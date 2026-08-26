@@ -279,6 +279,14 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
 #[test]
 fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
     assert!(UPGRADER.contains("mod uninstall;"));
+    assert!(!UNINSTALL.contains("use super::*"));
+    assert!(!UNINSTALL_CLEANUP.contains("use super::*"));
+    assert_eq!(
+        UNINSTALL_CLEANUP.matches("pub(in crate::upgrader)").count(),
+        3,
+        "cleanup implementation may expose only two cfg(test) complete oracles and one Replacement seam",
+    );
+    assert!(!UPGRADER.contains("use super::uninstall::cleanup"));
     let production_adapter = UPGRADER
         .split("#[cfg(test)]\nmod tests")
         .next()

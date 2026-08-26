@@ -401,7 +401,7 @@ impl FixedInstallPaths {
     }
 
     #[cfg(test)]
-    fn under(root: impl Into<PathBuf>) -> Self {
+    pub(crate) fn under(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             test_identity_owner_mapping: Some((
@@ -670,6 +670,37 @@ enum InterruptedInstall {
     Complete,
 }
 
+/// Classifies only whether the exact committed candidate transaction already
+/// owns local publication. Source metadata must never be retired once this
+/// journal exists, even before the candidate-layout receipt is persisted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CommittedReplacementLocalCustody {
+    SourceMetadata,
+    SourceMetadataRetired,
+    CandidateTransaction,
+}
+
+pub(crate) fn classify_committed_replacement_local_custody(
+    paths: &FixedInstallPaths,
+    resume_binding: &ReplacementResumeBinding,
+) -> Result<CommittedReplacementLocalCustody, InstallError> {
+    if let Some(journal) = TransactionJournal::load(&paths.bootstrap_state())? {
+        if !journal.matches_resume_binding(resume_binding.as_str()) {
+            return Err(InstallError::ExistingResidue);
+        }
+        return Ok(CommittedReplacementLocalCustody::CandidateTransaction);
+    }
+    if paths
+        .metadata()
+        .try_exists()
+        .map_err(|_| InstallError::Io)?
+    {
+        Ok(CommittedReplacementLocalCustody::SourceMetadata)
+    } else {
+        Ok(CommittedReplacementLocalCustody::SourceMetadataRetired)
+    }
+}
+
 /// Fresh 专属 coordinator：只接受普通新 Host Enrollment 与完整已验证角色集合。
 /// Replacement authority 在构造任何 account/filesystem/systemd effect 前关闭。
 pub(crate) fn coordinate_fresh_install(
@@ -861,7 +892,7 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
 ) -> Result<(), InstallError> {
     finalize_complete_replacement_current_probe(paths, resume_binding, bundle, commit)?;
     let registration_binding = commit
-        .registration_binding(&bundle.target)
+        .registration_binding()
         .ok_or(InstallError::ExistingResidue)?;
     replacement_registration::converge_registered_identity_to_canonical(
         paths,

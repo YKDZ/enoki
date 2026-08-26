@@ -1,4 +1,11 @@
-use super::*;
+use super::{
+    CompanionBinaryFacts, PostCommitSelfFinalizeFacts, ResumeDecision,
+    commit_lifecycle_capsule_with, lifecycle_response_from_resume_decision,
+    post_commit_self_finalize_policy,
+};
+use crate::upgrader::ProbeUpgraderRunError;
+use enoki_probe_bootstrap::lifecycle::LifecycleResponse;
+use std::path::Path;
 
 #[test]
 fn lifecycle_commit_deletes_only_the_capsule_before_process_self_finalization() {

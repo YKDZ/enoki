@@ -19,6 +19,7 @@ pub struct ReplacementIntent {
     pub old_probe_id: String,
     pub source_probe_version: String,
     pub source_probe_sha256: String,
+    pub target_bundle_target: String,
     pub target_probe_version: String,
     pub target_asset_set_digest: String,
     pub target_manifest_sha256: String,
@@ -62,10 +63,7 @@ impl ReplacementIntent {
     }
 
     #[must_use]
-    pub fn registration_binding(
-        &self,
-        target_bundle_target: &str,
-    ) -> Option<ReplacementRegistrationBinding> {
+    pub fn registration_binding(&self) -> Option<ReplacementRegistrationBinding> {
         Some(ReplacementRegistrationBinding {
             committed_source_probe_sha256: self.source_probe_sha256.clone(),
             enrollment_id: self.enrollment_id.clone(),
@@ -75,7 +73,7 @@ impl ReplacementIntent {
             replacement_commit_sha256: self.canonical_sha256()?,
             source_probe_version: self.source_probe_version.clone(),
             target_asset_set_digest: self.target_asset_set_digest.clone(),
-            target_bundle_target: target_bundle_target.to_owned(),
+            target_bundle_target: self.target_bundle_target.clone(),
             target_manifest_sha256: self.target_manifest_sha256.clone(),
             target_probe_version: self.target_probe_version.clone(),
         })
@@ -91,10 +89,7 @@ impl ReplacementCommitFact {
 
     #[cfg(feature = "activator")]
     #[must_use]
-    pub fn registration_binding(
-        &self,
-        target_bundle_target: &str,
-    ) -> Option<ReplacementRegistrationBinding> {
+    pub fn registration_binding(&self) -> Option<ReplacementRegistrationBinding> {
         self.has_valid_binding()
             .then(|| ReplacementRegistrationBinding {
                 committed_source_probe_sha256: self.intent.source_probe_sha256.clone(),
@@ -105,7 +100,7 @@ impl ReplacementCommitFact {
                 replacement_commit_sha256: self.canonical_intent_sha256.clone(),
                 source_probe_version: self.intent.source_probe_version.clone(),
                 target_asset_set_digest: self.intent.target_asset_set_digest.clone(),
-                target_bundle_target: target_bundle_target.to_owned(),
+                target_bundle_target: self.intent.target_bundle_target.clone(),
                 target_manifest_sha256: self.intent.target_manifest_sha256.clone(),
                 target_probe_version: self.intent.target_probe_version.clone(),
             })
@@ -446,6 +441,7 @@ mod tests {
             old_probe_id: "probe_old_01".to_owned(),
             source_probe_version: "1.2.2".to_owned(),
             source_probe_sha256: "a".repeat(64),
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
             target_probe_version: "1.2.3".to_owned(),
             target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
             target_manifest_sha256: "c".repeat(64),
@@ -456,7 +452,7 @@ mod tests {
     fn resume_binding_covers_every_canonical_replacement_fact() {
         let original = intent();
         let expected = canonical_intent_sha256(&original).unwrap();
-        let mutations: [fn(&mut ReplacementIntent); 10] = [
+        let mutations: [fn(&mut ReplacementIntent); 11] = [
             |intent| intent.enrollment_id.push_str("_other"),
             |intent| intent.enrollment_token_sha256.replace_range(..1, "e"),
             |intent| intent.host_id.push('8'),
@@ -464,6 +460,7 @@ mod tests {
             |intent| intent.old_probe_id.push_str("_other"),
             |intent| intent.source_probe_version.push_str("+other"),
             |intent| intent.source_probe_sha256.replace_range(..1, "f"),
+            |intent| intent.target_bundle_target.push_str("-other"),
             |intent| intent.target_probe_version.push_str("+other"),
             |intent| intent.target_asset_set_digest.replace_range(7..8, "e"),
             |intent| intent.target_manifest_sha256.replace_range(..1, "f"),
@@ -535,6 +532,11 @@ mod tests {
         assert_eq!(metadata.mode() & 0o777, 0o600);
         assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
         assert_eq!(store.load().unwrap(), Some(fact));
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"targetBundleTarget\":\"x86_64-unknown-linux-gnu\"")
+        );
         assert_eq!(cleanup.calls, 1);
         assert_eq!(
             fs::read_dir(temporary.path())

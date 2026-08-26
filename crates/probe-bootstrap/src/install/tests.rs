@@ -644,6 +644,7 @@ mod tests {
                 old_probe_id: "probe-old".to_owned(),
                 source_probe_version: "1.2.2".to_owned(),
                 source_probe_sha256: "2".repeat(64),
+                target_bundle_target: bundle.target.clone(),
                 target_probe_version: bundle.version.clone(),
                 target_asset_set_digest: format!(
                     "sha256:{}",
@@ -3245,10 +3246,28 @@ mod tests {
             .path()
             .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
             .exists());
+        assert!(FixedInstallPaths::under(temporary.path()).metadata().exists());
         assert!(temporary
             .path()
             .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
             .exists());
+        assert_eq!(
+            classify_committed_replacement_local_custody(
+                &FixedInstallPaths::under(temporary.path()),
+                &resume_binding,
+            )
+            .unwrap(),
+            CommittedReplacementLocalCustody::CandidateTransaction,
+            "published candidate metadata remains under the exact transaction journal"
+        );
+        assert_eq!(
+            classify_committed_replacement_local_custody(
+                &FixedInstallPaths::under(temporary.path()),
+                &ReplacementResumeBinding::for_test("wrong-candidate"),
+            ),
+            Err(InstallError::ExistingResidue),
+            "a mismatched candidate journal fails closed"
+        );
         assert!(!accounts.calls.contains(&"remove"));
         assert!(!accounts.ipc_calls.contains(&"remove"));
         assert!(!systemd.calls.contains(&"disable"));
@@ -3335,7 +3354,7 @@ mod tests {
         let commit = replacement_commit(&replacement_bundle);
         let resume = commit.resume_binding();
         let registration = commit
-            .registration_binding(&replacement_bundle.target)
+            .registration_binding()
             .expect("valid registration projection");
         let source = paths.replacement_registration_attempt_source();
         fs::create_dir_all(source.parent().unwrap()).unwrap();
@@ -3805,7 +3824,7 @@ mod tests {
                 let commit = replacement_commit(&bundle);
                 let resume = commit.resume_binding();
                 let registration = commit
-                    .registration_binding(&bundle.target)
+                    .registration_binding()
                     .expect("valid registration binding");
                 let journal = paths.bootstrap_state().join("activation-journal.json");
                 let resumed = journal.exists();

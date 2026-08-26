@@ -3,12 +3,115 @@
 //! Hub/Local authority、durable recovery 与固定 cleanup mechanics 都封闭在这里；
 //! 父模块只保留 lifecycle/replacement 的窄生产 adapter。
 
-use super::*;
+use super::{
+    ProbeUninstallerRunInput, ProbeUpgraderBootstrapConfig, ProbeUpgraderRunError,
+    ProbeUpgraderSystemdRunner, ProbeUpgraderValidationTransport, TrustedProbeInstallMetadata,
+    TrustedProbeInstallPreflight, hex_sha256, json_string_fragment, operation_status_url,
+    operation_token_validation_url, probe_request_auth_from_bootstrap_config,
+    read_upgrader_bootstrap_config, remove_path_if_exists, render_operation_status_body,
+    sync_directory, validate_bootstrap_config_matches_trusted_install_metadata,
+    validate_identity_path, write_new_synced_file,
+};
+use crate::probe_auth::ProbeRequestAuth;
+use enoki_probe_bootstrap::lifecycle::{
+    LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
-pub(in crate::upgrader) mod cleanup;
-use cleanup::*;
+mod cleanup;
+pub(super) use cleanup::commit_replacement_and_cleanup_install_with_systemd;
+use cleanup::{
+    ProbeUninstallCleanupPlan, finalize_recoverable_uninstall_cleanup,
+    plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
+};
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(in crate::upgrader) use cleanup::{
+    execute_probe_uninstall, execute_probe_uninstall_with_install_metadata_path,
+};
+
+#[cfg(test)]
+pub(in crate::upgrader) fn execute_uninstall_cleanup_phases_for_test(
+    input: &ProbeUninstallerRunInput,
+    metadata: &TrustedProbeInstallMetadata,
+    install_metadata_path: &Path,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    after_prepare: impl FnOnce(),
+) -> Result<(), ProbeUpgraderRunError> {
+    let plan = cleanup::plan_probe_uninstall_cleanup(input, metadata, install_metadata_path)?;
+    cleanup::prepare_probe_uninstall_cleanup(&plan, systemd)?;
+    after_prepare();
+    cleanup::finalize_recoverable_uninstall_cleanup(&plan, systemd)?;
+    cleanup::remove_lifecycle_companion_binary(&plan)
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn remove_uninstall_local_state_for_test(
+    input: &ProbeUninstallerRunInput,
+    metadata: &TrustedProbeInstallMetadata,
+    install_metadata_path: &Path,
+    remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let plan = cleanup::plan_probe_uninstall_recovery(input, metadata, install_metadata_path)?;
+    cleanup::remove_uninstall_local_state_with(&plan, remove)
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn finalize_replacement_local_state_for_test(
+    bootstrap_config_path: &Path,
+    state_dir: &Path,
+    remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+    verify: impl FnOnce() -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    cleanup::finalize_replacement_local_state_with(bootstrap_config_path, state_dir, remove, verify)
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn validate_owned_bootstrap_state_for_test(
+    path: Option<&Path>,
+) -> Result<(), ProbeUpgraderRunError> {
+    cleanup::validate_owned_bootstrap_state(path)
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn plan_probe_uninstall_cleanup_for_test(
+    input: &ProbeUninstallerRunInput,
+    metadata: &TrustedProbeInstallMetadata,
+    install_metadata_path: &Path,
+) -> Result<(), ProbeUpgraderRunError> {
+    cleanup::plan_probe_uninstall_cleanup(input, metadata, install_metadata_path).map(|_| ())
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn commit_replacement_cleanup_with_metadata_retirement_for_test<
+    S: enoki_probe_bootstrap::replacement::ReplacementCommitStore,
+>(
+    intent: enoki_probe_bootstrap::replacement::ReplacementIntent,
+    store: &mut S,
+    install_metadata_path: &Path,
+    test_root: Option<&Path>,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    retire_metadata: impl FnOnce(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<
+    enoki_probe_bootstrap::replacement::ReplacementCommitFact,
+    enoki_probe_bootstrap::replacement::ReplacementCommitError<S::Error, ProbeUpgraderRunError>,
+> {
+    cleanup::commit_replacement_cleanup_with_metadata_retirement(
+        intent,
+        store,
+        install_metadata_path,
+        test_root,
+        systemd,
+        retire_metadata,
+    )
+}
 
 pub(super) const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
 pub(super) const MAX_UNINSTALL_CAPSULE_BYTES: u64 = 64 * 1024;

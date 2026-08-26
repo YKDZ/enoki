@@ -1,8 +1,7 @@
 mod uninstall;
-use uninstall::cleanup::commit_replacement_and_cleanup_install_with_systemd;
 use uninstall::{
-    lifecycle_response_from_resume_decision, resume_lifecycle_companion_at,
-    run_uninstall_lifecycle_adapter,
+    commit_replacement_and_cleanup_install_with_systemd, lifecycle_response_from_resume_decision,
+    resume_lifecycle_companion_at, run_uninstall_lifecycle_adapter,
 };
 
 use std::{
@@ -33,7 +32,7 @@ use enoki_probe_bootstrap::{
     },
     replacement::{
         FileReplacementCommitStore, ReplacementCommitError, ReplacementCommitFact,
-        ReplacementCommitStore, ReplacementIntent, commit_and_cleanup_replacement,
+        ReplacementCommitStore, ReplacementIntent,
     },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
@@ -2217,11 +2216,12 @@ fn run_probe_replacement_migration(
         old_probe_id: expected_probe_id.clone(),
         source_probe_version: source_probe_version.clone(),
         source_probe_sha256: installed_probe_sha256,
+        target_bundle_target: target_bundle_target.clone(),
         target_probe_version: bundle_version.clone(),
         target_asset_set_digest: target_asset_set_digest.clone(),
         target_manifest_sha256: target_manifest_sha256.clone(),
     };
-    let Some(registration_binding) = intent.registration_binding(target_bundle_target) else {
+    let Some(registration_binding) = intent.registration_binding() else {
         return LifecycleResponse::failed("lifecycle.authority_invalid");
     };
     let enrollment_token = enrollment_token.clone();
@@ -2346,6 +2346,7 @@ fn replacement_request_matches_committed_fact(
         source_probe_version,
         source_probe_sha256,
         target_asset_set_digest,
+        target_bundle_target,
         target_manifest_sha256,
         bundle_version,
         ..
@@ -2363,6 +2364,7 @@ fn replacement_request_matches_committed_fact(
         && fact.intent.source_probe_version == *source_probe_version
         && source_probe_sha256.contains(&fact.intent.source_probe_sha256)
         && fact.intent.target_asset_set_digest == *target_asset_set_digest
+        && fact.intent.target_bundle_target == *target_bundle_target
         && fact.intent.target_manifest_sha256 == *target_manifest_sha256
         && fact.intent.target_probe_version == *bundle_version
 }
@@ -5118,7 +5120,6 @@ fn input_token(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::uninstall::cleanup::*;
     use super::uninstall::*;
     use super::*;
     use flate2::{Compression, write::GzEncoder};
@@ -5433,7 +5434,7 @@ mod tests {
         let state = PathBuf::from("/var/lib/enoki-probe");
         let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
         let mut failed_calls = Vec::new();
-        let failed = finalize_replacement_local_state_with(
+        let failed = finalize_replacement_local_state_for_test(
             &config,
             &state,
             |path| {
@@ -5456,7 +5457,7 @@ mod tests {
         );
 
         let mut completed_calls = Vec::new();
-        finalize_replacement_local_state_with(
+        finalize_replacement_local_state_for_test(
             &config,
             &state,
             |path| {
@@ -6756,25 +6757,28 @@ mod tests {
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: identity_path.clone(),
         };
-        let plan = plan_probe_uninstall_cleanup(&input, &metadata, &metadata_path)
-            .expect("schema four cleanup plan");
-        prepare_probe_uninstall_cleanup(&plan, &mut systemd).expect("pre-ack cleanup succeeds");
-        for path in [
-            identity_path.as_path(),
-            metadata_path.as_path(),
-            binaries[4].as_path(),
-            units[7].as_path(),
-            units[8].as_path(),
-        ] {
-            assert!(
-                path.exists(),
-                "pre-ack recovery entry lost: {}",
-                path.display()
-            );
-        }
-        finalize_recoverable_uninstall_cleanup(&plan, &mut systemd)
-            .expect("schema four uninstall succeeds");
-        remove_lifecycle_companion_binary(&plan).expect("companion self-unlink oracle");
+        execute_uninstall_cleanup_phases_for_test(
+            &input,
+            &metadata,
+            &metadata_path,
+            &mut systemd,
+            || {
+                for path in [
+                    identity_path.as_path(),
+                    metadata_path.as_path(),
+                    binaries[4].as_path(),
+                    units[7].as_path(),
+                    units[8].as_path(),
+                ] {
+                    assert!(
+                        path.exists(),
+                        "pre-ack recovery entry lost: {}",
+                        path.display()
+                    );
+                }
+            },
+        )
+        .expect("schema four uninstall succeeds");
 
         for path in binaries.into_iter().chain(units) {
             assert!(!path.exists(), "{} remains", path.display());
@@ -7021,6 +7025,21 @@ mod tests {
             fs::set_permissions(rooted(path), fs::Permissions::from_mode(0o755))
                 .expect("Bootstrap role mode");
         }
+        fs::set_permissions(
+            rooted(&metadata.install_path),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("installed Probe mode");
+        fs::write(
+            rooted(&metadata.identity_path),
+            "hub_url = \"https://hub.example\"\nprobe_id = \"probe_old_01\"\nprobe_private_key_pem = \"test-private-key\"\n",
+        )
+        .expect("source Probe identity");
+        fs::set_permissions(
+            rooted(&metadata.identity_path),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("source Probe identity mode");
         let bootstrap_state = rooted(metadata.bootstrap_state_dir.as_deref().expect("state"));
         fs::create_dir_all(bootstrap_state.join("trust")).expect("trust state");
         fs::create_dir(bootstrap_state.join("inbox")).expect("inbox state");
@@ -7097,14 +7116,21 @@ mod tests {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let (metadata_path, candidate_bootstrap_state, identity_path, state_dir) =
             fixed_replacement_cleanup_fixture(temporary.path());
+        let installed_probe_sha256 = fixed_installed_probe_sha256(
+            Path::new(PRODUCTION_PROBE_BINARY_PATH),
+            Some(temporary.path()),
+        )
+        .expect("installed Probe digest");
+        let token = "enk_enroll_test";
         let intent = ReplacementIntent {
             enrollment_id: "enr_0123456789abcdef".to_owned(),
-            enrollment_token_sha256: "a".repeat(64),
+            enrollment_token_sha256: format!("{:x}", Sha256::digest(token.as_bytes())),
             host_id: "7".to_owned(),
             hub_origin: "https://hub.example".to_owned(),
             old_probe_id: "probe_old_01".to_owned(),
-            source_probe_version: "1.2.2".to_owned(),
-            source_probe_sha256: "b".repeat(64),
+            source_probe_version: "1.2.3".to_owned(),
+            source_probe_sha256: installed_probe_sha256,
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
             target_probe_version: "1.2.3".to_owned(),
             target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
             target_manifest_sha256: "d".repeat(64),
@@ -7159,7 +7185,7 @@ mod tests {
         );
 
         let mut cleanup_systemd = RecordingSystemdRunner::default();
-        let retirement_failure = commit_replacement_cleanup_with_metadata_retirement(
+        let retirement_failure = commit_replacement_cleanup_with_metadata_retirement_for_test(
             intent.clone(),
             &mut store,
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
@@ -7181,21 +7207,38 @@ mod tests {
             "cleanup receipt owns metadata until retirement retries"
         );
 
-        let mut retry_systemd = RecordingSystemdRunner::default();
-        let completed = commit_replacement_and_cleanup_install_with_systemd(
-            intent,
-            &mut store,
-            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-            Some(temporary.path()),
-            &mut retry_systemd,
-        )
-        .expect("metadata retirement retries monotonically");
-        assert!(completed.cleanup_complete);
-        assert_eq!(store.persisted_cleanup, [false, true]);
-        assert!(
-            retry_systemd.calls.is_empty(),
-            "durable cleanup receipt makes metadata retirement independent of old Host effects"
+        let commit_path =
+            replacement_production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path()));
+        let mut production_store =
+            FileReplacementCommitStore::at(&commit_path, unsafe { libc::geteuid() });
+        production_store
+            .persist(store.fact.as_ref().expect("cleanup receipt"))
+            .expect("persist production cleanup receipt");
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"{token}\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.3\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            intent.source_probe_sha256,
+            "c".repeat(64),
         );
+        let enrollment = enoki_probe_bootstrap::handoff::Enrollment::from_install_input(
+            "https://hub.example",
+            enrollment_input.as_bytes(),
+        )
+        .expect("exact replacement enrollment");
+        let request = LifecycleRequest::replacement_migration(
+            &enrollment,
+            &intent.target_asset_set_digest,
+            &intent.target_bundle_target,
+            &intent.target_manifest_sha256,
+            &intent.target_probe_version,
+        )
+        .expect("exact replacement request");
+        assert_eq!(
+            resume_committed_replacement_from_exact_request(&request, Some(temporary.path())),
+            Some(LifecycleResponse::succeeded()),
+            "fresh production adapter retries metadata retirement monotonically"
+        );
+        assert!(production_store.load().unwrap().unwrap().cleanup_complete);
+        assert_eq!(store.persisted_cleanup, [false, true]);
         assert!(
             !metadata_path.exists(),
             "metadata is the final local deletion"
@@ -7226,14 +7269,20 @@ mod tests {
             let temporary = tempfile::tempdir().expect("temporary directory");
             let (metadata_path, candidate_bootstrap_state, identity_path, state_dir) =
                 fixed_replacement_cleanup_fixture_with_contents(temporary.path(), contents);
+            let installed_probe_sha256 = fixed_installed_probe_sha256(
+                Path::new(PRODUCTION_PROBE_BINARY_PATH),
+                Some(temporary.path()),
+            )
+            .expect("installed Probe digest");
             let intent = ReplacementIntent {
                 enrollment_id: "enr_0123456789abcdef".to_owned(),
                 enrollment_token_sha256: "a".repeat(64),
                 host_id: "7".to_owned(),
                 hub_origin: "https://hub.example".to_owned(),
                 old_probe_id: "probe_old_01".to_owned(),
-                source_probe_version: "1.2.2".to_owned(),
-                source_probe_sha256: "b".repeat(64),
+                source_probe_version: "1.2.3".to_owned(),
+                source_probe_sha256: installed_probe_sha256,
+                target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
                 target_probe_version: "1.2.3".to_owned(),
                 target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
                 target_manifest_sha256: "d".repeat(64),
@@ -7266,6 +7315,120 @@ mod tests {
     }
 
     #[test]
+    fn committed_replacement_metadata_mismatch_is_zero_effect_and_keeps_the_incomplete_fact() {
+        struct Store {
+            fact: ReplacementCommitFact,
+            writes: usize,
+        }
+        impl ReplacementCommitStore for Store {
+            type Error = ();
+            fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
+                Ok(Some(self.fact.clone()))
+            }
+            fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
+                self.writes += 1;
+                self.fact = fact.clone();
+                Ok(())
+            }
+        }
+
+        for mismatch in [
+            "metadata-hub",
+            "receipt-metadata-hub",
+            "source-version",
+            "probe-digest",
+            "identity-hub",
+            "identity-probe",
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let (metadata_path, candidate_bootstrap_state, identity_path, _) =
+                fixed_replacement_cleanup_fixture(temporary.path());
+            let installed_probe_sha256 = fixed_installed_probe_sha256(
+                Path::new(PRODUCTION_PROBE_BINARY_PATH),
+                Some(temporary.path()),
+            )
+            .expect("installed Probe digest");
+            let intent = ReplacementIntent {
+                enrollment_id: "enr_0123456789abcdef".to_owned(),
+                enrollment_token_sha256: "a".repeat(64),
+                host_id: "7".to_owned(),
+                hub_origin: "https://hub.example".to_owned(),
+                old_probe_id: "probe_old_01".to_owned(),
+                source_probe_version: "1.2.3".to_owned(),
+                source_probe_sha256: installed_probe_sha256,
+                target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+                target_probe_version: "1.2.4".to_owned(),
+                target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+                target_manifest_sha256: "d".repeat(64),
+            };
+            let fact = ReplacementCommitFact {
+                schema_version: 1,
+                canonical_intent_sha256: intent.canonical_sha256().expect("canonical intent"),
+                intent: intent.clone(),
+                cleanup_complete: mismatch == "receipt-metadata-hub",
+                candidate_layout_complete: false,
+            };
+            match mismatch {
+                "metadata-hub" | "receipt-metadata-hub" => fs::write(
+                    &metadata_path,
+                    fixed_schema_four_metadata_contents()
+                        .replace("https://hub.example", "https://other.example"),
+                )
+                .expect("mismatched metadata Hub"),
+                "source-version" => fs::write(
+                    &metadata_path,
+                    fixed_schema_four_metadata_contents().replace("1.2.3", "1.2.2"),
+                )
+                .expect("mismatched source version"),
+                "probe-digest" => fs::write(
+                    preflight_rooted_path(
+                        Some(temporary.path()),
+                        Path::new(PRODUCTION_PROBE_BINARY_PATH),
+                    ),
+                    "different Probe",
+                )
+                .expect("mismatched source Probe"),
+                "identity-hub" => fs::write(
+                    &identity_path,
+                    "hub_url = \"https://other.example\"\nprobe_id = \"probe_old_01\"\nprobe_private_key_pem = \"test-private-key\"\n",
+                )
+                .expect("mismatched identity Hub"),
+                "identity-probe" => fs::write(
+                    &identity_path,
+                    "hub_url = \"https://hub.example\"\nprobe_id = \"probe_other_01\"\nprobe_private_key_pem = \"test-private-key\"\n",
+                )
+                .expect("mismatched identity Probe"),
+                _ => unreachable!(),
+            }
+            let mut store = Store { fact, writes: 0 };
+            let mut systemd = RecordingSystemdRunner::default();
+
+            let result = commit_replacement_and_cleanup_install_with_systemd(
+                intent,
+                &mut store,
+                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+                Some(temporary.path()),
+                &mut systemd,
+            );
+
+            assert!(
+                matches!(result, Err(ReplacementCommitError::Effect(_))),
+                "{mismatch}"
+            );
+            assert_eq!(store.writes, 0, "{mismatch}");
+            assert_eq!(
+                store.fact.cleanup_complete,
+                mismatch == "receipt-metadata-hub",
+                "{mismatch}"
+            );
+            assert!(systemd.calls.is_empty(), "{mismatch}");
+            assert!(metadata_path.exists(), "{mismatch}");
+            assert!(identity_path.exists(), "{mismatch}");
+            assert!(candidate_bootstrap_state.exists(), "{mismatch}");
+        }
+    }
+
+    #[test]
     fn exact_incomplete_commit_without_custodied_metadata_fails_closed_without_persisting() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let (metadata_path, candidate_bootstrap_state, identity_path, _) =
@@ -7279,6 +7442,7 @@ mod tests {
             old_probe_id: "probe_old_01".to_owned(),
             source_probe_version: "1.2.2".to_owned(),
             source_probe_sha256: "b".repeat(64),
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
             target_probe_version: "1.2.3".to_owned(),
             target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
             target_manifest_sha256: "d".repeat(64),
@@ -7349,6 +7513,26 @@ mod tests {
                 "lifecycle.replacement_commit_conflict"
             ))
         );
+
+        let wrong_target_request = LifecycleRequest::replacement_migration(
+            &enrollment,
+            &format!("sha256:{}", "c".repeat(64)),
+            "aarch64-unknown-linux-gnu",
+            &"d".repeat(64),
+            "1.2.3",
+        )
+        .expect("well-formed wrong-target request");
+        assert_eq!(
+            resume_committed_replacement_from_exact_request(
+                &wrong_target_request,
+                Some(temporary.path()),
+            ),
+            Some(LifecycleResponse::failed(
+                "lifecycle.replacement_commit_conflict"
+            ))
+        );
+        assert!(!store.load().unwrap().unwrap().cleanup_complete);
+        assert!(candidate_bootstrap_state.exists());
     }
 
     #[test]
@@ -7805,18 +7989,17 @@ mod tests {
         assert!(identity_path.exists());
         assert!(companion_path.exists());
 
-        let recovery_plan = plan_probe_uninstall_recovery(&input, &metadata, &metadata_path)
-            .expect("recovery cleanup plan");
         let mut final_state_calls = Vec::new();
-        let final_state_error = remove_uninstall_local_state_with(&recovery_plan, |path| {
-            final_state_calls.push(path.to_path_buf());
-            if path == metadata.state_dir {
-                return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                    "injected ordinary state cleanup failure",
-                )));
-            }
-            Ok(())
-        });
+        let final_state_error =
+            remove_uninstall_local_state_for_test(&input, &metadata, &metadata_path, |path| {
+                final_state_calls.push(path.to_path_buf());
+                if path == metadata.state_dir {
+                    return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                        "injected ordinary state cleanup failure",
+                    )));
+                }
+                Ok(())
+            });
         assert!(final_state_error.is_err());
         assert_eq!(
             final_state_calls,
@@ -8006,7 +8189,7 @@ mod tests {
         private_directory(&outside);
         symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&symlink_state)),
+            validate_owned_bootstrap_state_for_test(Some(&symlink_state)),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert!(outside.exists());
@@ -8019,7 +8202,7 @@ mod tests {
         fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
             .expect("unsafe hardlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&hardlink_state)),
+            validate_owned_bootstrap_state_for_test(Some(&hardlink_state)),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
@@ -8028,7 +8211,7 @@ mod tests {
         let extra_state = owned_state(extra_temp.path());
         fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&extra_state)),
+            validate_owned_bootstrap_state_for_test(Some(&extra_state)),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert!(extra_state.join("unrecognised").exists());
@@ -8470,7 +8653,7 @@ mod tests {
         );
         install_metadata.install_path = PathBuf::from("relative-probe-binary");
 
-        let error = plan_probe_uninstall_cleanup(
+        let error = plan_probe_uninstall_cleanup_for_test(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: temp.path().join("state/probe-bootstrap.toml"),
             },

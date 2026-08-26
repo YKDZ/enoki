@@ -45,6 +45,7 @@ pub(super) fn verify_exact_layout(
         || !commit.cleanup_complete
         || !commit.candidate_layout_complete
         || commit.intent.target_probe_version != bundle.version
+        || commit.intent.target_bundle_target != bundle.target
         || commit.intent.target_manifest_sha256 != bundle.manifest_sha256
         || commit.intent.target_asset_set_digest
             != format!("sha256:{}", bundle.asset_set_manifest_sha256)

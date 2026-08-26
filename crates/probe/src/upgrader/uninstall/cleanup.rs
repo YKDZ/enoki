@@ -1,6 +1,23 @@
 //! Fixed uninstall/replacement inventory and Host cleanup mechanics.
 
-use super::*;
+use super::{
+    ProbeUninstallerRunInput, ProbeUpgraderRunError, ProbeUpgraderSystemdRunner,
+    TrustedProbeInstallMetadata,
+};
+#[cfg(test)]
+use crate::upgrader::PRODUCTION_INSTALL_METADATA_PATH;
+use crate::upgrader::{
+    ensure_absolute_path, fixed_installed_probe_sha256, is_lifecycle_companion_path,
+    is_lifecycle_companion_service, observation_services, preflight_rooted_path,
+    read_trusted_probe_install_metadata_read_only, read_trusted_probe_install_preflight,
+    rebase_trusted_install_metadata_paths, remove_empty_parent_dir, remove_path_if_exists,
+    verify_path_absent,
+};
+use enoki_probe_bootstrap::replacement::{
+    ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
+    commit_and_cleanup_replacement,
+};
+use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
 pub(in crate::upgrader) fn execute_probe_uninstall(
@@ -48,9 +65,7 @@ pub(in crate::upgrader) fn commit_replacement_and_cleanup_install_with_systemd<
     )
 }
 
-pub(in crate::upgrader) fn commit_replacement_cleanup_with_metadata_retirement<
-    S: ReplacementCommitStore,
->(
+pub(super) fn commit_replacement_cleanup_with_metadata_retirement<S: ReplacementCommitStore>(
     intent: ReplacementIntent,
     store: &mut S,
     install_metadata_path: &Path,
@@ -58,15 +73,36 @@ pub(in crate::upgrader) fn commit_replacement_cleanup_with_metadata_retirement<
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     retire_metadata: impl FnOnce(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<ReplacementCommitFact, ReplacementCommitError<S::Error, ProbeUpgraderRunError>> {
-    let mut cleanup =
-        || cleanup_committed_replacement_install(install_metadata_path, test_root, systemd);
+    let rooted_install_metadata_path = preflight_rooted_path(test_root, install_metadata_path);
+    if rooted_install_metadata_path.exists() {
+        let install_metadata =
+            read_trusted_probe_install_metadata_read_only(&rooted_install_metadata_path, None)
+                .map_err(ReplacementCommitError::Effect)?;
+        validate_committed_replacement_install_receipt(
+            &intent,
+            &install_metadata,
+            &rooted_install_metadata_path,
+            test_root,
+        )
+        .map_err(ReplacementCommitError::Effect)?;
+    }
+    let cleanup_intent = intent.clone();
+    let mut cleanup = || {
+        cleanup_committed_replacement_install(
+            &cleanup_intent,
+            install_metadata_path,
+            test_root,
+            systemd,
+        )
+    };
     let fact = commit_and_cleanup_replacement(intent, store, &mut cleanup)?;
     let install_metadata_path = preflight_rooted_path(test_root, install_metadata_path);
     retire_metadata(&install_metadata_path).map_err(ReplacementCommitError::Effect)?;
     Ok(fact)
 }
 
-pub(in crate::upgrader) fn cleanup_committed_replacement_install(
+pub(super) fn cleanup_committed_replacement_install(
+    intent: &ReplacementIntent,
     install_metadata_path: &Path,
     test_root: Option<&Path>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -74,6 +110,12 @@ pub(in crate::upgrader) fn cleanup_committed_replacement_install(
     let install_metadata_path = preflight_rooted_path(test_root, install_metadata_path);
     let mut install_metadata =
         read_trusted_probe_install_metadata_read_only(&install_metadata_path, None)?;
+    validate_committed_replacement_install_receipt(
+        intent,
+        &install_metadata,
+        &install_metadata_path,
+        test_root,
+    )?;
     rebase_trusted_install_metadata_paths(&mut install_metadata, test_root);
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: install_metadata.identity_path.clone(),
@@ -83,17 +125,54 @@ pub(in crate::upgrader) fn cleanup_committed_replacement_install(
     execute_committed_replacement_cleanup(&plan, systemd)
 }
 
+fn validate_committed_replacement_install_receipt(
+    intent: &ReplacementIntent,
+    metadata: &TrustedProbeInstallMetadata,
+    rooted_metadata_path: &Path,
+    test_root: Option<&Path>,
+) -> Result<(), ProbeUpgraderRunError> {
+    if metadata.hub_url != intent.hub_origin
+        || metadata
+            .bundle_version
+            .as_deref()
+            .is_some_and(|version| version != intent.source_probe_version)
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "committed Replacement metadata does not match the durable intent",
+        ));
+    }
+    let rooted_probe = preflight_rooted_path(test_root, &metadata.install_path);
+    if rooted_probe.exists()
+        && fixed_installed_probe_sha256(&metadata.install_path, test_root)?
+            != intent.source_probe_sha256
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "committed Replacement Probe does not match the durable intent",
+        ));
+    }
+    let rooted_identity = preflight_rooted_path(test_root, &metadata.identity_path);
+    if rooted_identity.exists() {
+        let identity = read_trusted_probe_install_preflight(rooted_metadata_path, test_root)?;
+        if identity.hub_url != intent.hub_origin || identity.probe_id != intent.old_probe_id {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "committed Replacement identity does not match the durable intent",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
-pub(in crate::upgrader) struct ProbeUninstallCleanupPlan<'a> {
-    pub(in crate::upgrader) input: &'a ProbeUninstallerRunInput,
-    pub(in crate::upgrader) install_metadata: &'a TrustedProbeInstallMetadata,
-    pub(in crate::upgrader) install_metadata_path: &'a Path,
+pub(super) struct ProbeUninstallCleanupPlan<'a> {
+    pub(super) input: &'a ProbeUninstallerRunInput,
+    pub(super) install_metadata: &'a TrustedProbeInstallMetadata,
+    pub(super) install_metadata_path: &'a Path,
 }
 
 /// Establishes every local deletion target before systemd or filesystem
 /// mutation. Both the offline public command and Hub-authorized operation
 /// invoke this planner through the same executor below.
-pub(in crate::upgrader) fn plan_probe_uninstall_cleanup<'a>(
+pub(super) fn plan_probe_uninstall_cleanup<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
@@ -103,7 +182,7 @@ pub(in crate::upgrader) fn plan_probe_uninstall_cleanup<'a>(
     Ok(plan)
 }
 
-pub(in crate::upgrader) fn plan_probe_uninstall_recovery<'a>(
+pub(super) fn plan_probe_uninstall_recovery<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
@@ -113,7 +192,7 @@ pub(in crate::upgrader) fn plan_probe_uninstall_recovery<'a>(
     Ok(plan)
 }
 
-pub(in crate::upgrader) fn plan_committed_replacement_cleanup<'a>(
+pub(super) fn plan_committed_replacement_cleanup<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
@@ -131,7 +210,7 @@ pub(in crate::upgrader) fn plan_committed_replacement_cleanup<'a>(
     Ok(plan)
 }
 
-pub(in crate::upgrader) fn plan_probe_uninstall_paths<'a>(
+pub(super) fn plan_probe_uninstall_paths<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
@@ -182,7 +261,7 @@ pub(in crate::upgrader) fn plan_probe_uninstall_paths<'a>(
     })
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_assets_for_cleanup(
+pub(super) fn validate_owned_bootstrap_assets_for_cleanup(
     metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
     if matches!(metadata.schema_version, 2..=5) {
@@ -193,7 +272,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_assets_for_cleanup(
     Ok(())
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_assets_for_recovery(
+pub(super) fn validate_owned_bootstrap_assets_for_recovery(
     metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
     if matches!(metadata.schema_version, 2..=5) {
@@ -204,7 +283,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_assets_for_recovery(
     Ok(())
 }
 
-pub(in crate::upgrader) fn prepare_probe_uninstall_cleanup(
+pub(super) fn prepare_probe_uninstall_cleanup(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -342,7 +421,7 @@ pub(in crate::upgrader) fn prepare_probe_uninstall_cleanup(
     Ok(())
 }
 
-pub(in crate::upgrader) fn remove_probe_bootstrap_roles(
+pub(super) fn remove_probe_bootstrap_roles(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     for path in [
@@ -357,7 +436,7 @@ pub(in crate::upgrader) fn remove_probe_bootstrap_roles(
     Ok(())
 }
 
-pub(in crate::upgrader) fn remove_probe_bootstrap_state(
+pub(super) fn remove_probe_bootstrap_state(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
@@ -366,7 +445,7 @@ pub(in crate::upgrader) fn remove_probe_bootstrap_state(
     Ok(())
 }
 
-pub(in crate::upgrader) fn remove_probe_install_identities(
+pub(super) fn remove_probe_install_identities(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -414,7 +493,7 @@ pub(in crate::upgrader) fn remove_probe_install_identities(
     Ok(())
 }
 
-pub(in crate::upgrader) fn remove_lifecycle_companion_activation(
+pub(super) fn remove_lifecycle_companion_activation(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -484,7 +563,7 @@ pub(in crate::upgrader) fn remove_lifecycle_companion_activation(
     Ok(())
 }
 
-pub(in crate::upgrader) fn remove_lifecycle_companion_binary(
+pub(super) fn remove_lifecycle_companion_binary(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.lifecycle_companion_path.as_deref() {
@@ -493,7 +572,7 @@ pub(in crate::upgrader) fn remove_lifecycle_companion_binary(
     Ok(())
 }
 
-pub(in crate::upgrader) fn finalize_recoverable_uninstall_cleanup(
+pub(super) fn finalize_recoverable_uninstall_cleanup(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -507,7 +586,7 @@ pub(in crate::upgrader) fn finalize_recoverable_uninstall_cleanup(
 }
 
 #[cfg(test)]
-pub(in crate::upgrader) fn execute_complete_uninstall_cleanup_oracle(
+pub(super) fn execute_complete_uninstall_cleanup_oracle(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -517,7 +596,7 @@ pub(in crate::upgrader) fn execute_complete_uninstall_cleanup_oracle(
     verify_lifecycle_companion_binary_absent(plan)
 }
 
-pub(in crate::upgrader) fn execute_committed_replacement_cleanup(
+pub(super) fn execute_committed_replacement_cleanup(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -536,7 +615,7 @@ pub(in crate::upgrader) fn execute_committed_replacement_cleanup(
     )
 }
 
-pub(in crate::upgrader) fn remove_uninstall_local_state_with(
+pub(super) fn remove_uninstall_local_state_with(
     plan: &ProbeUninstallCleanupPlan<'_>,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -545,7 +624,7 @@ pub(in crate::upgrader) fn remove_uninstall_local_state_with(
     remove(&plan.install_metadata.state_dir)
 }
 
-pub(in crate::upgrader) fn finalize_replacement_local_state_with(
+pub(super) fn finalize_replacement_local_state_with(
     bootstrap_config_path: &Path,
     state_dir: &Path,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
@@ -556,7 +635,7 @@ pub(in crate::upgrader) fn finalize_replacement_local_state_with(
     verify()
 }
 
-pub(in crate::upgrader) fn verify_uninstall_residue_absent(
+pub(super) fn verify_uninstall_residue_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -572,7 +651,7 @@ pub(in crate::upgrader) fn verify_uninstall_residue_absent(
     Ok(())
 }
 
-pub(in crate::upgrader) fn verify_replacement_residue_absent(
+pub(super) fn verify_replacement_residue_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -599,7 +678,7 @@ pub(in crate::upgrader) fn verify_replacement_residue_absent(
     verify_lifecycle_companion_binary_absent(plan)
 }
 
-pub(in crate::upgrader) fn verify_uninstall_local_state_absent(
+pub(super) fn verify_uninstall_local_state_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     for (path, code, action) in [
@@ -629,7 +708,7 @@ pub(in crate::upgrader) fn verify_uninstall_local_state_absent(
     Ok(())
 }
 
-pub(in crate::upgrader) fn verify_lifecycle_companion_binary_absent(
+pub(super) fn verify_lifecycle_companion_binary_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.lifecycle_companion_path.as_deref() {
@@ -642,7 +721,7 @@ pub(in crate::upgrader) fn verify_lifecycle_companion_binary_absent(
     Ok(())
 }
 
-pub(in crate::upgrader) fn verify_common_cleanup_residue_absent(
+pub(super) fn verify_common_cleanup_residue_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -732,7 +811,7 @@ pub(in crate::upgrader) fn verify_common_cleanup_residue_absent(
         })
 }
 
-pub(in crate::upgrader) fn probe_uninstall_cleanup_error(
+pub(super) fn probe_uninstall_cleanup_error(
     code: &'static str,
     action: &'static str,
     error: ProbeUpgraderRunError,
@@ -754,7 +833,7 @@ pub(in crate::upgrader) fn probe_uninstall_cleanup_error(
     }
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_role(
+pub(super) fn validate_owned_bootstrap_role(
     path: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -773,7 +852,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_role(
     Ok(())
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_role_for_recovery(
+pub(super) fn validate_owned_bootstrap_role_for_recovery(
     path: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if path.is_some_and(|path| {
@@ -784,7 +863,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_role_for_recovery(
     validate_owned_bootstrap_role(path)
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_state(
+pub(super) fn validate_owned_bootstrap_state(
     path: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -831,7 +910,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_state(
     Ok(())
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_state_for_recovery(
+pub(super) fn validate_owned_bootstrap_state_for_recovery(
     path: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if path.is_some_and(|path| {
@@ -842,7 +921,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_state_for_recovery(
     validate_owned_bootstrap_state(path)
 }
 
-pub(in crate::upgrader) fn validate_owned_bootstrap_directory(
+pub(super) fn validate_owned_bootstrap_directory(
     path: &Path,
     mode: u32,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -858,7 +937,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_directory(
     }
     Ok(())
 }
-pub(in crate::upgrader) fn validate_owned_bootstrap_regular(
+pub(super) fn validate_owned_bootstrap_regular(
     path: &Path,
     mode: u32,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -875,9 +954,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_regular(
     }
     Ok(())
 }
-pub(in crate::upgrader) fn remove_owned_bootstrap_state(
-    path: &Path,
-) -> Result<(), ProbeUpgraderRunError> {
+pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
         return Ok(());
     }

@@ -4,8 +4,8 @@ use crate::{
     generation::{DelegationGenerationLease, GenerationStateError, acquire_delegation_generation},
     handoff::{Enrollment, Handoff, HandoffError},
     install::{
-        FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd,
-        VerifiedCompleteFreshComponents,
+        CommittedReplacementLocalCustody, FixedInstallPaths, InstallError, SystemAccounts,
+        SystemSystemd, VerifiedCompleteFreshComponents,
         activate_complete_replacement_current_probe_with_registration, coordinate_fresh_install,
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
@@ -157,7 +157,7 @@ impl ReceivedRootHandoff {
         let result = if let ReplacementActivation::Resume(commit) = &replacement_activation {
             let resume_binding = commit.resume_binding();
             let registration_binding = commit
-                .registration_binding(&self.bundle.target)
+                .registration_binding()
                 .ok_or(ActivationError::Replacement)?;
             activate_complete_replacement_current_probe_with_registration(
                 components,
@@ -222,6 +222,13 @@ fn prepare_replacement_migration(
         bundle,
         &mut store,
         has_installed_metadata,
+        |fact| {
+            crate::install::classify_committed_replacement_local_custody(
+                &FixedInstallPaths::production(),
+                &fact.resume_binding(),
+            )
+            .map_err(ActivationError::Install)
+        },
         |request| invoke_replacement_companion(request, companion, bundle),
     )
 }
@@ -233,7 +240,7 @@ enum ReplacementActivation {
 }
 
 enum MatchingReplacementCommit {
-    CleanupRequired,
+    CleanupRequired(Box<crate::replacement::ReplacementCommitFact>),
     Ready(Box<crate::replacement::ReplacementCommitFact>),
 }
 
@@ -242,16 +249,35 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
     bundle: &VerifiedBundle,
     store: &mut S,
     has_installed_metadata: bool,
+    mut classify_local_custody: impl FnMut(
+        &crate::replacement::ReplacementCommitFact,
+    )
+        -> Result<CommittedReplacementLocalCustody, ActivationError>,
     mut invoke: impl FnMut(&LifecycleRequest) -> Result<(), ActivationError>,
 ) -> Result<ReplacementActivation, ActivationError> {
     if let Some(commit) = matching_replacement_commit_in(store, enrollment, bundle)? {
         match commit {
-            MatchingReplacementCommit::CleanupRequired => {
+            MatchingReplacementCommit::CleanupRequired(fact) => {
+                if classify_local_custody(&fact)?
+                    != CommittedReplacementLocalCustody::SourceMetadata
+                {
+                    return Err(ActivationError::Replacement);
+                }
                 let request = replacement_request_for_installed_state(true, enrollment, bundle)?
                     .ok_or(ActivationError::Replacement)?;
                 invoke(&request)?;
             }
             MatchingReplacementCommit::Ready(fact) => {
+                if !fact.candidate_layout_complete
+                    && classify_local_custody(&fact)?
+                        == CommittedReplacementLocalCustody::SourceMetadata
+                {
+                    let request =
+                        replacement_request_for_installed_state(true, enrollment, bundle)?
+                            .ok_or(ActivationError::Replacement)?;
+                    invoke(&request)?;
+                    return Ok(ReplacementActivation::Resume(*fact));
+                }
                 return Ok(if fact.candidate_layout_complete {
                     ReplacementActivation::Complete(*fact)
                 } else {
@@ -306,6 +332,7 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
                 && fact.intent.target_probe_version == replacement.target_probe_version()
                 && fact.intent.target_asset_set_digest == replacement.target_asset_set_digest()
         })
+        && fact.intent.target_bundle_target == bundle.target
         && fact.intent.target_probe_version == bundle.version
         && fact.intent.target_asset_set_digest
             == format!("sha256:{}", bundle.asset_set_manifest_sha256)
@@ -314,7 +341,7 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
         return Ok(Some(if fact.cleanup_complete {
             MatchingReplacementCommit::Ready(Box::new(fact))
         } else {
-            MatchingReplacementCommit::CleanupRequired
+            MatchingReplacementCommit::CleanupRequired(Box::new(fact))
         }));
     }
     if !fact.candidate_layout_complete {
@@ -1195,6 +1222,7 @@ mod tests {
                 old_probe_id: "probe-old".to_owned(),
                 source_probe_version: "1.2.2".to_owned(),
                 source_probe_sha256: "a".repeat(64),
+                target_bundle_target: received.bundle.target.clone(),
                 target_probe_version: received.bundle.version.clone(),
                 target_asset_set_digest: format!(
                     "sha256:{}",
@@ -1304,6 +1332,7 @@ mod tests {
             old_probe_id: "probe_old_01".to_owned(),
             source_probe_version: "1.2.2".to_owned(),
             source_probe_sha256: "c".repeat(64),
+            target_bundle_target: received.bundle.target.clone(),
             target_probe_version: received.bundle.version.clone(),
             target_asset_set_digest: format!(
                 "sha256:{}",
@@ -1322,6 +1351,7 @@ mod tests {
             &received.bundle,
             &mut Store(Rc::clone(&shared)),
             false,
+            |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
             move |request| {
                 invoked_from_fresh_instance
                     .borrow_mut()
@@ -1352,6 +1382,66 @@ mod tests {
             crate::lifecycle::LifecycleTransition::ReplacementMigration
         );
 
+        let retirement_invocations = Rc::new(RefCell::new(0));
+        let observed_retirement_invocations = Rc::clone(&retirement_invocations);
+        let source_custody = tempdir().unwrap();
+        let source_metadata = source_custody.path().join("etc/enoki/probe-install.toml");
+        fs::create_dir_all(source_metadata.parent().unwrap()).unwrap();
+        fs::write(
+            &source_metadata,
+            "source metadata under durable commit custody",
+        )
+        .unwrap();
+        let source_state = source_custody.path().join("var/lib/enoki-probe-bootstrap");
+        fs::create_dir_all(&source_state).unwrap();
+        fs::set_permissions(&source_state, fs::Permissions::from_mode(0o700)).unwrap();
+        let source_paths = FixedInstallPaths::under(source_custody.path());
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(Rc::clone(&shared)),
+            true,
+            |fact| {
+                crate::install::classify_committed_replacement_local_custody(
+                    &source_paths,
+                    &fact.resume_binding(),
+                )
+                .map_err(ActivationError::Install)
+            },
+            move |_| {
+                *observed_retirement_invocations.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect("fresh activation retires source metadata after cleanup receipt");
+        assert!(matches!(activation, ReplacementActivation::Resume(_)));
+        assert_eq!(
+            *retirement_invocations.borrow(),
+            1,
+            "cleanup receipt with source metadata must reenter the sealed Companion"
+        );
+
+        let candidate_invocations = Rc::new(RefCell::new(0));
+        let observed_candidate_invocations = Rc::clone(&candidate_invocations);
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(Rc::clone(&shared)),
+            true,
+            |_| Ok(CommittedReplacementLocalCustody::CandidateTransaction),
+            move |_| {
+                *observed_candidate_invocations.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect("fresh activation resumes candidate transaction without retiring its metadata");
+        assert!(matches!(activation, ReplacementActivation::Resume(_)));
+        assert_eq!(
+            *candidate_invocations.borrow(),
+            0,
+            "candidate transaction custody must bypass source metadata retirement"
+        );
+
         let wrong = Enrollment::new("https://hub.example", "enk_enroll_wrong").unwrap();
         let wrong_invocations = Rc::new(RefCell::new(0));
         let observed_wrong_invocations = Rc::clone(&wrong_invocations);
@@ -1361,6 +1451,7 @@ mod tests {
                 &received.bundle,
                 &mut Store(Rc::clone(&shared)),
                 false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
                 move |_| {
                     *observed_wrong_invocations.borrow_mut() += 1;
                     Ok(())
@@ -1384,6 +1475,7 @@ mod tests {
                 &wrong_bundle,
                 &mut Store(Rc::clone(&shared)),
                 false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
                 move |_| {
                     *observed_wrong_bundle.borrow_mut() += 1;
                     Ok(())
@@ -1395,6 +1487,30 @@ mod tests {
             *wrong_bundle_invocations.borrow(),
             0,
             "wrong verified bundle binding has zero effects"
+        );
+
+        let mut wrong_target_bundle = received.bundle.clone();
+        wrong_target_bundle.target = "aarch64-unknown-linux-gnu".to_owned();
+        let wrong_target_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_target = Rc::clone(&wrong_target_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &wrong_target_bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
+                move |_| {
+                    *observed_wrong_target.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_target_invocations.borrow(),
+            0,
+            "wrong target has zero Companion effects"
         );
 
         let wrong_intent_input =
@@ -1410,6 +1526,7 @@ mod tests {
                 &received.bundle,
                 &mut Store(shared),
                 false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
                 move |_| {
                     *observed_wrong_intent.borrow_mut() += 1;
                     Ok(())
