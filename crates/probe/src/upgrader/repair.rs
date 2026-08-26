@@ -20,6 +20,7 @@ use enoki_probe_bootstrap::{
         LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, RepairAuthorityV1,
     },
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -58,9 +59,11 @@ pub(super) fn coordinate(request: &LifecycleRequest, peer_uid: Option<u32>) -> L
     {
         return LifecycleResponse::failed("lifecycle.authority_mismatch");
     }
-    response(run_authorized_for_invoking_admin(
+    let mut dependencies = ProductionRepairDependencies;
+    response(run_authorized_for_invoking_admin_with(
         *invoking_uid,
         *invoking_gid,
+        &mut dependencies,
     ))
 }
 
@@ -76,9 +79,10 @@ pub(super) fn response(
     }
 }
 
-fn run_authorized_for_invoking_admin(
+fn run_authorized_for_invoking_admin_with(
     invoking_uid: u32,
     invoking_gid: u32,
+    dependencies: &mut impl RepairDependencies,
 ) -> Result<ProbeRepairResult, ProbeRepairRunError> {
     if unsafe { libc::geteuid() } != 0 || invoking_uid == 0 || invoking_gid == 0 {
         return Err(ProbeRepairRunError::RootRequired);
@@ -94,7 +98,7 @@ fn run_authorized_for_invoking_admin(
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
     }
     if installed_failure_is_current {
-        return run_installed_bundle_repair(invoking_uid, invoking_gid);
+        return run_installed_bundle_repair(invoking_uid, invoking_gid, dependencies);
     }
     if Path::new("/var/lib/enoki-probe/runtime-failure/latch").exists() {
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
@@ -102,7 +106,7 @@ fn run_authorized_for_invoking_admin(
     let consumed = if let Some(consumed) = resumable_upgrade {
         consumed
     } else {
-        let (request_nonce, now_ms) = fresh_exchange_facts()?;
+        let (request_nonce, now_ms) = fresh_exchange_facts_with(dependencies)?;
         let signed = issue_probe_repair_evidence(
             &paths,
             now_ms,
@@ -121,15 +125,8 @@ fn run_authorized_for_invoking_admin(
             evidence_signature: &signed.signature,
         })
         .map_err(|_| contract_failure("probe_repair_request_invalid"))?;
-        let output = exchange_authority(&request, invoking_uid, invoking_gid)?;
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct RepairAuthorizationResponse {
-            authority: RepairAuthorityV1,
-            signature: String,
-        }
-        let response: RepairAuthorizationResponse = serde_json::from_slice(&output)
-            .map_err(|_| contract_failure("probe_repair_authority_invalid"))?;
+        let output = exchange_authority_with(dependencies, &request, invoking_uid, invoking_gid)?;
+        let response: RepairAuthorizationResponse = decode_authority_response(&output)?;
         consume_probe_repair_authority(
             &paths,
             &signed.evidence,
@@ -168,6 +165,7 @@ fn run_authorized_for_invoking_admin(
 fn run_installed_bundle_repair(
     invoking_uid: u32,
     invoking_gid: u32,
+    dependencies: &mut impl RepairDependencies,
 ) -> Result<ProbeRepairResult, ProbeRepairRunError> {
     if let Some(resumable) = crate::runtime_failure::resume_installed_bundle_repair()
         .map_err(|_| contract_failure("probe_repair_intent_invalid"))?
@@ -176,7 +174,7 @@ fn run_installed_bundle_repair(
             crate::runtime_failure::drive_live_installed_bundle_repair(resumable),
         );
     }
-    let (request_nonce, now_ms) = fresh_exchange_facts()?;
+    let (request_nonce, now_ms) = fresh_exchange_facts_with(dependencies)?;
     let signed = crate::runtime_failure::issue_installed_bundle_failure_evidence(
         now_ms,
         now_ms.saturating_add(60_000),
@@ -194,16 +192,8 @@ fn run_installed_bundle_repair(
         evidence_signature: &signed.signature,
     })
     .map_err(|_| contract_failure("probe_repair_request_invalid"))?;
-    let output = exchange_authority(&request, invoking_uid, invoking_gid)?;
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Response {
-        authority: enoki_probe_bootstrap::lifecycle::InstalledBundleRepairAuthorityV1,
-        signature: String,
-        stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
-    }
-    let response: Response = serde_json::from_slice(&output)
-        .map_err(|_| contract_failure("probe_repair_authority_invalid"))?;
+    let output = exchange_authority_with(dependencies, &request, invoking_uid, invoking_gid)?;
+    let response: InstalledBundleRepairAuthorizationResponse = decode_authority_response(&output)?;
     let grant = crate::runtime_failure::validate_installed_bundle_repair_authority(
         &signed,
         &response.authority,
@@ -250,16 +240,113 @@ pub(super) fn acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunE
     (code == Some(3)).then(|| ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
 }
 
-fn fresh_exchange_facts() -> Result<(String, u64), ProbeRepairRunError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepairDependencyFailure {
+    Random,
+    Clock,
+    Spawn,
+    Write,
+    Wait,
+}
+
+#[derive(Debug)]
+struct RepairAuthorityOutput {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    successful: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RepairAuthorizationResponse {
+    authority: RepairAuthorityV1,
+    signature: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstalledBundleRepairAuthorizationResponse {
+    authority: enoki_probe_bootstrap::lifecycle::InstalledBundleRepairAuthorityV1,
+    signature: String,
+    stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+}
+
+fn decode_authority_response<T: DeserializeOwned>(output: &[u8]) -> Result<T, ProbeRepairRunError> {
+    serde_json::from_slice(output).map_err(|_| contract_failure("probe_repair_authority_invalid"))
+}
+
+/// Repair coordinator 的内部事实与 authority exchange Interface。
+/// production 与 deterministic tests 各自提供一个真实 Adapter。
+trait RepairDependencies {
+    fn fill_nonce(&mut self, nonce: &mut [u8]) -> Result<(), RepairDependencyFailure>;
+    fn now_ms(&mut self) -> Result<u64, RepairDependencyFailure>;
+    fn exchange_authority(
+        &mut self,
+        request: &[u8],
+        invoking_uid: u32,
+        invoking_gid: u32,
+    ) -> Result<RepairAuthorityOutput, RepairDependencyFailure>;
+}
+
+struct ProductionRepairDependencies;
+
+impl RepairDependencies for ProductionRepairDependencies {
+    fn fill_nonce(&mut self, nonce: &mut [u8]) -> Result<(), RepairDependencyFailure> {
+        fs::File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(nonce))
+            .map_err(|_| RepairDependencyFailure::Random)
+    }
+
+    fn now_ms(&mut self) -> Result<u64, RepairDependencyFailure> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| RepairDependencyFailure::Clock)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| RepairDependencyFailure::Clock)
+    }
+
+    fn exchange_authority(
+        &mut self,
+        request: &[u8],
+        invoking_uid: u32,
+        invoking_gid: u32,
+    ) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
+        let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
+        acquirer.arg("--repair-authorize");
+        configure_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
+        let mut child = acquirer
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|_| RepairDependencyFailure::Spawn)?;
+        child
+            .stdin
+            .take()
+            .ok_or(RepairDependencyFailure::Write)?
+            .write_all(request)
+            .map_err(|_| RepairDependencyFailure::Write)?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| RepairDependencyFailure::Wait)?;
+        Ok(RepairAuthorityOutput {
+            code: output.status.code(),
+            stdout: output.stdout,
+            successful: output.status.success(),
+        })
+    }
+}
+
+fn fresh_exchange_facts_with(
+    dependencies: &mut impl RepairDependencies,
+) -> Result<(String, u64), ProbeRepairRunError> {
     let mut nonce = [0_u8; 16];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut nonce))
+    dependencies
+        .fill_nonce(&mut nonce)
         .map_err(|_| contract_failure("probe_repair_random_failed"))?;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| contract_failure("probe_repair_clock_invalid"))?
-        .as_millis()
-        .try_into()
+    let now_ms = dependencies
+        .now_ms()
         .map_err(|_| contract_failure("probe_repair_clock_invalid"))?;
     Ok((
         nonce.iter().map(|byte| format!("{byte:02x}")).collect(),
@@ -267,33 +354,19 @@ fn fresh_exchange_facts() -> Result<(String, u64), ProbeRepairRunError> {
     ))
 }
 
-fn exchange_authority(
+fn exchange_authority_with(
+    dependencies: &mut impl RepairDependencies,
     request: &[u8],
     invoking_uid: u32,
     invoking_gid: u32,
 ) -> Result<Vec<u8>, ProbeRepairRunError> {
-    let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
-    acquirer.arg("--repair-authorize");
-    configure_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
-    let mut child = acquirer
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
+    let output = dependencies
+        .exchange_authority(request, invoking_uid, invoking_gid)
         .map_err(|_| contract_failure("probe_repair_authority_acquire_failed"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| contract_failure("probe_repair_authority_acquire_failed"))?
-        .write_all(request)
-        .map_err(|_| contract_failure("probe_repair_authority_acquire_failed"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|_| contract_failure("probe_repair_authority_acquire_failed"))?;
-    if let Some(error) = acquirer_exit_failure(output.status.code()) {
+    if let Some(error) = acquirer_exit_failure(output.code) {
         return Err(error);
     }
-    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
+    if !output.successful || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
         return Err(contract_failure("probe_repair_authority_acquire_failed"));
     }
     Ok(output.stdout)
@@ -333,6 +406,73 @@ fn contract_failure(code: &'static str) -> ProbeRepairRunError {
 mod tests {
     use super::*;
 
+    struct DeterministicRepairDependencies {
+        failure: Option<RepairDependencyFailure>,
+        now_ms: u64,
+        nonce: [u8; 16],
+        output: RepairAuthorityOutput,
+    }
+
+    impl DeterministicRepairDependencies {
+        fn successful(stdout: Vec<u8>) -> Self {
+            Self {
+                failure: None,
+                now_ms: 1_234,
+                nonce: [0xab; 16],
+                output: RepairAuthorityOutput {
+                    code: Some(0),
+                    stdout,
+                    successful: true,
+                },
+            }
+        }
+
+        fn failing(failure: RepairDependencyFailure) -> Self {
+            Self {
+                failure: Some(failure),
+                ..Self::successful(b"{}".to_vec())
+            }
+        }
+    }
+
+    impl RepairDependencies for DeterministicRepairDependencies {
+        fn fill_nonce(&mut self, nonce: &mut [u8]) -> Result<(), RepairDependencyFailure> {
+            if self.failure == Some(RepairDependencyFailure::Random) {
+                return Err(RepairDependencyFailure::Random);
+            }
+            nonce.copy_from_slice(&self.nonce);
+            Ok(())
+        }
+
+        fn now_ms(&mut self) -> Result<u64, RepairDependencyFailure> {
+            if self.failure == Some(RepairDependencyFailure::Clock) {
+                return Err(RepairDependencyFailure::Clock);
+            }
+            Ok(self.now_ms)
+        }
+
+        fn exchange_authority(
+            &mut self,
+            _request: &[u8],
+            _invoking_uid: u32,
+            _invoking_gid: u32,
+        ) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
+            if let Some(
+                failure @ (RepairDependencyFailure::Spawn
+                | RepairDependencyFailure::Write
+                | RepairDependencyFailure::Wait),
+            ) = self.failure
+            {
+                return Err(failure);
+            }
+            Ok(RepairAuthorityOutput {
+                code: self.output.code,
+                stdout: self.output.stdout.clone(),
+                successful: self.output.successful,
+            })
+        }
+    }
+
     #[test]
     fn acquirer_exit_three_is_the_only_manual_reinstall_classification() {
         assert!(matches!(
@@ -357,5 +497,116 @@ mod tests {
             response(Err(contract_failure("probe_repair_recovery_pending"))),
             LifecycleResponse::failed("lifecycle.repair_unresolved")
         );
+    }
+
+    #[test]
+    fn deterministic_dependency_maps_random_failure() {
+        let mut dependencies =
+            DeterministicRepairDependencies::failing(RepairDependencyFailure::Random);
+
+        let error = fresh_exchange_facts_with(&mut dependencies).unwrap_err();
+
+        assert_eq!(error.code(), "probe_repair_random_failed");
+    }
+
+    #[test]
+    fn deterministic_dependency_maps_clock_failure() {
+        let mut dependencies =
+            DeterministicRepairDependencies::failing(RepairDependencyFailure::Clock);
+
+        let error = fresh_exchange_facts_with(&mut dependencies).unwrap_err();
+
+        assert_eq!(error.code(), "probe_repair_clock_invalid");
+    }
+
+    #[test]
+    fn deterministic_dependency_supplies_bounded_exchange_facts() {
+        let mut dependencies = DeterministicRepairDependencies::successful(b"{}".to_vec());
+
+        let facts = fresh_exchange_facts_with(&mut dependencies).unwrap();
+
+        assert_eq!(
+            facts,
+            ("abababababababababababababababab".to_owned(), 1_234)
+        );
+    }
+
+    #[test]
+    fn deterministic_dependency_maps_spawn_write_and_wait_failures() {
+        for failure in [
+            RepairDependencyFailure::Spawn,
+            RepairDependencyFailure::Write,
+            RepairDependencyFailure::Wait,
+        ] {
+            let mut dependencies = DeterministicRepairDependencies::failing(failure);
+
+            let error =
+                exchange_authority_with(&mut dependencies, b"request", 1000, 1000).unwrap_err();
+
+            assert_eq!(error.code(), "probe_repair_authority_acquire_failed");
+        }
+    }
+
+    #[test]
+    fn deterministic_dependency_maps_exit_and_bounded_output_failures() {
+        let cases = [
+            RepairAuthorityOutput {
+                code: Some(1),
+                stdout: b"failure".to_vec(),
+                successful: false,
+            },
+            RepairAuthorityOutput {
+                code: None,
+                stdout: b"failure".to_vec(),
+                successful: false,
+            },
+            RepairAuthorityOutput {
+                code: Some(0),
+                stdout: Vec::new(),
+                successful: true,
+            },
+            RepairAuthorityOutput {
+                code: Some(0),
+                stdout: vec![b'x'; 8 * 1024 + 1],
+                successful: true,
+            },
+        ];
+        for output in cases {
+            let mut dependencies = DeterministicRepairDependencies {
+                output,
+                ..DeterministicRepairDependencies::successful(b"{}".to_vec())
+            };
+
+            let error =
+                exchange_authority_with(&mut dependencies, b"request", 1000, 1000).unwrap_err();
+
+            assert_eq!(error.code(), "probe_repair_authority_acquire_failed");
+        }
+    }
+
+    #[test]
+    fn deterministic_dependency_keeps_manual_reinstall_exit_distinct() {
+        let mut dependencies = DeterministicRepairDependencies {
+            output: RepairAuthorityOutput {
+                code: Some(3),
+                stdout: Vec::new(),
+                successful: false,
+            },
+            ..DeterministicRepairDependencies::successful(b"{}".to_vec())
+        };
+
+        let error = exchange_authority_with(&mut dependencies, b"request", 1000, 1000).unwrap_err();
+
+        assert_eq!(error.code(), "probe_manual_reinstall_required");
+    }
+
+    #[test]
+    fn malformed_authority_response_has_a_stable_failure_mapping() {
+        let error = decode_authority_response::<RepairAuthorizationResponse>(
+            br#"{"authority":{},"signature":3}"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "probe_repair_authority_invalid");
     }
 }

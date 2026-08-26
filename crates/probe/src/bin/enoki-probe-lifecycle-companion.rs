@@ -8,6 +8,7 @@ use std::{
 use enoki_probe::upgrader::{
     HttpProbeUpgraderValidationTransport, finalize_lifecycle_companion_binary,
     resume_lifecycle_companion, run_lifecycle_companion_from_peer,
+    run_upgrade_lifecycle_companion_from_peer,
 };
 use enoki_probe_bootstrap::lifecycle::{
     LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, MAX_LIFECYCLE_REQUEST_BYTES,
@@ -75,7 +76,11 @@ fn run(mode: CompanionMode) -> ExitCode {
     if !caller_is_authorized(request.authority(), peer_uid, process_uid) {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
     }
-    let response = run_lifecycle_companion_from_peer(&request, &mut transport, peer_uid);
+    let response = if mode == CompanionMode::Upgrade {
+        run_upgrade_lifecycle_companion_from_peer(&request, peer_uid)
+    } else {
+        run_lifecycle_companion_from_peer(&request, &mut transport, peer_uid)
+    };
     if request.transition() == enoki_probe_bootstrap::lifecycle::LifecycleTransition::Repair {
         write_response(response)
     } else {

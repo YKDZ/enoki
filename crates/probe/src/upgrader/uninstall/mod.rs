@@ -363,7 +363,7 @@ impl UninstallMechanics<'_> {
         transport: &mut impl ProbeUpgraderValidationTransport,
     ) -> Result<(), ProbeUpgraderRunError> {
         if !self.terminal_is_acknowledged {
-            let body = render_operation_status_body(operation_token, "succeeded", None, None);
+            let body = render_operation_status_body(operation_token, "succeeded");
             let (probe_id, probe_private_key_pem, server_time_offset_ms) =
                 self.request_auth_material()?;
             let auth = ProbeRequestAuth {

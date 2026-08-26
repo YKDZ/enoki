@@ -371,7 +371,10 @@ fn observation_roles_have_one_way_dependency_boundaries() {
 #[test]
 fn fresh_probe_installation_cannot_render_collector_helper_sudoers() {
     assert!(!UPGRADER.contains("fn write_collector_helper_sudoers"));
-    assert!(UPGRADER.contains("fn remove_legacy_collector_helper_sudoers"));
+    assert!(
+        !UPGRADER.contains("fn remove_legacy_collector_helper_sudoers"),
+        "退役 Upgrade 路径不得为已删除的旧 sudoers 保留专属 helper",
+    );
 }
 
 #[test]
@@ -871,15 +874,54 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
 }
 
 #[test]
-fn compatible_upgrade_enters_a_transition_specific_coordinator() {
+fn compatible_upgrade_enters_two_adapters_and_one_deep_coordinator() {
     assert!(
-        UPGRADER.contains("upgrade::coordinate(request, peer_uid)"),
-        "Compatible Upgrade 的顶层入口必须委托给转换专属 coordinator",
+        UPGRADER.contains("upgrade::coordinate_from_companion(request, peer_uid)"),
+        "Companion Upgrade 入口必须委托给转换专属 Adapter",
     );
     assert!(
-        UPGRADE_COORDINATOR.contains("run_compatible_upgrade as coordinate"),
-        "Upgrade Adapter 必须直接收窄既有深 Module 的 Interface，不得复制实现",
+        UPGRADE_COORDINATOR.contains("fn coordinate_from_companion(")
+            && UPGRADE_COORDINATOR.contains("fn coordinate_from_fixed_cli(")
+            && UPGRADE_COORDINATOR.contains("fn enter_deep_coordinator("),
+        "Upgrade Module 必须拥有两个真实 Adapter，不能只是 re-export alias",
     );
+    assert!(
+        !UPGRADE_COORDINATOR.contains("run_compatible_upgrade as coordinate"),
+        "删除 Upgrade Module 必须迫使业务语义回流，不能留下可零成本删除的 Middle Man",
+    );
+    for legacy_parent_knowledge in [
+        "pub fn run_probe_upgrader(",
+        "fn read_operation_metadata(",
+        "fn execute_probe_upgrade(",
+        "ProbeUpgraderOperationMetadata",
+        "ProbeUpgraderResult",
+    ] {
+        assert!(
+            !production_source(UPGRADER).contains(legacy_parent_knowledge),
+            "父 Module 不得保留旧 Upgrade authority/HTTP/status/commit 路径：{legacy_parent_knowledge}",
+        );
+    }
+    for owned_semantics in [
+        "request.transition() != LifecycleTransition::Upgrade",
+        "install::run_compatible_upgrade(request, peer_uid)",
+    ] {
+        assert!(
+            UPGRADE_COORDINATOR.contains(owned_semantics),
+            "Upgrade Adapter 必须封闭入口分类并进入唯一兼容升级实现：{owned_semantics}",
+        );
+    }
+    assert_eq!(
+        UPGRADE_COORDINATOR
+            .matches("install::run_compatible_upgrade(request, peer_uid)")
+            .count(),
+        1,
+        "两个 Probe Adapter 必须汇入 Probe Bootstrap 的唯一 Compatible Upgrade deep coordinator",
+    );
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("CompanionMode::General"));
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("CompanionMode::Upgrade"));
+    assert!(UPGRADE_COORDINATOR.contains("fn coordinate_from_companion("));
+    assert!(UPGRADE_COORDINATOR.contains("fn coordinate_from_fixed_cli("));
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_upgrade_lifecycle_companion_from_peer("));
     assert!(COMPATIBLE_UPGRADE.contains("struct VerifiedMutationPlan"));
     assert!(COMPATIBLE_UPGRADE.contains("mod mechanics"));
     assert!(COMPATIBLE_UPGRADE.contains("SystemSystemd::for_live_upgrade()"));
@@ -962,7 +1004,7 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         );
     }
     for typed_delegate in [
-        "upgrade::coordinate(",
+        "upgrade::coordinate_from_companion(",
         "repair::coordinate(",
         "replacement::coordinate(",
         "uninstall::coordinate(",
@@ -974,7 +1016,6 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
     }
 
     let interfaces = [
-        (UPGRADE_COORDINATOR, "Upgrade"),
         (REPAIR_COORDINATOR, "Repair"),
         (REPLACEMENT_COORDINATOR, "Replacement"),
         (UNINSTALL, "Uninstall"),
@@ -984,11 +1025,6 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
             .split("fn coordinate(")
             .nth(1)
             .map(|source| source.split('{').next().unwrap_or(source))
-            .or_else(|| {
-                module
-                    .contains("run_compatible_upgrade as coordinate")
-                    .then_some("request, peer_uid")
-            })
             .unwrap_or_else(|| panic!("{transition} 缺少 coordinator Interface"));
         for leaked_mechanics in [
             "Path",
