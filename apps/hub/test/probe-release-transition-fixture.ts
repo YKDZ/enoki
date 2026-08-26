@@ -226,7 +226,7 @@ function sha256(value: Buffer) {
 }
 
 function testKeyPair() {
-  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const pair = generateKeyPairSync("rsa", { modulusLength: 4096 });
   return {
     privateKey: pair.privateKey.export({ format: "pem", type: "pkcs8" }),
     publicKey: pair.publicKey.export({ format: "pem", type: "spki" }),
