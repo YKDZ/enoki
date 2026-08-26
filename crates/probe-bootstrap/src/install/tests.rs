@@ -21,6 +21,42 @@ mod tests {
     use std::sync::OnceLock;
     use tempfile::tempdir;
 
+    fn coordinate_fresh_install_for_test(
+        components: VerifiedCompleteFreshComponents<'_>,
+        enrollment: &Enrollment,
+        bundle: &VerifiedBundle,
+        trust: &BuildTrust,
+        paths: &FixedInstallPaths,
+        accounts: &mut impl AccountPort,
+        systemd: &mut impl SystemdPort,
+    ) -> Result<(), InstallError> {
+        let verified = verify_fresh_install(components, enrollment, bundle, trust)?;
+        let mut files = SystemInstallFiles;
+        activate_verified_fresh_install(
+            verified.components.probe,
+            Some((
+                verified.components.observation_runtime,
+                verified.components.cpu_provider,
+                verified.components.disk_health_provider,
+                verified.components.lifecycle_companion,
+            )),
+            Some((
+                verified.components.bootstrap_acquirer,
+                verified.components.bootstrap_activator,
+            )),
+            verified.authority.enrollment,
+            verified.bundle,
+            verified.trust,
+            paths,
+            &mut InstallPorts {
+                accounts,
+                systemd,
+                files: &mut files,
+            },
+            InstallFailureSemantics::FreshRollback,
+        )
+    }
+
     struct LayoutBootstrapComponentsForTest<'a> {
         probe: &'a mut File,
         bootstrap_acquirer: &'a mut File,
@@ -36,15 +72,15 @@ mod tests {
         accounts: &mut impl AccountPort,
         systemd: &mut impl SystemdPort,
     ) -> Result<(), InstallError> {
+        let authority = FreshInstallAuthority::classify(enrollment)?;
         let mut files = SystemInstallFiles;
-        activate_verified_install_layout(
+        activate_classified_layout_for_test(
             components.probe,
-            None,
             Some((
                 components.bootstrap_acquirer,
                 components.bootstrap_activator,
             )),
-            enrollment,
+            authority,
             bundle,
             trust,
             paths,
@@ -53,7 +89,6 @@ mod tests {
                 systemd,
                 files: &mut files,
             },
-            InstallFailureSemantics::FreshRollback,
         )
     }
 
@@ -66,12 +101,12 @@ mod tests {
         accounts: &mut impl AccountPort,
         systemd: &mut impl SystemdPort,
     ) -> Result<(), InstallError> {
+        let authority = FreshInstallAuthority::classify(enrollment)?;
         let mut files = SystemInstallFiles;
-        activate_verified_install_layout(
+        activate_classified_layout_for_test(
             component,
             None,
-            None,
-            enrollment,
+            authority,
             bundle,
             trust,
             paths,
@@ -80,7 +115,6 @@ mod tests {
                 systemd,
                 files: &mut files,
             },
-            InstallFailureSemantics::FreshRollback,
         )
     }
 
@@ -93,11 +127,32 @@ mod tests {
         paths: &FixedInstallPaths,
         ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
     ) -> Result<(), InstallError> {
+        let authority = FreshInstallAuthority::classify(enrollment)?;
+        activate_classified_layout_for_test(
+            component,
+            bootstrap_components,
+            authority,
+            bundle,
+            trust,
+            paths,
+            ports,
+        )
+    }
+
+    fn activate_classified_layout_for_test(
+        component: &mut File,
+        bootstrap_components: Option<(&mut File, &mut File)>,
+        authority: FreshInstallAuthority<'_>,
+        bundle: &VerifiedBundle,
+        trust: &BuildTrust,
+        paths: &FixedInstallPaths,
+        ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+    ) -> Result<(), InstallError> {
         activate_verified_install_layout(
             component,
             None,
             bootstrap_components,
-            enrollment,
+            authority.enrollment,
             bundle,
             trust,
             paths,
@@ -618,7 +673,7 @@ mod tests {
         let bundle = bundle().with_test_complete_receipts(5);
         let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
-        coordinate_fresh_install(
+        coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -1244,7 +1299,7 @@ mod tests {
         ] = std::array::from_fn(|_| component());
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
-        coordinate_fresh_install(
+        coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut source_probe,
                 observation_runtime: &mut source_runtime,
@@ -1508,7 +1563,7 @@ mod tests {
             mut source_acquirer,
             mut source_activator,
         ] = std::array::from_fn(|_| component());
-        coordinate_fresh_install(
+        coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut source_probe,
                 observation_runtime: &mut source_runtime,
@@ -1667,7 +1722,7 @@ mod tests {
         let installed_bundle = bundle().with_test_complete_receipts(5);
         let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
-        coordinate_fresh_install(
+        coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -2918,7 +2973,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
 
-        coordinate_fresh_install(
+        coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -3113,7 +3168,7 @@ mod tests {
             ..Systemd::default()
         };
 
-        let result = coordinate_fresh_install(
+        let result = coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -3969,7 +4024,7 @@ mod tests {
         let mut systemd = Systemd::default();
 
         assert_eq!(
-            coordinate_fresh_install(
+            coordinate_fresh_install_for_test(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -3992,6 +4047,46 @@ mod tests {
         assert!(accounts.ipc_calls.is_empty());
         assert!(systemd.calls.is_empty());
         assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn fresh_layout_test_seam_cannot_bypass_replacement_authority_classification() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        let enrollment = Enrollment::from_install_input(
+            "https://hub.example",
+            format!(
+                "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+                "c".repeat(64),
+                "a".repeat(64),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let mut probe = component();
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            activate_layout_with_bootstrap_for_test(
+                LayoutBootstrapComponentsForTest {
+                    probe: &mut probe,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &enrollment,
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::InvalidVerifiedComponent),
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
     }
 
     #[test]
@@ -4041,7 +4136,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         assert_eq!(
-            coordinate_fresh_install(
+            coordinate_fresh_install_for_test(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -4132,7 +4227,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         assert_eq!(
-            coordinate_fresh_install(
+            coordinate_fresh_install_for_test(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -4359,7 +4454,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         assert_eq!(
-            coordinate_fresh_install(
+            coordinate_fresh_install_for_test(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -5000,7 +5095,7 @@ mod tests {
         let mut activator = component();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
-        coordinate_fresh_install(
+        coordinate_fresh_install_for_test(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,

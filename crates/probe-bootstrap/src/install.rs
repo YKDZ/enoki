@@ -612,6 +612,27 @@ pub(crate) struct VerifiedCompleteFreshComponents<'a> {
 }
 
 #[derive(Clone, Copy)]
+struct FreshInstallAuthority<'a> {
+    enrollment: &'a Enrollment,
+}
+
+impl<'a> FreshInstallAuthority<'a> {
+    fn classify(enrollment: &'a Enrollment) -> Result<Self, InstallError> {
+        if enrollment.replacement_migration().is_some() {
+            return Err(InstallError::InvalidVerifiedComponent);
+        }
+        Ok(Self { enrollment })
+    }
+}
+
+struct VerifiedFreshInstall<'a> {
+    components: VerifiedCompleteFreshComponents<'a>,
+    authority: FreshInstallAuthority<'a>,
+    bundle: &'a VerifiedBundle,
+    trust: &'a BuildTrust,
+}
+
+#[derive(Clone, Copy)]
 enum InstallFailureSemantics<'a> {
     FreshRollback,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -656,37 +677,61 @@ pub(crate) fn coordinate_fresh_install(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    accounts: &mut impl AccountPort,
-    systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
-    if enrollment.replacement_migration().is_some() {
-        return Err(InstallError::InvalidVerifiedComponent);
-    }
+    let verified = verify_fresh_install(components, enrollment, bundle, trust)?;
+    let paths = FixedInstallPaths::production();
+    let mut accounts = SystemAccounts::default();
+    let mut systemd = SystemSystemd::default();
     let mut files = SystemInstallFiles;
-    activate_verified_install_layout(
-        components.probe,
+    activate_verified_fresh_install(
+        verified.components.probe,
         Some((
-            components.observation_runtime,
-            components.cpu_provider,
-            components.disk_health_provider,
-            components.lifecycle_companion,
+            verified.components.observation_runtime,
+            verified.components.cpu_provider,
+            verified.components.disk_health_provider,
+            verified.components.lifecycle_companion,
         )),
         Some((
-            components.bootstrap_acquirer,
-            components.bootstrap_activator,
+            verified.components.bootstrap_acquirer,
+            verified.components.bootstrap_activator,
         )),
-        enrollment,
-        bundle,
-        trust,
-        paths,
+        verified.authority.enrollment,
+        verified.bundle,
+        verified.trust,
+        &paths,
         &mut InstallPorts {
-            accounts,
-            systemd,
+            accounts: &mut accounts,
+            systemd: &mut systemd,
             files: &mut files,
         },
         InstallFailureSemantics::FreshRollback,
     )
+}
+
+fn verify_fresh_install<'a>(
+    components: VerifiedCompleteFreshComponents<'a>,
+    enrollment: &'a Enrollment,
+    bundle: &'a VerifiedBundle,
+    trust: &'a BuildTrust,
+) -> Result<VerifiedFreshInstall<'a>, InstallError> {
+    let authority = FreshInstallAuthority::classify(enrollment)?;
+    verify_fresh_install_inputs(
+        components.probe,
+        Some(&mut (
+            &mut *components.observation_runtime,
+            &mut *components.cpu_provider,
+            &mut *components.disk_health_provider,
+            &mut *components.lifecycle_companion,
+        )),
+        bundle,
+        trust,
+    )?;
+    Ok(VerifiedFreshInstall {
+        components,
+        authority,
+        bundle,
+        trust,
+    })
 }
 
 /// 仅用于 Replacement；调用者已持久化精确的 Replacement Migration commit fact，

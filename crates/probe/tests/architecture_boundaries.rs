@@ -18,6 +18,7 @@ const INSTALLED_BUNDLE_REPAIR_LIVE: &str =
 const COMPATIBLE_UPGRADE: &str =
     include_str!("../../probe-bootstrap/src/install/compatible_upgrade.rs");
 const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
+const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/install/tests.rs");
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
 
@@ -138,6 +139,46 @@ fn legacy_fresh_installer_and_shallow_lifecycle_surfaces_are_absent() {
             "零生产 caller 的 Fresh wrapper 必须删除：{retired}",
         );
     }
+
+    let coordinator = BOOTSTRAP_INSTALL
+        .split("pub(crate) fn coordinate_fresh_install(")
+        .nth(1)
+        .expect("Fresh coordinator 必须保持 crate-private")
+        .split("-> Result")
+        .next()
+        .expect("Fresh coordinator 必须有封闭结果");
+    for forbidden in [
+        "FixedInstallPaths",
+        "AccountPort",
+        "SystemdPort",
+        "bool",
+        "mode",
+        "phase",
+        "step",
+    ] {
+        assert!(
+            !coordinator.contains(forbidden),
+            "生产 Fresh coordinator interface 不得暴露 {forbidden}",
+        );
+    }
+
+    assert_eq!(
+        BOOTSTRAP_INSTALL_TESTS
+            .matches("activate_verified_install_layout(")
+            .count(),
+        1,
+        "内部 fault tests 只能从一个 classified Fresh seam 进入 layout mechanics",
+    );
+    let classified_test_seam = BOOTSTRAP_INSTALL_TESTS
+        .split("fn activate_classified_layout_for_test(")
+        .nth(1)
+        .expect("fault test seam 必须显式消费 classified Fresh authority")
+        .split("-> Result")
+        .next()
+        .unwrap();
+    assert!(classified_test_seam.contains("FreshInstallAuthority"));
+    assert!(!classified_test_seam.contains("Enrollment"));
+    assert!(!classified_test_seam.contains("InstallFailureSemantics"));
 }
 
 #[test]

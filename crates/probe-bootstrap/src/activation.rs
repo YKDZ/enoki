@@ -171,15 +171,7 @@ impl ReceivedRootHandoff {
                 &registration_binding,
             )
         } else {
-            coordinate_fresh_install(
-                components,
-                &self.enrollment,
-                &self.bundle,
-                &trust,
-                &paths,
-                &mut accounts,
-                &mut systemd,
-            )
+            coordinate_fresh_install(components, &self.enrollment, &self.bundle, &trust)
         };
         result.map_err(ActivationError::Install)?;
         if let ReplacementActivation::Resume(commit) = replacement_activation {
