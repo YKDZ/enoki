@@ -1,20 +1,17 @@
-import {
-  createHash,
-  createPublicKey,
-  generateKeyPairSync,
-  sign,
-} from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
-// @ts-expect-error JavaScript release tool has no declaration file.
-import { createProbeTrustDelegation } from "../../../scripts/release-candidate-lib.mjs";
-// @ts-expect-error JavaScript release transition issuer has no declaration file.
-import { createReleaseTransitionContract } from "../../../scripts/release-transition-contract.mjs";
-// @ts-expect-error JavaScript release test fixture has no declaration file.
-import { createSignedLegacyProbeAssetSetFixture } from "../../../scripts/release-transition-test-fixture.mjs";
-// @ts-expect-error JavaScript Trust Epoch authorization issuer has no declaration file.
-import { createTrustEpochMigrationAuthorization } from "../../../scripts/trust-epoch-migration-lib.mjs";
+import {
+  createProbeTrustDelegation,
+  createReleaseTransitionContract,
+  createTrustEpochMigrationAuthorization,
+  probeTargets,
+} from "@enoki/probe-release";
+import {
+  createGenericReleaseTransitionContractFixture,
+  createSignedLegacyProbeAssetSetFixture,
+} from "@enoki/probe-release/test-fixture";
 
 export type TestProbeReleaseAuthority = ReturnType<typeof testKeyPair>;
 
@@ -47,12 +44,7 @@ export async function writeSignedProbeAssetSet(
     releasePublicKeyPem: release.publicKey,
     rootPrivateKeyPem: authority.privateKey,
   });
-  const assets = [
-    "aarch64-unknown-linux-gnu",
-    "aarch64-unknown-linux-musl",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-  ].map((target, index) => {
+  const assets = probeTargets.map((target, index) => {
     if (target === "x86_64-unknown-linux-gnu" && input.x86_64GnuBundle) {
       return {
         bundleManifestSha256: sha256(input.x86_64GnuBundle.bundleManifest),
@@ -94,7 +86,7 @@ export async function writeSignedProbeAssetSet(
     : null;
   const contract =
     trustEpoch?.contract ??
-    createGenericReleaseTransitionContract({
+    createGenericReleaseTransitionContractFixture({
       authority,
       manifest,
       sourceVersion: input.sourceVersion,
@@ -220,73 +212,8 @@ async function createTrustEpochMigrationFixture({
   }
 }
 
-function createGenericReleaseTransitionContract({
-  authority,
-  manifest,
-  sourceVersion,
-  transition,
-  sourceProbeComponents,
-}: {
-  authority: TestProbeReleaseAuthority;
-  manifest: Buffer;
-  sourceVersion: string;
-  transition: "compatible" | "replacement-required";
-  sourceProbeComponents: ReturnType<typeof sourceProbeComponentFixture>;
-}) {
-  const value = JSON.parse(manifest.toString("utf8")) as {
-    assets: unknown;
-    signature: {
-      delegationGeneration: number;
-      delegationKeyId: string;
-    };
-    version: string;
-  };
-  const rootPublicKey = Buffer.from(
-    createPublicKey(authority.publicKey).export({
-      format: "pem",
-      type: "spki",
-    }),
-  );
-  const bytes = Buffer.from(
-    `${JSON.stringify({
-      distribution: "enoki",
-      kind: "enoki-release-transition-contract",
-      rootKeyId: sha256(rootPublicKey),
-      schemaVersion: 1,
-      source: {
-        probeComponents: sourceProbeComponents,
-        version: sourceVersion,
-      },
-      target: {
-        assetClosure: value.assets,
-        assetSetManifestSha256: sha256(manifest),
-        delegationGeneration: value.signature.delegationGeneration,
-        signingKeyId: value.signature.delegationKeyId,
-        version: value.version,
-      },
-      transition,
-    })}\n`,
-  );
-  return {
-    bytes,
-    signature: sign(
-      "RSA-SHA256",
-      Buffer.concat([
-        Buffer.from("enoki/release-transition-contract/v1\0", "utf8"),
-        bytes,
-      ]),
-      authority.privateKey,
-    ),
-  };
-}
-
 function sourceProbeComponentFixture() {
-  return [
-    "aarch64-unknown-linux-gnu",
-    "aarch64-unknown-linux-musl",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-  ].map((target, index) => ({
+  return probeTargets.map((target, index) => ({
     file: "enoki-probe",
     role: "probe",
     sha256: String(index + 5).repeat(64),

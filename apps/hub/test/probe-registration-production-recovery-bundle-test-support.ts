@@ -4,14 +4,14 @@ import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// @ts-expect-error 仓库 JavaScript 角色清单没有类型声明。
-import * as probeAssetBundle from "../../../scripts/probe-asset-bundle.mjs";
+import {
+  probeBundleComponentProfiles,
+  probeBundledBootstrapAssets,
+} from "@enoki/probe-release";
+
 import { requireCommand } from "./probe-registration-production-recovery-command-test-support";
 
 const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const { probeBundleComponentProfiles, probeBundledBootstrapAssets } =
-  probeAssetBundle;
-
 export type ProductionBundle = {
   acquirerPath: string;
   archive: Buffer;
@@ -93,7 +93,7 @@ export async function buildProductionBundle(input: {
       resourceContract: string;
     }
   >;
-  const bootstrapAssets = probeBundledBootstrapAssets as Array<{
+  const bootstrapAssets = probeBundledBootstrapAssets as ReadonlyArray<{
     archivePath: string;
     key: "acquirer" | "activator";
     permissionProfile: string;

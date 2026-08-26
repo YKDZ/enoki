@@ -24,6 +24,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 
+import {
+  createReleaseTransitionContract,
+  releaseTransitionContractSigningInput,
+} from "@enoki/probe-release";
+import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
+import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { describe, expect, it } from "vitest";
 
 import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
@@ -43,12 +49,6 @@ import {
   verifyActiveHubBootstrapRecipeProvenance,
 } from "./release-e2e-adapters.mjs";
 import { createProbeHostHarness } from "./release-e2e-lib.mjs";
-import {
-  createReleaseTransitionContract,
-  releaseTransitionContractSigningInput,
-} from "./release-transition-contract.mjs";
-import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
-import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const candidateCli = "scripts/release-candidate.mjs";

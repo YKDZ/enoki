@@ -1,17 +1,17 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
-import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
-import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
 import {
   createReleaseTransitionContract,
   preflightReleaseMigrationConfiguration,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
-} from "./release-transition-contract.mjs";
-import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
-import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
+} from "@enoki/probe-release";
+import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
+import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
+import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
 
 describe("Trust Epoch release transition", () => {
   let fixture;

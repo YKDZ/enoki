@@ -1,12 +1,12 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
-import { describe, expect, it, vi } from "vitest";
-
-import * as planner from "./release-scenario-plan.mjs";
 import {
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
-} from "./release-transition-contract.mjs";
+} from "@enoki/probe-release";
+import { describe, expect, it, vi } from "vitest";
+
+import * as planner from "./release-scenario-plan.mjs";
 
 describe("Release Scenario Planner", () => {
   it("compiles the exact Compatible capabilities without caller-selected scenarios", () => {

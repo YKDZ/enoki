@@ -28,6 +28,9 @@
     "e2e": "pnpm run test:e2e",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
+  "dependencies": {
+    "@enoki/probe-release": "workspace:*"
+  },
   "devDependencies": {
     "@playwright/test": "catalog:",
     "@types/node": "catalog:",

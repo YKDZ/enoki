@@ -19,6 +19,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import {
+  createReleaseTransitionContract,
+  createTrustEpochMigrationAuthorization,
+} from "@enoki/probe-release";
+import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { describe, expect, it } from "vitest";
 
 import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
@@ -36,9 +41,6 @@ import {
   prepareProbeAssetSet,
   probeTargets,
 } from "./release-candidate-lib.mjs";
-import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
-import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
-import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";

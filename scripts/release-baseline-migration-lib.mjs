@@ -2,11 +2,12 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 import {
   trustEpochLegacyReleaseSha256,
   verifyTrustEpochMigrationAuthorization,
-} from "./trust-epoch-migration-lib.mjs";
+} from "@enoki/probe-release";
+
+import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 
 const sourceManifestFile = "hub-source-manifest.json";
 const authorizationFile = "trust-epoch-migration-authorization.json";

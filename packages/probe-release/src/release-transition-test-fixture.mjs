@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, sign } from "node:crypto";
+import { createHash, createPublicKey, sign } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -13,13 +13,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { probeTargets } from "./probe-asset-bundle.mjs";
+import { releaseTransitionContractSigningInput } from "./release-transition-contract.mjs";
+
 const execFileAsync = promisify(execFile);
-const sourceTargets = [
-  "aarch64-unknown-linux-gnu",
-  "aarch64-unknown-linux-musl",
-  "x86_64-unknown-linux-gnu",
-  "x86_64-unknown-linux-musl",
-];
 
 export async function createSignedLegacyProbeAssetSetFixture({
   privateKeyPem,
@@ -28,7 +25,7 @@ export async function createSignedLegacyProbeAssetSetFixture({
   const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-source-assets-"));
   const assets = [];
   const probeComponents = [];
-  for (const target of sourceTargets) {
+  for (const target of probeTargets) {
     const contentsDir = path.join(assetDir, `${target}-contents`);
     await mkdir(contentsDir);
     const probe = createSourceProbeElf(target);
@@ -93,6 +90,50 @@ export async function createSignedLegacyProbeAssetSetFixture({
     assets: authorizedAssets,
     cleanup: () => rm(assetDir, { force: true, recursive: true }),
     probeComponents,
+  };
+}
+
+export function createGenericReleaseTransitionContractFixture({
+  authority,
+  manifest,
+  sourceVersion,
+  transition,
+  sourceProbeComponents,
+}) {
+  const value = JSON.parse(manifest.toString("utf8"));
+  const rootPublicKey = Buffer.from(
+    createPublicKey(authority.publicKey).export({
+      format: "pem",
+      type: "spki",
+    }),
+  );
+  const bytes = Buffer.from(
+    `${JSON.stringify({
+      distribution: "enoki",
+      kind: "enoki-release-transition-contract",
+      rootKeyId: sha256(rootPublicKey),
+      schemaVersion: 1,
+      source: {
+        probeComponents: sourceProbeComponents,
+        version: sourceVersion,
+      },
+      target: {
+        assetClosure: value.assets,
+        assetSetManifestSha256: sha256(manifest),
+        delegationGeneration: value.signature.delegationGeneration,
+        signingKeyId: value.signature.delegationKeyId,
+        version: value.version,
+      },
+      transition,
+    })}\n`,
+  );
+  return {
+    bytes,
+    signature: sign(
+      "RSA-SHA256",
+      releaseTransitionContractSigningInput(bytes),
+      authority.privateKey,
+    ),
   };
 }
 

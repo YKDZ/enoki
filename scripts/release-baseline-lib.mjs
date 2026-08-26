@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { trustEpochLegacyReleaseSha256 } from "@enoki/probe-release";
+
 import {
   resolveMigrationAuthorization,
   validateMigrationBaselineContents,
@@ -24,7 +26,6 @@ import {
   probeTargets,
 } from "./release-candidate-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
-import { trustEpochLegacyReleaseSha256 } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;

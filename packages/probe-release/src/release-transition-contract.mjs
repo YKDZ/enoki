@@ -6,10 +6,9 @@ import {
   verify,
 } from "node:crypto";
 
-import {
-  inspectLegacyProbeAssetSet,
-  verifyProbeTrustDelegation,
-} from "./release-candidate-lib.mjs";
+import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
+import { probeTargets } from "./probe-asset-bundle.mjs";
+import { verifyProbeTrustDelegation } from "./probe-trust-delegation.mjs";
 import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const signingDomain = Buffer.from(
@@ -18,12 +17,6 @@ const signingDomain = Buffer.from(
 );
 const digestPattern = /^[0-9a-f]{64}$/;
 const semverPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
-const probeTargets = Object.freeze([
-  "aarch64-unknown-linux-gnu",
-  "aarch64-unknown-linux-musl",
-  "x86_64-unknown-linux-gnu",
-  "x86_64-unknown-linux-musl",
-]);
 const MAX_CONTRACT_BYTES = 64 * 1024;
 const MAX_SIGNATURE_BYTES = 1024;
 const MAX_TARGET_BUNDLE_BYTES = 1024 * 1024 * 1024;

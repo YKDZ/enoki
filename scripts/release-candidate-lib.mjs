@@ -5,7 +5,6 @@ import {
   createPublicKey,
   randomUUID,
   sign,
-  verify,
 } from "node:crypto";
 import {
   chmod,
@@ -26,9 +25,22 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import {
+  canonicalPublicKeyPem,
+  createProbeTrustDelegation,
+  inspectLegacyProbeAssetSet,
+  inspectProbeElf,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
-} from "./probe-asset-bundle.mjs";
+  probeTargets,
+  verifyReleaseTransitionContract,
+  verifyProbeTrustDelegation,
+} from "@enoki/probe-release";
+export {
+  createProbeTrustDelegation,
+  inspectLegacyProbeAssetSet,
+  probeTargets,
+  verifyProbeTrustDelegation,
+} from "@enoki/probe-release";
 import {
   inspectProbeBootstrapBinary,
   probeBootstrapTargets,
@@ -40,26 +52,9 @@ import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 const execFileAsync = promisify(execFile);
 const commitPattern = /^[0-9a-f]{40}$/;
 const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const probeTrustDelegationDomain = Buffer.from(
-  "enoki/probe-trust-delegation/v1\0",
-  "utf8",
-);
-const dynamicLoaderByProbeTarget = Object.freeze({
-  "aarch64-unknown-linux-gnu": "/lib/ld-linux-aarch64.so.1",
-  "aarch64-unknown-linux-musl": "/lib/ld-musl-aarch64.so.1",
-  "x86_64-unknown-linux-gnu": "/lib64/ld-linux-x86-64.so.2",
-  "x86_64-unknown-linux-musl": "/lib/ld-musl-x86_64.so.1",
-});
 const bootstrapRecipeFile = "enoki-probe-bootstrap.py";
 const bootstrapRecipeRecordFile = "enoki-probe-bootstrap-recipe.json";
 const verifiedCandidateReleaseTransitions = new WeakMap();
-export const probeTargets = Object.freeze([
-  "aarch64-unknown-linux-gnu",
-  "aarch64-unknown-linux-musl",
-  "x86_64-unknown-linux-gnu",
-  "x86_64-unknown-linux-musl",
-]);
-
 export function releaseTransitionForValidatedCandidate(manifest) {
   if (!verifiedCandidateReleaseTransitions.has(manifest)) {
     throw new Error("Candidate Manifest has not passed release verification");
@@ -203,110 +198,6 @@ export function validateProbeSigningIdentity({ privateKeyPem, publicKeyPem }) {
   return { publicKeySha256: sha256(normalizedPublicKey) };
 }
 
-export function createProbeTrustDelegation({
-  distribution,
-  generation,
-  purpose = "probe-asset-signing",
-  releasePublicKeyPem,
-  rootPrivateKey,
-  rootPrivateKeyPem,
-}) {
-  const hasKeyObject = rootPrivateKey !== undefined;
-  const hasPem = rootPrivateKeyPem !== undefined;
-  if (hasKeyObject === hasPem) {
-    throw new Error("exactly one root private key representation is required");
-  }
-  if (hasKeyObject && rootPrivateKey?.type !== "private") {
-    throw new Error("root private key must be a KeyObject");
-  }
-  const signingKey = hasKeyObject
-    ? rootPrivateKey
-    : createPrivateKey(rootPrivateKeyPem);
-  const rootPublicKeyPem = canonicalPublicKeyPem(
-    createPublicKey(signingKey).export({ format: "pem", type: "spki" }),
-  );
-  const releasePublicKey = canonicalPublicKeyPem(releasePublicKeyPem);
-  const delegation = validateProbeTrustDelegationDocument({
-    distribution,
-    generation,
-    kind: "enoki-probe-trust-delegation",
-    purpose,
-    rootKeyId: sha256(rootPublicKeyPem),
-    schemaVersion: 1,
-    signingIdentity: {
-      algorithm: "rsa-sha256",
-      keyId: sha256(releasePublicKey),
-      publicKeyPem: releasePublicKey.toString("utf8"),
-    },
-  });
-  const bytes = canonicalProbeTrustDelegationBytes(delegation);
-  return {
-    bytes,
-    delegation,
-    signature: sign(
-      "RSA-SHA256",
-      trustDelegationSigningInput(bytes),
-      signingKey,
-    ),
-  };
-}
-
-export function verifyProbeTrustDelegation({
-  bytes,
-  expectedDistribution,
-  expectedPurpose = "probe-asset-signing",
-  highestAcceptedGeneration = 0,
-  rootPublicKeyPem,
-  signature,
-}) {
-  if (
-    !Number.isSafeInteger(highestAcceptedGeneration) ||
-    highestAcceptedGeneration < 0
-  ) {
-    throw new Error(
-      "highest accepted Probe Trust Delegation generation is invalid",
-    );
-  }
-  const rootPublicKey = canonicalPublicKeyPem(rootPublicKeyPem);
-  let parsed;
-  try {
-    parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
-  } catch {
-    throw new Error("Probe Trust Delegation is malformed");
-  }
-  const delegation = validateProbeTrustDelegationDocument(parsed);
-  const canonicalBytes = canonicalProbeTrustDelegationBytes(delegation);
-  if (!Buffer.from(bytes).equals(canonicalBytes)) {
-    throw new Error("Probe Trust Delegation must use canonical encoding");
-  }
-  if (
-    delegation.distribution !== expectedDistribution ||
-    delegation.purpose !== expectedPurpose ||
-    delegation.rootKeyId !== sha256(rootPublicKey)
-  ) {
-    throw new Error("Probe Trust Delegation binding is invalid");
-  }
-  if (delegation.generation < highestAcceptedGeneration) {
-    throw new Error(
-      "Probe Trust Delegation generation is not newer than installed trust",
-    );
-  }
-  let valid = false;
-  try {
-    valid = verify(
-      "RSA-SHA256",
-      trustDelegationSigningInput(canonicalBytes),
-      rootPublicKey,
-      signature,
-    );
-  } catch {
-    valid = false;
-  }
-  if (!valid)
-    throw new Error("Probe Trust Delegation root signature is invalid");
-  return delegation;
-}
-
 export function validateDelegatedProbeSigningIdentity({
   delegationBytes,
   delegationSignature,
@@ -333,80 +224,6 @@ export function validateDelegatedProbeSigningIdentity({
     );
   }
   return { ...identity, delegation };
-}
-
-function validateProbeTrustDelegationDocument(value) {
-  assertPlainObject(value, "Probe Trust Delegation");
-  assertExactKeys(value, [
-    "distribution",
-    "generation",
-    "kind",
-    "purpose",
-    "rootKeyId",
-    "schemaVersion",
-    "signingIdentity",
-  ]);
-  if (
-    value.kind !== "enoki-probe-trust-delegation" ||
-    value.schemaVersion !== 1 ||
-    typeof value.distribution !== "string" ||
-    !/^[a-z][a-z0-9-]{0,63}$/.test(value.distribution) ||
-    value.purpose !== "probe-asset-signing" ||
-    !Number.isSafeInteger(value.generation) ||
-    value.generation < 1 ||
-    !/^[0-9a-f]{64}$/.test(value.rootKeyId)
-  ) {
-    throw new Error("Probe Trust Delegation fields are invalid");
-  }
-  assertPlainObject(
-    value.signingIdentity,
-    "Probe Trust Delegation signing identity",
-  );
-  assertExactKeys(value.signingIdentity, [
-    "algorithm",
-    "keyId",
-    "publicKeyPem",
-  ]);
-  const publicKey = canonicalPublicKeyPem(value.signingIdentity.publicKeyPem);
-  if (
-    value.signingIdentity.algorithm !== "rsa-sha256" ||
-    !/^[0-9a-f]{64}$/.test(value.signingIdentity.keyId) ||
-    value.signingIdentity.keyId !== sha256(publicKey)
-  ) {
-    throw new Error("Probe Trust Delegation signing identity is invalid");
-  }
-  return {
-    distribution: value.distribution,
-    generation: value.generation,
-    kind: value.kind,
-    purpose: value.purpose,
-    rootKeyId: value.rootKeyId,
-    schemaVersion: value.schemaVersion,
-    signingIdentity: {
-      algorithm: value.signingIdentity.algorithm,
-      keyId: value.signingIdentity.keyId,
-      publicKeyPem: publicKey.toString("utf8"),
-    },
-  };
-}
-
-function canonicalProbeTrustDelegationBytes(delegation) {
-  return Buffer.from(`${JSON.stringify(delegation)}\n`, "utf8");
-}
-
-function trustDelegationSigningInput(bytes) {
-  return Buffer.concat([probeTrustDelegationDomain, bytes]);
-}
-
-function canonicalPublicKeyPem(publicKeyPem) {
-  try {
-    return Buffer.from(
-      createPublicKey(publicKeyPem).export({ format: "pem", type: "spki" }),
-      "utf8",
-    );
-  } catch {
-    throw new Error("Probe Trust Delegation public key is malformed");
-  }
 }
 
 export function parseCommandLine(arguments_) {
@@ -1634,8 +1451,6 @@ export async function inspectProbeAssetSet(
     } catch {
       throw new Error("Release Transition Contract is malformed");
     }
-    const { verifyReleaseTransitionContract } =
-      await import("./release-transition-contract.mjs");
     releaseTransition = verifyReleaseTransitionContract({
       ...(migrationAuthorizationFileCount === 2
         ? {
@@ -1690,201 +1505,11 @@ export async function inspectProbeAssetSet(
   };
 }
 
-export async function inspectLegacyProbeAssetSet(
-  assetDir,
-  { expectedAssets, expectedSigningKeySha256, expectedVersion },
-) {
-  if (!Array.isArray(expectedAssets) || expectedAssets.length === 0) {
-    throw new Error("legacy Probe Asset Set authorization is incomplete");
-  }
-  const expectedFiles = expectedAssets
-    .map((asset) => {
-      assertPlainObject(asset, "legacy Probe Asset Set authorized asset");
-      assertExactKeys(asset, ["name", "sha256", "size"]);
-      if (
-        typeof asset.name !== "string" ||
-        path.basename(asset.name) !== asset.name ||
-        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(asset.name) ||
-        !/^[0-9a-f]{64}$/.test(asset.sha256) ||
-        !Number.isSafeInteger(asset.size) ||
-        asset.size < 1
-      ) {
-        throw new Error("legacy Probe Asset Set authorization is invalid");
-      }
-      return asset.name;
-    })
-    .sort();
-  if (new Set(expectedFiles).size !== expectedFiles.length) {
-    throw new Error("legacy Probe Asset Set authorization is invalid");
-  }
-  assertSameFileNames(
-    (await readdir(assetDir)).sort(),
-    expectedFiles,
-    "legacy Probe Asset Set",
-  );
-  for (const asset of expectedAssets) {
-    const assetPath = path.join(assetDir, asset.name);
-    const details = await stat(assetPath);
-    if (
-      !details.isFile() ||
-      details.size !== asset.size ||
-      (await fileSha256(assetPath)) !== asset.sha256
-    ) {
-      throw new Error(
-        `legacy Probe Asset Set authorized asset does not match ${asset.name}`,
-      );
-    }
-  }
-
-  const manifestBytes = await readFile(path.join(assetDir, "manifest.json"));
-  const signingKey = await readFile(path.join(assetDir, "signing-key.pem"));
-  if (sha256(signingKey) !== expectedSigningKeySha256) {
-    throw new Error("legacy Probe Asset Set signing identity does not match");
-  }
-  let signatureValid = false;
-  try {
-    signatureValid = verify(
-      "RSA-SHA256",
-      manifestBytes,
-      createPublicKey(signingKey),
-      await readFile(path.join(assetDir, "manifest.json.sig")),
-    );
-  } catch {
-    signatureValid = false;
-  }
-  if (!signatureValid) {
-    throw new Error("legacy Probe Asset Set manifest signature is invalid");
-  }
-  let manifest;
-  try {
-    manifest = JSON.parse(manifestBytes.toString("utf8"));
-  } catch {
-    throw new Error("legacy Probe Asset Set manifest is malformed");
-  }
-  assertPlainObject(manifest, "legacy Probe Asset Set manifest");
-  assertExactKeys(manifest, ["assets", "kind", "signature", "version"]);
-  assertPlainObject(
-    manifest.signature,
-    "legacy Probe Asset Set signature descriptor",
-  );
-  assertExactKeys(manifest.signature, ["algorithm", "file", "publicKey"]);
-  if (
-    manifest.kind !== "enoki-probe-assets" ||
-    manifest.version !== expectedVersion ||
-    manifest.signature.algorithm !== "rsa-sha256" ||
-    manifest.signature.file !== "manifest.json.sig" ||
-    manifest.signature.publicKey !== "signing-key.pem" ||
-    !Array.isArray(manifest.assets) ||
-    manifest.assets.length !== probeTargets.length
-  ) {
-    throw new Error("legacy Probe Asset Set manifest is invalid");
-  }
-
-  const probeComponents = [];
-  for (let index = 0; index < probeTargets.length; index += 1) {
-    const target = probeTargets[index];
-    const asset = manifest.assets[index];
-    assertPlainObject(asset, `legacy Probe Asset Set target ${target}`);
-    assertExactKeys(asset, ["file", "sha256", "size", "target"]);
-    const file = `enoki-probe-${target}.tar.gz`;
-    if (
-      asset.file !== file ||
-      asset.target !== target ||
-      !/^[0-9a-f]{64}$/.test(asset.sha256) ||
-      !Number.isSafeInteger(asset.size) ||
-      asset.size < 1
-    ) {
-      throw new Error(`legacy Probe Asset Set target ${target} is invalid`);
-    }
-    const archivePath = path.join(assetDir, file);
-    const archiveDetails = await stat(archivePath);
-    if (
-      archiveDetails.size !== asset.size ||
-      (await fileSha256(archivePath)) !== asset.sha256
-    ) {
-      throw new Error(`legacy Probe Asset Set archive does not match ${file}`);
-    }
-    if (
-      (await readFile(`${archivePath}.sha256`, "utf8")) !==
-      `${asset.sha256}  ${file}\n`
-    ) {
-      throw new Error(`legacy Probe Asset Set sidecar does not match ${file}`);
-    }
-    probeComponents.push({
-      file: "enoki-probe",
-      role: "probe",
-      sha256: await inspectLegacyProbeArchive(archivePath, {
-        target,
-        version: `v${manifest.version}`,
-      }),
-      target,
-    });
-  }
-  const installer = await readFile(
-    path.join(assetDir, "install-probe.sh"),
-    "utf8",
-  );
-  if (!installer.includes(expectedSigningKeySha256)) {
-    throw new Error("legacy Probe installer does not pin its signing identity");
-  }
-  return { probeComponents, version: manifest.version };
-}
-
 function assertSigningPublicKey(publicKeyPem) {
   try {
     createPublicKey(publicKeyPem);
   } catch {
     throw new Error("Probe asset signing public key is malformed");
-  }
-}
-
-async function inspectLegacyProbeArchive(archivePath, { target, version }) {
-  const extractionDir = await mkdtemp(
-    path.join(tmpdir(), "enoki-legacy-probe-archive-"),
-  );
-  try {
-    let listing;
-    try {
-      ({ stdout: listing } = await execFileAsync(
-        "tar",
-        ["--list", "--gzip", "--file", archivePath],
-        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-      ));
-    } catch {
-      throw new Error(
-        `legacy Probe archive ${path.basename(archivePath)} is invalid`,
-      );
-    }
-    if (listing !== "enoki-probe\n") {
-      throw new Error(
-        `legacy Probe archive ${path.basename(archivePath)} closure is invalid`,
-      );
-    }
-    await execFileAsync(
-      "tar",
-      [
-        "--extract",
-        "--gzip",
-        "--file",
-        archivePath,
-        "--directory",
-        extractionDir,
-        "--no-same-owner",
-      ],
-      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-    );
-    const binaryPath = path.join(extractionDir, "enoki-probe");
-    const details = await lstat(binaryPath);
-    if (!details.isFile() || (details.mode & 0o111) === 0) {
-      throw new Error(
-        `legacy Probe archive ${path.basename(archivePath)} payload is invalid`,
-      );
-    }
-    const binary = await readFile(binaryPath);
-    inspectProbeElf(binary, { target, version });
-    return sha256(binary);
-  } finally {
-    await rm(extractionDir, { force: true, recursive: true });
   }
 }
 
@@ -2162,96 +1787,6 @@ function renderBundledBootstrapAssets({ componentDetails, version }) {
       version,
     }),
   );
-}
-
-function inspectProbeElf(
-  binary,
-  { requireEmbeddedProbeIdentity = true, target, version },
-) {
-  const archiveTarget = `enoki-probe-${target}.tar.gz`;
-  if (
-    binary.length < 64 ||
-    !binary.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) ||
-    binary[4] !== 2 ||
-    binary[5] !== 1
-  ) {
-    throw new Error(
-      `${archiveTarget} payload must be a 64-bit little-endian ELF`,
-    );
-  }
-
-  const expectedMachine = target.startsWith("x86_64-") ? 62 : 183;
-  if (binary.readUInt16LE(18) !== expectedMachine) {
-    throw new Error(
-      `${archiveTarget} ELF architecture does not match ${target}`,
-    );
-  }
-
-  const contents = binary.toString("latin1");
-  if (
-    requireEmbeddedProbeIdentity &&
-    !contents.includes(`ENOKI_PROBE_TARGET=${target}\0`)
-  ) {
-    throw new Error(
-      `${archiveTarget} embedded target does not match ${target}`,
-    );
-  }
-  if (
-    requireEmbeddedProbeIdentity &&
-    !contents.includes(`ENOKI_PROBE_VERSION=${version}\0`)
-  ) {
-    throw new Error(
-      `${archiveTarget} embedded Probe version does not match ${version}`,
-    );
-  }
-
-  const interpreter = elfInterpreter(binary);
-  const expectedLoader = dynamicLoaderByProbeTarget[target];
-  const staticMuslBinary = target.endsWith("-musl") && !interpreter;
-  if (!staticMuslBinary && interpreter !== expectedLoader) {
-    throw new Error(`${archiveTarget} ELF ABI does not match ${target}`);
-  }
-}
-
-function elfInterpreter(binary) {
-  const programHeaderOffset = Number(binary.readBigUInt64LE(32));
-  const programHeaderSize = binary.readUInt16LE(54);
-  const programHeaderCount = binary.readUInt16LE(56);
-  if (
-    !Number.isSafeInteger(programHeaderOffset) ||
-    programHeaderSize < 56 ||
-    programHeaderOffset + programHeaderSize * programHeaderCount > binary.length
-  ) {
-    throw new Error("Probe ELF program headers are malformed");
-  }
-
-  for (let index = 0; index < programHeaderCount; index += 1) {
-    const offset = programHeaderOffset + index * programHeaderSize;
-    if (binary.readUInt32LE(offset) !== 3) {
-      continue;
-    }
-    const stringOffset = Number(binary.readBigUInt64LE(offset + 8));
-    const stringSize = Number(binary.readBigUInt64LE(offset + 32));
-    if (
-      !Number.isSafeInteger(stringOffset) ||
-      !Number.isSafeInteger(stringSize) ||
-      stringSize < 2 ||
-      stringOffset + stringSize > binary.length
-    ) {
-      throw new Error("Probe ELF interpreter is malformed");
-    }
-    const interpreter = binary
-      .subarray(stringOffset, stringOffset + stringSize)
-      .toString("utf8");
-    if (
-      !interpreter.endsWith("\0") ||
-      interpreter.slice(0, -1).includes("\0")
-    ) {
-      throw new Error("Probe ELF interpreter is malformed");
-    }
-    return interpreter.slice(0, -1);
-  }
-  return undefined;
 }
 
 function untrustedToolEnvironment() {

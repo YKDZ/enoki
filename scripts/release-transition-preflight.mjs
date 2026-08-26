@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { preflightReleaseMigrationConfiguration } from "./release-transition-contract.mjs";
+import { preflightReleaseMigrationConfiguration } from "@enoki/probe-release";
 
 const options = parseOptions(process.argv.slice(2));
 preflightReleaseMigrationConfiguration({
