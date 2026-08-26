@@ -3497,6 +3497,7 @@ describe("Release E2E Orchestrator", () => {
     let enrollmentCount = 0;
     let installCount = 0;
     let lifecycle = "empty";
+    let canonicalRuntimeState = "available";
     let newEnrollmentCalls = 0;
     let offlineObservations = 0;
     let probeConfiguration = {
@@ -3581,21 +3582,32 @@ describe("Release E2E Orchestrator", () => {
             uptimeSeconds: 110,
           }),
         ];
-        return lifecycle === "reenrolled"
+        const reenrolled =
+          lifecycle === "reenrolled"
+            ? [
+                ...samples,
+                portableMetric({
+                  collectedAtMs: 30,
+                  sequence: 3,
+                  uptimeSeconds: 120,
+                }),
+                portableMetric({
+                  collectedAtMs: 40,
+                  sequence: 4,
+                  uptimeSeconds: 130,
+                }),
+              ]
+            : samples;
+        return canonicalRuntimeState === "restored"
           ? [
-              ...samples,
+              ...reenrolled,
               portableMetric({
-                collectedAtMs: 30,
+                collectedAtMs: 50,
                 sequence: 3,
-                uptimeSeconds: 120,
-              }),
-              portableMetric({
-                collectedAtMs: 40,
-                sequence: 4,
-                uptimeSeconds: 130,
+                uptimeSeconds: 140,
               }),
             ]
-          : samples;
+          : reenrolled;
       },
       async getHostProbeConfiguration() {
         calls.push("hub.getHostProbeConfiguration");
@@ -3709,6 +3721,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async restartCanonicalProbeWithoutObservationRuntime() {
         calls.push("host.restartCanonicalProbeWithoutObservationRuntime");
+        canonicalRuntimeState = "masked";
         return {
           identity: {
             probeId: "probe_release_02",
@@ -3732,6 +3745,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async restoreObservationRuntime() {
         calls.push("host.restoreObservationRuntime");
+        canonicalRuntimeState = "restored";
         return { restored: true };
       },
       async repairInstalledBundleFailure() {
@@ -3857,6 +3871,12 @@ describe("Release E2E Orchestrator", () => {
     expect(
       calls.indexOf("host.restartCanonicalProbeWithoutObservationRuntime"),
     ).toBeLessThan(calls.indexOf("hub.deleteHostHubOnly:7"));
+    expect(calls.indexOf("canonicalReports.waitForEvidence")).toBeLessThan(
+      calls.lastIndexOf("hub.getHostMetrics"),
+    );
+    expect(calls.lastIndexOf("hub.getHostMetrics")).toBeLessThan(
+      calls.indexOf("host.restoreObservationRuntime"),
+    );
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
       installedBundleFailureRepair: {

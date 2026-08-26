@@ -348,6 +348,13 @@ describe("Probe report API", () => {
     expect(
       database.sqlite
         .prepare(
+          "select count(*) as count from report_observations where probe_id = ? and boot_id = ? and sequence = ?",
+        )
+        .get(registration.probeId, "boot-window-failure", 2),
+    ).toEqual({ count: 1 });
+    expect(
+      database.sqlite
+        .prepare(
           "select count(*) as count from metric_samples where boot_id = ?",
         )
         .get("boot-window-failure"),

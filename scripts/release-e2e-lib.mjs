@@ -2280,6 +2280,7 @@ async function runFreshInstallUninstallScenario({
     canonicalReports.arm({ expectedProbeId: reEnrollmentIdentity.probeId });
     let canonicalHostEvidence;
     let canonicalReporting;
+    let metricsAfterCanonicalFailure;
     let restoreError = null;
     try {
       canonicalHostEvidence =
@@ -2290,6 +2291,19 @@ async function runFreshInstallUninstallScenario({
       canonicalReporting = await canonicalReports.waitForEvidence({
         timeoutMs: timing.canonicalReportTimeoutMs ?? 90_000,
       });
+      metricsAfterCanonicalFailure = await hub.getHostMetrics(hostId, {
+        window: "24h",
+      });
+      if (
+        JSON.stringify(
+          portableMetricIdentities(metricsAfterCanonicalFailure),
+        ) !== JSON.stringify(portableMetricIdentities(reEnrollmentMetrics))
+      ) {
+        throw assertionError(
+          "canonical_runtime_unavailable_created_metrics",
+          "Accepted ObservationWindowFailure created or changed Metrics",
+        );
+      }
     } finally {
       try {
         await host.restoreObservationRuntime(runId);
@@ -2310,18 +2324,6 @@ async function runFreshInstallUninstallScenario({
           canonicalReporting.bootReport.reconciliation
             .currentProbeConfigurationVersion,
     });
-    const metricsAfterCanonicalFailure = await hub.getHostMetrics(hostId, {
-      window: "24h",
-    });
-    if (
-      JSON.stringify(portableMetricIdentities(metricsAfterCanonicalFailure)) !==
-      JSON.stringify(portableMetricIdentities(reEnrollmentMetrics))
-    ) {
-      throw assertionError(
-        "canonical_runtime_unavailable_created_metrics",
-        "Accepted ObservationWindowFailure created or changed Metrics",
-      );
-    }
     evidence.canonicalRuntimeUnavailableReporting = {
       host: canonicalHostEvidence,
       ownerProjection: {

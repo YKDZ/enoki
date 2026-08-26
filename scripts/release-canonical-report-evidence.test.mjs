@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, get } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -124,6 +124,89 @@ describe("canonical Probe report response-loss evidence", () => {
     expect(JSON.stringify(evidence)).not.toMatch(
       /signed-request|authorization|body|private|token/i,
     );
+  });
+
+  it("streams non-report responses before upstream completion", async () => {
+    let finishUpstream;
+    let upstreamStarted;
+    const upstreamStartedPromise = new Promise((resolve) => {
+      upstreamStarted = resolve;
+    });
+    const upstream = await listen(async (_request, response) => {
+      response.writeHead(200, { "content-type": "application/octet-stream" });
+      response.write("first-chunk");
+      upstreamStarted();
+      await new Promise((resolve) => {
+        finishUpstream = resolve;
+      });
+      response.end("last-chunk");
+    });
+    close.push(upstream.close);
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+    close.push(() => transport.close());
+
+    const response = get(`${started.origin}/api/probe/assets/bundle.tar.gz`);
+    const firstChunk = new Promise((resolve, reject) => {
+      response.once("response", (incoming) => {
+        incoming.once("data", (chunk) => resolve(chunk.toString()));
+        incoming.once("error", reject);
+      });
+      response.once("error", reject);
+    });
+    await upstreamStartedPromise;
+    const observedBeforeCompletion = await Promise.race([
+      firstChunk.then((chunk) => chunk === "first-chunk"),
+      new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    finishUpstream();
+    await new Promise((resolve) => response.once("close", resolve));
+
+    expect(observedBeforeCompletion).toBe(true);
+  });
+
+  it("releases a non-report upstream stream when downstream disconnects", async () => {
+    let finishUpstream;
+    let upstreamStarted;
+    let upstreamClosed;
+    const upstreamStartedPromise = new Promise((resolve) => {
+      upstreamStarted = resolve;
+    });
+    const upstreamClosedPromise = new Promise((resolve) => {
+      upstreamClosed = resolve;
+    });
+    const upstream = await listen(async (request, response) => {
+      response.once("close", upstreamClosed);
+      response.writeHead(200, { "content-type": "application/octet-stream" });
+      response.write("first-chunk");
+      upstreamStarted();
+      await new Promise((resolve) => {
+        finishUpstream = resolve;
+      });
+      if (!response.destroyed) response.end("last-chunk");
+    });
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+
+    const downstream = get(`${started.origin}/api/probe/assets/bundle.tar.gz`);
+    downstream.on("error", () => {});
+    await upstreamStartedPromise;
+    downstream.destroy();
+    const released = await Promise.race([
+      Promise.all([upstreamClosedPromise, transport.close()]).then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    finishUpstream();
+    if (!released) await transport.close();
+    await upstream.close();
+
+    expect(released).toBe(true);
   });
 
   it.each([

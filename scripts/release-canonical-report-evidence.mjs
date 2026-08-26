@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 
 import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
 
@@ -34,11 +34,15 @@ export function createCanonicalReportEvidenceTransport({
 
   async function handle(incoming, outgoing) {
     try {
-      const body = await readBody(incoming);
       const target = new URL(incoming.url ?? "/", upstream);
-      const headers = forwardedHeaders(incoming.headers, body.byteLength);
       const isReport =
         incoming.method === "POST" && target.pathname === reportPath;
+      if (!isReport) {
+        streamTransparent(incoming, outgoing, target);
+        return;
+      }
+      const body = await readBody(incoming);
+      const headers = forwardedHeaders(incoming.headers, body.byteLength);
       const observation =
         isReport && armed && !completedEvidence && !failure
           ? observeReport(body)
@@ -308,6 +312,39 @@ export function createCanonicalReportEvidenceTransport({
   };
 }
 
+function streamTransparent(incoming, outgoing, target) {
+  let upstreamResponse = null;
+  const upstreamRequest = request(
+    target,
+    {
+      headers: transparentHeaders(incoming.headers),
+      method: incoming.method,
+    },
+    (response) => {
+      upstreamResponse = response;
+      outgoing.writeHead(
+        response.statusCode ?? 502,
+        response.statusMessage ?? undefined,
+        transparentHeaders(response.headers),
+      );
+      response.once("error", (error) => outgoing.destroy(error));
+      response.pipe(outgoing);
+    },
+  );
+  const releaseUpstream = () => {
+    if (!outgoing.writableEnded) {
+      upstreamResponse?.destroy();
+      upstreamRequest.destroy();
+    }
+  };
+  incoming.once("aborted", releaseUpstream);
+  outgoing.once("close", releaseUpstream);
+  upstreamRequest.once("error", (error) => {
+    if (!outgoing.destroyed) outgoing.destroy(error);
+  });
+  incoming.pipe(upstreamRequest);
+}
+
 function buildEvidence({ armed, retryResponseSha256 }) {
   const boot = armed.boot;
   const failure = armed.failure;
@@ -439,6 +476,29 @@ function forwardedHeaders(source, length) {
     }
   }
   headers.set("content-length", String(length));
+  return headers;
+}
+
+function transparentHeaders(source) {
+  const headers = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (
+      value !== undefined &&
+      !new Set([
+        "connection",
+        "host",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+      ]).has(name.toLowerCase())
+    ) {
+      headers[name] = value;
+    }
+  }
   return headers;
 }
 
