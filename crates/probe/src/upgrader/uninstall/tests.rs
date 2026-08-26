@@ -1,9 +1,9 @@
 use super::{
     CompanionBinaryFacts, PostCommitSelfFinalizeFacts, ResumeDecision, UninstallCapsulePhase,
     adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
-    lifecycle_response_from_resume_decision, persist_uninstall_capsule,
-    post_commit_self_finalize_policy, read_uninstall_capsule, resume_lifecycle_companion_at,
-    run_uninstall_lifecycle_adapter, uninstall_capsule_path,
+    lifecycle_response_from_resume_decision, post_commit_self_finalize_policy,
+    read_uninstall_capsule, resume_lifecycle_companion_at, run_uninstall_lifecycle_adapter,
+    uninstall_capsule_path,
 };
 use crate::{
     probe_auth::ProbeRequestAuth,
@@ -24,6 +24,7 @@ use std::{
 
 #[derive(Default)]
 struct RecordingValidationTransport {
+    ack_persistence_blocker: Option<PathBuf>,
     assets: HashMap<String, Vec<u8>>,
     body: String,
     downloads: Vec<String>,
@@ -69,6 +70,9 @@ impl ProbeUpgraderValidationTransport for RecordingValidationTransport {
                 "temporary report failure".to_owned(),
             ));
         }
+        if let Some(path) = self.ack_persistence_blocker.take() {
+            fs::create_dir(path).map_err(ProbeUpgraderRunError::Io)?;
+        }
         Ok(())
     }
 
@@ -85,6 +89,7 @@ impl ProbeUpgraderValidationTransport for RecordingValidationTransport {
 struct RecordingSystemdRunner {
     calls: Vec<String>,
     failure_step: Option<&'static str>,
+    loaded_service_residue: bool,
 }
 
 impl RecordingSystemdRunner {
@@ -111,6 +116,11 @@ impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
 
     fn disable_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
         self.calls.push(format!("disable {service_name}"));
+        if self.failure_step == Some("disable-probe") && service_name == "enoki-probe" {
+            return Err(ProbeUpgraderRunError::RestartFailure(
+                "disable-probe failed".to_owned(),
+            ));
+        }
         self.fail("disable")
     }
 
@@ -127,6 +137,13 @@ impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
     fn verify_service_absent(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
         self.calls
             .push(format!("verify-service-absent {service_name}"));
+        if self.loaded_service_residue {
+            return Err(ProbeUpgraderRunError::UninstallCleanupFailure {
+                action: "verifying the service is absent",
+                code: "probe_uninstall_service_residue",
+                message: "systemd LoadState is loaded".to_owned(),
+            });
+        }
         self.fail("verify-service")
     }
 
@@ -406,27 +423,53 @@ fn acknowledgement_persistence_interruption_keeps_the_exact_private_capsule_bind
         .expect("read prepared capsule")
         .expect("prepared capsule");
     assert_eq!(prepared_capsule.phase, UninstallCapsulePhase::Prepared);
-    let recovery_assets = [
+    let mut recovery_asset_paths = vec![
         fixture.metadata_path.clone(),
         fixture.identity_path.clone(),
         fixture.companion_path.clone(),
-    ]
-    .map(|path| (path.clone(), fs::read(path).expect("recovery asset")));
+    ];
+    recovery_asset_paths.extend(
+        fixture
+            .metadata
+            .observation_unit_paths
+            .iter()
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    name == "enoki-probe-lifecycle-companion@.service"
+                        || name == "enoki-probe-lifecycle-companion.socket"
+                })
+            })
+            .cloned(),
+    );
+    let recovery_assets = recovery_asset_paths
+        .into_iter()
+        .map(|path| (path.clone(), fs::read(path).expect("recovery asset")))
+        .collect::<Vec<_>>();
 
     let persistence_temporary = capsule_path
         .parent()
         .expect("capsule parent")
         .join(".probe-uninstall.capsule.tmp");
-    fs::create_dir(&persistence_temporary).expect("inject acknowledgement persistence failure");
-    assert!(matches!(
-        persist_uninstall_capsule(
-            &capsule_path,
-            &request,
-            &fixture.metadata,
-            UninstallCapsulePhase::TerminalAcknowledged,
-        ),
-        Err(ProbeUpgraderRunError::Io(_))
+    let mut acknowledged_transport = RecordingValidationTransport {
+        ack_persistence_blocker: Some(persistence_temporary.clone()),
+        ..RecordingValidationTransport::default()
+    };
+    let mut acknowledged_systemd = RecordingSystemdRunner::default();
+    let interrupted = lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
+        &request,
+        &input,
+        &fixture.metadata,
+        &fixture.metadata_path,
+        &mut acknowledged_transport,
+        &mut acknowledged_systemd,
     ));
+    assert!(acknowledged_transport.url.is_empty());
+    assert!(
+        acknowledged_transport
+            .status_body
+            .contains("\"status\":\"succeeded\"")
+    );
+    assert_eq!(interrupted, LifecycleResponse::recovery_pending());
     assert_eq!(
         fs::read(&capsule_path).expect("unchanged capsule"),
         prepared
@@ -468,6 +511,14 @@ fn acknowledgement_persistence_interruption_keeps_the_exact_private_capsule_bind
             .status_body
             .contains("\"status\":\"succeeded\"")
     );
+    for path in [
+        &capsule_path,
+        &fixture.metadata_path,
+        &fixture.identity_path,
+        &fixture.metadata.state_dir,
+    ] {
+        assert!(!path.exists(), "retry residue: {}", path.display());
+    }
 }
 
 #[test]
@@ -502,6 +553,245 @@ fn local_uninstall_never_uses_hub_transport_and_propagates_finalize_failure() {
     assert!(transport.url.is_empty());
     assert!(transport.status_url.is_empty());
     assert!(fixture.companion_path.exists());
+}
+
+fn schema_four_prepare_systemd_transcript() -> Vec<String> {
+    [
+        "stop enoki-disk-health-resource-provider@*.service",
+        "disable enoki-disk-health-resource-provider@*.service",
+        "stop enoki-cpu-resource-provider@*.service",
+        "disable enoki-cpu-resource-provider@*.service",
+        "stop enoki-disk-health-resource-provider.socket",
+        "disable enoki-disk-health-resource-provider.socket",
+        "stop enoki-cpu-resource-provider.socket",
+        "disable enoki-cpu-resource-provider.socket",
+        "stop enoki-observation-runtime.socket",
+        "disable enoki-observation-runtime.socket",
+        "stop enoki-observation-runtime.service",
+        "disable enoki-observation-runtime.service",
+        "stop enoki-probe",
+        "disable enoki-probe",
+        "daemon-reload",
+        "reset-failed enoki-probe",
+        "verify-service-absent enoki-probe",
+        "reset-failed enoki-observation-runtime.service",
+        "verify-service-absent enoki-observation-runtime.service",
+        "reset-failed enoki-observation-runtime.socket",
+        "verify-service-absent enoki-observation-runtime.socket",
+        "reset-failed enoki-cpu-resource-provider.socket",
+        "verify-service-absent enoki-cpu-resource-provider.socket",
+        "reset-failed enoki-disk-health-resource-provider.socket",
+        "verify-service-absent enoki-disk-health-resource-provider.socket",
+        "reset-failed enoki-cpu-resource-provider@*.service",
+        "verify-service-absent enoki-cpu-resource-provider@*.service",
+        "reset-failed enoki-disk-health-resource-provider@*.service",
+        "verify-service-absent enoki-disk-health-resource-provider@*.service",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn local_uninstall_request() -> LifecycleRequest {
+    LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+        .expect("bound local uninstall request")
+}
+
+#[test]
+fn complete_local_workflow_maps_disable_failure_at_the_exact_effect_boundary() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: fixture.identity_path.clone(),
+    };
+    let preserved = [
+        fixture.metadata_path.clone(),
+        fixture.identity_path.clone(),
+        fixture.metadata.install_path.clone(),
+        fixture.metadata.service_unit_path.clone(),
+        fixture.companion_path.clone(),
+    ]
+    .into_iter()
+    .chain(fixture.metadata.observation_unit_paths.iter().cloned())
+    .chain(fixture.metadata.observation_runtime_path.iter().cloned())
+    .chain(fixture.metadata.cpu_provider_path.iter().cloned())
+    .chain(fixture.metadata.disk_health_provider_path.iter().cloned())
+    .chain(fixture.metadata.bootstrap_acquirer_path.iter().cloned())
+    .chain(fixture.metadata.bootstrap_activator_path.iter().cloned())
+    .map(|path| (path.clone(), fs::read(path).expect("preserved asset")))
+    .collect::<Vec<_>>();
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner {
+        failure_step: Some("disable-probe"),
+        ..RecordingSystemdRunner::default()
+    };
+
+    let response = lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
+        &local_uninstall_request(),
+        &input,
+        &fixture.metadata,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    ));
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_service_disable_failed")
+    );
+    assert_eq!(
+        systemd.calls,
+        schema_four_prepare_systemd_transcript()[..14]
+    );
+    assert!(transport.url.is_empty() && transport.status_url.is_empty());
+    for (path, bytes) in preserved {
+        assert_eq!(fs::read(path).expect("asset unchanged"), bytes);
+    }
+}
+
+#[test]
+fn complete_local_workflow_maps_loaded_service_residue_at_the_exact_effect_boundary() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: fixture.identity_path.clone(),
+    };
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner {
+        loaded_service_residue: true,
+        ..RecordingSystemdRunner::default()
+    };
+
+    let response = lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
+        &local_uninstall_request(),
+        &input,
+        &fixture.metadata,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    ));
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_service_residue")
+    );
+    assert_eq!(
+        systemd.calls,
+        schema_four_prepare_systemd_transcript()[..17]
+    );
+    assert!(transport.url.is_empty() && transport.status_url.is_empty());
+    for path in [
+        &fixture.metadata.install_path,
+        &fixture.identity_path,
+        &fixture.metadata_path,
+        &fixture.companion_path,
+    ]
+    .into_iter()
+    .chain(fixture.metadata.observation_runtime_path.iter())
+    .chain(fixture.metadata.cpu_provider_path.iter())
+    .chain(fixture.metadata.disk_health_provider_path.iter())
+    .chain(fixture.metadata.bootstrap_acquirer_path.iter())
+    .chain(fixture.metadata.bootstrap_activator_path.iter())
+    {
+        assert!(path.exists(), "later asset changed: {}", path.display());
+    }
+    assert!(
+        fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .unwrap()
+            .exists()
+    );
+    assert!(!fixture.metadata.service_unit_path.exists());
+    for path in &fixture.metadata.observation_unit_paths {
+        let companion_activation = path.file_name().is_some_and(|name| {
+            name == "enoki-probe-lifecycle-companion@.service"
+                || name == "enoki-probe-lifecycle-companion.socket"
+        });
+        assert_eq!(path.exists(), companion_activation, "{}", path.display());
+    }
+}
+
+#[test]
+fn complete_local_workflow_maps_account_failure_at_the_exact_effect_boundary() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: fixture.identity_path.clone(),
+    };
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner {
+        failure_step: Some("remove-account"),
+        ..RecordingSystemdRunner::default()
+    };
+
+    let response = lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
+        &local_uninstall_request(),
+        &input,
+        &fixture.metadata,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    ));
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_service_account_remove_failed")
+    );
+    let mut expected = schema_four_prepare_systemd_transcript();
+    expected.push("remove-service-identity enoki-probe:enoki-probe".to_owned());
+    assert_eq!(systemd.calls, expected);
+    assert!(transport.url.is_empty() && transport.status_url.is_empty());
+    for path in [
+        &fixture.metadata_path,
+        &fixture.identity_path,
+        &fixture.companion_path,
+    ]
+    .into_iter()
+    .chain(
+        fixture
+            .metadata
+            .observation_unit_paths
+            .iter()
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    name == "enoki-probe-lifecycle-companion@.service"
+                        || name == "enoki-probe-lifecycle-companion.socket"
+                })
+            }),
+    ) {
+        assert!(path.exists(), "reentry asset changed: {}", path.display());
+    }
+    for path in [
+        fixture.metadata.bootstrap_acquirer_path.as_ref().unwrap(),
+        fixture.metadata.bootstrap_activator_path.as_ref().unwrap(),
+        fixture.metadata.bootstrap_state_dir.as_ref().unwrap(),
+        &fixture.metadata.install_path,
+        &fixture.metadata.service_unit_path,
+    ]
+    .into_iter()
+    .chain(fixture.metadata.observation_runtime_path.iter())
+    .chain(fixture.metadata.cpu_provider_path.iter())
+    .chain(fixture.metadata.disk_health_provider_path.iter())
+    .chain(
+        fixture
+            .metadata
+            .observation_unit_paths
+            .iter()
+            .filter(|path| {
+                path.file_name().is_none_or(|name| {
+                    name != "enoki-probe-lifecycle-companion@.service"
+                        && name != "enoki-probe-lifecycle-companion.socket"
+                })
+            }),
+    ) {
+        assert!(
+            !path.exists(),
+            "completed prior effect remains: {}",
+            path.display()
+        );
+    }
 }
 
 #[test]
@@ -595,13 +885,29 @@ fn schema_five_uninstall_removes_upgrade_companion_roles_and_complete_layout() {
     );
     remove_path_if_exists(&fixture.companion_path)
         .expect("response-flush self-unlink completes the no-residue boundary");
-
-    for path in fixture.metadata.observation_unit_paths.iter().chain([
-        &fixture.metadata.install_path,
-        &fixture.identity_path,
-        &fixture.metadata_path,
-        &fixture.companion_path,
-    ]) {
+    for path in fixture
+        .metadata
+        .observation_unit_paths
+        .iter()
+        .chain(fixture.metadata.observation_runtime_path.iter())
+        .chain(fixture.metadata.cpu_provider_path.iter())
+        .chain(fixture.metadata.disk_health_provider_path.iter())
+        .chain(fixture.metadata.bootstrap_acquirer_path.iter())
+        .chain(fixture.metadata.bootstrap_activator_path.iter())
+        .chain([
+            &fixture.metadata.install_path,
+            &fixture.metadata.service_unit_path,
+            &fixture.identity_path,
+            &fixture.metadata_path,
+            &fixture.metadata.state_dir,
+            fixture
+                .metadata
+                .bootstrap_state_dir
+                .as_ref()
+                .expect("bootstrap state"),
+            &fixture.companion_path,
+        ])
+    {
         assert!(!path.exists(), "{} remains", path.display());
     }
     assert!(

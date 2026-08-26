@@ -24,7 +24,7 @@ const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/in
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
 
-use syn::{Attribute, ForeignItem, Item, Visibility};
+use syn::{Attribute, ForeignItem, ImplItem, Item, Visibility};
 
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -111,6 +111,27 @@ fn validate_foreign_items(items: &[ForeignItem]) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_impl_items(items: &[ImplItem]) -> Result<(), String> {
+    for item in items {
+        let visibility = match item {
+            ImplItem::Const(item) => &item.vis,
+            ImplItem::Fn(item) => &item.vis,
+            ImplItem::Type(item) => &item.vis,
+            ImplItem::Macro(_) | ImplItem::Verbatim(_) => {
+                return Err("unsupported impl item".to_owned());
+            }
+            _ => return Err("unsupported impl item".to_owned()),
+        };
+        if !matches!(
+            classify_visibility(visibility),
+            ItemVisibility::Private | ItemVisibility::SelfOnly
+        ) {
+            return Err("parent-reaching impl item".to_owned());
+        }
+    }
+    Ok(())
+}
+
 fn classify_top_level_item(item: &Item) -> Result<Option<TopLevelDeclaration>, String> {
     let declared = match item {
         Item::Const(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
@@ -129,7 +150,10 @@ fn classify_top_level_item(item: &Item) -> Result<Option<TopLevelDeclaration>, S
             validate_foreign_items(&item.items)?;
             return Ok(None);
         }
-        Item::Impl(_) => return Ok(None),
+        Item::Impl(item) => {
+            validate_impl_items(&item.items)?;
+            return Ok(None);
+        }
         Item::Macro(item) => {
             if item
                 .attrs
@@ -137,6 +161,9 @@ fn classify_top_level_item(item: &Item) -> Result<Option<TopLevelDeclaration>, S
                 .any(|attribute| attribute.path().is_ident("macro_export"))
             {
                 return Err("macro_export reaches outside the module".to_owned());
+            }
+            if item.ident.is_none() {
+                return Err("top-level macro invocation may export an item".to_owned());
             }
             return Ok(None);
         }
@@ -238,6 +265,23 @@ fn rust_ast_classifier_rejects_macro_export() {
 #[test]
 fn rust_ast_classifier_rejects_unsupported_item() {
     assert!(classify_top_level_item(&Item::Verbatim(Default::default())).is_err());
+}
+
+#[test]
+fn rust_ast_classifier_allows_private_macro_definition_but_rejects_invocation() {
+    assert!(top_level_declarations("macro_rules! private_macro { () => {} }").is_ok());
+    assert!(top_level_declarations("private_macro!();").is_err());
+}
+
+#[test]
+fn rust_ast_classifier_checks_impl_associated_item_visibility() {
+    assert!(
+        top_level_declarations("struct Private; impl Private { fn private_method() {} }").is_ok()
+    );
+    assert!(
+        top_level_declarations("struct Private; impl Private { pub(super) fn leaked() {} }")
+            .is_err()
+    );
 }
 
 #[test]
