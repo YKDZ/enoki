@@ -1168,9 +1168,11 @@ mod tests {
         let acquirer = temporary.path().join("bin/enoki-bootstrap-acquire");
         let activator = temporary.path().join("bin/enoki-bootstrap-activate");
         let bootstrap_state = owned_state(temporary.path());
+        let undeclared_legacy_sudoers = temporary.path().join("sudoers/preexisting-legacy");
         metadata.bootstrap_acquirer_path = Some(acquirer.clone());
         metadata.bootstrap_activator_path = Some(activator.clone());
         metadata.bootstrap_state_dir = Some(bootstrap_state.clone());
+        assert!(metadata.old_sudoers_paths.is_empty());
         for path in [
             &metadata.identity_path,
             &metadata.install_path,
@@ -1190,6 +1192,10 @@ mod tests {
         }
         let install_metadata_path = temporary.path().join("etc/probe-install.toml");
         create_file(&install_metadata_path, 0o600);
+        create_file(&undeclared_legacy_sudoers, 0o440);
+        let legacy_bytes = fs::read(&undeclared_legacy_sudoers).expect("legacy sudoers bytes");
+        let legacy_before =
+            fs::metadata(&undeclared_legacy_sudoers).expect("legacy sudoers metadata");
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
         };
@@ -1215,6 +1221,14 @@ mod tests {
         ] {
             assert!(!path.exists(), "owned path remains: {}", path.display());
         }
+        assert_eq!(
+            fs::read(&undeclared_legacy_sudoers).expect("legacy sudoers remains"),
+            legacy_bytes
+        );
+        let legacy_after =
+            fs::metadata(&undeclared_legacy_sudoers).expect("legacy sudoers remains");
+        assert_eq!(legacy_after.mode(), legacy_before.mode());
+        assert_eq!(legacy_after.ino(), legacy_before.ino());
         assert_eq!(
             systemd.calls,
             [
