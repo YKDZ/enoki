@@ -122,6 +122,7 @@ function validateHostScenarioEvidence(
     ],
     "fresh-install-uninstall": [
       "auditLog",
+      "canonicalRuntimeUnavailableReporting",
       "host",
       "hostBoundary",
       "diagnostics",
@@ -312,6 +313,7 @@ function validateFreshEvidence(evidence, errors, candidateManifest) {
     errors,
   );
   validateReEnrollmentEvidence(evidence, errors, candidateManifest);
+  validateCanonicalRuntimeUnavailableReporting(evidence, errors);
   validateHubOnlyDeletionEvidence(evidence, errors);
   validateLocalUninstallEvidence(
     evidence?.finalLocalUninstall,
@@ -320,6 +322,178 @@ function validateFreshEvidence(evidence, errors, candidateManifest) {
     errors,
   );
   validateDiagnosticsEvidence(evidence?.diagnostics, errors);
+}
+
+function validateCanonicalRuntimeUnavailableReporting(evidence, errors) {
+  const value = evidence?.canonicalRuntimeUnavailableReporting;
+  const host = value?.host;
+  const identity = host?.identity;
+  const probe = host?.probe;
+  const runtime = host?.runtime;
+  const owner = value?.ownerProjection;
+  const reporting = value?.reporting;
+  const boot = reporting?.bootReport;
+  const failure = reporting?.failureReport;
+  const receiptConvergence = reporting?.receiptConvergence;
+  const expectedProbeId = evidence?.reEnrollment?.identity?.after?.probeId;
+  const validSha256 = (candidate) => /^[0-9a-f]{64}$/.test(candidate ?? "");
+  const validIdentity =
+    sameKeySet(identity ?? {}, {
+      probeId: null,
+      registrationAttemptCredential: null,
+      registrationAttemptSource: null,
+      registrationDropIn: null,
+      transitionalRegistrationKeys: null,
+    }) &&
+    identity.probeId === expectedProbeId &&
+    identity.registrationAttemptCredential === false &&
+    identity.registrationAttemptSource === false &&
+    identity.registrationDropIn === false &&
+    identity.transitionalRegistrationKeys === false;
+  const validHost =
+    validIdentity &&
+    sameKeySet(probe ?? {}, {
+      ActiveState: null,
+      LoadState: null,
+      Result: null,
+      SubState: null,
+      Type: null,
+    }) &&
+    probe.ActiveState === "active" &&
+    probe.LoadState === "loaded" &&
+    probe.Result === "success" &&
+    probe.SubState === "running" &&
+    probe.Type === "notify" &&
+    sameKeySet(runtime ?? {}, {
+      serviceLoadState: null,
+      socketLoadState: null,
+    }) &&
+    runtime.serviceLoadState === "masked" &&
+    runtime.socketLoadState === "masked";
+  const validBoot =
+    sameKeySet(boot ?? {}, {
+      acceptedSequenceEnd: null,
+      bytes: null,
+      payloadSha256: null,
+      reconciliation: null,
+      responseDelivered: null,
+      responseSha256: null,
+      sequence: null,
+      upstreamStatus: null,
+    }) &&
+    boot.sequence === 1 &&
+    boot.acceptedSequenceEnd === 1 &&
+    boot.upstreamStatus === 200 &&
+    boot.responseDelivered === true &&
+    Number.isSafeInteger(boot.bytes) &&
+    boot.bytes > 0 &&
+    sameKeySet(boot.reconciliation ?? {}, {
+      currentProbeConfigurationVersion: null,
+      pendingOperation: null,
+      requestedSnapshotCollectorIdsCount: null,
+    }) &&
+    typeof boot.reconciliation.currentProbeConfigurationVersion === "string" &&
+    boot.reconciliation.currentProbeConfigurationVersion.length > 0 &&
+    ["absent", "present"].includes(boot.reconciliation.pendingOperation) &&
+    Number.isSafeInteger(
+      boot.reconciliation.requestedSnapshotCollectorIdsCount,
+    ) &&
+    boot.reconciliation.requestedSnapshotCollectorIdsCount >= 0 &&
+    validSha256(boot.payloadSha256) &&
+    validSha256(boot.responseSha256);
+  const validFailureAttempts =
+    Array.isArray(failure?.attempts) &&
+    failure.attempts.length === 2 &&
+    failure.attempts.every(
+      (attempt, index) =>
+        sameKeySet(attempt ?? {}, {
+          acceptedSequenceEnd: null,
+          response: null,
+          responseSha256: null,
+          upstreamStatus: null,
+        }) &&
+        attempt.acceptedSequenceEnd === 2 &&
+        attempt.response === (index === 0 ? "dropped" : "delivered") &&
+        validSha256(attempt.responseSha256) &&
+        attempt.upstreamStatus === 200,
+    );
+  const validFailure =
+    sameKeySet(failure ?? {}, {
+      attempts: null,
+      bytes: null,
+      collectionOutcomeCount: null,
+      metricsCount: null,
+      payloadSha256: null,
+      probeConfigurationVersion: null,
+      reason: null,
+      retryPayloadSha256: null,
+      sequence: null,
+    }) &&
+    failure.sequence === 2 &&
+    failure.reason === "observation_runtime_unavailable" &&
+    failure.metricsCount === 0 &&
+    failure.collectionOutcomeCount === 0 &&
+    failure.probeConfigurationVersion ===
+      boot?.reconciliation?.currentProbeConfigurationVersion &&
+    Number.isSafeInteger(failure.bytes) &&
+    failure.bytes > 0 &&
+    validSha256(failure.payloadSha256) &&
+    failure.retryPayloadSha256 === failure.payloadSha256 &&
+    validFailureAttempts;
+  const validReporting =
+    sameKeySet(reporting ?? {}, {
+      bootId: null,
+      bootReport: null,
+      failureReport: null,
+      kind: null,
+      probeId: null,
+      receiptConvergence: null,
+      schemaVersion: null,
+    }) &&
+    reporting.kind === "canonical-runtime-unavailable-report-evidence" &&
+    reporting.schemaVersion === 1 &&
+    reporting.probeId === expectedProbeId &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(reporting.bootId ?? "") &&
+    validBoot &&
+    validFailure &&
+    sameKeySet(receiptConvergence ?? {}, {
+      contract: null,
+      key: null,
+      requestAttemptCount: null,
+      uniquePayloadCount: null,
+    }) &&
+    receiptConvergence.contract === "report-sequence-ack-idempotency" &&
+    sameKeySet(receiptConvergence.key ?? {}, {
+      bootId: null,
+      probeId: null,
+      sequence: null,
+    }) &&
+    receiptConvergence.key.probeId === reporting.probeId &&
+    receiptConvergence.key.bootId === reporting.bootId &&
+    receiptConvergence.key.sequence === 2 &&
+    receiptConvergence.requestAttemptCount === 2 &&
+    receiptConvergence.uniquePayloadCount === 1;
+  const validOwnerProjection =
+    owner?.metricsUnchanged === true &&
+    owner?.reportedProbeConfigurationVersion ===
+      boot?.reconciliation?.currentProbeConfigurationVersion &&
+    owner?.host?.id === evidence?.host?.id &&
+    owner?.host?.status === "online" &&
+    isCandidateHostReady(owner?.host, candidateProbeVersion(evidence));
+  const transport = evidence?.diagnostics?.transport;
+  const validTransportDiagnostics =
+    transport?.completed === true &&
+    transport?.failure === null &&
+    transport?.failureReportObserved === true &&
+    transport?.lastUpstreamStatus === 200;
+  if (
+    !validHost ||
+    !validReporting ||
+    !validOwnerProjection ||
+    !validTransportDiagnostics
+  ) {
+    errors.push("canonical Runtime-unavailable reporting evidence is invalid");
+  }
 }
 
 function validateInstalledBundleFailureRepair(
@@ -1793,6 +1967,7 @@ export function createReleaseVerificationSummary({
     const expectedOutcome = "succeeded";
     return {
       artifactName: gate?.artifactName ?? null,
+      capabilities: [...cell.capabilities],
       cellId: cell.cellId,
       environmentId: cell.environmentId,
       evidenceOutcome: gate?.evidenceOutcome ?? "missing",
@@ -1950,15 +2125,15 @@ export function renderReleaseVerificationEvidenceMarkdown(summary) {
     "",
     "## Required gates",
     "",
-    "| Gate | Outcome | Evidence |",
-    "| --- | --- | --- |",
-    `| Candidate build | ${summary.gates.candidateBuild.outcome} | Candidate Manifest |`,
-    `| Standard CI | ${summary.gates.standardCi.outcome} | ${summary.gates.standardCi.runUrl ?? "missing"} |`,
-    `| Matrix expansion | ${summary.gates.matrixExpansion.outcome} | central matrix |`,
-    `| Candidate-image UI Contract | ${summary.gates.candidateUiContract.outcome} | ${evidenceLink(summary.gates.candidateUiContract)} |`,
+    "| Gate | Capabilities | Outcome | Evidence |",
+    "| --- | --- | --- | --- |",
+    `| Candidate build | — | ${summary.gates.candidateBuild.outcome} | Candidate Manifest |`,
+    `| Standard CI | — | ${summary.gates.standardCi.outcome} | ${summary.gates.standardCi.runUrl ?? "missing"} |`,
+    `| Matrix expansion | — | ${summary.gates.matrixExpansion.outcome} | central matrix |`,
+    `| Candidate-image UI Contract | — | ${summary.gates.candidateUiContract.outcome} | ${evidenceLink(summary.gates.candidateUiContract)} |`,
     ...summary.gates.hostScenarios.map(
       (gate) =>
-        `| \`${gate.cellId}\` | ${gate.outcome} | ${evidenceLink(gate)} |`,
+        `| \`${gate.cellId}\` | ${gate.capabilities.map((capability) => `\`${capability}\``).join(", ") || "missing"} | ${gate.outcome} | ${evidenceLink(gate)} |`,
     ),
     "",
     "## Failure reasons",
@@ -2175,7 +2350,13 @@ function validateScenarioPlan(plan) {
         typeof cell?.cellId !== "string" ||
         typeof cell.environmentId !== "string" ||
         typeof cell.runner !== "string" ||
-        typeof cell.scenarioId !== "string",
+        typeof cell.scenarioId !== "string" ||
+        !Array.isArray(cell.capabilities) ||
+        cell.capabilities.some(
+          (capability) => typeof capability !== "string" || !capability,
+        ) ||
+        (cell.scenarioId === "fresh-install-uninstall" &&
+          !cell.capabilities.includes("canonical-report-response-loss")),
     ) ||
     new Set(plan.cells.map((cell) => cell.cellId)).size !== plan.cells.length
   ) {

@@ -817,6 +817,7 @@ describe("verify-only release workflow", () => {
       candidate,
     );
     for (const field of [
+      "canonicalRuntimeUnavailableReporting",
       "diagnostics",
       "finalLocalUninstall",
       "hubOnlyDeletion",
@@ -847,7 +848,98 @@ describe("verify-only release workflow", () => {
         "missing finalLocalUninstall",
         "missing diagnostics",
         "missing initialInstall",
+        "missing canonicalRuntimeUnavailableReporting",
       ]),
+    );
+  });
+
+  it.each([
+    [
+      "different boot",
+      (value) => {
+        value.reporting.receiptConvergence.key.bootId = "boot-other";
+      },
+    ],
+    [
+      "wrong sequence",
+      (value) => {
+        value.reporting.failureReport.sequence = 3;
+      },
+    ],
+    [
+      "different retry payload",
+      (value) => {
+        value.reporting.failureReport.retryPayloadSha256 = "9".repeat(64);
+      },
+    ],
+    [
+      "Hub non-200",
+      (value) => {
+        value.reporting.failureReport.attempts[0].upstreamStatus = 503;
+      },
+    ],
+    [
+      "Metrics",
+      (value) => {
+        value.reporting.failureReport.metricsCount = 1;
+      },
+    ],
+    [
+      "Collection Outcomes",
+      (value) => {
+        value.reporting.failureReport.collectionOutcomeCount = 1;
+      },
+    ],
+    [
+      "Probe not READY",
+      (value) => {
+        value.host.probe.ActiveState = "failed";
+      },
+    ],
+    [
+      "configuration not reconciled",
+      (value) => {
+        value.reporting.failureReport.probeConfigurationVersion = "stale-v1";
+      },
+    ],
+    [
+      "response not dropped",
+      (value) => {
+        value.reporting.failureReport.attempts[0].response = "delivered";
+      },
+    ],
+    [
+      "retry not delivered",
+      (value) => {
+        value.reporting.failureReport.attempts.pop();
+      },
+    ],
+    [
+      "transport incomplete",
+      (_value, evidence) => {
+        evidence.diagnostics.transport.completed = false;
+      },
+    ],
+  ])("fails closed when C4 has %s", (_label, corrupt) => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    corrupt(evidence.canonicalRuntimeUnavailableReporting, evidence);
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.outcome).toBe("failed");
+    expect(gate.evidenceValidationErrors).toContain(
+      "canonical Runtime-unavailable reporting evidence is invalid",
     );
   });
 
@@ -1724,6 +1816,7 @@ describe("verify-only release workflow", () => {
     expect(markdown).toContain(candidateManifest.hub.archiveSha256);
     expect(markdown).toContain(candidateManifest.probeAssetSet.files[0].sha256);
     expect(markdown).toContain("Current workflow run only");
+    expect(markdown).toContain("`canonical-report-response-loss`");
     expect(markdown).toContain("release-e2e-ubuntu-24.04-x86_64--");
     expect(markdown).toContain("actions/runs/12345/artifacts/9000");
   });
@@ -1877,6 +1970,10 @@ function expectedHostGateResults(matrix, candidateManifest) {
         )
       : matrix.environments;
     return environments.map((environment) => ({
+      capabilities:
+        scenario.id === "fresh-install-uninstall"
+          ? ["canonical-report-response-loss"]
+          : [],
       environmentId: environment.capabilityId,
       runner: matrix.providers
         .find((provider) => provider.id === environment.providerId)
@@ -2003,7 +2100,18 @@ function successfulHostEvidence(
       diagnostics: {
         host: terminalDiagnosticsEvidence(reEnrolledIdentity),
         hub: { apiTimeline: [{ method: "DELETE", status: 200 }] },
+        transport: {
+          armed: true,
+          bootReportObserved: true,
+          completed: true,
+          failure: null,
+          failureReportObserved: true,
+          lastUpstreamStatus: 200,
+          reportRequestCount: 3,
+        },
       },
+      canonicalRuntimeUnavailableReporting:
+        canonicalRuntimeUnavailableEvidence(),
       finalLocalUninstall: { completion: common.uninstall.hostCompletion },
       host: evidenceHost("1.2.3"),
       hostBoundary: installedHostBoundary("1.2.3"),
@@ -2331,6 +2439,90 @@ function evidenceMetrics(firstSequence) {
     sequence,
     uptimeSeconds: 100 + sequence,
   }));
+}
+
+function canonicalRuntimeUnavailableEvidence() {
+  return {
+    host: {
+      identity: {
+        probeId: "probe_release_02",
+        registrationAttemptCredential: false,
+        registrationAttemptSource: false,
+        registrationDropIn: false,
+        transitionalRegistrationKeys: false,
+      },
+      probe: {
+        ActiveState: "active",
+        LoadState: "loaded",
+        Result: "success",
+        SubState: "running",
+        Type: "notify",
+      },
+      runtime: {
+        serviceLoadState: "masked",
+        socketLoadState: "masked",
+      },
+    },
+    ownerProjection: {
+      host: evidenceHost("1.2.3"),
+      metricsUnchanged: true,
+      reportedProbeConfigurationVersion: "host-7-1",
+    },
+    reporting: {
+      bootId: "boot-c4-01",
+      bootReport: {
+        acceptedSequenceEnd: 1,
+        bytes: 128,
+        payloadSha256: "1".repeat(64),
+        reconciliation: {
+          currentProbeConfigurationVersion: "host-7-1",
+          pendingOperation: "absent",
+          requestedSnapshotCollectorIdsCount: 0,
+        },
+        responseDelivered: true,
+        responseSha256: "2".repeat(64),
+        sequence: 1,
+        upstreamStatus: 200,
+      },
+      failureReport: {
+        attempts: [
+          {
+            acceptedSequenceEnd: 2,
+            response: "dropped",
+            responseSha256: "4".repeat(64),
+            upstreamStatus: 200,
+          },
+          {
+            acceptedSequenceEnd: 2,
+            response: "delivered",
+            responseSha256: "5".repeat(64),
+            upstreamStatus: 200,
+          },
+        ],
+        bytes: 64,
+        collectionOutcomeCount: 0,
+        metricsCount: 0,
+        payloadSha256: "3".repeat(64),
+        probeConfigurationVersion: "host-7-1",
+        reason: "observation_runtime_unavailable",
+        retryPayloadSha256: "3".repeat(64),
+        sequence: 2,
+      },
+      kind: "canonical-runtime-unavailable-report-evidence",
+      receiptConvergence: {
+        contract: "report-sequence-ack-idempotency",
+        key: {
+          bootId: "boot-c4-01",
+          probeId: "probe_release_02",
+          sequence: 2,
+        },
+        requestAttemptCount: 2,
+        uniquePayloadCount: 1,
+      },
+      probeId: "probe_release_02",
+      schemaVersion: 1,
+    },
+  };
 }
 
 function metricsHistoryEvidence(samples, { retain = [] } = {}) {

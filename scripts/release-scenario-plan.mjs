@@ -16,6 +16,7 @@ const sharedCandidateScenario = Object.freeze({
   capabilities: Object.freeze([
     "fresh-install",
     "installed-bundle-failure-repair",
+    "canonical-report-response-loss",
     "final-uninstall",
   ]),
   id: "fresh-install-uninstall",

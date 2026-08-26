@@ -30,6 +30,7 @@ describe("Release Scenario Planner", () => {
         capabilities: [
           "fresh-install",
           "installed-bundle-failure-repair",
+          "canonical-report-response-loss",
           "final-uninstall",
         ],
         id: "fresh-install-uninstall",
@@ -81,6 +82,7 @@ describe("Release Scenario Planner", () => {
         capabilities: [
           "fresh-install",
           "installed-bundle-failure-repair",
+          "canonical-report-response-loss",
           "final-uninstall",
         ],
         id: "fresh-install-uninstall",

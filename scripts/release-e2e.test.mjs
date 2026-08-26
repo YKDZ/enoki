@@ -75,6 +75,105 @@ describe("Release E2E business assertions", () => {
     expect(calls).toEqual(["cleanup.owned", "docker.start"]);
   });
 
+  it("binds and cleans the canonical report transport around the direct Hub owner origin", async () => {
+    const calls = [];
+    const environment = createReleaseEnvironment({
+      candidateDir: "/tmp/release-candidate",
+      canonicalReportTransportFactory(options) {
+        calls.push(["transport.create", options]);
+        return {
+          async close() {
+            calls.push("transport.close");
+            return { clean: true };
+          },
+          async start() {
+            calls.push("transport.start");
+            return { origin: "http://127.0.0.1:33000" };
+          },
+        };
+      },
+      docker: {
+        async cleanup() {
+          calls.push("docker.cleanup");
+          return { clean: true };
+        },
+        async start() {
+          calls.push("docker.start");
+          return { activeHub: "candidate" };
+        },
+      },
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      hubOwnerUrl: "http://127.0.0.1:33001",
+      hubPublicUrl: "http://127.0.0.1:33000",
+      ownerPassword: "owner-password",
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    const resources = await environment.start({
+      candidateManifest: candidateManifest(),
+      runId: "run-report-transport",
+    });
+    expect(resources.canonicalReports).toBeDefined();
+    await environment.cleanup({ resources, runId: "run-report-transport" });
+    expect(calls).toEqual([
+      "docker.start",
+      [
+        "transport.create",
+        {
+          listenUrl: "http://127.0.0.1:33000",
+          upstreamUrl: "http://127.0.0.1:33001",
+        },
+      ],
+      "transport.start",
+      "transport.close",
+      "docker.cleanup",
+    ]);
+  });
+
+  it("retains transport cleanup ownership when its public-origin bind fails", async () => {
+    const calls = [];
+    const environment = createReleaseEnvironment({
+      candidateDir: "/tmp/release-candidate",
+      canonicalReportTransportFactory() {
+        return {
+          async close() {
+            calls.push("transport.close");
+            return { clean: true };
+          },
+          async start() {
+            throw new Error("public origin unavailable");
+          },
+        };
+      },
+      docker: {
+        async cleanup() {
+          calls.push("docker.cleanup");
+          return { clean: true };
+        },
+        async start() {
+          return { activeHub: "candidate" };
+        },
+      },
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      hubOwnerUrl: "http://127.0.0.1:33001",
+      hubPublicUrl: "http://127.0.0.1:33000",
+      ownerPassword: "owner-password",
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(
+      environment.start({
+        candidateManifest: candidateManifest(),
+        runId: "run-report-transport-failure",
+      }),
+    ).rejects.toThrow("public origin unavailable");
+    await environment.cleanup({
+      resources: null,
+      runId: "run-report-transport-failure",
+    });
+    expect(calls).toEqual(["transport.close", "docker.cleanup"]);
+  });
+
   it("keeps ForwardTransitions authority behind the typed Hub adapter and out of the Host Harness", async () => {
     const host = createProbeHostHarness({
       execute: async () => ({ code: 0, stderr: "", stdout: "" }),
@@ -487,6 +586,8 @@ describe("Release E2E business assertions", () => {
       "--candidate-manifest candidate/candidate-manifest.json",
     );
     expect(workflow).not.toMatch(/--baseline-kind|baseline_kind:/);
+    expect(workflow).toContain("--hub-owner-url http://127.0.0.1:33001");
+    expect(workflow).toContain("--hub-public-url http://127.0.0.1:33000");
   });
 
   it("constructs the real Docker Hub controller with default options", () => {
@@ -789,6 +890,87 @@ describe("successful Probe Repair boundary evidence", () => {
 });
 
 describe("Probe Host Harness", () => {
+  it("restarts the canonical Probe READY with Runtime masked and no registration one-shot material", async () => {
+    const commands = [];
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:canonical-runtime-unavailable")
+        ) {
+          return successfulCommand({
+            identity: {
+              probeId: "probe_release_02",
+              registrationAttemptCredential: false,
+              registrationAttemptSource: false,
+              registrationDropIn: false,
+              transitionalRegistrationKeys: false,
+            },
+            probe: {
+              ActiveState: "active",
+              LoadState: "loaded",
+              Result: "success",
+              SubState: "running",
+              Type: "notify",
+            },
+            runtime: {
+              serviceLoadState: "masked",
+              socketLoadState: "masked",
+            },
+          });
+        }
+        if (
+          command.includes("# enoki-release-e2e:restore-observation-runtime")
+        ) {
+          return successfulCommandText("restored\n");
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+    await harness.assertDisposable("run-canonical-reporting");
+    await harness.install(officialEnrollment(), "run-canonical-reporting");
+
+    await expect(
+      harness.restartCanonicalProbeWithoutObservationRuntime(
+        "run-canonical-reporting",
+        "probe_release_02",
+      ),
+    ).resolves.toMatchObject({
+      identity: { probeId: "probe_release_02" },
+      probe: { ActiveState: "active", SubState: "running", Type: "notify" },
+      runtime: { serviceLoadState: "masked", socketLoadState: "masked" },
+    });
+    await expect(
+      harness.restoreObservationRuntime("run-canonical-reporting"),
+    ).resolves.toEqual({ restored: true });
+    const restart = commands.find((command) =>
+      command.includes("# enoki-release-e2e:canonical-runtime-unavailable"),
+    );
+    expect(restart).toContain("systemctl mask --runtime");
+    expect(restart).toContain("systemctl restart enoki-probe.service");
+    expect(restart).toContain("registration_");
+    expect(restart).toContain("/var/lib/enoki-probe-registration/attempt.json");
+    expect(restart).toContain(
+      "/run/credentials/enoki-probe.service/registration-attempt",
+    );
+  });
+
   it("fingerprints same-path content, recursive directory closure, and file ownership metadata", async () => {
     const root = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-fingerprint-"),
@@ -3311,6 +3493,7 @@ describe("Release E2E Orchestrator", () => {
         SubState: "running",
       },
     };
+    const canonicalReportEvidence = canonicalRuntimeUnavailableEvidence();
     let enrollmentCount = 0;
     let installCount = 0;
     let lifecycle = "empty";
@@ -3524,6 +3707,33 @@ describe("Release E2E Orchestrator", () => {
           ? installedState.identity
           : { identitySha256: "d".repeat(64), probeId: "probe_release_02" };
       },
+      async restartCanonicalProbeWithoutObservationRuntime() {
+        calls.push("host.restartCanonicalProbeWithoutObservationRuntime");
+        return {
+          identity: {
+            probeId: "probe_release_02",
+            registrationAttemptCredential: false,
+            registrationAttemptSource: false,
+            registrationDropIn: false,
+            transitionalRegistrationKeys: false,
+          },
+          probe: {
+            ActiveState: "active",
+            LoadState: "loaded",
+            Result: "success",
+            SubState: "running",
+            Type: "notify",
+          },
+          runtime: {
+            serviceLoadState: "masked",
+            socketLoadState: "masked",
+          },
+        };
+      },
+      async restoreObservationRuntime() {
+        calls.push("host.restoreObservationRuntime");
+        return { restored: true };
+      },
       async repairInstalledBundleFailure() {
         calls.push("host.repairInstalledBundleFailure");
         return {
@@ -3570,7 +3780,22 @@ describe("Release E2E Orchestrator", () => {
           },
           async start() {
             calls.push("environment.start");
-            return { host, hub };
+            return {
+              canonicalReports: {
+                arm({ expectedProbeId }) {
+                  calls.push(`canonicalReports.arm:${expectedProbeId}`);
+                },
+                diagnostics() {
+                  return { completed: true };
+                },
+                async waitForEvidence() {
+                  calls.push("canonicalReports.waitForEvidence");
+                  return canonicalReportEvidence;
+                },
+              },
+              host,
+              hub,
+            };
           },
         },
         evidenceSink: {
@@ -3597,6 +3822,10 @@ describe("Release E2E Orchestrator", () => {
         "hub.createEnrollment:existing_host",
         "hub.deleteHostHubOnly:7",
         "host.awaitPermanentReportRejection",
+        "canonicalReports.arm:probe_release_02",
+        "host.restartCanonicalProbeWithoutObservationRuntime",
+        "canonicalReports.waitForEvidence",
+        "host.restoreObservationRuntime",
       ]),
     );
     expect(calls.filter((call) => call === "host.install:1")).toHaveLength(1);
@@ -3625,6 +3854,9 @@ describe("Release E2E Orchestrator", () => {
     expect(calls.indexOf("host.repairInstalledBundleFailure")).toBeLessThan(
       calls.indexOf("host.localUninstall"),
     );
+    expect(
+      calls.indexOf("host.restartCanonicalProbeWithoutObservationRuntime"),
+    ).toBeLessThan(calls.indexOf("hub.deleteHostHubOnly:7"));
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
       installedBundleFailureRepair: {
@@ -3652,6 +3884,21 @@ describe("Release E2E Orchestrator", () => {
           latchRemoved: true,
           repairedVersion: "1.2.3",
           sameBundle: true,
+        },
+      },
+      canonicalRuntimeUnavailableReporting: {
+        reporting: canonicalReportEvidence,
+        host: {
+          identity: { probeId: "probe_release_02" },
+          probe: { ActiveState: "active", SubState: "running" },
+          runtime: {
+            serviceLoadState: "masked",
+            socketLoadState: "masked",
+          },
+        },
+        ownerProjection: {
+          host: { id: 7, status: "online" },
+          metricsUnchanged: true,
         },
       },
       finalLocalUninstall: { completion: { clean: true } },
@@ -7581,6 +7828,63 @@ function ordinaryReleaseBaseline() {
     },
     schemaVersion: 2,
     tag: "v1.2.2",
+  };
+}
+
+function canonicalRuntimeUnavailableEvidence() {
+  return {
+    bootId: "boot-c4-01",
+    bootReport: {
+      acceptedSequenceEnd: 1,
+      bytes: 128,
+      payloadSha256: "1".repeat(64),
+      reconciliation: {
+        currentProbeConfigurationVersion: "host-2-1",
+        pendingOperation: "absent",
+        requestedSnapshotCollectorIdsCount: 0,
+      },
+      responseDelivered: true,
+      responseSha256: "2".repeat(64),
+      sequence: 1,
+      upstreamStatus: 200,
+    },
+    failureReport: {
+      attempts: [
+        {
+          acceptedSequenceEnd: 2,
+          response: "dropped",
+          responseSha256: "4".repeat(64),
+          upstreamStatus: 200,
+        },
+        {
+          acceptedSequenceEnd: 2,
+          response: "delivered",
+          responseSha256: "5".repeat(64),
+          upstreamStatus: 200,
+        },
+      ],
+      bytes: 64,
+      collectionOutcomeCount: 0,
+      metricsCount: 0,
+      payloadSha256: "3".repeat(64),
+      probeConfigurationVersion: "host-2-1",
+      reason: "observation_runtime_unavailable",
+      retryPayloadSha256: "3".repeat(64),
+      sequence: 2,
+    },
+    kind: "canonical-runtime-unavailable-report-evidence",
+    receiptConvergence: {
+      contract: "report-sequence-ack-idempotency",
+      key: {
+        bootId: "boot-c4-01",
+        probeId: "probe_release_02",
+        sequence: 2,
+      },
+      requestAttemptCount: 2,
+      uniquePayloadCount: 1,
+    },
+    probeId: "probe_release_02",
+    schemaVersion: 1,
   };
 }
 

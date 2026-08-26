@@ -16,6 +16,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { validateReleaseCandidate } from "./release-candidate-lib.mjs";
+import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.mjs";
 import {
   createHubLifecycleClient,
   createProbeHostHarness,
@@ -878,6 +879,7 @@ export function createLocalSshReleaseEnvironment({
 export function createReleaseEnvironment({
   bootstrapProvisioner,
   candidateDir,
+  canonicalReportTransportFactory = createCanonicalReportEvidenceTransport,
   docker = createDockerHubController(),
   execute,
   hubOwnerUrl,
@@ -898,6 +900,7 @@ export function createReleaseEnvironment({
     );
   }
   let dockerResources = null;
+  let canonicalReports = null;
   return {
     async start({
       candidateManifest,
@@ -918,6 +921,16 @@ export function createReleaseEnvironment({
         runId,
         useHubStateSnapshot: scenario === "hub-restore-compatibility-window",
       });
+      canonicalReports = canonicalReportTransportFactory({
+        listenUrl: hubPublicUrl,
+        upstreamUrl: hubOwnerUrl,
+      });
+      const transport = await canonicalReports.start();
+      if (transport.origin !== new URL(hubPublicUrl).origin) {
+        throw new Error(
+          "canonical report evidence transport did not bind the declared Probe origin",
+        );
+      }
       const lifecycle = createHubLifecycleClient({ baseUrl: hubOwnerUrl });
       const host = createProbeHostHarness({
         execute,
@@ -960,6 +973,7 @@ export function createReleaseEnvironment({
         : null;
       return {
         bootstrap: null,
+        canonicalReports,
         docker: dockerResources,
         host,
         hub: {
@@ -1001,6 +1015,15 @@ export function createReleaseEnvironment({
     async cleanup({ resources, runId }) {
       const cleanup = {};
       const errors = [];
+      if (canonicalReports) {
+        try {
+          cleanup.transport = await canonicalReports.close();
+        } catch (error) {
+          errors.push(error);
+          cleanup.transport = { clean: false, error: error.message };
+        }
+      }
+      canonicalReports = null;
       try {
         cleanup.hub = await docker.cleanup({
           resources: dockerResources,

@@ -2001,6 +2001,7 @@ async function runFreshInstallUninstallScenario({
       probeAssetSetVersion: candidateManifest.probeAssetSet.version,
     },
     cleanup: null,
+    canonicalRuntimeUnavailableReporting: null,
     diagnostics: null,
     finalLocalUninstall: null,
     host: null,
@@ -2262,6 +2263,76 @@ async function runFreshInstallUninstallScenario({
       probeConfiguration: reEnrollmentConfiguration,
     };
 
+    const canonicalReports = resources?.canonicalReports;
+    if (
+      typeof canonicalReports?.arm !== "function" ||
+      typeof canonicalReports?.waitForEvidence !== "function" ||
+      typeof canonicalReports?.diagnostics !== "function" ||
+      typeof host.restartCanonicalProbeWithoutObservationRuntime !==
+        "function" ||
+      typeof host.restoreObservationRuntime !== "function"
+    ) {
+      throw assertionError(
+        "canonical_report_evidence_unavailable",
+        "Release E2E environment lacks canonical report response-loss evidence",
+      );
+    }
+    canonicalReports.arm({ expectedProbeId: reEnrollmentIdentity.probeId });
+    let canonicalHostEvidence;
+    let canonicalReporting;
+    let restoreError = null;
+    try {
+      canonicalHostEvidence =
+        await host.restartCanonicalProbeWithoutObservationRuntime(
+          runId,
+          reEnrollmentIdentity.probeId,
+        );
+      canonicalReporting = await canonicalReports.waitForEvidence({
+        timeoutMs: timing.canonicalReportTimeoutMs ?? 90_000,
+      });
+    } finally {
+      try {
+        await host.restoreObservationRuntime(runId);
+      } catch (error) {
+        restoreError = error;
+      }
+    }
+    if (restoreError) throw restoreError;
+    const canonicalOwnerHost = await waitForObservation({
+      code: "canonical_runtime_unavailable_owner_projection_timeout",
+      label: "canonical Probe online after accepted Runtime-unavailable report",
+      observe: () => hub.getHost(hostId),
+      poll,
+      ready: (value) =>
+        value?.id === hostId &&
+        value?.status === "online" &&
+        value?.reportedProbeConfigurationVersion ===
+          canonicalReporting.bootReport.reconciliation
+            .currentProbeConfigurationVersion,
+    });
+    const metricsAfterCanonicalFailure = await hub.getHostMetrics(hostId, {
+      window: "24h",
+    });
+    if (
+      JSON.stringify(portableMetricIdentities(metricsAfterCanonicalFailure)) !==
+      JSON.stringify(portableMetricIdentities(reEnrollmentMetrics))
+    ) {
+      throw assertionError(
+        "canonical_runtime_unavailable_created_metrics",
+        "Accepted ObservationWindowFailure created or changed Metrics",
+      );
+    }
+    evidence.canonicalRuntimeUnavailableReporting = {
+      host: canonicalHostEvidence,
+      ownerProjection: {
+        host: compactHostEvidence(canonicalOwnerHost),
+        metricsUnchanged: true,
+        reportedProbeConfigurationVersion:
+          canonicalOwnerHost.reportedProbeConfigurationVersion,
+      },
+      reporting: canonicalReporting,
+    };
+
     const deletedHost = await hub.deleteHostHubOnly(hostId);
     const deleted = await waitForObservation({
       code: "hub_only_host_deletion_timeout",
@@ -2326,6 +2397,15 @@ async function runFreshInstallUninstallScenario({
       } catch (error) {
         evidence.diagnostics = { error: serializedError(error) };
       }
+    }
+    if (resources?.canonicalReports?.diagnostics) {
+      const transport = resources.canonicalReports.diagnostics();
+      evidence.diagnostics = {
+        ...(evidence.diagnostics && typeof evidence.diagnostics === "object"
+          ? evidence.diagnostics
+          : {}),
+        transport,
+      };
     }
 
     const cleanup = {};
@@ -2735,6 +2815,7 @@ export function createProbeHostHarness({
     throw new Error("Probe Host Harness ownership token is invalid");
   }
   let runOwnsMutation = false;
+  let canonicalRuntimeUnavailableArmed = false;
   let postReplacementFaultArmed = false;
   let readyForReinstallation = false;
   let sharedDependenciesBefore = null;
@@ -3184,6 +3265,54 @@ export function createProbeHostHarness({
       return identity;
     },
 
+    async restartCanonicalProbeWithoutObservationRuntime(
+      runId,
+      expectedProbeId,
+    ) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(expectedProbeId ?? "")) {
+        throw new Error("canonical Probe Identity is invalid");
+      }
+      if (canonicalRuntimeUnavailableArmed) {
+        throw new Error(
+          "canonical Runtime-unavailable fixture is already armed",
+        );
+      }
+      canonicalRuntimeUnavailableArmed = true;
+      const result = await execute(
+        canonicalRuntimeUnavailableRestartScript(expectedProbeId),
+        { root: true },
+      );
+      if (result.code !== 0) {
+        throw new Error(
+          `Canonical Probe did not reach READY without Observation Runtime: ${result.stderr}`,
+        );
+      }
+      const evidence = parseJson(
+        result.stdout,
+        "canonical Runtime-unavailable Host evidence",
+      );
+      assertCanonicalRuntimeUnavailableHostEvidence(evidence, expectedProbeId);
+      return evidence;
+    },
+
+    async restoreObservationRuntime(runId) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      if (!canonicalRuntimeUnavailableArmed) {
+        throw new Error("canonical Runtime-unavailable fixture is not armed");
+      }
+      const result = await execute(restoreObservationRuntimeScript(), {
+        root: true,
+      });
+      if (result.code !== 0 || result.stdout.trim() !== "restored") {
+        throw new Error(
+          `Observation Runtime fixture restoration failed: ${result.stderr}`,
+        );
+      }
+      canonicalRuntimeUnavailableArmed = false;
+      return { restored: true };
+    },
+
     async beginUpgradeOwnershipTransition(runId, targetProbeVersion) {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
       assertProbeVersion(targetProbeVersion, "Probe Upgrade target version");
@@ -3442,6 +3571,20 @@ export function createProbeHostHarness({
         });
       }
 
+      if (canonicalRuntimeUnavailableArmed) {
+        await attempt(async () => {
+          const restored = await execute(restoreObservationRuntimeScript(), {
+            root: true,
+          });
+          if (restored.code !== 0 || restored.stdout.trim() !== "restored") {
+            throw new Error(
+              `Run-owned canonical Runtime fixture cleanup failed: ${restored.stderr}`,
+            );
+          }
+          canonicalRuntimeUnavailableArmed = false;
+        });
+      }
+
       await attempt(() => installedBundleFailureRepair.cleanup(runId));
 
       let inspected = await attempt(() => inventory());
@@ -3684,6 +3827,54 @@ systemctl show enoki-probe.service --no-pager \
   --property=User \
   --property=Group \
   --property=FragmentPath
+`;
+}
+
+function canonicalRuntimeUnavailableRestartScript(expectedProbeId) {
+  return String.raw`# enoki-release-e2e:canonical-runtime-unavailable
+set -eu
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+attempt_source=/var/lib/enoki-probe-registration/attempt.json
+credential=/run/credentials/enoki-probe.service/registration-attempt
+registration_drop_in=/run/systemd/system/enoki-probe.service.d/10-enoki-replacement-registration.conf
+[ -f "$identity" ] && [ ! -L "$identity" ]
+probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$identity")
+probe_id=$(printf '%s\n' "$probe_id_line" | cut -d '"' -f 2)
+[ "$probe_id" = ${shellSingleQuote(expectedProbeId)} ]
+! grep -Eq '^[[:space:]]*registration_' "$identity"
+[ ! -e "$attempt_source" ] && [ ! -L "$attempt_source" ]
+[ ! -e "$credential" ] && [ ! -L "$credential" ]
+[ ! -e "$registration_drop_in" ] && [ ! -L "$registration_drop_in" ]
+systemctl stop enoki-observation-runtime.socket enoki-observation-runtime.service
+systemctl mask --runtime enoki-observation-runtime.socket enoki-observation-runtime.service
+systemctl restart enoki-probe.service
+probe_load=$(systemctl show enoki-probe.service --property=LoadState --value)
+probe_active=$(systemctl show enoki-probe.service --property=ActiveState --value)
+probe_sub=$(systemctl show enoki-probe.service --property=SubState --value)
+probe_result=$(systemctl show enoki-probe.service --property=Result --value)
+probe_type=$(systemctl show enoki-probe.service --property=Type --value)
+runtime_service_load=$(systemctl show enoki-observation-runtime.service --property=LoadState --value)
+runtime_socket_load=$(systemctl show enoki-observation-runtime.socket --property=LoadState --value)
+[ "$probe_load" = loaded ]
+[ "$probe_active" = active ]
+[ "$probe_sub" = running ]
+[ "$probe_result" = success ]
+[ "$probe_type" = notify ]
+[ "$runtime_service_load" = masked ]
+[ "$runtime_socket_load" = masked ]
+printf '{"identity":{"probeId":"%s","registrationAttemptCredential":false,"registrationAttemptSource":false,"registrationDropIn":false,"transitionalRegistrationKeys":false},"probe":{"ActiveState":"%s","LoadState":"%s","Result":"%s","SubState":"%s","Type":"%s"},"runtime":{"serviceLoadState":"%s","socketLoadState":"%s"}}\n' \
+  "$probe_id" "$probe_active" "$probe_load" "$probe_result" "$probe_sub" "$probe_type" "$runtime_service_load" "$runtime_socket_load"
+`;
+}
+
+function restoreObservationRuntimeScript() {
+  return String.raw`# enoki-release-e2e:restore-observation-runtime
+set -eu
+systemctl unmask --runtime enoki-observation-runtime.socket enoki-observation-runtime.service
+systemctl daemon-reload
+systemctl reset-failed enoki-observation-runtime.socket enoki-observation-runtime.service
+systemctl start enoki-observation-runtime.socket
+printf 'restored\n'
 `;
 }
 
@@ -5117,6 +5308,31 @@ function assertFreshInstallScenarioParticipants(host, hub) {
   }
 }
 
+function assertCanonicalRuntimeUnavailableHostEvidence(
+  evidence,
+  expectedProbeId,
+) {
+  const identity = evidence?.identity;
+  const probe = evidence?.probe;
+  const runtime = evidence?.runtime;
+  if (
+    identity?.probeId !== expectedProbeId ||
+    identity.registrationAttemptCredential !== false ||
+    identity.registrationAttemptSource !== false ||
+    identity.registrationDropIn !== false ||
+    identity.transitionalRegistrationKeys !== false ||
+    probe?.ActiveState !== "active" ||
+    probe.LoadState !== "loaded" ||
+    probe.Result !== "success" ||
+    probe.SubState !== "running" ||
+    probe.Type !== "notify" ||
+    runtime?.serviceLoadState !== "masked" ||
+    runtime.socketLoadState !== "masked"
+  ) {
+    throw new Error("canonical Runtime-unavailable Host evidence is invalid");
+  }
+}
+
 function assertCreatedEnrollment(enrollment, expectedTarget) {
   if (
     !enrollment?.installCommand ||
@@ -6019,6 +6235,20 @@ function compactMetricsEvidence(samples) {
     sequence: sample.sequence,
     uptimeSeconds: sample.uptimeSeconds,
   }));
+}
+
+function portableMetricIdentities(samples) {
+  return samples
+    .filter(isPortableMetricSample)
+    .map((sample) => ({
+      collectedAtMs: sample.collectedAtMs,
+      sequence: sample.sequence,
+    }))
+    .sort(
+      (left, right) =>
+        left.sequence - right.sequence ||
+        left.collectedAtMs - right.collectedAtMs,
+    );
 }
 
 function metricsHistoryEvidence(samples, { retain = [] } = {}) {

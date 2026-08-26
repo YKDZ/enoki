@@ -643,7 +643,7 @@ jobs:
           --matrix trusted-tool/scripts/release-e2e-matrix.json
           --matrix-cell "$MATRIX_CELL"
           --host-adapter "$HOST_ADAPTER"
-          --hub-owner-url http://127.0.0.1:33000
+          --hub-owner-url http://127.0.0.1:33001
           --hub-public-url http://127.0.0.1:33000
           --owner-password-env ENOKI_E2E_OWNER_PASSWORD
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
