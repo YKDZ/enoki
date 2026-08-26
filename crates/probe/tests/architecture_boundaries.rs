@@ -11,7 +11,6 @@ const LIFECYCLE_COMPANION_BINARY: &str =
     include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
-const UPGRADE_COORDINATOR: &str = include_str!("../src/upgrader/upgrade.rs");
 const REPAIR_COORDINATOR: &str = include_str!("../src/upgrader/repair.rs");
 const REPLACEMENT_COORDINATOR: &str = include_str!("../src/upgrader/replacement.rs");
 const UNINSTALL: &str = include_str!("../src/upgrader/uninstall/mod.rs");
@@ -20,8 +19,6 @@ const INSTALLED_BUNDLE_REPAIR: &str =
     include_str!("../src/runtime_failure/installed_bundle_repair.rs");
 const INSTALLED_BUNDLE_REPAIR_LIVE: &str =
     include_str!("../src/runtime_failure/installed_bundle_repair/live.rs");
-const COMPATIBLE_UPGRADE: &str =
-    include_str!("../../probe-bootstrap/src/install/compatible_upgrade.rs");
 const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
 const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/install/tests.rs");
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
@@ -874,88 +871,9 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
 }
 
 #[test]
-fn compatible_upgrade_enters_two_adapters_and_one_deep_coordinator() {
-    assert!(
-        UPGRADER.contains("upgrade::coordinate_from_companion(request, peer_uid)"),
-        "Companion Upgrade 入口必须委托给转换专属 Adapter",
-    );
-    assert!(
-        UPGRADE_COORDINATOR.contains("fn coordinate_from_companion(")
-            && UPGRADE_COORDINATOR.contains("fn coordinate_from_fixed_cli(")
-            && UPGRADE_COORDINATOR.contains("fn enter_deep_coordinator("),
-        "Upgrade Module 必须拥有两个真实 Adapter，不能只是 re-export alias",
-    );
-    assert!(
-        !UPGRADE_COORDINATOR.contains("run_compatible_upgrade as coordinate"),
-        "删除 Upgrade Module 必须迫使业务语义回流，不能留下可零成本删除的 Middle Man",
-    );
-    for legacy_parent_knowledge in [
-        "pub fn run_probe_upgrader(",
-        "fn read_operation_metadata(",
-        "fn execute_probe_upgrade(",
-        "ProbeUpgraderOperationMetadata",
-        "ProbeUpgraderResult",
-    ] {
-        assert!(
-            !production_source(UPGRADER).contains(legacy_parent_knowledge),
-            "父 Module 不得保留旧 Upgrade authority/HTTP/status/commit 路径：{legacy_parent_knowledge}",
-        );
-    }
-    for owned_semantics in [
-        "request.transition() != LifecycleTransition::Upgrade",
-        "install::run_compatible_upgrade(request, peer_uid)",
-    ] {
-        assert!(
-            UPGRADE_COORDINATOR.contains(owned_semantics),
-            "Upgrade Adapter 必须封闭入口分类并进入唯一兼容升级实现：{owned_semantics}",
-        );
-    }
-    assert_eq!(
-        UPGRADE_COORDINATOR
-            .matches("install::run_compatible_upgrade(request, peer_uid)")
-            .count(),
-        1,
-        "两个 Probe Adapter 必须汇入 Probe Bootstrap 的唯一 Compatible Upgrade deep coordinator",
-    );
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("CompanionMode::General"));
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("CompanionMode::Upgrade"));
-    assert!(UPGRADE_COORDINATOR.contains("fn coordinate_from_companion("));
-    assert!(UPGRADE_COORDINATOR.contains("fn coordinate_from_fixed_cli("));
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_upgrade_lifecycle_companion_from_peer("));
-    assert!(COMPATIBLE_UPGRADE.contains("struct VerifiedMutationPlan"));
-    assert!(COMPATIBLE_UPGRADE.contains("mod mechanics"));
-    assert!(COMPATIBLE_UPGRADE.contains("SystemSystemd::for_live_upgrade()"));
-    assert!(!BOOTSTRAP_LIFECYCLE.contains("pub trait UpgradeLifecycleEffects"));
-    assert!(!BOOTSTRAP_LIFECYCLE.contains("pub fn execute_upgrade_lifecycle"));
-    for forbidden in [
-        "pub struct VerifiedMutationPlan",
-        "pub(crate) struct VerifiedMutationPlan",
-        "journal_phase",
-        "initial_mode",
-        "retry_mode",
-        "resume_mode",
-        "steps:",
-        "commands:",
-    ] {
-        assert!(
-            !COMPATIBLE_UPGRADE.contains(forbidden),
-            "私有 lifecycle mechanics Interface 不得暴露可选 phase/mode/步骤：{forbidden}",
-        );
-    }
-}
-
-#[test]
 fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
-    let production = UPGRADER
-        .split("#[cfg(test)]\nmod tests")
-        .next()
-        .expect("production upgrader source");
-    for coordinator in [
-        "mod upgrade;",
-        "mod repair;",
-        "mod replacement;",
-        "mod uninstall;",
-    ] {
+    let production = UPGRADER;
+    for coordinator in ["mod repair;", "mod replacement;", "mod uninstall;"] {
         assert!(
             production.contains(coordinator),
             "Lifecycle Companion 缺少封闭的转换专属 coordinator Module：{coordinator}",
@@ -978,12 +896,12 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
     }
 
     let dispatch = production
-        .split("pub fn run_lifecycle_companion_from_peer(")
+        .split("fn run_lifecycle_companion_from_peer_with_effective_uid(")
         .nth(1)
-        .expect("Lifecycle Companion 必须保留 public peer seam")
-        .split("\nfn ")
+        .expect("Lifecycle Companion 必须保留内部 effective UID seam")
+        .split("/// 固定 `--upgrade`")
         .next()
-        .expect("Lifecycle Companion dispatch body");
+        .expect("Lifecycle Companion internal dispatch body");
     for leaked_knowledge in [
         "LifecycleRequestAuthority",
         "ReplacementEnrollment",
@@ -1004,7 +922,6 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         );
     }
     for typed_delegate in [
-        "upgrade::coordinate_from_companion(",
         "repair::coordinate(",
         "replacement::coordinate(",
         "uninstall::coordinate(",

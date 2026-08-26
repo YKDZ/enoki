@@ -1,7 +1,6 @@
 mod repair;
 mod replacement;
 mod uninstall;
-mod upgrade;
 use uninstall::resume_lifecycle_companion_at;
 
 use std::{
@@ -1130,11 +1129,45 @@ pub fn run_lifecycle_companion_from_peer(
     transport: &mut impl ProbeUpgraderValidationTransport,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
-    if unsafe { libc::geteuid() } != 0 {
+    run_lifecycle_companion_from_peer_with_effective_uid(
+        request,
+        transport,
+        peer_uid,
+        EffectiveUid::process(),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct EffectiveUid(u32);
+
+impl EffectiveUid {
+    fn process() -> Self {
+        Self(unsafe { libc::geteuid() })
+    }
+
+    #[cfg(test)]
+    const fn test(uid: u32) -> Self {
+        Self(uid)
+    }
+
+    const fn is_root(self) -> bool {
+        self.0 == 0
+    }
+}
+
+fn run_lifecycle_companion_from_peer_with_effective_uid(
+    request: &LifecycleRequest,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    peer_uid: Option<u32>,
+    effective_uid: EffectiveUid,
+) -> LifecycleResponse {
+    if !effective_uid.is_root() {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
     match request.transition() {
-        LifecycleTransition::Upgrade => upgrade::coordinate_from_companion(request, peer_uid),
+        LifecycleTransition::Upgrade => {
+            enoki_probe_bootstrap::install::run_compatible_upgrade(request, peer_uid)
+        }
         LifecycleTransition::Repair => repair::coordinate(request, peer_uid),
         LifecycleTransition::ReplacementMigration => replacement::coordinate(request),
         LifecycleTransition::Uninstall => uninstall::coordinate(request, transport),
@@ -1148,10 +1181,25 @@ pub fn run_upgrade_lifecycle_companion_from_peer(
     request: &LifecycleRequest,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
-    if unsafe { libc::geteuid() } != 0 {
+    run_upgrade_lifecycle_companion_from_peer_with_effective_uid(
+        request,
+        peer_uid,
+        EffectiveUid::process(),
+    )
+}
+
+fn run_upgrade_lifecycle_companion_from_peer_with_effective_uid(
+    request: &LifecycleRequest,
+    peer_uid: Option<u32>,
+    effective_uid: EffectiveUid,
+) -> LifecycleResponse {
+    if !effective_uid.is_root() {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
-    upgrade::coordinate_from_fixed_cli(request, peer_uid)
+    if request.transition() != LifecycleTransition::Upgrade {
+        return LifecycleResponse::not_enabled();
+    }
+    enoki_probe_bootstrap::install::run_compatible_upgrade(request, peer_uid)
 }
 
 fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
@@ -2333,3 +2381,8 @@ fn toml_string(value: &str) -> String {
 
     format!("\"{escaped}\"")
 }
+
+#[cfg(test)]
+mod install_metadata_tests;
+#[cfg(test)]
+mod lifecycle_entry_tests;
