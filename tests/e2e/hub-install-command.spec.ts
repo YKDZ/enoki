@@ -49,7 +49,11 @@ type BrowserScrollCall = {
   block?: ScrollLogicalPosition;
 };
 
-test("owner can generate a two-role probe activation command", async ({
+const isCandidateImageGate = Boolean(
+  process.env.ENOKI_RELEASE_UI_CANDIDATE_VERSION,
+);
+
+test("owner can generate the configured probe activation command", async ({
   context,
   page,
 }) => {
@@ -66,13 +70,22 @@ test("owner can generate a two-role probe activation command", async ({
 
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
-  await expect(command).toHaveValue(
-    /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
-  );
-  await expect(command).toHaveValue(
-    /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38201'/,
-  );
-  await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  const enrollmentToken = isCandidateImageGate
+    ? /ENOKI_ENROLLMENT_TOKEN=/
+    : /enk_enroll_[A-Za-z0-9_-]+/;
+  if (isCandidateImageGate) {
+    await expect(command).toHaveValue(
+      /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
+    );
+    await expect(command).toHaveValue(
+      /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38201'/,
+    );
+  } else {
+    await expect(command).toHaveValue(
+      /^printf '%s\\n' 'enk_enroll_[A-Za-z0-9_-]+' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin 'http:\/\/127\.0\.0\.1:38201'$/,
+    );
+  }
+  await expect(command).toHaveValue(enrollmentToken);
   await expect(command).not.toHaveValue(/sudo env/);
   await expect(command).not.toHaveValue(/curl/);
   await expect(command).not.toHaveValue(/github\.com/);
@@ -84,11 +97,11 @@ test("owner can generate a two-role probe activation command", async ({
     (await command.inputValue()).length,
   );
   await command.press("x");
-  await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  await expect(command).toHaveValue(enrollmentToken);
 
   await seedSystemClipboard(context, "must-not-paste");
   await command.press("Control+V");
-  await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  await expect(command).toHaveValue(enrollmentToken);
 });
 
 test("owner can select the command with Cmd+A on a macOS browser runner", async ({
