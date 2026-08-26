@@ -117,47 +117,95 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
   });
 
   test("手动重装 disposition 进入既有一次性安装流程", async ({ page }) => {
-    let enrollmentTarget: unknown = null;
+    let ordinaryEnrollmentPostCount = 0;
     await page.route("**/api/web/enrollments", async (route) => {
-      enrollmentTarget = route.request().postDataJSON();
-      await route.fulfill({
-        contentType: "application/json",
-        json: {
-          createdAtMs: 1_725_000_000_000,
-          enrollmentId: "enr_manual_reinstall",
-          enrollmentToken: "enrollment-token",
-          expiresAtMs: 1_725_000_900_000,
-          expiredAtMs: null,
-          hostId: null,
-          hubUrl: "http://127.0.0.1:38200",
-          installCommand: "sudo enoki-probe-bootstrap manual-reinstall",
-          readyAtMs: null,
-          rejectedAtMs: null,
-          rejection: null,
-          status: "pending",
-          target: { hostId, kind: "existing_host" },
-          verificationDeadlineAtMs: null,
-        },
-        status: 201,
-      });
+      if (route.request().method() === "POST") {
+        ordinaryEnrollmentPostCount += 1;
+      }
+      await route.abort("blockedbyclient");
     });
+    let manualReinstallRequest: {
+      method: string;
+      pathname: string;
+      postData: string | null;
+    } | null = null;
+    let manualReinstallRequestCount = 0;
+    await page.route(
+      `**/api/web/enrollments/manual-reinstall/${hostId}`,
+      async (route) => {
+        const request = route.request();
+        manualReinstallRequestCount += 1;
+        manualReinstallRequest = {
+          method: request.method(),
+          pathname: new URL(request.url()).pathname,
+          postData: request.postData(),
+        };
+        await route.fulfill({
+          contentType: "application/json",
+          json: {
+            bootstrapRecipe: {
+              bundleVersion: targetProbeVersion,
+              distribution: "enoki",
+              kind: "enoki-probe-bootstrap-recipe-record",
+              recipe: {
+                file: "enoki-probe-bootstrap.py",
+                sha256: "a".repeat(64),
+                size: 123,
+                version: "v1",
+              },
+              rootFingerprint: "b".repeat(64),
+              schemaVersion: 1,
+              targets: ["x86_64-unknown-linux-musl"],
+            },
+            createdAtMs: 1_725_000_000_000,
+            enrollmentId: "enr_manual_reinstall",
+            enrollmentToken: "enrollment-token",
+            expiresAtMs: 1_725_000_900_000,
+            expiredAtMs: null,
+            hostId: null,
+            hubUrl: "http://127.0.0.1:38200",
+            installCommand: "sudo enoki-probe-bootstrap manual-reinstall",
+            readyAtMs: null,
+            rejectedAtMs: null,
+            rejection: null,
+            status: "pending",
+            target: { hostId, kind: "manual_reinstall" },
+            verificationDeadlineAtMs: null,
+          },
+          status: 201,
+        });
+      },
+    );
     await openHostDetail(
       page,
       probeUpgrade("failed", {
         recoveryDisposition: "manual_reinstall_required",
       }),
-      { hostStatus: "offline" },
+      {
+        hostStatus: "offline",
+        manualReinstall: {
+          sourceProbeVersion: currentProbeVersion,
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion,
+        },
+      },
     );
 
     const status = page.getByTestId("probe-upgrade-status");
     await expect(status).toContainText("需要手动重新安装探针");
+    expect(manualReinstallRequestCount).toBe(0);
+    expect(ordinaryEnrollmentPostCount).toBe(0);
     await page.getByRole("button", { name: "生成手动重装命令" }).click();
     await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
       "sudo enoki-probe-bootstrap manual-reinstall",
     );
-    expect(enrollmentTarget).toEqual({
-      target: { hostId, kind: "existing_host" },
+    expect(manualReinstallRequest).toEqual({
+      method: "POST",
+      pathname: `/api/web/enrollments/manual-reinstall/${hostId}`,
+      postData: null,
     });
+    expect(manualReinstallRequestCount).toBe(1);
+    expect(ordinaryEnrollmentPostCount).toBe(0);
     await expect(status).not.toContainText("探针修复");
   });
 
@@ -464,12 +512,19 @@ async function openHostDetail(
   probeUpgradeStatus: ProbeUpgradeStatus | null,
   options: {
     hostStatus?: HostDetail["status"];
+    manualReinstall?: NonNullable<
+      HostDetail["probeUpgradeEligibility"]
+    >["manualReinstall"];
     onHostRequest?: (route: Route) => Promise<boolean>;
     onMetricsRequest?: (route: Route) => Promise<boolean>;
     onProbeOperationRequest?: (route: Route) => Promise<boolean>;
   } = {},
 ) {
-  const host = hostDetail(probeUpgradeStatus, options.hostStatus);
+  const host = hostDetail(
+    probeUpgradeStatus,
+    options.hostStatus,
+    options.manualReinstall,
+  );
   await page.route("**/api/web/hosts", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -555,6 +610,9 @@ function probeUpgrade(
 function hostDetail(
   probeUpgradeStatus: ProbeUpgradeStatus | null,
   status: HostDetail["status"] = "online",
+  manualReinstall?: NonNullable<
+    HostDetail["probeUpgradeEligibility"]
+  >["manualReinstall"],
 ): HostDetail {
   return {
     clockSkew: { detected: false, lastDeltaMs: null },
@@ -607,6 +665,7 @@ function hostDetail(
       currentProbeVersion,
       isUpgradeable:
         probeUpgradeStatus === null || probeUpgradeStatus.state === "failed",
+      ...(manualReinstall ? { manualReinstall } : {}),
       nonUpgradeableReason:
         probeUpgradeStatus === null || probeUpgradeStatus.state === "failed"
           ? null
