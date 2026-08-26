@@ -202,10 +202,26 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
         "cleanup extent 不得成为 caller-selected interface",
     );
     assert!(UPGRADER.contains("fn cleanup_committed_replacement_install("));
-    assert!(UPGRADER.contains("ReplacementUninstallCleanup"));
+    assert!(UPGRADER.contains("fn execute_committed_replacement_cleanup("));
     assert!(!UPGRADER.contains("cleanup_trusted_probe_install_for_reenrollment"));
     assert!(UPGRADER.contains("enum HubUninstallResult"));
     assert!(UPGRADER.contains("struct LocalUninstallComplete"));
+
+    for retired_bypass in [
+        "SealedUninstallCleanup",
+        "PREPARE_ONLY",
+        "PRESERVE_COMPANION_BINARY",
+        "run_probe_uninstaller_with_systemd_runner_and_install_metadata",
+        "read_uninstall_operation_metadata",
+        "ProbeUninstallerOperationMetadata",
+        "failed_probe_uninstaller_result",
+        "internal_probe_uninstaller",
+    ] {
+        assert!(
+            !UPGRADER.contains(retired_bypass),
+            "Uninstall 不得保留 mode marker 或平行业务入口：{retired_bypass}",
+        );
+    }
 
     for (coordinator, local) in [
         ("fn coordinate_hub_uninstall(", false),
@@ -219,6 +235,8 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
             .next()
             .expect("Uninstall coordinator 必须有封闭结果");
         for forbidden in [
+            "Authority",
+            "UninstallMechanics",
             "Path",
             "unit",
             "command",
@@ -233,6 +251,14 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
                 "生产 Uninstall coordinator interface 不得暴露 {forbidden}",
             );
         }
+        assert!(
+            interface.contains(if local {
+                "LocalUninstallIntent"
+            } else {
+                "HubUninstallIntent"
+            }),
+            "coordinator 必须消费不可拆分的 classified intent",
+        );
         if local {
             assert!(
                 !interface.contains("Transport") && !interface.contains("transport"),
@@ -240,6 +266,64 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
             );
         }
     }
+}
+
+#[test]
+fn uninstall_has_no_parallel_stdin_business_or_failed_status_path() {
+    for retired_bypass in [
+        "run_probe_uninstaller_with_systemd_runner_and_install_metadata",
+        "read_uninstall_operation_metadata",
+        "ProbeUninstallerOperationMetadata",
+        "failed_probe_uninstaller_result",
+    ] {
+        assert!(
+            !UPGRADER.contains(retired_bypass),
+            "Uninstall 业务测试与生产必须共用 classified adapter：{retired_bypass}",
+        );
+    }
+    let mechanics_oracle = UPGRADER
+        .split("fn execute_probe_uninstall(")
+        .nth(1)
+        .expect("legacy schema oracle must stay narrow")
+        .split("fn execute_probe_uninstall_with_install_metadata_path(")
+        .next()
+        .expect("legacy schema oracle body");
+    for business_concern in [
+        "stdin",
+        "token",
+        "operation_id",
+        "post_token_validation",
+        "post_operation_status",
+        "render_operation_status_body",
+    ] {
+        assert!(
+            !mechanics_oracle.contains(business_concern),
+            "legacy schema oracle 不得恢复业务编排：{business_concern}",
+        );
+    }
+}
+
+#[test]
+fn replacement_commit_enters_the_same_dedicated_cleanup_seam_used_by_production() {
+    let production = UPGRADER
+        .split("fn run_probe_replacement_migration(")
+        .nth(1)
+        .expect("Replacement production coordinator")
+        .split("struct InstalledProbeBinaryFacts")
+        .next()
+        .expect("Replacement production body");
+    assert!(production.contains("commit_replacement_and_cleanup_install_with_systemd("));
+    assert!(!production.contains("commit_and_cleanup_replacement("));
+
+    let dedicated = UPGRADER
+        .split("fn commit_replacement_and_cleanup_install_with_systemd")
+        .nth(1)
+        .expect("dedicated committed Replacement cleanup coordinator")
+        .split("fn cleanup_committed_replacement_install(")
+        .next()
+        .expect("dedicated coordinator body");
+    assert!(dedicated.contains("commit_and_cleanup_replacement("));
+    assert!(dedicated.contains("cleanup_committed_replacement_install("));
 }
 
 #[test]
