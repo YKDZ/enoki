@@ -182,6 +182,67 @@ fn legacy_fresh_installer_and_shallow_lifecycle_surfaces_are_absent() {
 }
 
 #[test]
+fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics() {
+    for retired in [
+        "UninstallCommitPolicy",
+        "UninstallLifecycleEffects",
+        "execute_uninstall_lifecycle",
+    ] {
+        assert!(
+            !BOOTSTRAP_LIFECYCLE.contains(retired),
+            "浅 uninstall lifecycle surface 必须删除：{retired}",
+        );
+        assert!(
+            !UPGRADER.contains(retired),
+            "Probe Uninstall 不得重建浅 runner surface：{retired}",
+        );
+    }
+    assert!(
+        !UPGRADER.contains("UninstallCleanupExtent"),
+        "cleanup extent 不得成为 caller-selected interface",
+    );
+    assert!(UPGRADER.contains("fn cleanup_committed_replacement_install("));
+    assert!(UPGRADER.contains("ReplacementUninstallCleanup"));
+    assert!(!UPGRADER.contains("cleanup_trusted_probe_install_for_reenrollment"));
+    assert!(UPGRADER.contains("enum HubUninstallResult"));
+    assert!(UPGRADER.contains("struct LocalUninstallComplete"));
+
+    for (coordinator, local) in [
+        ("fn coordinate_hub_uninstall(", false),
+        ("fn coordinate_local_uninstall(", true),
+    ] {
+        let interface = UPGRADER
+            .split(coordinator)
+            .nth(1)
+            .unwrap_or_else(|| panic!("缺少封闭 coordinator：{coordinator}"))
+            .split("-> Result")
+            .next()
+            .expect("Uninstall coordinator 必须有封闭结果");
+        for forbidden in [
+            "Path",
+            "unit",
+            "command",
+            "permission",
+            "step",
+            "phase",
+            "extent",
+            "bool",
+        ] {
+            assert!(
+                !interface.contains(forbidden),
+                "生产 Uninstall coordinator interface 不得暴露 {forbidden}",
+            );
+        }
+        if local {
+            assert!(
+                !interface.contains("Transport") && !interface.contains("transport"),
+                "Local Uninstall coordinator 不得取得 Hub transport",
+            );
+        }
+    }
+}
+
+#[test]
 fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
     let bootstrap = production_source(BOOTSTRAP_INSTALL);
     for forbidden in [

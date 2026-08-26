@@ -940,12 +940,6 @@ impl LifecycleRejection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LifecycleCompletion {
-    Complete,
-    RecoveryPending,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(
     not(all(feature = "acquirer", feature = "activator")),
     allow(dead_code)
@@ -995,45 +989,6 @@ pub(crate) fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
             UpgradeActivationFailure::Preactivation(error)
             | UpgradeActivationFailure::RecoveryPersistence(error),
         ) => Err(error),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UninstallCommitPolicy {
-    Local,
-    HubTerminal,
-}
-
-pub trait UninstallLifecycleEffects {
-    type Error;
-
-    fn verify(&mut self) -> Result<(), Self::Error>;
-    fn clean(&mut self) -> Result<(), Self::Error>;
-    fn report(&mut self) -> Result<(), Self::Error>;
-    fn commit(&mut self) -> Result<(), Self::Error>;
-    fn finalize(&mut self) -> Result<(), Self::Error>;
-}
-
-pub fn execute_uninstall_lifecycle<E: UninstallLifecycleEffects>(
-    effects: &mut E,
-    commit_policy: UninstallCommitPolicy,
-) -> Result<LifecycleCompletion, E::Error> {
-    effects.verify()?;
-    effects.clean()?;
-    effects.report()?;
-    if let Err(error) = effects.commit() {
-        return if commit_policy == UninstallCommitPolicy::HubTerminal {
-            Ok(LifecycleCompletion::RecoveryPending)
-        } else {
-            Err(error)
-        };
-    }
-    match effects.finalize() {
-        Ok(()) => Ok(LifecycleCompletion::Complete),
-        Err(_) if commit_policy == UninstallCommitPolicy::HubTerminal => {
-            Ok(LifecycleCompletion::RecoveryPending)
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -1283,77 +1238,6 @@ mod tests {
         assert_eq!(
             after.calls,
             ["verify-and-prepare", "activate-complete-bundle"]
-        );
-    }
-
-    #[test]
-    fn uninstall_runner_owns_effect_order_and_terminal_commit_policy() {
-        struct Effects {
-            calls: Vec<&'static str>,
-            fail: Option<&'static str>,
-        }
-        impl UninstallLifecycleEffects for Effects {
-            type Error = &'static str;
-            fn verify(&mut self) -> Result<(), Self::Error> {
-                self.call("verify")
-            }
-            fn clean(&mut self) -> Result<(), Self::Error> {
-                self.call("clean")
-            }
-            fn report(&mut self) -> Result<(), Self::Error> {
-                self.call("report")
-            }
-            fn commit(&mut self) -> Result<(), Self::Error> {
-                self.call("commit")
-            }
-            fn finalize(&mut self) -> Result<(), Self::Error> {
-                self.call("finalize")
-            }
-        }
-        impl Effects {
-            fn call(&mut self, phase: &'static str) -> Result<(), &'static str> {
-                self.calls.push(phase);
-                (self.fail != Some(phase))
-                    .then_some(())
-                    .ok_or("stage-failed")
-            }
-        }
-
-        for failed in ["verify", "clean", "report", "commit"] {
-            let mut effects = Effects {
-                calls: Vec::new(),
-                fail: Some(failed),
-            };
-            assert_eq!(
-                execute_uninstall_lifecycle(&mut effects, UninstallCommitPolicy::Local),
-                Err("stage-failed")
-            );
-            assert_eq!(effects.calls.last(), Some(&failed));
-        }
-        let mut remote = Effects {
-            calls: Vec::new(),
-            fail: Some("finalize"),
-        };
-        assert_eq!(
-            execute_uninstall_lifecycle(&mut remote, UninstallCommitPolicy::HubTerminal),
-            Ok(LifecycleCompletion::RecoveryPending)
-        );
-        let mut remote_commit = Effects {
-            calls: Vec::new(),
-            fail: Some("commit"),
-        };
-        assert_eq!(
-            execute_uninstall_lifecycle(&mut remote_commit, UninstallCommitPolicy::HubTerminal),
-            Ok(LifecycleCompletion::RecoveryPending)
-        );
-        assert_eq!(remote_commit.calls.last(), Some(&"commit"));
-        let mut local = Effects {
-            calls: Vec::new(),
-            fail: Some("finalize"),
-        };
-        assert_eq!(
-            execute_uninstall_lifecycle(&mut local, UninstallCommitPolicy::Local),
-            Err("stage-failed")
         );
     }
 }

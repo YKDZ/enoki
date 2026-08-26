@@ -21,9 +21,8 @@ use enoki_probe_bootstrap::{
         resume_probe_repair_intent, run_compatible_upgrade,
     },
     lifecycle::{
-        LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
-        LifecycleTransition, RepairAuthorityV1, UninstallCommitPolicy, UninstallLifecycleEffects,
-        execute_uninstall_lifecycle,
+        LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, LifecycleTransition,
+        RepairAuthorityV1,
     },
     replacement::{
         FileReplacementCommitStore, ReplacementCommitError, ReplacementIntent,
@@ -2141,7 +2140,7 @@ pub fn run_lifecycle_companion_from_peer(
         bootstrap_config_path: metadata.identity_path.clone(),
     };
     let mut systemd = SystemProbeUpgraderSystemdRunner;
-    lifecycle_response_from_resume_decision(execute_lifecycle_uninstall(
+    lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
         request,
         &input,
         &metadata,
@@ -2327,7 +2326,7 @@ fn run_probe_replacement_migration(
         0,
     );
     let mut cleanup = || {
-        cleanup_trusted_probe_install_for_reenrollment(
+        cleanup_committed_replacement_install(
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             production_root,
         )
@@ -2531,14 +2530,63 @@ fn replacement_authority_matches(
     }
 }
 
-fn execute_lifecycle_uninstall(
-    request: &LifecycleRequest,
-    input: &ProbeUninstallerRunInput,
-    install_metadata: &TrustedProbeInstallMetadata,
-    install_metadata_path: &Path,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<ResumeDecision, ProbeUpgraderRunError> {
+#[derive(Clone, Copy)]
+struct HubUninstallAuthority<'a> {
+    operation_id: &'a str,
+    operation_token: &'a str,
+}
+
+impl<'a> HubUninstallAuthority<'a> {
+    fn classify(request: &'a LifecycleRequest) -> Result<Self, ProbeUpgraderRunError> {
+        let LifecycleRequestAuthority::HubOperation {
+            operation_id,
+            operation_token,
+            ..
+        } = request.authority()
+        else {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "uninstall authority is not a Hub operation",
+            ));
+        };
+        Ok(Self {
+            operation_id,
+            operation_token,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LocalUninstallAuthority;
+
+impl LocalUninstallAuthority {
+    fn classify(request: &LifecycleRequest) -> Result<Self, ProbeUpgraderRunError> {
+        if !matches!(
+            request.authority(),
+            LifecycleRequestAuthority::LocalRoot { .. }
+        ) {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "uninstall authority is not local root",
+            ));
+        }
+        Ok(Self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HubUninstallResult {
+    Complete,
+    RecoveryPending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LocalUninstallComplete;
+
+fn prepare_uninstall_mechanics<'a>(
+    request: &'a LifecycleRequest,
+    input: &'a ProbeUninstallerRunInput,
+    install_metadata: &'a TrustedProbeInstallMetadata,
+    install_metadata_path: &'a Path,
+) -> Result<UninstallMechanics<'a>, ProbeUpgraderRunError> {
     let capsule_path = uninstall_capsule_path(install_metadata_path)?;
     let authority_sha256 = lifecycle_authority_sha256(request)?;
     let capsule = read_uninstall_capsule(&capsule_path)?;
@@ -2556,17 +2604,6 @@ fn execute_lifecycle_uninstall(
         install_metadata_path,
         capsule.is_some(),
     )?;
-    let hub_operation = match request.authority() {
-        LifecycleRequestAuthority::HubOperation {
-            operation_id,
-            operation_token,
-            ..
-        } => Some((operation_id.as_str(), operation_token.as_str())),
-        LifecycleRequestAuthority::HubUpgrade { .. }
-        | LifecycleRequestAuthority::LocalRoot { .. }
-        | LifecycleRequestAuthority::LocalRepair { .. } => None,
-        LifecycleRequestAuthority::ReplacementEnrollment { .. } => None,
-    };
     let terminal_was_acknowledged = matches!(
         capsule.as_ref().map(|capsule| capsule.phase),
         Some(UninstallCapsulePhase::TerminalAcknowledged)
@@ -2579,57 +2616,26 @@ fn execute_lifecycle_uninstall(
         validate_bootstrap_config_matches_trusted_install_metadata(&config, install_metadata)?;
         Some(config)
     };
-    let commit_policy = if hub_operation.is_some() {
-        UninstallCommitPolicy::HubTerminal
-    } else {
-        UninstallCommitPolicy::Local
-    };
-    let mut effects = ProbeUninstallLifecycleEffects {
+    Ok(UninstallMechanics {
         request,
         plan,
         capsule_path,
         capsule,
         bootstrap_config,
         terminal_is_acknowledged: terminal_was_acknowledged,
-        transport,
-        systemd,
-    };
-    execute_uninstall_lifecycle(&mut effects, commit_policy).map(|completion| match completion {
-        LifecycleCompletion::Complete => ResumeDecision::Completed,
-        LifecycleCompletion::RecoveryPending => ResumeDecision::RecoveryPending,
     })
 }
 
-struct ProbeUninstallLifecycleEffects<'a, T, S> {
+struct UninstallMechanics<'a> {
     request: &'a LifecycleRequest,
     plan: ProbeUninstallCleanupPlan<'a>,
     capsule_path: PathBuf,
     capsule: Option<UninstallRecoveryCapsule>,
     bootstrap_config: Option<ProbeUpgraderBootstrapConfig>,
     terminal_is_acknowledged: bool,
-    transport: &'a mut T,
-    systemd: &'a mut S,
 }
 
-impl<T, S> ProbeUninstallLifecycleEffects<'_, T, S>
-where
-    T: ProbeUpgraderValidationTransport,
-    S: ProbeUpgraderSystemdRunner,
-{
-    fn hub_operation(&self) -> Option<(&str, &str)> {
-        match self.request.authority() {
-            LifecycleRequestAuthority::HubOperation {
-                operation_id,
-                operation_token,
-                ..
-            } => Some((operation_id, operation_token)),
-            LifecycleRequestAuthority::HubUpgrade { .. }
-            | LifecycleRequestAuthority::LocalRoot { .. }
-            | LifecycleRequestAuthority::LocalRepair { .. } => None,
-            LifecycleRequestAuthority::ReplacementEnrollment { .. } => None,
-        }
-    }
-
+impl UninstallMechanics<'_> {
     fn request_auth_material(&self) -> Result<(String, String, i64), ProbeUpgraderRunError> {
         let auth =
             probe_request_auth_from_bootstrap_config(self.bootstrap_config.as_ref().ok_or(
@@ -2643,22 +2649,16 @@ where
             auth.server_time_offset_ms,
         ))
     }
-}
 
-impl<T, S> UninstallLifecycleEffects for ProbeUninstallLifecycleEffects<'_, T, S>
-where
-    T: ProbeUpgraderValidationTransport,
-    S: ProbeUpgraderSystemdRunner,
-{
-    type Error = ProbeUpgraderRunError;
-
-    fn verify(&mut self) -> Result<(), Self::Error> {
-        if self.capsule.is_none()
-            && let Some((operation_id, operation_token)) = self.hub_operation()
-        {
+    fn verify_hub_authority(
+        &mut self,
+        authority: HubUninstallAuthority<'_>,
+        transport: &mut impl ProbeUpgraderValidationTransport,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        if self.capsule.is_none() {
             let token_body = format!(
                 "{{\"token\":\"{}\"}}",
-                json_string_fragment(operation_token)
+                json_string_fragment(authority.operation_token)
             );
             let (probe_id, probe_private_key_pem, server_time_offset_ms) =
                 self.request_auth_material()?;
@@ -2667,12 +2667,19 @@ where
                 probe_private_key_pem: &probe_private_key_pem,
                 server_time_offset_ms,
             };
-            self.transport.post_token_validation(
-                &operation_token_validation_url(&self.plan.install_metadata.hub_url, operation_id)?,
+            transport.post_token_validation(
+                &operation_token_validation_url(
+                    &self.plan.install_metadata.hub_url,
+                    authority.operation_id,
+                )?,
                 &auth,
                 &token_body,
             )?;
         }
+        self.persist_verified()
+    }
+
+    fn persist_verified(&mut self) -> Result<(), ProbeUpgraderRunError> {
         if self.capsule.is_none() {
             persist_uninstall_capsule(
                 &self.capsule_path,
@@ -2685,13 +2692,12 @@ where
         Ok(())
     }
 
-    fn clean(&mut self) -> Result<(), Self::Error> {
+    fn prepare(
+        &mut self,
+        systemd: &mut impl ProbeUpgraderSystemdRunner,
+    ) -> Result<(), ProbeUpgraderRunError> {
         if !self.terminal_is_acknowledged {
-            execute_probe_uninstall_cleanup(
-                &self.plan,
-                self.systemd,
-                UninstallCleanupExtent::Prepare,
-            )?;
+            execute_probe_uninstall_cleanup(&self.plan, systemd, PrepareUninstallCleanup)?;
             persist_uninstall_capsule(
                 &self.capsule_path,
                 self.request,
@@ -2703,11 +2709,14 @@ where
         Ok(())
     }
 
-    fn report(&mut self) -> Result<(), Self::Error> {
-        if !self.terminal_is_acknowledged
-            && let Some((operation_id, operation_token)) = self.hub_operation()
-        {
-            let body = render_operation_status_body(operation_token, "succeeded", None, None);
+    fn report_hub_terminal(
+        &mut self,
+        authority: HubUninstallAuthority<'_>,
+        transport: &mut impl ProbeUpgraderValidationTransport,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        if !self.terminal_is_acknowledged {
+            let body =
+                render_operation_status_body(authority.operation_token, "succeeded", None, None);
             let (probe_id, probe_private_key_pem, server_time_offset_ms) =
                 self.request_auth_material()?;
             let auth = ProbeRequestAuth {
@@ -2715,8 +2724,8 @@ where
                 probe_private_key_pem: &probe_private_key_pem,
                 server_time_offset_ms,
             };
-            self.transport.post_operation_status(
-                &operation_status_url(&self.plan.install_metadata.hub_url, operation_id)?,
+            transport.post_operation_status(
+                &operation_status_url(&self.plan.install_metadata.hub_url, authority.operation_id)?,
                 &auth,
                 &body,
             )?;
@@ -2724,7 +2733,7 @@ where
         Ok(())
     }
 
-    fn commit(&mut self) -> Result<(), Self::Error> {
+    fn acknowledge_terminal(&mut self) -> Result<(), ProbeUpgraderRunError> {
         persist_uninstall_capsule(
             &self.capsule_path,
             self.request,
@@ -2735,7 +2744,10 @@ where
         Ok(())
     }
 
-    fn finalize(&mut self) -> Result<(), Self::Error> {
+    fn finalize(
+        &mut self,
+        systemd: &mut impl ProbeUpgraderSystemdRunner,
+    ) -> Result<(), ProbeUpgraderRunError> {
         let companion_binary = self
             .plan
             .install_metadata
@@ -2744,13 +2756,79 @@ where
             .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "schema v4 metadata is missing lifecycle companion",
             ))?;
-        execute_probe_uninstall_cleanup(
-            &self.plan,
-            self.systemd,
-            UninstallCleanupExtent::RecoverableFinalize,
-        )?;
+        execute_probe_uninstall_cleanup(&self.plan, systemd, RecoverableUninstallCleanup)?;
         let _ = companion_binary;
         commit_lifecycle_capsule_with(&self.capsule_path, remove_path_if_exists)
+    }
+}
+
+fn coordinate_hub_uninstall(
+    authority: HubUninstallAuthority<'_>,
+    mut mechanics: UninstallMechanics<'_>,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<HubUninstallResult, ProbeUpgraderRunError> {
+    mechanics.verify_hub_authority(authority, transport)?;
+    mechanics.prepare(systemd)?;
+    mechanics.report_hub_terminal(authority, transport)?;
+    if mechanics.acknowledge_terminal().is_err() || mechanics.finalize(systemd).is_err() {
+        return Ok(HubUninstallResult::RecoveryPending);
+    }
+    Ok(HubUninstallResult::Complete)
+}
+
+fn coordinate_local_uninstall(
+    _authority: LocalUninstallAuthority,
+    mut mechanics: UninstallMechanics<'_>,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<LocalUninstallComplete, ProbeUpgraderRunError> {
+    mechanics.persist_verified()?;
+    mechanics.prepare(systemd)?;
+    mechanics.acknowledge_terminal()?;
+    mechanics.finalize(systemd)?;
+    Ok(LocalUninstallComplete)
+}
+
+fn adapt_uninstall_wire_request(
+    request: &LifecycleRequest,
+    input: &ProbeUninstallerRunInput,
+    install_metadata: &TrustedProbeInstallMetadata,
+    install_metadata_path: &Path,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<ResumeDecision, ProbeUpgraderRunError> {
+    match request.authority() {
+        LifecycleRequestAuthority::HubOperation { .. } => {
+            let authority = HubUninstallAuthority::classify(request)?;
+            let mechanics = prepare_uninstall_mechanics(
+                request,
+                input,
+                install_metadata,
+                install_metadata_path,
+            )?;
+            coordinate_hub_uninstall(authority, mechanics, transport, systemd).map(|result| {
+                match result {
+                    HubUninstallResult::Complete => ResumeDecision::Completed,
+                    HubUninstallResult::RecoveryPending => ResumeDecision::RecoveryPending,
+                }
+            })
+        }
+        LifecycleRequestAuthority::LocalRoot { .. } => {
+            let authority = LocalUninstallAuthority::classify(request)?;
+            let mechanics = prepare_uninstall_mechanics(
+                request,
+                input,
+                install_metadata,
+                install_metadata_path,
+            )?;
+            coordinate_local_uninstall(authority, mechanics, systemd)
+                .map(|LocalUninstallComplete| ResumeDecision::Completed)
+        }
+        LifecycleRequestAuthority::HubUpgrade { .. }
+        | LifecycleRequestAuthority::LocalRepair { .. }
+        | LifecycleRequestAuthority::ReplacementEnrollment { .. } => Err(
+            ProbeUpgraderRunError::InvalidInstallMetadata("invalid uninstall authority"),
+        ),
     }
 }
 
@@ -2820,7 +2898,7 @@ fn resume_lifecycle_companion_at(
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: capsule.install_metadata.identity_path.clone(),
     };
-    execute_lifecycle_uninstall(
+    adapt_uninstall_wire_request(
         &request,
         &input,
         &capsule.install_metadata,
@@ -2983,14 +3061,12 @@ fn execute_probe_uninstall_with_install_metadata_path(
     install_metadata_path: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
     let plan = plan_probe_uninstall_cleanup(input, install_metadata, install_metadata_path, false)?;
-    execute_probe_uninstall_cleanup(&plan, systemd, UninstallCleanupExtent::Complete)
+    execute_probe_uninstall_cleanup(&plan, systemd, CompleteUninstallCleanup)
 }
 
-/// Runs the same trusted uninstall cleanup core used by both public and
-/// Hub-authorized uninstall paths. The staged local-install candidate uses
-/// this only after it has established that the complete prior installation is
-/// bound to the same Hub.
-pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
+/// Replacement-only seam used after the durable migration commit. It reuses
+/// the uninstall cleanup mechanics while preserving candidate Bootstrap state.
+fn cleanup_committed_replacement_install(
     install_metadata_path: &Path,
     test_root: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -3004,7 +3080,7 @@ pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
     let plan =
         plan_probe_uninstall_cleanup(&input, &install_metadata, &install_metadata_path, false)?;
     let mut systemd = SystemProbeUpgraderSystemdRunner;
-    execute_probe_uninstall_cleanup(&plan, &mut systemd, UninstallCleanupExtent::Replacement)
+    execute_probe_uninstall_cleanup(&plan, &mut systemd, ReplacementUninstallCleanup)
 }
 
 fn rebase_trusted_install_metadata_paths(
@@ -3058,19 +3134,45 @@ struct ProbeUninstallCleanupPlan<'a> {
     install_metadata_path: &'a Path,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UninstallCleanupExtent {
-    Prepare,
-    RecoverableFinalize,
-    #[cfg(test)]
-    Complete,
-    Replacement,
+trait SealedUninstallCleanup {
+    const PREPARE_ONLY: bool;
+    const PRESERVE_COMPANION_BINARY: bool;
+    const REPLACEMENT: bool;
+
+    fn removes_bootstrap_state() -> bool {
+        !Self::REPLACEMENT
+    }
 }
 
-impl UninstallCleanupExtent {
-    fn removes_bootstrap_state(self) -> bool {
-        self != Self::Replacement
-    }
+struct PrepareUninstallCleanup;
+struct RecoverableUninstallCleanup;
+#[cfg(test)]
+struct CompleteUninstallCleanup;
+struct ReplacementUninstallCleanup;
+
+impl SealedUninstallCleanup for PrepareUninstallCleanup {
+    const PREPARE_ONLY: bool = true;
+    const PRESERVE_COMPANION_BINARY: bool = true;
+    const REPLACEMENT: bool = false;
+}
+
+impl SealedUninstallCleanup for RecoverableUninstallCleanup {
+    const PREPARE_ONLY: bool = false;
+    const PRESERVE_COMPANION_BINARY: bool = true;
+    const REPLACEMENT: bool = false;
+}
+
+#[cfg(test)]
+impl SealedUninstallCleanup for CompleteUninstallCleanup {
+    const PREPARE_ONLY: bool = false;
+    const PRESERVE_COMPANION_BINARY: bool = false;
+    const REPLACEMENT: bool = false;
+}
+
+impl SealedUninstallCleanup for ReplacementUninstallCleanup {
+    const PREPARE_ONLY: bool = false;
+    const PRESERVE_COMPANION_BINARY: bool = false;
+    const REPLACEMENT: bool = true;
 }
 
 /// Establishes every local deletion target before systemd or filesystem
@@ -3142,10 +3244,10 @@ fn plan_probe_uninstall_cleanup<'a>(
     })
 }
 
-fn execute_probe_uninstall_cleanup(
+fn execute_probe_uninstall_cleanup<C: SealedUninstallCleanup>(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-    extent: UninstallCleanupExtent,
+    _capability: C,
 ) -> Result<(), ProbeUpgraderRunError> {
     let input = plan.input;
     let install_metadata = plan.install_metadata;
@@ -3279,7 +3381,7 @@ fn execute_probe_uninstall_cleanup(
     for path in &install_metadata.old_sudoers_paths {
         remove_path_if_exists(path)?;
     }
-    if extent == UninstallCleanupExtent::Prepare {
+    if C::PREPARE_ONLY {
         return Ok(());
     }
     for path in [
@@ -3291,7 +3393,7 @@ fn execute_probe_uninstall_cleanup(
     {
         remove_path_if_exists(path)?;
     }
-    if extent.removes_bootstrap_state()
+    if C::removes_bootstrap_state()
         && let Some(path) = install_metadata.bootstrap_state_dir.as_deref()
     {
         remove_owned_bootstrap_state(path)?;
@@ -3373,7 +3475,7 @@ fn execute_probe_uninstall_cleanup(
         {
             remove_path_if_exists(path)?;
         }
-        if extent != UninstallCleanupExtent::RecoverableFinalize
+        if !C::PRESERVE_COMPANION_BINARY
             && let Some(path) = install_metadata.lifecycle_companion_path.as_deref()
         {
             remove_path_if_exists(path)?;
@@ -3405,7 +3507,7 @@ fn execute_probe_uninstall_cleanup(
         }
     }
 
-    if extent == UninstallCleanupExtent::Replacement {
+    if C::REPLACEMENT {
         // 手动重装必须让可信 metadata 活过全部可失败清理与核验。删除 metadata
         // 是最后一个可失败动作；成功后候选 Activator 可立即进入 fresh transaction。
         return finalize_replacement_local_state_with(
@@ -3413,14 +3515,14 @@ fn execute_probe_uninstall_cleanup(
             &install_metadata.state_dir,
             plan.install_metadata_path,
             remove_path_if_exists,
-            || verify_probe_uninstall_cleanup(plan, systemd, extent),
+            || verify_probe_uninstall_cleanup::<C>(plan, systemd),
         );
     }
 
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&input.bootstrap_config_path)?;
 
-    verify_probe_uninstall_cleanup(plan, systemd, extent)
+    verify_probe_uninstall_cleanup::<C>(plan, systemd)
 }
 
 fn remove_uninstall_local_state_with(
@@ -3445,10 +3547,9 @@ fn finalize_replacement_local_state_with(
     remove(install_metadata_path)
 }
 
-fn verify_probe_uninstall_cleanup(
+fn verify_probe_uninstall_cleanup<C: SealedUninstallCleanup>(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-    extent: UninstallCleanupExtent,
 ) -> Result<(), ProbeUpgraderRunError> {
     let metadata = plan.install_metadata;
     for (path, code, action) in [
@@ -3483,7 +3584,7 @@ fn verify_probe_uninstall_cleanup(
             "verifying the service unit is absent",
         ),
     ] {
-        if extent != UninstallCleanupExtent::Replacement || path != plan.install_metadata_path {
+        if !C::REPLACEMENT || path != plan.install_metadata_path {
             verify_path_absent(path, code, action)?;
         }
     }
@@ -3519,9 +3620,7 @@ fn verify_probe_uninstall_cleanup(
     .into_iter()
     .flatten()
     {
-        if extent == UninstallCleanupExtent::RecoverableFinalize
-            && is_lifecycle_companion_path(path)
-        {
+        if C::PRESERVE_COMPANION_BINARY && is_lifecycle_companion_path(path) {
             continue;
         }
         verify_path_absent(
@@ -3553,7 +3652,7 @@ fn verify_probe_uninstall_cleanup(
             verify_path_absent(path, code, action)?;
         }
     }
-    if extent.removes_bootstrap_state()
+    if C::removes_bootstrap_state()
         && let Some(path) = metadata.bootstrap_state_dir.as_deref()
     {
         verify_path_absent(
@@ -6674,8 +6773,8 @@ mod tests {
 
     #[test]
     fn replacement_cleanup_keeps_trusted_metadata_until_every_other_check_succeeds() {
-        assert!(!UninstallCleanupExtent::Replacement.removes_bootstrap_state());
-        assert!(UninstallCleanupExtent::Complete.removes_bootstrap_state());
+        assert!(!ReplacementUninstallCleanup::removes_bootstrap_state());
+        assert!(CompleteUninstallCleanup::removes_bootstrap_state());
         let config = PathBuf::from("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
         let state = PathBuf::from("/var/lib/enoki-probe");
         let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
@@ -8011,7 +8110,7 @@ mod tests {
         };
         let plan = plan_probe_uninstall_cleanup(&input, &metadata, &metadata_path, false)
             .expect("schema four cleanup plan");
-        execute_probe_uninstall_cleanup(&plan, &mut systemd, UninstallCleanupExtent::Prepare)
+        execute_probe_uninstall_cleanup(&plan, &mut systemd, PrepareUninstallCleanup)
             .expect("pre-ack cleanup succeeds");
         for path in [
             identity_path.as_path(),
@@ -8026,7 +8125,7 @@ mod tests {
                 path.display()
             );
         }
-        execute_probe_uninstall_cleanup(&plan, &mut systemd, UninstallCleanupExtent::Complete)
+        execute_probe_uninstall_cleanup(&plan, &mut systemd, CompleteUninstallCleanup)
             .expect("schema four uninstall succeeds");
 
         for path in binaries.into_iter().chain(units) {
@@ -8058,20 +8157,35 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hub_uninstall_report_failure_keeps_exact_reentry_until_acknowledged_cleanup() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let root = temporary.path();
+    struct UninstallCoordinatorFixture {
+        metadata: TrustedProbeInstallMetadata,
+        metadata_path: PathBuf,
+        identity_path: PathBuf,
+        companion_path: PathBuf,
+    }
+
+    fn uninstall_coordinator_fixture(root: &Path) -> UninstallCoordinatorFixture {
         let state_dir = root.join("var/lib/enoki-probe");
         let identity_path = state_dir.join("identity/probe-bootstrap.toml");
         let metadata_path = root.join("etc/enoki/probe-install.toml");
         let install_path = root.join("usr/local/bin/enoki-probe");
+        let observation_runtime = root.join("usr/local/bin/enoki-observation-runtime");
+        let cpu_provider = root.join("usr/local/bin/enoki-cpu-resource-provider");
+        let disk_provider = root.join("usr/local/bin/enoki-disk-health-resource-provider");
         let service_unit_path = root.join("etc/systemd/system/enoki-probe.service");
         let companion_path = root.join("usr/local/bin/enoki-probe-lifecycle-companion");
         let companion_service =
             root.join("etc/systemd/system/enoki-probe-lifecycle-companion@.service");
         let companion_socket =
             root.join("etc/systemd/system/enoki-probe-lifecycle-companion.socket");
+        let observation_units = [
+            root.join("etc/systemd/system/enoki-observation-runtime.service"),
+            root.join("etc/systemd/system/enoki-observation-runtime.socket"),
+            root.join("etc/systemd/system/enoki-cpu-resource-provider@.service"),
+            root.join("etc/systemd/system/enoki-cpu-resource-provider.socket"),
+            root.join("etc/systemd/system/enoki-disk-health-resource-provider@.service"),
+            root.join("etc/systemd/system/enoki-disk-health-resource-provider.socket"),
+        ];
         let bootstrap_acquirer = root.join("usr/local/bin/enoki-probe-bootstrap-acquire");
         let bootstrap_activator = root.join("usr/local/bin/enoki-probe-bootstrap-activate");
         let bootstrap_state = root.join("var/lib/enoki-probe-bootstrap");
@@ -8086,13 +8200,19 @@ mod tests {
         for path in [
             &metadata_path,
             &install_path,
+            &observation_runtime,
+            &cpu_provider,
+            &disk_provider,
             &service_unit_path,
             &companion_path,
             &companion_service,
             &companion_socket,
             &bootstrap_acquirer,
             &bootstrap_activator,
-        ] {
+        ]
+        .into_iter()
+        .chain(observation_units.iter())
+        {
             fs::write(path, "owned").expect("fixture file");
         }
         for path in [&bootstrap_acquirer, &bootstrap_activator] {
@@ -8118,7 +8238,7 @@ mod tests {
             schema_version: 4,
             hub_url: "https://hub.example".to_owned(),
             identity_path: identity_path.clone(),
-            install_path: install_path.clone(),
+            install_path,
             operation_status_path: state_dir.join("probe-operation-status.toml"),
             probe_asset_public_key_sha256: "a".repeat(64),
             probe_distribution_root_sha256: Some("a".repeat(64)),
@@ -8129,15 +8249,18 @@ mod tests {
             service_group: "enoki-probe".to_owned(),
             service_unit_path,
             service_user: "enoki-probe".to_owned(),
-            state_dir: state_dir.clone(),
+            state_dir,
             operation_sudoers_path: None,
             collector_helper_sudoers_path: None,
             old_sudoers_paths: Vec::new(),
-            observation_runtime_path: None,
-            cpu_provider_path: None,
-            disk_health_provider_path: None,
+            observation_runtime_path: Some(observation_runtime),
+            cpu_provider_path: Some(cpu_provider),
+            disk_health_provider_path: Some(disk_provider),
             lifecycle_companion_path: Some(companion_path.clone()),
-            observation_unit_paths: vec![companion_service.clone(), companion_socket.clone()],
+            observation_unit_paths: observation_units
+                .into_iter()
+                .chain([companion_service, companion_socket])
+                .collect(),
             probe_ipc_group: Some(PROBE_IPC_GROUP.to_owned()),
             probe_ipc_group_ownership: Some(format!("!enoki-bootstrap-{}", "d".repeat(32))),
             observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_owned()),
@@ -8147,6 +8270,131 @@ mod tests {
             lifecycle_authority_install_key: None,
         };
         write_test_bootstrap_config(&identity_path, &metadata).expect("identity config");
+        UninstallCoordinatorFixture {
+            metadata,
+            metadata_path,
+            identity_path,
+            companion_path,
+        }
+    }
+
+    #[test]
+    fn local_uninstall_never_uses_hub_transport_and_propagates_finalize_failure() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let fixture = uninstall_coordinator_fixture(temporary.path());
+        let request = LifecycleRequest::local_uninstall(
+            "probe_01",
+            &"b".repeat(64),
+            &"c".repeat(64),
+            "1.2.3",
+        )
+        .expect("bound local uninstall request");
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: fixture.identity_path.clone(),
+        };
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner {
+            failure_step: Some("remove-account"),
+            ..RecordingSystemdRunner::default()
+        };
+
+        let result = adapt_uninstall_wire_request(
+            &request,
+            &input,
+            &fixture.metadata,
+            &fixture.metadata_path,
+            &mut transport,
+            &mut systemd,
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProbeUpgraderRunError::UninstallCleanupFailure { .. })
+        ));
+        assert!(transport.url.is_empty());
+        assert!(transport.status_url.is_empty());
+        let capsule = read_uninstall_capsule(
+            &uninstall_capsule_path(&fixture.metadata_path).expect("capsule path"),
+        )
+        .expect("read capsule")
+        .expect("durable local capsule");
+        assert_eq!(capsule.phase, UninstallCapsulePhase::TerminalAcknowledged);
+        assert!(fixture.companion_path.exists());
+    }
+
+    #[test]
+    fn schema_five_uninstall_removes_upgrade_companion_roles_and_complete_layout() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut fixture = uninstall_coordinator_fixture(temporary.path());
+        fixture.metadata.schema_version = 5;
+        fixture.metadata.lifecycle_authority_install_key = Some("e".repeat(64));
+        let upgrade_service = temporary
+            .path()
+            .join("etc/systemd/system/enoki-probe-lifecycle-upgrade@.service");
+        let upgrade_socket = temporary
+            .path()
+            .join("etc/systemd/system/enoki-probe-lifecycle-upgrade.socket");
+        for path in [&upgrade_service, &upgrade_socket] {
+            fs::write(path, "owned").expect("schema five lifecycle unit");
+        }
+        fixture
+            .metadata
+            .observation_unit_paths
+            .extend([upgrade_service.clone(), upgrade_socket.clone()]);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: fixture.identity_path.clone(),
+        };
+        let mut systemd = RecordingSystemdRunner::default();
+
+        execute_probe_uninstall_with_install_metadata_path(
+            &input,
+            &fixture.metadata,
+            &mut systemd,
+            &fixture.metadata_path,
+        )
+        .expect("schema five uninstall succeeds");
+
+        for path in fixture.metadata.observation_unit_paths.iter().chain([
+            &fixture.metadata.install_path,
+            &fixture.identity_path,
+            &fixture.metadata_path,
+            &fixture.companion_path,
+        ]) {
+            assert!(!path.exists(), "{} remains", path.display());
+        }
+        assert!(
+            systemd
+                .calls
+                .contains(&"stop enoki-probe-lifecycle-upgrade.socket".to_owned())
+        );
+        assert!(
+            systemd
+                .calls
+                .contains(&"disable enoki-probe-lifecycle-upgrade.socket".to_owned())
+        );
+    }
+
+    #[test]
+    fn hub_uninstall_report_failure_keeps_exact_reentry_until_acknowledged_cleanup() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let fixture = uninstall_coordinator_fixture(temporary.path());
+        let metadata = fixture.metadata;
+        let metadata_path = fixture.metadata_path;
+        let identity_path = fixture.identity_path;
+        let companion_path = fixture.companion_path;
+        let state_dir = metadata.state_dir.clone();
+        let companion_service = metadata
+            .observation_unit_paths
+            .iter()
+            .find(|path| path.ends_with("enoki-probe-lifecycle-companion@.service"))
+            .expect("companion service")
+            .clone();
+        let companion_socket = metadata
+            .observation_unit_paths
+            .iter()
+            .find(|path| path.ends_with("enoki-probe-lifecycle-companion.socket"))
+            .expect("companion socket")
+            .clone();
         let request = LifecycleRequest::hub_uninstall(
             "probe_01",
             "operation_42",
@@ -8165,7 +8413,7 @@ mod tests {
             ..RecordingValidationTransport::default()
         };
 
-        let first = execute_lifecycle_uninstall(
+        let first = adapt_uninstall_wire_request(
             &request,
             &input,
             &metadata,
@@ -8199,7 +8447,7 @@ mod tests {
 
         let mut retry_transport = RecordingValidationTransport::default();
         systemd.failure_step = Some("remove-account");
-        let completed = execute_lifecycle_uninstall(
+        let completed = adapt_uninstall_wire_request(
             &request,
             &input,
             &metadata,
