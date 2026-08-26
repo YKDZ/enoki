@@ -1,4 +1,4 @@
-import { createServer, get } from "node:http";
+import { createServer, get, request } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -123,6 +123,56 @@ describe("canonical Probe report response-loss evidence", () => {
     );
     expect(JSON.stringify(evidence)).not.toMatch(
       /signed-request|authorization|body|private|token/i,
+    );
+  });
+
+  it("rejects an oversized chunked report before forwarding it upstream", async () => {
+    let upstreamRequestCount = 0;
+    const upstream = await listen(async (incoming, response) => {
+      upstreamRequestCount += 1;
+      await readBody(incoming);
+      response.writeHead(200, { "content-type": "application/x-protobuf" });
+      response.end(ReportResponse.encode({ acceptedSequenceEnd: 1 }).finish());
+    });
+    close.push(upstream.close);
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+    close.push(() => transport.close());
+    transport.arm({ expectedProbeId: "probe-canonical-01" });
+
+    const report = request(`${started.origin}/api/probe/report`, {
+      headers: {
+        ...canonicalAuthHeaders,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    report.on("error", () => {});
+    const closed = new Promise((resolve) =>
+      report.once("close", () => resolve(true)),
+    );
+    report.write(Buffer.alloc(1024 * 1024 + 1, 0x61));
+    const rejectedBeforeEnd = await Promise.race([
+      closed,
+      new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    if (!rejectedBeforeEnd) report.end();
+    await closed;
+
+    expect(rejectedBeforeEnd).toBe(true);
+    expect(upstreamRequestCount).toBe(0);
+    expect(transport.diagnostics()).toMatchObject({
+      failure: {
+        code: "canonical_report_payload_too_large",
+        message: expect.stringMatching(/production.*1 MiB.*limit/i),
+      },
+      reportRequestCount: 0,
+    });
+    expect(JSON.stringify(transport.diagnostics())).not.toMatch(
+      /x-enoki|signature|authorization|body|private|token/i,
     );
   });
 

@@ -5,6 +5,7 @@ import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
 
 const ReportRequest = enoki.v1.ProbeReportRequest;
 const ReportResponse = enoki.v1.ProbeReportResponse;
+const maxProbeReportPayloadBytes = 1024 * 1024;
 const reportPath = "/api/probe/report";
 
 export function createCanonicalReportEvidenceTransport({
@@ -41,7 +42,15 @@ export function createCanonicalReportEvidenceTransport({
         streamTransparent(incoming, outgoing, target);
         return;
       }
-      const body = await readBody(incoming);
+      if (contentLengthExceeds(incoming.headers, maxProbeReportPayloadBytes)) {
+        rejectOversizedReport(incoming, outgoing);
+        return;
+      }
+      const body = await readCappedBody(incoming, maxProbeReportPayloadBytes);
+      if (!body) {
+        rejectOversizedReport(incoming, outgoing);
+        return;
+      }
       const headers = forwardedHeaders(incoming.headers, body.byteLength);
       const observation =
         isReport && armed && !completedEvidence && !failure
@@ -204,10 +213,19 @@ export function createCanonicalReportEvidenceTransport({
     return "deliver";
   }
 
-  function fail(message) {
+  function rejectOversizedReport(incoming, outgoing) {
+    fail(
+      "canonical report payload exceeded the production 1 MiB limit",
+      "canonical_report_payload_too_large",
+    );
+    incoming.destroy();
+    if (!outgoing.destroyed) outgoing.destroy();
+  }
+
+  function fail(message, code = "canonical_report_evidence_invalid") {
     if (!failure) {
       failure = new Error(message);
-      failure.code = "canonical_report_evidence_invalid";
+      failure.code = code;
       notify();
     }
   }
@@ -502,6 +520,16 @@ function transparentHeaders(source) {
   return headers;
 }
 
+function contentLengthExceeds(headers, maxBytes) {
+  const value = headers["content-length"];
+  const contentLength = Array.isArray(value) ? value[0] : value?.trim();
+  return Boolean(
+    contentLength &&
+    /^\d+$/.test(contentLength) &&
+    Number(contentLength) > maxBytes,
+  );
+}
+
 function writeResponse(outgoing, response, body) {
   const headers = {};
   response.headers.forEach((value, name) => {
@@ -516,8 +544,13 @@ function writeResponse(outgoing, response, body) {
   outgoing.end(body);
 }
 
-async function readBody(request) {
+async function readCappedBody(request, maxBytes) {
   const chunks = [];
-  for await (const chunk of request) chunks.push(chunk);
-  return Buffer.concat(chunks);
+  let totalBytes = 0;
+  for await (const chunk of request) {
+    totalBytes += chunk.byteLength;
+    if (totalBytes > maxBytes) return null;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, totalBytes);
 }
