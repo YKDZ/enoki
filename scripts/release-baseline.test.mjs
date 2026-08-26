@@ -1,10 +1,5 @@
 import { execFile } from "node:child_process";
-import {
-  createHash,
-  createPublicKey,
-  generateKeyPairSync,
-  sign as signContents,
-} from "node:crypto";
+import { createHash, createPublicKey, sign as signContents } from "node:crypto";
 import {
   chmod,
   cp,
@@ -564,11 +559,7 @@ async function createResolverFixture(options = {}) {
     legacyProbe: options.legacyProbe,
   });
   if (options.historicalTransition) {
-    const sourceRelease = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const sourceRelease = rsa4096TestKeyPair("baseline-legacy-release");
     const source = await createSignedLegacyProbeAssetSetFixture({
       privateKeyPem: sourceRelease.privateKey,
       publicKeyPem: sourceRelease.publicKey,
@@ -743,16 +734,8 @@ async function createProbeAssetSetFixture(
 ) {
   const archivesDir = path.join(workDir, "archives");
   const outputDir = path.join(workDir, "probe-assets-source");
-  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
-  const root = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
+  const { privateKey, publicKey } = rsa4096TestKeyPair("baseline-release");
+  const root = rsa4096TestKeyPair("baseline-root");
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",
     generation: 1,

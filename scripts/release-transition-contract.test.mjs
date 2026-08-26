@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createHash, sign } from "node:crypto";
 
 import {
   createReleaseTransitionContract,
@@ -12,6 +12,7 @@ import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/tes
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
+import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 describe("Trust Epoch release transition", () => {
   let fixture;
@@ -331,8 +332,8 @@ describe("Trust Epoch release transition", () => {
 });
 
 async function transitionFixture() {
-  const root = keyPair();
-  const release = keyPair();
+  const root = rsa4096TestKeyPair("transition-root");
+  const release = rsa4096TestKeyPair("transition-release");
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",
     generation: 1,
@@ -418,14 +419,6 @@ async function transitionFixture() {
     cleanup: source.cleanup,
     sourceProbeComponents: source.probeComponents,
   };
-}
-
-function keyPair() {
-  return generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
 }
 
 function sha256(value) {

@@ -364,6 +364,19 @@ describe("Probe Bootstrap build artifact", () => {
     expect(workflow).toContain('test "$BOOTSTRAP_DISTRIBUTION" = enoki');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM");
+    expect(workflow).toContain(
+      "key.asymmetricKeyDetails?.modulusLength !== 4096",
+    );
+    expect(workflow).toContain("root must be RSA-4096");
+    expect(workflow).not.toContain(
+      'key.asymmetricKeyType !== "rsa") throw new Error("root must be RSA")',
+    );
+    const bootstrapBuildScript = await readFile(
+      "crates/probe-bootstrap/build.rs",
+      "utf8",
+    );
+    expect(bootstrapBuildScript).toContain("root.n().bits() != 4096");
+    expect(bootstrapBuildScript).toContain("must be an RSA-4096 SPKI PEM");
     expect(workflow).toContain('ENOKI_BOOTSTRAP_BUILD_ROLE="$role"');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_TARGET");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_VERSION");

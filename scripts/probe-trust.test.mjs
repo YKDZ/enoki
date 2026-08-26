@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import {
+  createHash,
   createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
+  sign as signBytes,
 } from "node:crypto";
 import {
   chmod,
@@ -175,14 +177,34 @@ describe("Probe Distribution Trust CLI", { timeout: 60_000 }, () => {
       passphrase,
       type: "pkcs8",
     });
-    const delegation = createProbeTrustDelegation({
+    const rootPublicKey = createPublicKey(rootPrivateKey).export({
+      format: "pem",
+      type: "spki",
+    });
+    const delegation = {
       distribution: "enoki",
       generation: 1,
-      releasePublicKeyPem: weakRelease.publicKey,
+      kind: "enoki-probe-trust-delegation",
+      purpose: "probe-asset-signing",
+      rootKeyId: createHash("sha256").update(rootPublicKey).digest("hex"),
+      schemaVersion: 1,
+      signingIdentity: {
+        algorithm: "rsa-sha256",
+        keyId: createHash("sha256").update(weakRelease.publicKey).digest("hex"),
+        publicKeyPem: weakRelease.publicKey,
+      },
+    };
+    const delegationBytes = Buffer.from(`${JSON.stringify(delegation)}\n`);
+    const delegationSignature = signBytes(
+      "RSA-SHA256",
+      Buffer.concat([
+        Buffer.from("enoki/probe-trust-delegation/v1\0"),
+        delegationBytes,
+      ]),
       rootPrivateKey,
-    });
-    await writeFile(delegationPath, delegation.bytes);
-    await writeFile(signaturePath, delegation.signature);
+    );
+    await writeFile(delegationPath, delegationBytes);
+    await writeFile(signaturePath, delegationSignature);
 
     const failure = await expectCliFailure([
       "verify",
@@ -196,7 +218,7 @@ describe("Probe Distribution Trust CLI", { timeout: 60_000 }, () => {
       "0",
     ]);
 
-    expect(failure.stderr).toMatch(/release signing identity must be RSA-4096/);
+    expect(failure.stderr).toMatch(/signing identity must be RSA-4096/);
     await rm(workDir, { force: true, recursive: true });
   });
 

@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createHash, sign } from "node:crypto";
 
 import {
   releaseTransitionContractSigningInput,
@@ -7,6 +7,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import * as planner from "./release-scenario-plan.mjs";
+import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 describe("Release Scenario Planner", () => {
   it("compiles the exact Compatible capabilities without caller-selected scenarios", () => {
@@ -222,11 +223,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("rejects a wrong contract signature across verification and planning before provisioning", async () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("scenario-root");
     const contract = signedContractFixture(root.publicKey);
     const provision = vi.fn();
 
@@ -252,11 +249,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("rejects a signed same-version and same-assets contract for a different candidate commit before provisioning", async () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("scenario-root");
     const contract = {
       ...signedContractFixture(root.publicKey),
       candidateCommit: "b".repeat(40),

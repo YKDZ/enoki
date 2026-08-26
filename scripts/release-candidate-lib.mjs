@@ -1792,10 +1792,12 @@ function untrustedToolEnvironment() {
 }
 
 function assertSigningKeyPair(privateKeyPem, publicKeyPem) {
+  let privateKey;
   let derivedPublicKey;
   let declaredPublicKey;
   try {
-    derivedPublicKey = createPublicKey(createPrivateKey(privateKeyPem)).export({
+    privateKey = createPrivateKey(privateKeyPem);
+    derivedPublicKey = createPublicKey(privateKey).export({
       format: "der",
       type: "spki",
     });
@@ -1805,6 +1807,12 @@ function assertSigningKeyPair(privateKeyPem, publicKeyPem) {
     });
   } catch {
     throw new Error("Probe asset signing key material is malformed");
+  }
+  if (
+    privateKey.asymmetricKeyType !== "rsa" ||
+    privateKey.asymmetricKeyDetails?.modulusLength !== 4096
+  ) {
+    throw new Error("Probe asset signing key must be an RSA-4096 private key");
   }
 
   if (!derivedPublicKey.equals(declaredPublicKey)) {

@@ -623,8 +623,8 @@ pub struct ProbeOperationFailed {
     pub error_code: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
-    /// Root-owned, domain-separated post-activation evidence. The Probe only
-    /// forwards these opaque values; the Hub verifies them before persistence.
+    /// 由 root 持有、按领域分离的激活后证据。Probe 仅转发这些不透明值；
+    /// Hub 在持久化前对其进行验证。
     #[prost(string, tag = "3")]
     pub repair_eligibility_evidence: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]

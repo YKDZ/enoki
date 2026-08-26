@@ -49,6 +49,7 @@ import {
   verifyActiveHubBootstrapRecipeProvenance,
 } from "./release-e2e-adapters.mjs";
 import { createProbeHostHarness } from "./release-e2e-lib.mjs";
+import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const execFileAsync = promisify(execFile);
 const candidateCli = "scripts/release-candidate.mjs";
@@ -62,13 +63,20 @@ const probeTargets = [
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
 ];
-const testDistributionRoot = generateKeyPairSync("rsa", {
-  modulusLength: 2048,
-  privateKeyEncoding: { format: "pem", type: "pkcs8" },
-  publicKeyEncoding: { format: "pem", type: "spki" },
-});
+const testDistributionRoot = rsa4096TestKeyPair("candidate-root");
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
+  it("reuses one strong in-memory test identity per slot while separating slots", () => {
+    const release = rsa4096TestKeyPair("candidate-release");
+    const sameRelease = rsa4096TestKeyPair("candidate-release");
+    const unrelated = rsa4096TestKeyPair("candidate-unrelated");
+
+    expect(sameRelease).toBe(release);
+    expect(unrelated.publicKey).not.toBe(release.publicKey);
+    expect(
+      createPublicKey(release.publicKey).asymmetricKeyDetails?.modulusLength,
+    ).toBe(4096);
+  });
   it("generates the bootstrap recipe from the canonical seven-role bundle closure", async () => {
     const publication = await createProbeBootstrapPublication({
       bundleVersion: "1.2.3",
@@ -143,16 +151,8 @@ with open(os.devnull, "rb") as input_stream:
   });
 
   it("requires exactly one root private-key representation for trust delegations", () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("candidate-root");
+    const release = rsa4096TestKeyPair("candidate-release");
     const input = {
       distribution: "enoki",
       generation: 1,
@@ -175,16 +175,8 @@ with open(os.devnull, "rb") as input_stream:
   });
 
   it("authorizes a routine signer with one root-signed, domain-separated delegated identity", () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("candidate-root");
+    const release = rsa4096TestKeyPair("candidate-release");
     const delegation = createProbeTrustDelegation({
       distribution: "enoki",
       generation: 1,
@@ -222,27 +214,15 @@ with open(os.devnull, "rb") as input_stream:
     [
       "unrelated release signer",
       (input) => {
-        const unrelated = generateKeyPairSync("rsa", {
-          modulusLength: 2048,
-          privateKeyEncoding: { format: "pem", type: "pkcs8" },
-          publicKeyEncoding: { format: "pem", type: "spki" },
-        });
+        const unrelated = rsa4096TestKeyPair("candidate-unrelated");
         input.privateKeyPem = unrelated.privateKey;
         input.publicKeyPem = unrelated.publicKey;
       },
       /not authorized/,
     ],
   ])("rejects a %s delegated signing identity", (_label, mutate, expected) => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("candidate-root");
+    const release = rsa4096TestKeyPair("candidate-release");
     const delegation = createProbeTrustDelegation({
       distribution: "enoki",
       generation: 1,
@@ -264,16 +244,8 @@ with open(os.devnull, "rb") as input_stream:
   });
 
   it("rejects a noncanonical or invalid-root-signed Probe Trust Delegation", () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("candidate-root");
+    const release = rsa4096TestKeyPair("candidate-release");
     const delegation = createProbeTrustDelegation({
       distribution: "enoki",
       generation: 1,
@@ -299,16 +271,8 @@ with open(os.devnull, "rb") as input_stream:
   });
 
   it("accepts the current delegation generation again while rejecting only rollback", () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const root = rsa4096TestKeyPair("candidate-root");
+    const release = rsa4096TestKeyPair("candidate-release");
     const delegation = createProbeTrustDelegation({
       distribution: "enoki",
       generation: 1,
@@ -326,16 +290,8 @@ with open(os.devnull, "rb") as input_stream:
     ).toBe(1);
   });
   it("validates the configured production signing identity before candidate construction", async () => {
-    const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const { privateKey, publicKey } = rsa4096TestKeyPair("candidate-release");
+    const root = rsa4096TestKeyPair("candidate-root");
     const delegation = createProbeTrustDelegation({
       distribution: "enoki",
       generation: 1,
@@ -385,16 +341,10 @@ with open(os.devnull, "rb") as input_stream:
   });
 
   it("rejects a production public key that does not match the private key", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const { publicKey: unrelatedPublicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const { privateKey } = rsa4096TestKeyPair("candidate-release");
+    const { publicKey: unrelatedPublicKey } = rsa4096TestKeyPair(
+      "candidate-unrelated",
+    );
 
     expect(() =>
       validateProbeSigningIdentity({
@@ -402,6 +352,21 @@ with open(os.devnull, "rb") as input_stream:
         publicKeyPem: unrelatedPublicKey,
       }),
     ).toThrow("public key does not match private key");
+  });
+
+  it("rejects an explicitly weak RSA-2048 production signing identity", () => {
+    const weakRejectionOnlySigningIdentity = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+
+    expect(() =>
+      validateProbeSigningIdentity({
+        privateKeyPem: weakRejectionOnlySigningIdentity.privateKey,
+        publicKeyPem: weakRejectionOnlySigningIdentity.publicKey,
+      }),
+    ).toThrow(/RSA-4096 private key/);
   });
 
   it("passes one named signing secret and fails closed in a trusted preflight", async () => {
@@ -1027,11 +992,7 @@ with open(os.devnull, "rb") as input_stream:
       const fixture = await createProbeAssetSetFixture(workDir, {
         version: "v1.2.3",
       });
-      const sourceRelease = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        privateKeyEncoding: { format: "pem", type: "pkcs8" },
-        publicKeyEncoding: { format: "pem", type: "spki" },
-      });
+      const sourceRelease = rsa4096TestKeyPair("candidate-legacy-release");
       const source = await createSignedLegacyProbeAssetSetFixture({
         privateKeyPem: sourceRelease.privateKey,
         publicKeyPem: sourceRelease.publicKey,
@@ -1132,11 +1093,7 @@ with open(os.devnull, "rb") as input_stream:
         }),
       ).resolves.toMatchObject({ version: "1.2.3" });
 
-      const attackerRoot = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        privateKeyEncoding: { format: "pem", type: "pkcs8" },
-        publicKeyEncoding: { format: "pem", type: "spki" },
-      });
+      const attackerRoot = rsa4096TestKeyPair("candidate-unrelated");
       await writeFile(
         path.join(outputDir, "root-key.pem"),
         attackerRoot.publicKey,
@@ -2203,11 +2160,7 @@ async function createProbeAssetSetFixture(
 ) {
   const archivesDir = path.join(workDir, `${name}archives`);
   const outputDir = path.join(workDir, `${name}probe-assets`);
-  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
+  const { privateKey, publicKey } = rsa4096TestKeyPair("candidate-release");
   const root = suppliedRoot ?? testDistributionRoot;
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",

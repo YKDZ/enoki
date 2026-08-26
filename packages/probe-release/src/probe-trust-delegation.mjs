@@ -30,10 +30,15 @@ export function createProbeTrustDelegation({
   const signingKey = hasKeyObject
     ? rootPrivateKey
     : createPrivateKey(rootPrivateKeyPem);
-  const rootPublicKeyPem = canonicalPublicKeyPem(
+  assertRsa4096PrivateKey(signingKey, "Probe Distribution Trust Root");
+  const rootPublicKeyPem = canonicalRsa4096PublicKeyPem(
     createPublicKey(signingKey).export({ format: "pem", type: "spki" }),
+    "Probe Distribution Trust Root public key",
   );
-  const releasePublicKey = canonicalPublicKeyPem(releasePublicKeyPem);
+  const releasePublicKey = canonicalRsa4096PublicKeyPem(
+    releasePublicKeyPem,
+    "Probe asset signing public key",
+  );
   const delegation = validateProbeTrustDelegationDocument({
     distribution,
     generation,
@@ -75,7 +80,10 @@ export function verifyProbeTrustDelegation({
       "highest accepted Probe Trust Delegation generation is invalid",
     );
   }
-  const rootPublicKey = canonicalPublicKeyPem(rootPublicKeyPem);
+  const rootPublicKey = canonicalRsa4096PublicKeyPem(
+    rootPublicKeyPem,
+    "Probe Distribution Trust Root public key",
+  );
   let parsed;
   try {
     parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
@@ -127,6 +135,37 @@ export function canonicalPublicKeyPem(publicKeyPem) {
   }
 }
 
+function canonicalRsa4096PublicKeyPem(publicKeyPem, description) {
+  const key = rsa4096PublicKey(publicKeyPem, description);
+  return Buffer.from(key.export({ format: "pem", type: "spki" }), "utf8");
+}
+
+function rsa4096PublicKey(publicKeyPem, description) {
+  let key;
+  try {
+    key = createPublicKey(publicKeyPem);
+  } catch {
+    throw new Error(`${description} is malformed`);
+  }
+  if (
+    key.asymmetricKeyType !== "rsa" ||
+    key.asymmetricKeyDetails?.modulusLength !== 4096
+  ) {
+    throw new Error(`${description} must be RSA-4096`);
+  }
+  return key;
+}
+
+function assertRsa4096PrivateKey(privateKey, description) {
+  if (
+    privateKey?.type !== "private" ||
+    privateKey.asymmetricKeyType !== "rsa" ||
+    privateKey.asymmetricKeyDetails?.modulusLength !== 4096
+  ) {
+    throw new Error(`${description} must be an RSA-4096 private key`);
+  }
+}
+
 function validateProbeTrustDelegationDocument(value) {
   assertPlainObject(value, "Probe Trust Delegation");
   assertExactKeys(value, [
@@ -159,7 +198,10 @@ function validateProbeTrustDelegationDocument(value) {
     "keyId",
     "publicKeyPem",
   ]);
-  const publicKey = canonicalPublicKeyPem(value.signingIdentity.publicKeyPem);
+  const publicKey = canonicalRsa4096PublicKeyPem(
+    value.signingIdentity.publicKeyPem,
+    "Probe Trust Delegation signing identity",
+  );
   if (
     value.signingIdentity.algorithm !== "rsa-sha256" ||
     !/^[0-9a-f]{64}$/.test(value.signingIdentity.keyId) ||

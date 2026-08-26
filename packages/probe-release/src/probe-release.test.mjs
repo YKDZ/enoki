@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
+import { rsa4096TestKeyPair } from "../../../scripts/test-rsa-key-pool.mjs";
 import {
   createProbeTrustDelegation,
   probeBundleComponentProfiles,
@@ -25,16 +26,13 @@ describe("Probe release primitives", () => {
   });
 
   it("creates canonical delegation bytes accepted by the same verifier", () => {
-    const root = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const release = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const root = rsa4096TestKeyPair("probe-release-root");
+    const release = rsa4096TestKeyPair("probe-release-signer");
     const signed = createProbeTrustDelegation({
       distribution: "enoki",
       generation: 3,
-      releasePublicKeyPem: release.publicKey.export({
-        format: "pem",
-        type: "spki",
-      }),
-      rootPrivateKey: root.privateKey,
+      releasePublicKeyPem: release.publicKey,
+      rootPrivateKeyPem: root.privateKey,
     });
 
     expect(signed.bytes).toEqual(
@@ -44,12 +42,50 @@ describe("Probe release primitives", () => {
       verifyProbeTrustDelegation({
         bytes: signed.bytes,
         expectedDistribution: "enoki",
-        rootPublicKeyPem: root.publicKey.export({
-          format: "pem",
-          type: "spki",
-        }),
+        rootPublicKeyPem: root.publicKey,
         signature: signed.signature,
       }),
     ).toEqual(signed.delegation);
+  });
+
+  it("rejects explicitly weak RSA-2048 production trust identities", () => {
+    const root = rsa4096TestKeyPair("probe-release-root");
+    const release = rsa4096TestKeyPair("probe-release-signer");
+    const weakRejectionOnlyIdentity = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const signed = createProbeTrustDelegation({
+      distribution: "enoki",
+      generation: 3,
+      releasePublicKeyPem: release.publicKey,
+      rootPrivateKeyPem: root.privateKey,
+    });
+
+    expect(() =>
+      createProbeTrustDelegation({
+        distribution: "enoki",
+        generation: 3,
+        releasePublicKeyPem: release.publicKey,
+        rootPrivateKeyPem: weakRejectionOnlyIdentity.privateKey,
+      }),
+    ).toThrow(/Trust Root must be an RSA-4096 private key/);
+    expect(() =>
+      createProbeTrustDelegation({
+        distribution: "enoki",
+        generation: 3,
+        releasePublicKeyPem: weakRejectionOnlyIdentity.publicKey,
+        rootPrivateKeyPem: root.privateKey,
+      }),
+    ).toThrow(/signing public key must be RSA-4096/);
+    expect(() =>
+      verifyProbeTrustDelegation({
+        bytes: signed.bytes,
+        expectedDistribution: "enoki",
+        rootPublicKeyPem: weakRejectionOnlyIdentity.publicKey,
+        signature: signed.signature,
+      }),
+    ).toThrow(/Trust Root public key must be RSA-4096/);
   });
 });
