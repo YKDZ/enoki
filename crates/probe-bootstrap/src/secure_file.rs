@@ -378,7 +378,7 @@ fn open_systemd_probe_state_projection(
     })
 }
 
-#[cfg(feature = "deterministic-test-seams")]
+#[cfg(any(test, feature = "deterministic-test-seams"))]
 fn secure_file_effect_crash(path: &Path, point: &str) {
     if std::env::var_os("ENOKI_TEST_SECURE_FILE_PATH").as_deref() == Some(path.as_os_str())
         && std::env::var("ENOKI_TEST_SECURE_FILE_CRASH_POINT").as_deref() == Ok(point)
@@ -387,7 +387,7 @@ fn secure_file_effect_crash(path: &Path, point: &str) {
     }
 }
 
-#[cfg(not(feature = "deterministic-test-seams"))]
+#[cfg(not(any(test, feature = "deterministic-test-seams")))]
 fn secure_file_effect_crash(_path: &Path, _point: &str) {}
 
 /// 通过持有的禁止跟随符号链接目录描述符，删除指定的 root 私有普通文件，
