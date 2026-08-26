@@ -298,10 +298,10 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
   }) => {
     let recovered = false;
     let detailRequestCount = 0;
-    let liveSocket: WebSocketRoute | null = null;
+    const liveSocket: { route?: WebSocketRoute } = {};
     const detailSubscribed = deferred<void>();
     await page.routeWebSocket("**/api/web/ws", (socket) => {
-      liveSocket = socket;
+      liveSocket.route = socket;
       socket.onMessage((message) => {
         if (
           typeof message === "string" &&
@@ -330,7 +330,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     await detailSubscribed.promise;
 
     recovered = true;
-    liveSocket?.send(
+    liveSocket.route?.send(
       JSON.stringify({
         host: {
           id: hostId,
