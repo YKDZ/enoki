@@ -545,6 +545,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "activator")]
     #[test]
     fn filesystem_store_retires_only_the_exact_complete_replacement_fact() {
         let temporary = tempfile::tempdir().unwrap();
