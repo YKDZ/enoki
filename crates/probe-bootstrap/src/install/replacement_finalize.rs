@@ -1,6 +1,7 @@
 use super::{
     FixedInstallPaths, InstallError, ServiceIdentity,
     installed_layout::{self, Fingerprint, TargetKind},
+    transaction::TransactionJournal,
 };
 use crate::secure_file::{
     SystemdProbeDirectory, SystemdProbeStateProjection,
@@ -9,7 +10,18 @@ use crate::secure_file::{
 use crate::{replacement::ReplacementCommitFact, verifier::VerifiedBundle};
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
-use std::{ffi::OsStr, os::unix::fs::MetadataExt};
+use std::{
+    collections::BTreeSet,
+    ffi::OsStr,
+    fs::{File, OpenOptions},
+    io::Read,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
+};
+
+const MAX_METADATA_BYTES: u64 = 256 * 1024;
 
 struct IdentityCustody {
     owner_receipt: ServiceIdentity,
@@ -20,7 +32,12 @@ pub(super) fn verify_exact_layout(
     paths: &FixedInstallPaths,
     bundle: &VerifiedBundle,
     commit: &ReplacementCommitFact,
+    journal: Option<&TransactionJournal>,
 ) -> Result<(), InstallError> {
+    let held_metadata_directory = hold_fixed_metadata_directory(paths)?;
+    if let Some(journal) = journal {
+        verify_exact_journal_layout(paths, journal)?;
+    }
     let identity_custody = identity_custody(paths)?;
     let identity_owner_receipt = identity_custody.owner_receipt;
     let identity_owner = paths.observed_identity_owner(identity_owner_receipt);
@@ -84,7 +101,9 @@ pub(super) fn verify_exact_layout(
                     },
                 )?;
             }
-            TargetKind::Metadata => verify_metadata(paths, bundle, commit)?,
+            TargetKind::Metadata => {
+                verify_metadata(paths, bundle, commit, &held_metadata_directory)?
+            }
             TargetKind::Identity => verify_identity(
                 paths,
                 bundle,
@@ -93,6 +112,102 @@ pub(super) fn verify_exact_layout(
                 identity_custody.projection.as_ref(),
             )?,
         }
+    }
+    recheck_fixed_metadata_directory(paths, &held_metadata_directory)?;
+    drop(held_metadata_directory);
+    Ok(())
+}
+
+fn hold_fixed_metadata_directory(paths: &FixedInstallPaths) -> Result<File, InstallError> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(paths.etc_enoki())
+        .map_err(|_| InstallError::ExistingResidue)?;
+    let metadata = directory
+        .metadata()
+        .map_err(|_| InstallError::ExistingResidue)?;
+    if !metadata.is_dir()
+        || metadata.uid() != paths.expected_root_uid()
+        || metadata.gid() != paths.expected_root_gid()
+        || metadata.mode() & 0o7777 != 0o755
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(directory)
+}
+
+fn recheck_fixed_metadata_directory(
+    paths: &FixedInstallPaths,
+    held: &File,
+) -> Result<(), InstallError> {
+    let path_metadata =
+        std::fs::symlink_metadata(paths.etc_enoki()).map_err(|_| InstallError::ExistingResidue)?;
+    let held_metadata = held.metadata().map_err(|_| InstallError::ExistingResidue)?;
+    (!path_metadata.file_type().is_symlink()
+        && path_metadata.is_dir()
+        && path_metadata.dev() == held_metadata.dev()
+        && path_metadata.ino() == held_metadata.ino()
+        && path_metadata.uid() == held_metadata.uid()
+        && path_metadata.gid() == held_metadata.gid()
+        && path_metadata.mode() & 0o7777 == held_metadata.mode() & 0o7777
+        && held_metadata.uid() == paths.expected_root_uid()
+        && held_metadata.gid() == paths.expected_root_gid()
+        && held_metadata.mode() & 0o7777 == 0o755)
+        .then_some(())
+        .ok_or(InstallError::ExistingResidue)
+}
+
+fn verify_exact_journal_layout(
+    paths: &FixedInstallPaths,
+    journal: &TransactionJournal,
+) -> Result<(), InstallError> {
+    if journal.identity().is_none() {
+        return Err(InstallError::ExistingResidue);
+    }
+    let registry = installed_layout::registry(paths);
+    let expected_count = registry.len() + 3;
+    let mut expected = registry
+        .into_iter()
+        .map(|target| target.destination)
+        .collect::<BTreeSet<_>>();
+    expected.extend([paths.etc_enoki(), paths.state(), paths.identity_dir()]);
+    if expected.len() != expected_count {
+        return Err(InstallError::ExistingResidue);
+    }
+
+    let mut actual = journal
+        .paths()
+        .iter()
+        .map(|owned| owned.path().to_owned())
+        .collect::<BTreeSet<_>>();
+    if actual.len() != journal.paths().len() {
+        return Err(InstallError::ExistingResidue);
+    }
+    let metadata_directory_receipts = journal
+        .paths()
+        .iter()
+        .filter(|owned| owned.path() == paths.etc_enoki())
+        .collect::<Vec<_>>();
+    match metadata_directory_receipts.as_slice() {
+        [] => {
+            actual.insert(paths.etc_enoki());
+        }
+        [owned] if owned.directory() && owned.still_owned() => {}
+        _ => return Err(InstallError::ExistingResidue),
+    }
+    if actual != expected
+        || !journal
+            .paths()
+            .iter()
+            .filter(|owned| {
+                ![paths.state(), paths.identity_dir(), paths.identity()]
+                    .iter()
+                    .any(|mutable| owned.path() == mutable)
+            })
+            .all(|owned| owned.still_owned())
+    {
+        return Err(InstallError::ExistingResidue);
     }
     Ok(())
 }
@@ -167,14 +282,43 @@ fn verify_metadata(
     paths: &FixedInstallPaths,
     bundle: &VerifiedBundle,
     commit: &ReplacementCommitFact,
+    metadata_directory: &File,
 ) -> Result<(), InstallError> {
     let root_uid = paths.expected_root_uid();
-    let metadata = installed_layout::trusted_text(
-        &paths.metadata(),
-        root_uid,
-        paths.expected_root_gid(),
-        0o600,
-    )?;
+    let descriptor = unsafe {
+        libc::openat(
+            metadata_directory.as_raw_fd(),
+            c"probe-install.toml".as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(InstallError::ExistingResidue);
+    }
+    let mut metadata_file = unsafe { File::from_raw_fd(descriptor) };
+    let opened = metadata_file
+        .metadata()
+        .map_err(|_| InstallError::ExistingResidue)?;
+    if !opened.is_file()
+        || opened.uid() != root_uid
+        || opened.gid() != paths.expected_root_gid()
+        || opened.mode() & 0o7777 != 0o600
+        || opened.nlink() != 1
+        || opened.len() == 0
+        || opened.len() > MAX_METADATA_BYTES
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let mut bytes = Vec::new();
+    metadata_file
+        .by_ref()
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| InstallError::Io)?;
+    if bytes.len() as u64 != opened.len() || bytes.len() as u64 > MAX_METADATA_BYTES {
+        return Err(InstallError::ExistingResidue);
+    }
+    let metadata = String::from_utf8(bytes).map_err(|_| InstallError::ExistingResidue)?;
     if super::upgrade::metadata_scalar(&metadata, "schema_version").as_deref() != Some("5")
         || super::upgrade::metadata_string(&metadata, "bundle_version").as_deref()
             != Some(bundle.version.as_str())
@@ -234,4 +378,56 @@ fn verify_identity(
         return Err(InstallError::ExistingResidue);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    use tempfile::tempdir;
+
+    #[test]
+    fn held_metadata_directory_recheck_rejects_a_legal_path_swap() {
+        let temporary = tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("etc/enoki")).unwrap();
+        fs::set_permissions(
+            temporary.path().join("etc/enoki"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        let held = hold_fixed_metadata_directory(&paths).unwrap();
+        fs::rename(
+            paths.etc_enoki(),
+            temporary.path().join("etc/enoki-before-swap"),
+        )
+        .unwrap();
+        fs::create_dir(paths.etc_enoki()).unwrap();
+        fs::set_permissions(paths.etc_enoki(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            recheck_fixed_metadata_directory(&paths, &held),
+            Err(InstallError::ExistingResidue)
+        );
+    }
+
+    #[test]
+    fn held_metadata_directory_recheck_rejects_a_mode_change_on_the_same_inode() {
+        let temporary = tempdir().unwrap();
+        fs::create_dir_all(temporary.path().join("etc/enoki")).unwrap();
+        fs::set_permissions(
+            temporary.path().join("etc/enoki"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        let held = hold_fixed_metadata_directory(&paths).unwrap();
+
+        fs::set_permissions(paths.etc_enoki(), fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(
+            recheck_fixed_metadata_directory(&paths, &held),
+            Err(InstallError::ExistingResidue)
+        );
+    }
 }

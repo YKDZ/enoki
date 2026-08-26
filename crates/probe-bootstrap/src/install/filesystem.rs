@@ -9,7 +9,6 @@ pub(super) fn ensure_fixed_metadata_directory(
     match fs::symlink_metadata(path) {
         Ok(_) => {
             validate_existing_metadata_directory(path)?;
-            journal.record_verified_pre_existing_metadata_directory(path)?;
             Ok(false)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -39,7 +38,6 @@ pub(super) fn validate_existing_metadata_directory(path: &Path) -> Result<(), In
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
         || metadata.uid() != 0
-        || metadata.gid() != 0
         || metadata.mode() & 0o777 != 0o755
     {
         return Err(InstallError::ExistingResidue);

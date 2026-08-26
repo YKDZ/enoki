@@ -4110,8 +4110,86 @@ mod tests {
             }
         }
         let original_journal = serde_json::to_vec(&production_shape_journal).unwrap();
+        assert!(production_shape_journal.get("pre_existing_paths").is_none());
         fs::write(&journal_path, &original_journal).unwrap();
         fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut metadata_directory_cases = vec!["mode", "symlink", "non-directory"];
+        if unsafe { libc::geteuid() } == 0 {
+            metadata_directory_cases.extend(["owner", "group"]);
+        }
+        for case in metadata_directory_cases {
+            let metadata_directory = paths.etc_enoki();
+            let backup = metadata_directory.with_extension("r3-03-safe-directory");
+            match case {
+                "owner" => {
+                    std::os::unix::fs::chown(&metadata_directory, Some(1), None).unwrap();
+                }
+                "group" => {
+                    std::os::unix::fs::chown(&metadata_directory, None, Some(1)).unwrap();
+                }
+                "mode" => {
+                    fs::set_permissions(
+                        &metadata_directory,
+                        fs::Permissions::from_mode(0o750),
+                    )
+                    .unwrap();
+                }
+                "symlink" => {
+                    fs::rename(&metadata_directory, &backup).unwrap();
+                    std::os::unix::fs::symlink(&backup, &metadata_directory).unwrap();
+                }
+                "non-directory" => {
+                    fs::rename(&metadata_directory, &backup).unwrap();
+                    fs::write(&metadata_directory, b"not-a-directory").unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                finalize_complete_replacement_current_probe(
+                    &paths,
+                    &binding,
+                    &replacement_bundle,
+                    &commit,
+                ),
+                Err(InstallError::ExistingResidue),
+                "Replacement metadata directory {case} 必须 fail closed"
+            );
+            assert_eq!(
+                fs::read(&journal_path).unwrap(),
+                original_journal,
+                "Replacement read-only projection 不得改写 journal"
+            );
+            match case {
+                "owner" => {
+                    std::os::unix::fs::chown(
+                        &metadata_directory,
+                        Some(paths.expected_root_uid()),
+                        None,
+                    )
+                    .unwrap();
+                }
+                "group" => {
+                    std::os::unix::fs::chown(
+                        &metadata_directory,
+                        None,
+                        Some(paths.expected_root_gid()),
+                    )
+                    .unwrap();
+                }
+                "mode" => {
+                    fs::set_permissions(
+                        &metadata_directory,
+                        fs::Permissions::from_mode(0o755),
+                    )
+                    .unwrap();
+                }
+                "symlink" | "non-directory" => {
+                    fs::remove_file(&metadata_directory).unwrap();
+                    fs::rename(&backup, &metadata_directory).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
         for case in ["empty", "missing", "duplicate", "unknown", "wrong-receipt"] {
             let mut changed: serde_json::Value =
                 serde_json::from_slice(&original_journal).unwrap();
@@ -4421,10 +4499,7 @@ mod tests {
                 .iter()
                 .all(|receipt| receipt["path"] != serde_json::json!(paths.etc_enoki()))
         );
-        assert_eq!(
-            interrupted["pre_existing_paths"][0]["path"],
-            serde_json::json!(paths.etc_enoki())
-        );
+        assert!(interrupted.get("pre_existing_paths").is_none());
 
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());

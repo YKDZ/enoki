@@ -99,71 +99,6 @@ pub(super) struct OwnedPath {
     step: RollbackStep,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct PreExistingPath {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    uid: u32,
-    gid: u32,
-    mode: u32,
-    links: u64,
-    directory: bool,
-}
-
-impl PreExistingPath {
-    fn capture_metadata_directory(path: &Path) -> Result<Self, InstallError> {
-        if !is_fixed_metadata_directory(path) {
-            return Err(InstallError::ExistingResidue);
-        }
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-            .map_err(|_| InstallError::ExistingResidue)?;
-        let metadata = directory
-            .metadata()
-            .map_err(|_| InstallError::ExistingResidue)?;
-        if !metadata.is_dir()
-            || metadata.uid() != 0
-            || metadata.gid() != 0
-            || metadata.mode() & 0o7777 != 0o755
-        {
-            return Err(InstallError::ExistingResidue);
-        }
-        Ok(Self {
-            path: path.to_owned(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            mode: metadata.mode() & 0o7777,
-            links: metadata.nlink(),
-            directory: true,
-        })
-    }
-
-    fn still_matches(&self) -> bool {
-        if !self.directory || !is_fixed_metadata_directory(&self.path) {
-            return false;
-        }
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.path)
-            .and_then(|directory| directory.metadata())
-            .is_ok_and(|metadata| {
-                metadata.is_dir()
-                    && metadata.dev() == self.device
-                    && metadata.ino() == self.inode
-                    && metadata.uid() == self.uid
-                    && metadata.gid() == self.gid
-                    && metadata.mode() & 0o7777 == self.mode
-                    && metadata.nlink() == self.links
-            })
-    }
-}
-
 impl OwnedPath {
     pub fn capture(path: &Path, directory: bool, step: RollbackStep) -> Result<Self, InstallError> {
         let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
@@ -342,8 +277,6 @@ struct JournalState {
     started_may_exist: bool,
     staging: OwnedPath,
     paths: Vec<OwnedPath>,
-    #[serde(default)]
-    pre_existing_paths: Vec<PreExistingPath>,
 }
 
 pub(super) struct TransactionJournal {
@@ -401,7 +334,6 @@ impl TransactionJournal {
                     step: RollbackStep::RemoveTemporary,
                 },
                 paths: Vec::new(),
-                pre_existing_paths: Vec::new(),
             },
         };
         match fs::symlink_metadata(&journal.path) {
@@ -454,18 +386,8 @@ impl TransactionJournal {
                 .transaction_id
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
-        let valid_pre_existing_paths = state.pre_existing_paths.len() <= 1
-            && state
-                .pre_existing_paths
-                .iter()
-                .all(|receipt| receipt.still_matches())
-            && state
-                .pre_existing_paths
-                .iter()
-                .all(|receipt| !state.paths.iter().any(|owned| owned.path() == receipt.path));
         if !matches!(state.schema_version, 2 | 3)
             || !valid_transaction_id
-            || !valid_pre_existing_paths
             || state.staging.path
                 != state_directory.join(format!("{STAGING_NAME}-{}", state.transaction_id))
         {
@@ -515,39 +437,6 @@ impl TransactionJournal {
         self.persist()
     }
 
-    pub fn record_verified_pre_existing_metadata_directory(
-        &mut self,
-        path: &Path,
-    ) -> Result<(), InstallError> {
-        if self.state.paths.iter().any(|owned| owned.path() == path) {
-            return Err(InstallError::ExistingResidue);
-        }
-        let receipt = PreExistingPath::capture_metadata_directory(path)?;
-        if let Some(existing) = self
-            .state
-            .pre_existing_paths
-            .iter()
-            .find(|existing| existing.path == path)
-        {
-            return if *existing == receipt && existing.still_matches() {
-                Ok(())
-            } else {
-                Err(InstallError::ExistingResidue)
-            };
-        }
-        if !self.state.pre_existing_paths.is_empty() {
-            return Err(InstallError::ExistingResidue);
-        }
-        self.state.pre_existing_paths.push(receipt);
-        self.persist()?;
-        self.state
-            .pre_existing_paths
-            .first()
-            .is_some_and(PreExistingPath::still_matches)
-            .then_some(())
-            .ok_or(InstallError::ExistingResidue)
-    }
-
     pub fn record_enabled_intent(&mut self) -> Result<(), InstallError> {
         self.state.enabled_may_exist = true;
         self.persist()
@@ -588,48 +477,6 @@ impl TransactionJournal {
 
     pub fn published_path_is_recorded(&self, path: &Path) -> bool {
         self.state.paths.iter().any(|owned| owned.path() == path)
-    }
-
-    pub fn exact_complete_layout_is_owned(&self, paths: &super::FixedInstallPaths) -> bool {
-        let mut expected = super::installed_layout::registry(paths)
-            .into_iter()
-            .map(|target| target.destination)
-            .collect::<std::collections::BTreeSet<_>>();
-        expected.extend([paths.etc_enoki(), paths.state(), paths.identity_dir()]);
-        if self.state.paths.len() + self.state.pre_existing_paths.len() != expected.len()
-            || self.state.identity.is_none()
-        {
-            return false;
-        }
-        let actual = self
-            .state
-            .paths
-            .iter()
-            .map(|owned| owned.path.clone())
-            .chain(
-                self.state
-                    .pre_existing_paths
-                    .iter()
-                    .map(|receipt| receipt.path.clone()),
-            )
-            .collect::<std::collections::BTreeSet<_>>();
-        actual.len() == self.state.paths.len() + self.state.pre_existing_paths.len()
-            && actual == expected
-            && self
-                .state
-                .pre_existing_paths
-                .iter()
-                .all(PreExistingPath::still_matches)
-            && self
-                .state
-                .paths
-                .iter()
-                .filter(|owned| {
-                    ![paths.state(), paths.identity_dir(), paths.identity()]
-                        .iter()
-                        .any(|mutable| owned.path() == mutable)
-                })
-                .all(OwnedPath::still_owned)
     }
 
     pub fn owns_published_path(&self, path: &Path) -> Result<bool, InstallError> {
@@ -787,17 +634,6 @@ impl TransactionJournal {
     }
 }
 
-fn is_fixed_metadata_directory(path: &Path) -> bool {
-    path.is_absolute()
-        && path.components().all(|component| {
-            matches!(
-                component,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )
-        })
-        && path.ends_with(Path::new("etc/enoki"))
-}
-
 fn digest_file(path: &Path) -> Result<String, InstallError> {
     let bytes = fs::read(path).map_err(|_| InstallError::Io)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -951,7 +787,7 @@ mod tests {
         }
     }
 
-    fn pre_existing_metadata_journal_fixture() -> (
+    fn ordinary_pre_existing_metadata_fixture() -> (
         tempfile::TempDir,
         super::super::FixedInstallPaths,
         TransactionJournal,
@@ -969,77 +805,45 @@ mod tests {
             fs::set_permissions(root.path().join(path), fs::Permissions::from_mode(mode)).unwrap();
         }
         let paths = super::super::FixedInstallPaths::under(root.path());
+        if unsafe { libc::geteuid() } == 0 {
+            std::os::unix::fs::chown(paths.etc_enoki(), None, Some(1)).unwrap();
+        }
         let mut journal = TransactionJournal::begin(&paths.bootstrap_state()).unwrap();
-        journal
-            .record_verified_pre_existing_metadata_directory(&paths.etc_enoki())
-            .unwrap();
+        assert!(
+            !super::super::filesystem::ensure_fixed_metadata_directory(
+                &paths.etc_enoki(),
+                &mut journal,
+            )
+            .unwrap()
+        );
         (root, paths, journal)
     }
 
     #[test]
-    fn pre_existing_metadata_receipt_survives_reload_without_becoming_owned() {
-        let (_root, paths, journal) = pre_existing_metadata_journal_fixture();
-        let before = fs::symlink_metadata(paths.etc_enoki()).unwrap();
+    fn ordinary_transaction_does_not_persist_or_own_a_pre_existing_metadata_directory() {
+        let (_root, paths, journal) = ordinary_pre_existing_metadata_fixture();
         let encoded: serde_json::Value =
             serde_json::from_slice(&fs::read(paths.bootstrap_state().join(JOURNAL_NAME)).unwrap())
                 .unwrap();
         assert!(encoded["paths"].as_array().unwrap().is_empty());
-        assert_eq!(encoded["pre_existing_paths"].as_array().unwrap().len(), 1);
+        assert!(encoded.get("pre_existing_paths").is_none());
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(fs::symlink_metadata(paths.etc_enoki()).unwrap().gid(), 1);
+        }
         drop(journal);
 
-        let mut recovered = TransactionJournal::load(&paths.bootstrap_state())
+        let recovered = TransactionJournal::load(&paths.bootstrap_state())
             .unwrap()
-            .unwrap();
-        recovered
-            .record_verified_pre_existing_metadata_directory(&paths.etc_enoki())
             .unwrap();
         recovered.remove_staging_if_owned().unwrap();
         recovered.remove().unwrap();
 
-        let after = fs::symlink_metadata(paths.etc_enoki()).unwrap();
-        assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
-    }
-
-    #[test]
-    fn pre_existing_metadata_receipt_rejects_custody_tamper_without_deleting_it() {
-        for tamper in ["owner", "mode", "inode", "symlink", "links"] {
-            let (_root, paths, journal) = pre_existing_metadata_journal_fixture();
-            let metadata = paths.etc_enoki();
-            match tamper {
-                "owner" => {
-                    std::os::unix::fs::chown(&metadata, Some(1), Some(1)).unwrap();
-                }
-                "mode" => {
-                    fs::set_permissions(&metadata, fs::Permissions::from_mode(0o750)).unwrap();
-                }
-                "inode" => {
-                    fs::rename(&metadata, metadata.with_extension("original")).unwrap();
-                    fs::create_dir(&metadata).unwrap();
-                    fs::set_permissions(&metadata, fs::Permissions::from_mode(0o755)).unwrap();
-                }
-                "symlink" => {
-                    let original = metadata.with_extension("original");
-                    fs::rename(&metadata, &original).unwrap();
-                    symlink(&original, &metadata).unwrap();
-                }
-                "links" => fs::create_dir(metadata.join("unexpected-directory")).unwrap(),
-                _ => unreachable!(),
-            }
-            drop(journal);
-
-            assert_eq!(
-                TransactionJournal::load(&paths.bootstrap_state()).map(|_| ()),
-                Err(InstallError::ExistingResidue),
-                "custody tamper {tamper} 必须 fail closed"
-            );
-            assert!(fs::symlink_metadata(&metadata).is_ok());
-            assert!(paths.bootstrap_state().join(JOURNAL_NAME).exists());
-        }
+        assert!(paths.etc_enoki().is_dir());
     }
 
     #[test]
     fn rollback_removes_only_owned_children_of_pre_existing_metadata_directory() {
-        let (_root, paths, mut journal) = pre_existing_metadata_journal_fixture();
+        let (_root, paths, mut journal) = ordinary_pre_existing_metadata_fixture();
         let child = paths.etc_enoki().join("probe-install.toml");
         fs::write(&child, b"candidate").unwrap();
         fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();

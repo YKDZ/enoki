@@ -853,12 +853,11 @@ pub(crate) fn finalize_complete_replacement_current_probe(
     }
     let journal = TransactionJournal::load(&paths.bootstrap_state())?;
     if let Some(journal) = journal.as_ref()
-        && (!journal.matches_resume_binding(resume_binding.as_str())
-            || !journal.exact_complete_layout_is_owned(paths))
+        && !journal.matches_resume_binding(resume_binding.as_str())
     {
         return Err(InstallError::ExistingResidue);
     }
-    replacement_finalize::verify_exact_layout(paths, bundle, commit)?;
+    replacement_finalize::verify_exact_layout(paths, bundle, commit, journal.as_ref())?;
     if let Some(journal) = journal {
         journal.remove_staging_if_owned()?;
         journal.remove()?;
