@@ -1,14 +1,14 @@
-//! Fixed uninstall/replacement inventory and Host cleanup mechanics.
+//! 固定的 Uninstall/Replacement inventory 与 Host cleanup mechanics。
 
 use super::{
     ProbeUninstallerRunInput, ProbeUpgraderRunError, ProbeUpgraderSystemdRunner,
     TrustedProbeInstallMetadata,
 };
 use crate::upgrader::{
-    ensure_absolute_path, fixed_installed_probe_sha256, is_lifecycle_companion_path,
-    is_lifecycle_companion_service, observation_services, preflight_rooted_path,
-    read_trusted_probe_install_metadata_read_only, read_trusted_probe_install_preflight,
-    rebase_trusted_install_metadata_paths, remove_empty_parent_dir, remove_path_if_exists,
+    ensure_absolute_path, is_lifecycle_companion_path, is_lifecycle_companion_service,
+    observation_services, preflight_rooted_path, read_trusted_probe_install_metadata_read_only,
+    read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
+    remove_empty_parent_dir, remove_path_if_exists, replacement::fixed_installed_probe_sha256,
     verify_path_absent,
 };
 use enoki_probe_bootstrap::replacement::{
@@ -28,8 +28,8 @@ fn execute_probe_uninstall_with_install_metadata_path(
     execute_complete_uninstall_cleanup_oracle(&plan, systemd)
 }
 
-/// Replacement-only seam used after the durable migration commit. It reuses
-/// the uninstall cleanup mechanics while preserving candidate Bootstrap state.
+/// Replacement 在 durable migration commit 后使用的专属 seam。
+/// 它复用 Uninstall cleanup mechanics，同时保留候选 Bootstrap 状态。
 pub(in crate::upgrader) fn commit_replacement_and_cleanup_install_with_systemd<
     S: ReplacementCommitStore,
 >(
@@ -153,9 +153,8 @@ pub(super) struct ProbeUninstallCleanupPlan<'a> {
     pub(super) install_metadata_path: &'a Path,
 }
 
-/// Establishes every local deletion target before systemd or filesystem
-/// mutation. Both the offline public command and Hub-authorized operation
-/// invoke this planner through the same executor below.
+/// 在 systemd 或文件系统变更前确定全部本机删除目标。
+/// 离线公开命令与 Hub 授权操作都通过下方同一个 executor 调用此 planner。
 pub(super) fn plan_probe_uninstall_cleanup<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,

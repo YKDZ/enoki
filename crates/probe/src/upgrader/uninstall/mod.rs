@@ -4,13 +4,15 @@
 //! 父模块只保留 lifecycle/replacement 的窄生产 adapter。
 
 use super::{
-    ProbeUninstallerRunInput, ProbeUpgraderBootstrapConfig, ProbeUpgraderRunError,
-    ProbeUpgraderSystemdRunner, ProbeUpgraderValidationTransport, TrustedProbeInstallMetadata,
-    TrustedProbeInstallPreflight, hex_sha256, json_string_fragment, operation_status_url,
-    operation_token_validation_url, probe_request_auth_from_bootstrap_config,
-    read_upgrader_bootstrap_config, remove_path_if_exists, render_operation_status_body,
-    sync_directory, validate_bootstrap_config_matches_trusted_install_metadata,
-    validate_identity_path, write_new_synced_file,
+    PRODUCTION_INSTALL_METADATA_PATH, ProbeUninstallerRunInput, ProbeUpgraderBootstrapConfig,
+    ProbeUpgraderRunError, ProbeUpgraderSystemdRunner, ProbeUpgraderValidationTransport,
+    SystemProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, TrustedProbeInstallPreflight,
+    hex_sha256, json_string_fragment, operation_status_url, operation_token_validation_url,
+    probe_request_auth_from_bootstrap_config, read_trusted_probe_install_metadata,
+    read_trusted_probe_install_preflight, read_upgrader_bootstrap_config, remove_path_if_exists,
+    render_operation_status_body, sync_directory,
+    validate_bootstrap_config_matches_trusted_install_metadata, validate_identity_path,
+    write_new_synced_file,
 };
 use crate::probe_auth::ProbeRequestAuth;
 use enoki_probe_bootstrap::lifecycle::{
@@ -74,7 +76,31 @@ struct UninstallRecoveryCapsule {
     install_metadata: TrustedProbeInstallMetadata,
 }
 
-pub(super) fn run_uninstall_lifecycle_adapter(
+pub(super) fn coordinate(
+    request: &LifecycleRequest,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+) -> LifecycleResponse {
+    let install_metadata_path = Path::new(PRODUCTION_INSTALL_METADATA_PATH);
+    let metadata = match read_trusted_probe_install_metadata(install_metadata_path, None) {
+        Ok(metadata) => metadata,
+        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
+    };
+    let identity = match read_trusted_probe_install_preflight(install_metadata_path, None) {
+        Ok(identity) => identity,
+        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+    };
+    let mut systemd = SystemProbeUpgraderSystemdRunner;
+    run_uninstall_lifecycle_adapter(
+        request,
+        &metadata,
+        &identity,
+        install_metadata_path,
+        transport,
+        &mut systemd,
+    )
+}
+
+fn run_uninstall_lifecycle_adapter(
     request: &LifecycleRequest,
     metadata: &TrustedProbeInstallMetadata,
     identity: &TrustedProbeInstallPreflight,

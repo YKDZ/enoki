@@ -1421,7 +1421,9 @@ pub(super) mod tests {
     #[test]
     fn upgrader_adapter_cannot_observe_or_drive_private_repair_checkpoints() {
         let upgrader = include_str!("upgrader.rs");
-        assert!(upgrader.contains("drive_live_installed_bundle_repair"));
+        let coordinator = include_str!("upgrader/repair.rs");
+        assert!(coordinator.contains("drive_live_installed_bundle_repair"));
+        assert!(!upgrader.contains("drive_live_installed_bundle_repair"));
         for private_detail in [
             "InstalledBundleRepairProgress",
             "mark_validation_pending",
@@ -1432,8 +1434,8 @@ pub(super) mod tests {
             "publish_success",
         ] {
             assert!(
-                !upgrader.contains(private_detail),
-                "upgrader Adapter 不得观察 Repair 私有 checkpoint：{private_detail}"
+                !upgrader.contains(private_detail) && !coordinator.contains(private_detail),
+                "Repair coordinator Interface 不得观察私有 checkpoint：{private_detail}"
             );
         }
     }

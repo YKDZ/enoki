@@ -11,6 +11,9 @@ const LIFECYCLE_COMPANION_BINARY: &str =
     include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
+const UPGRADE_COORDINATOR: &str = include_str!("../src/upgrader/upgrade.rs");
+const REPAIR_COORDINATOR: &str = include_str!("../src/upgrader/repair.rs");
+const REPLACEMENT_COORDINATOR: &str = include_str!("../src/upgrader/replacement.rs");
 const UNINSTALL: &str = include_str!("../src/upgrader/uninstall/mod.rs");
 const UNINSTALL_CLEANUP: &str = include_str!("../src/upgrader/uninstall/cleanup.rs");
 const INSTALLED_BUNDLE_REPAIR: &str =
@@ -561,10 +564,10 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
                 "cleanup::commit_replacement_and_cleanup_install_with_systemd",
                 ItemVisibility::Parent,
             ),
-            ("run_uninstall_lifecycle_adapter", ItemVisibility::Parent),
+            ("coordinate", ItemVisibility::Parent),
             ("resume_lifecycle_companion_at", ItemVisibility::Parent),
         ],
-        "focused Uninstall implementation layer 只向父级暴露两个 adapter hook 与一个 Replacement seam",
+        "focused Uninstall Module 只向父级暴露 coordinator、恢复 hook 与一个 Replacement seam",
     );
     let nested_parent_surface = top_level_declarations(UNINSTALL_CLEANUP)
         .expect("supported cleanup module")
@@ -673,11 +676,11 @@ fn uninstall_has_no_parallel_stdin_business_or_failed_status_path() {
 
 #[test]
 fn replacement_commit_enters_the_same_dedicated_cleanup_seam_used_by_production() {
-    let production = UPGRADER
-        .split("fn run_probe_replacement_migration(")
+    let production = REPLACEMENT_COORDINATOR
+        .split("fn run(")
         .nth(1)
         .expect("Replacement production coordinator")
-        .split("struct InstalledProbeBinaryFacts")
+        .split("fn resume_committed_from_exact_request")
         .next()
         .expect("Replacement production body");
     assert!(production.contains("commit_replacement_and_cleanup_install_with_systemd("));
@@ -810,7 +813,20 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
             "Installed Bundle Repair 缺少 {required}"
         );
     }
-    assert!(UPGRADER.contains("drive_live_installed_bundle_repair"));
+    assert!(REPAIR_COORDINATOR.contains("drive_live_installed_bundle_repair"));
+    for closed_eligibility in [
+        "issue_probe_repair_evidence",
+        "issue_installed_bundle_failure_evidence",
+    ] {
+        assert!(
+            REPAIR_COORDINATOR.contains(closed_eligibility),
+            "Repair coordinator 必须独占封闭 eligibility：{closed_eligibility}",
+        );
+        assert!(
+            !UPGRADER.contains(closed_eligibility),
+            "顶层 upgrader 不得读取 Repair eligibility：{closed_eligibility}",
+        );
+    }
     for private_detail in [
         "InstalledBundleRepairProgress",
         "mark_validation_pending",
@@ -842,8 +858,8 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
     assert!(canonical < canonical_receipt);
     assert!(canonical_receipt < publish);
 
-    let exchange = UPGRADER
-        .split("fn exchange_repair_authority(")
+    let exchange = REPAIR_COORDINATOR
+        .split("fn exchange_authority(")
         .nth(1)
         .unwrap()
         .split('{')
@@ -857,12 +873,12 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
 #[test]
 fn compatible_upgrade_enters_a_transition_specific_coordinator() {
     assert!(
-        UPGRADER.contains("run_compatible_upgrade(request, peer_uid)"),
-        "Compatible Upgrade 的生产入口必须委托给转换专属 coordinator",
+        UPGRADER.contains("upgrade::coordinate(request, peer_uid)"),
+        "Compatible Upgrade 的顶层入口必须委托给转换专属 coordinator",
     );
     assert!(
-        !UPGRADER.contains("fn run_probe_compatible_upgrade("),
-        "Compatible Upgrade coordinator 不得继续内联在通用 upgrader 分派中",
+        UPGRADE_COORDINATOR.contains("run_compatible_upgrade as coordinate"),
+        "Upgrade Adapter 必须直接收窄既有深 Module 的 Interface，不得复制实现",
     );
     assert!(COMPATIBLE_UPGRADE.contains("struct VerifiedMutationPlan"));
     assert!(COMPATIBLE_UPGRADE.contains("mod mechanics"));
@@ -883,6 +899,112 @@ fn compatible_upgrade_enters_a_transition_specific_coordinator() {
             !COMPATIBLE_UPGRADE.contains(forbidden),
             "私有 lifecycle mechanics Interface 不得暴露可选 phase/mode/步骤：{forbidden}",
         );
+    }
+}
+
+#[test]
+fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
+    let production = UPGRADER
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("production upgrader source");
+    for coordinator in [
+        "mod upgrade;",
+        "mod repair;",
+        "mod replacement;",
+        "mod uninstall;",
+    ] {
+        assert!(
+            production.contains(coordinator),
+            "Lifecycle Companion 缺少封闭的转换专属 coordinator Module：{coordinator}",
+        );
+    }
+    for private_transition_knowledge in [
+        "LifecycleRequestAuthority",
+        "ReplacementEnrollment",
+        "ReplacementCommit",
+        "RepairAuthorityV1",
+        "issue_probe_repair_evidence",
+        "issue_installed_bundle_failure_evidence",
+        "UninstallRecoveryCapsule",
+        "cleanup_complete",
+    ] {
+        assert!(
+            !production.contains(private_transition_knowledge),
+            "父 production Module 不得持有转换专属 authority/commit/eligibility/cleanup：{private_transition_knowledge}",
+        );
+    }
+
+    let dispatch = production
+        .split("pub fn run_lifecycle_companion_from_peer(")
+        .nth(1)
+        .expect("Lifecycle Companion 必须保留 public peer seam")
+        .split("\nfn ")
+        .next()
+        .expect("Lifecycle Companion dispatch body");
+    for leaked_knowledge in [
+        "LifecycleRequestAuthority",
+        "ReplacementEnrollment",
+        "ReplacementCommit",
+        "registration",
+        "cleanup_complete",
+        "install_state_sha256",
+        "target_manifest_sha256",
+        "bundle_version",
+        "invoking_uid",
+        "invoking_gid",
+        "run_authorized_probe_repair",
+        "read_trusted_probe_install",
+    ] {
+        assert!(
+            !dispatch.contains(leaked_knowledge),
+            "顶层 dispatch 不得读取或拼装转换专属语义：{leaked_knowledge}",
+        );
+    }
+    for typed_delegate in [
+        "upgrade::coordinate(",
+        "repair::coordinate(",
+        "replacement::coordinate(",
+        "uninstall::coordinate(",
+    ] {
+        assert!(
+            dispatch.contains(typed_delegate),
+            "顶层 dispatch 必须只通过小 Interface 委派：{typed_delegate}",
+        );
+    }
+
+    let interfaces = [
+        (UPGRADE_COORDINATOR, "Upgrade"),
+        (REPAIR_COORDINATOR, "Repair"),
+        (REPLACEMENT_COORDINATOR, "Replacement"),
+        (UNINSTALL, "Uninstall"),
+    ];
+    for (module, transition) in interfaces {
+        let interface = module
+            .split("fn coordinate(")
+            .nth(1)
+            .map(|source| source.split('{').next().unwrap_or(source))
+            .or_else(|| {
+                module
+                    .contains("run_compatible_upgrade as coordinate")
+                    .then_some("request, peer_uid")
+            })
+            .unwrap_or_else(|| panic!("{transition} 缺少 coordinator Interface"));
+        for leaked_mechanics in [
+            "Path",
+            "Systemd",
+            "command",
+            "unit",
+            "permission",
+            "phase",
+            "step",
+            "bool",
+        ] {
+            assert!(
+                !interface.contains(leaked_mechanics),
+                "{transition} coordinator Interface 不得暴露 mechanics：{leaked_mechanics}",
+            );
+        }
     }
 }
 
