@@ -76,10 +76,10 @@ jobs:
           repository: ${{ needs.validate-publication-invocation.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-publication-invocation.outputs.trusted-workflow-sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable publication tooling dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Install the content-preserving registry transport
         run: sudo apt-get update && sudo apt-get install --yes skopeo

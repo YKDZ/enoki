@@ -65,19 +65,25 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.commit }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: candidate-source/package.json
+      - name: Bind exact candidate checkout before candidate-controlled setup
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
+        run: |
+          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
+          test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_COMMIT"
 
-      - name: Bind candidate source and release policy to one revision
+      - name: Set up candidate workspace dependencies
+        uses: ./candidate-source/.github/actions/setup-release-workspace-dependencies
+        with:
+          working-directory: candidate-source
+
+      - name: Validate candidate source inputs after trusted binding
         env:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
           CANDIDATE_VERSION: ${{ inputs.version }}
-          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
         run: >-
-          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
-          && node candidate-source/scripts/release-candidate.mjs validate-inputs
+          node candidate-source/scripts/release-candidate.mjs validate-inputs
           --commit "$CANDIDATE_COMMIT"
           --version "$CANDIDATE_VERSION"
           --source-dir candidate-source
@@ -96,10 +102,10 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable release preflight dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Validate public release migration configuration
         env:
@@ -180,10 +186,10 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable baseline resolver dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Resolve and fully verify published baseline inputs
         env:
@@ -258,10 +264,10 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.commit }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up candidate workspace dependencies
+        uses: ./candidate-source/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: candidate-source/package.json
+          working-directory: candidate-source
 
       - name: Download x86_64 musl Probe target build
         uses: actions/download-artifact@v8
@@ -365,10 +371,10 @@ jobs:
           TRUSTED_SIGNER_COMMIT: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
         run: test "$(git rev-parse HEAD)" = "$TRUSTED_SIGNER_COMMIT"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up trusted signer dependencies
+        uses: ./trusted-signer/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-signer/package.json
+          working-directory: trusted-signer
 
       - name: Download exact unsigned signing input
         uses: actions/download-artifact@v8
@@ -483,10 +489,10 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable assembly tooling dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Download signed Probe Asset Set
         uses: actions/download-artifact@v8
@@ -588,10 +594,10 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable Release planning dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Download the immutable candidate before planning Host jobs
         uses: actions/download-artifact@v8
@@ -639,10 +645,10 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable Release E2E dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Set up the shared Release runtime
         uses: ./trusted-tool/.github/actions/setup-release-runtime
@@ -913,10 +919,10 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.workflow_sha }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
+      - name: Set up immutable verification finalizer dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: trusted-tool/package.json
+          working-directory: trusted-tool
 
       - name: Download the one assembled candidate
         id: download-candidate

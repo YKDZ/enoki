@@ -79,6 +79,11 @@ jobs:
           BOOTSTRAP_DISTRIBUTION: ${{ inputs.distribution }}
         run: test "$BOOTSTRAP_DISTRIBUTION" = enoki
 
+      - name: Set up workspace dependencies for Bootstrap packaging
+        uses: ./.github/actions/setup-release-workspace-dependencies
+        with:
+          working-directory: .
+
       - name: Install pinned Rust toolchain
         run: >-
           rustup toolchain install 1.97.1 --profile minimal
