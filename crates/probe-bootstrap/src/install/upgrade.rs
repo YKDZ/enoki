@@ -652,6 +652,15 @@ enum RuntimeFailureConsumption {
     },
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalRetryReceipt {
+    schema_version: u16,
+    generation: String,
+    epoch_sha256: String,
+    progress: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ValidatedUpgradeAttemptBinding {
     operation_id: String,
@@ -824,6 +833,12 @@ fn load_validated_upgrade_attempt(
         finalized_targets,
         target_count,
     )?;
+    if runtime_failure_consumption
+        .as_ref()
+        .is_some_and(|consumption| !runtime_failure_consumption_matches_phase(consumption, &phase))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
     if schema_version == 2 {
         let mut migrated = contents.replacen("schema_version = 2", "schema_version = 3", 1);
         if metadata_scalar(&contents, "activation_started").is_none() {
@@ -853,6 +868,35 @@ fn load_validated_upgrade_attempt(
         finalized_targets,
         runtime_failure_consumption,
     })
+}
+
+fn runtime_failure_consumption_matches_phase(
+    consumption: &RuntimeFailureConsumption,
+    phase: &str,
+) -> bool {
+    match consumption {
+        RuntimeFailureConsumption::None | RuntimeFailureConsumption::Bound { .. } => matches!(
+            phase,
+            "consumed"
+                | "admitted"
+                | "prepared"
+                | "aborted"
+                | "activation-started"
+                | "repair-required"
+        ),
+        RuntimeFailureConsumption::EpochRemoved { .. } => {
+            matches!(phase, "activation-started" | "repair-required")
+        }
+        RuntimeFailureConsumption::NoneConsumed
+        | RuntimeFailureConsumption::LatchRemoved { .. } => matches!(
+            phase,
+            "activation-started"
+                | "repair-required"
+                | "finalizing"
+                | "stage-cleanup-required"
+                | "activated"
+        ),
+    }
 }
 
 fn infer_legacy_activation_started(
@@ -1673,14 +1717,12 @@ pub(super) fn bind_runtime_failure_pair_to_upgrade(
     let binding = match (epoch_exists, latch_exists) {
         (false, false) => {
             if let Some(receipt) = local_retry_receipt {
-                let receipt: serde_json::Value =
+                let receipt: LocalRetryReceipt =
                     serde_json::from_slice(&receipt).map_err(|_| InstallError::ExistingResidue)?;
-                if receipt
-                    .get("schemaVersion")
-                    .and_then(serde_json::Value::as_u64)
-                    != Some(1)
-                    || receipt.get("progress").and_then(serde_json::Value::as_str)
-                        != Some("retry-invoked")
+                if receipt.schema_version != 1
+                    || !valid_sha256(&receipt.generation)
+                    || !valid_sha256(&receipt.epoch_sha256)
+                    || receipt.progress != "retry-invoked"
                 {
                     return Err(InstallError::ExistingResidue);
                 }
@@ -1695,7 +1737,12 @@ pub(super) fn bind_runtime_failure_pair_to_upgrade(
             if local_retry_receipt.is_some() {
                 return Err(InstallError::ExistingResidue);
             }
-            let (generation, epoch_sha256) = current_runtime_failure_epoch_binding(paths)?;
+            let (generation, epoch_sha256) =
+                if state.schema_version == 3 && state.activation_started {
+                    legacy_upgrade_runtime_failure_epoch_binding(paths, &state)?
+                } else {
+                    current_runtime_failure_epoch_binding(paths)?
+                };
             if latch_exists {
                 let latch = trusted_runtime_failure_bytes(
                     &paths.runtime_failure_latch(),
@@ -1941,6 +1988,167 @@ pub(super) fn current_runtime_failure_epoch_binding(
         return Err(InstallError::ExistingResidue);
     }
     Ok((generation, format!("{:x}", Sha256::digest(&epoch))))
+}
+
+fn legacy_upgrade_runtime_failure_epoch_binding(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<(String, String), InstallError> {
+    if state.schema_version != 3
+        || !state.activation_started
+        || !matches!(
+            state.phase.as_str(),
+            "activation-started" | "repair-required"
+        )
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let epoch = trusted_runtime_failure_bytes(
+        &paths.runtime_failure_epoch(),
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    let epoch_text = std::str::from_utf8(&epoch).map_err(|_| InstallError::ExistingResidue)?;
+    let unit = trusted_legacy_upgrade_source_target(paths, state, "runtime-unit")?;
+    let identity = trusted_legacy_upgrade_source_target(paths, state, "identity")?;
+    let metadata = trusted_legacy_upgrade_source_target(paths, state, "metadata")?;
+    let identity_text =
+        std::str::from_utf8(&identity).map_err(|_| InstallError::ExistingResidue)?;
+    let metadata_text =
+        std::str::from_utf8(&metadata).map_err(|_| InstallError::ExistingResidue)?;
+    let boot_id =
+        trusted_runtime_failure_bytes(&paths.boot_id(), paths.expected_root_uid(), 0o444)?;
+    let boot_id = std::str::from_utf8(&boot_id).map_err(|_| InstallError::ExistingResidue)?;
+    let epoch_string =
+        |key: &str| metadata_string(epoch_text, key).ok_or(InstallError::ExistingResidue);
+    let identity_string =
+        |key: &str| metadata_string(identity_text, key).ok_or(InstallError::ExistingResidue);
+    let metadata_value =
+        |key: &str| metadata_string(metadata_text, key).ok_or(InstallError::ExistingResidue);
+    let generation = epoch_string("generation")?;
+    let source_matches_authority = match state.binding.authority_scope.as_ref() {
+        Some(scope) => {
+            metadata_value("hub_url")? == scope.hub_origin
+                && identity_string("host_id")? == scope.host_id
+        }
+        None => true,
+    };
+    if metadata_scalar(epoch_text, "schema_version").as_deref() != Some("1")
+        || epoch_string("result")? != "start-limit-hit"
+        || epoch_string("unit")? != "enoki-observation-runtime.service"
+        || !valid_sha256(&generation)
+        || epoch_string("boot_id")? != boot_id.trim()
+        || epoch_string("unit_sha256")? != format!("{:x}", Sha256::digest(&unit))
+        || epoch_string("identity_receipt_sha256")? != format!("{:x}", Sha256::digest(&identity))
+        || epoch_string("hub_origin")? != metadata_value("hub_url")?
+        || epoch_string("hub_origin")? != identity_string("hub_url")?
+        || epoch_string("host_id")? != identity_string("host_id")?
+        || epoch_string("probe_id")? != identity_string("probe_id")?
+        || epoch_string("probe_id")? != state.binding.source_probe_id
+        || epoch_string("install_state_sha256")? != state.binding.source_install_state_sha256
+        || metadata_value("install_state_sha256")? != state.binding.source_install_state_sha256
+        || epoch_string("manifest_sha256")? != state.binding.source_manifest_sha256
+        || metadata_value("target_manifest_sha256")? != state.binding.source_manifest_sha256
+        || epoch_string("bundle_version")? != state.binding.source_bundle_version
+        || metadata_value("bundle_version")? != state.binding.source_bundle_version
+        || !source_matches_authority
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok((generation, format!("{:x}", Sha256::digest(&epoch))))
+}
+
+fn trusted_legacy_upgrade_source_target(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+    target_id: &str,
+) -> Result<Vec<u8>, InstallError> {
+    use std::io::Read as _;
+
+    let registry = super::installed_layout::registry(paths);
+    let (index, target) = registry
+        .iter()
+        .enumerate()
+        .find(|(_, target)| target.id == target_id)
+        .ok_or(InstallError::ExistingResidue)?;
+    let name = target
+        .destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(InstallError::ExistingResidue)?;
+    let backup = target
+        .destination
+        .with_file_name(format!(".{name}.enoki-upgrade-old"));
+    let (mut current, current_metadata) = open_legacy_upgrade_target(&target.destination)?;
+    let (mut retained, retained_metadata) = open_legacy_upgrade_target(&backup)?;
+    let same_inode = current_metadata.dev() == retained_metadata.dev()
+        && current_metadata.ino() == retained_metadata.ino();
+    let source_is_retained = if index < state.activated_targets {
+        if same_inode || retained_metadata.nlink() != 1 {
+            return Err(InstallError::ExistingResidue);
+        }
+        true
+    } else if index == state.activated_targets {
+        if same_inode {
+            if current_metadata.nlink() != 2 || retained_metadata.nlink() != 2 {
+                return Err(InstallError::ExistingResidue);
+            }
+            false
+        } else {
+            if retained_metadata.nlink() != 1 {
+                return Err(InstallError::ExistingResidue);
+            }
+            true
+        }
+    } else {
+        if !same_inode || current_metadata.nlink() != 2 || retained_metadata.nlink() != 2 {
+            return Err(InstallError::ExistingResidue);
+        }
+        false
+    };
+    if current_metadata.mode() & 0o7777 != target.mode
+        || retained_metadata.mode() & 0o7777 != target.mode
+        || current_metadata.uid() != retained_metadata.uid()
+        || current_metadata.gid() != retained_metadata.gid()
+        || (target_id != "identity"
+            && (retained_metadata.uid() != paths.expected_root_uid()
+                || retained_metadata.gid() != paths.expected_root_uid()))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let source = if source_is_retained {
+        &mut retained
+    } else {
+        &mut current
+    };
+    let mut bytes = Vec::new();
+    source
+        .take(256 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| InstallError::Io)?;
+    if bytes.is_empty() || bytes.len() > 256 * 1024 {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(bytes)
+}
+
+fn open_legacy_upgrade_target(path: &Path) -> Result<(File, fs::Metadata), InstallError> {
+    let path_metadata = fs::symlink_metadata(path).map_err(|_| InstallError::ExistingResidue)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| InstallError::ExistingResidue)?;
+    let opened = file.metadata().map_err(|_| InstallError::ExistingResidue)?;
+    if path_metadata.file_type().is_symlink()
+        || !opened.is_file()
+        || path_metadata.dev() != opened.dev()
+        || path_metadata.ino() != opened.ino()
+        || opened.len() > 256 * 1024
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok((file, opened))
 }
 
 fn trusted_runtime_failure_bytes(
@@ -2596,6 +2804,12 @@ fn recover_incomplete_probe_upgrade_with_status(
             }
             "aborted" => {}
             "activation-started" | "repair-required" => {
+                // A candidate companion can inherit a schema-3 journal from an
+                // older binary. Establish custody from its retained source
+                // closure before any further stop or target rename.
+                if finalized_targets == 0 {
+                    bind_runtime_failure_pair_to_upgrade(paths)?;
+                }
                 if activated_targets < destinations.len() || finalized_targets == 0 {
                     systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
                     systemd.stop()?;
@@ -2617,7 +2831,6 @@ fn recover_incomplete_probe_upgrade_with_status(
                         advance_upgrade_attempt(paths, phase, index + 1, finalized_targets)?;
                     }
                     systemd.daemon_reload()?;
-                    bind_runtime_failure_pair_to_upgrade(paths)?;
                     consume_runtime_failure_pair_for_upgrade(paths)?;
                     systemd.start()?;
                     systemd.wait_local_activated()?;

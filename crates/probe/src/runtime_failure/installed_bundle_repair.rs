@@ -427,9 +427,32 @@ fn resume_installed_bundle_repair_at_locked(
     root: &Path,
     expected_uid: u32,
 ) -> Result<Option<ResumableInstalledBundleRepair>, InstalledBundleRepairError> {
-    let path = rooted(root, REPAIR_INTENT_PATH);
-    if !path.exists() {
+    let Some(intent) = load_validated_installed_bundle_repair_intent_at(root, expected_uid)? else {
         return Ok(None);
+    };
+    Ok(Some(ResumableInstalledBundleRepair {
+        grant: InstalledBundleRepairGrant {
+            authority: intent.authority,
+            authority_signature: intent.authority_signature,
+            signed_evidence: intent.signed_evidence,
+            root: root.to_path_buf(),
+            expected_uid,
+        },
+        progress: intent.state,
+        stage_owner_uid: intent.stage_owner_uid,
+        stage_receipt: intent.stage_receipt,
+    }))
+}
+
+pub(super) fn load_validated_installed_bundle_repair_intent_at(
+    root: &Path,
+    expected_uid: u32,
+) -> Result<Option<InstalledBundleRepairIntent>, InstalledBundleRepairError> {
+    let path = rooted(root, REPAIR_INTENT_PATH);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(InstalledBundleRepairError::RecoveryPending),
     }
     let bytes = trusted_file(&path, expected_uid, 0o600)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
@@ -446,6 +469,7 @@ fn resume_installed_bundle_repair_at_locked(
         .and_then(|value| decode_lower_hex_32(&value))
         .ok_or(InstalledBundleRepairError::RecoveryPending)?;
     if intent.schema_version != 2
+        || decode_lower_hex_32(&intent.authority.generation).is_none()
         || !intent
             .signed_evidence
             .evidence
@@ -464,18 +488,7 @@ fn resume_installed_bundle_repair_at_locked(
     {
         return Err(InstalledBundleRepairError::RecoveryPending);
     }
-    Ok(Some(ResumableInstalledBundleRepair {
-        grant: InstalledBundleRepairGrant {
-            authority: intent.authority,
-            authority_signature: intent.authority_signature,
-            signed_evidence: intent.signed_evidence,
-            root: root.to_path_buf(),
-            expected_uid,
-        },
-        progress: intent.state,
-        stage_owner_uid: intent.stage_owner_uid,
-        stage_receipt: intent.stage_receipt,
-    }))
+    Ok(Some(intent))
 }
 
 fn repair_generation_is_still_terminal(
@@ -518,12 +531,9 @@ pub(super) fn invalidate_installed_bundle_failure_at(
 ) -> Result<(), InstalledBundleRepairError> {
     let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    let intent_path = rooted(root, REPAIR_INTENT_PATH);
-    let intent_bytes = trusted_file(&intent_path, expected_uid, 0o600)
-        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    let mut intent: InstalledBundleRepairIntent = serde_json::from_slice(&intent_bytes)
-        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    if intent.schema_version != 2 || intent.authority != *authority {
+    let mut intent = load_validated_installed_bundle_repair_intent_at(root, expected_uid)?
+        .ok_or(InstalledBundleRepairError::RecoveryPending)?;
+    if intent.authority != *authority {
         return Err(InstalledBundleRepairError::RecoveryPending);
     }
     if intent.state == InstalledBundleRepairProgress::ProbeActive {
@@ -551,7 +561,19 @@ pub(super) fn invalidate_installed_bundle_failure_at(
             .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     }
     if intent.state == InstalledBundleRepairProgress::EpochRemoved {
-        remove_regular_file_if_present(&rooted(root, LATCH_PATH), 0o600, expected_uid)?;
+        let latch_path = rooted(root, LATCH_PATH);
+        match fs::symlink_metadata(&latch_path) {
+            Ok(_) => {
+                let latch = trusted_file(&latch_path, expected_uid, 0o600)
+                    .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+                if latch != authority.generation.as_bytes() {
+                    return Err(InstalledBundleRepairError::RecoveryPending);
+                }
+                remove_regular_file_if_present(&latch_path, 0o600, expected_uid)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(InstalledBundleRepairError::RecoveryPending),
+        }
         intent.state = InstalledBundleRepairProgress::LatchRemoved;
         write_installed_bundle_repair_intent(root, &intent)
             .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;

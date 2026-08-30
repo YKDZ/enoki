@@ -745,6 +745,76 @@ mod tests {
         .unwrap();
     }
 
+    fn prepare_legacy_partial_upgrade_with_unreceipted_next_target(
+        fixture: &InstalledBundleFixture,
+        activated_targets: usize,
+    ) -> VerifiedBundle {
+        let paths = &fixture.paths;
+        let mut target = fixture.bundle.clone();
+        target.version = "1.2.4".to_owned();
+        target.manifest_sha256 = "d".repeat(64);
+        target.asset_set_manifest_sha256 = "e".repeat(64);
+        let destinations = upgrade_destinations(paths);
+        for destination in &destinations {
+            let name = destination.file_name().unwrap().to_str().unwrap();
+            let backup = destination.with_file_name(format!(".{name}.enoki-upgrade-old"));
+            fs::hard_link(destination, backup).unwrap();
+            let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+            let current = fs::read(destination).unwrap();
+            let target_bytes = if destination == &paths.identity() {
+                upgrade::updated_receipt_projection(
+                    std::str::from_utf8(&current).unwrap(),
+                    &target,
+                    &fixture.installed,
+                )
+                .unwrap()
+                .into_bytes()
+            } else if destination == &paths.metadata() {
+                upgrade::updated_metadata(
+                    std::str::from_utf8(&current).unwrap(),
+                    &target,
+                    &fixture.installed,
+                )
+                .unwrap()
+                .into_bytes()
+            } else {
+                current
+            };
+            fs::write(&staged, target_bytes).unwrap();
+            let mode = fs::metadata(destination).unwrap().mode() & 0o7777;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        for destination in destinations.iter().take(activated_targets) {
+            let name = destination.file_name().unwrap().to_str().unwrap();
+            let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+            fs::rename(staged, destination).unwrap();
+        }
+        if let Some(destination) = destinations.get(activated_targets) {
+            let name = destination.file_name().unwrap().to_str().unwrap();
+            let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+            fs::rename(staged, destination).unwrap();
+        }
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        let journal = format!(
+            "schema_version = 3\noperation_id = \"legacy-runtime-pair\"\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = {:?}\nhost_id = \"host_01\"\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"activation-started\"\nactivation_started = true\nactivated_targets = {activated_targets}\nfinalized_targets = 0\n",
+            unsafe { libc::geteuid() },
+            "a".repeat(64),
+            fixture.installed.hub_origin,
+            fixture.installed.probe_id,
+            fixture.installed.source_bundle_version,
+            fixture.installed.source_install_state_sha256,
+            fixture.installed.source_manifest_sha256,
+            target.version,
+            format!("sha256:{}", target.asset_set_manifest_sha256),
+            target.manifest_sha256,
+            "f".repeat(64),
+        );
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        fs::write(&journal_path, journal).unwrap();
+        fs::set_permissions(journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        target
+    }
+
     fn restore_bundle_fixture(
         fixture: &InstalledBundleFixture,
         systemd: &mut Systemd,
@@ -1592,8 +1662,20 @@ mod tests {
         let paths = &fixture.paths;
         let generation = "2d".repeat(32);
         write_runtime_failure_pair_fixture(paths, &generation);
-        write_authority_upgrade_journal(paths, 3, "activation-started", Some(true), 0, 0);
+        write_authority_upgrade_journal(paths, 3, "prepared", Some(false), 0, 0);
         upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
+        let prepared = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        upgrade::write_upgrade_attempt_from_journal(
+            paths,
+            &prepared,
+            "activation-started",
+            0,
+            0,
+        )
+        .unwrap();
         upgrade::fail_next_atomic_write_containing("epoch-removed");
 
         assert!(upgrade::consume_runtime_failure_pair_for_upgrade(paths).is_err());
@@ -1617,6 +1699,104 @@ mod tests {
         .unwrap();
         assert!(completed.contains("runtime_failure_consumption = \"latch-removed\""));
         assert!(completed.contains(&format!("runtime_failure_generation = {generation:?}")));
+    }
+
+    #[test]
+    fn fresh_candidate_recovers_every_legacy_activation_receipt_window_after_binding_old_pair() {
+        for activated_targets in 0..=21 {
+            let fixture = installed_bundle_fixture();
+            let paths = &fixture.paths;
+            let generation = format!("{:02x}", 0x30 + activated_targets).repeat(32);
+            write_runtime_failure_pair_fixture(paths, &generation);
+            let target = prepare_legacy_partial_upgrade_with_unreceipted_next_target(
+                &fixture,
+                activated_targets,
+            );
+            let mut systemd = Systemd::default();
+
+            let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
+                .unwrap_or_else(|error| {
+                    panic!("legacy activated_targets={activated_targets} recovery failed: {error:?}")
+                })
+                .unwrap();
+
+            assert_eq!(receipt.source_bundle_version, fixture.installed.source_bundle_version);
+            assert_eq!(receipt.target_bundle_version, target.version);
+            assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
+            let journal = fs::read_to_string(
+                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+            )
+            .unwrap();
+            assert!(journal.contains("schema_version = 4"));
+            assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
+            assert!(journal.contains(&format!("runtime_failure_generation = {generation:?}")));
+            assert!(!paths.runtime_failure_epoch().exists());
+            assert!(!paths.runtime_failure_latch().exists());
+        }
+    }
+
+    #[test]
+    fn legacy_pair_binding_failure_precedes_stop_and_any_further_target_mutation() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "5a".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        prepare_legacy_partial_upgrade_with_unreceipted_next_target(&fixture, 18);
+        let destinations = upgrade_destinations(paths);
+        let next = &destinations[19];
+        let next_before = fs::read(next).unwrap();
+        let staged = next.with_file_name(format!(
+            ".{}.enoki-upgrade-new",
+            next.file_name().unwrap().to_str().unwrap(),
+        ));
+        let staged_before = fs::read(&staged).unwrap();
+        upgrade::fail_next_atomic_write_containing("schema_version = 4");
+        let mut systemd = Systemd::default();
+
+        assert!(recover_incomplete_probe_upgrade(paths, &mut systemd).is_err());
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read(next).unwrap(), next_before);
+        assert_eq!(fs::read(staged).unwrap(), staged_before);
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
+        assert!(paths.runtime_failure_epoch().exists());
+        assert!(
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml"))
+                .unwrap()
+                .contains("schema_version = 3")
+        );
+    }
+
+    #[test]
+    fn legacy_recovery_establishes_epoch_only_or_absent_pair_custody_before_resuming() {
+        for epoch_only in [true, false] {
+            let fixture = installed_bundle_fixture();
+            let paths = &fixture.paths;
+            let generation = "6b".repeat(32);
+            if epoch_only {
+                write_runtime_failure_pair_fixture(paths, &generation);
+                fs::remove_file(paths.runtime_failure_latch()).unwrap();
+            }
+            prepare_legacy_partial_upgrade_with_unreceipted_next_target(&fixture, 19);
+            let mut systemd = Systemd::default();
+
+            recover_incomplete_probe_upgrade(paths, &mut systemd)
+                .unwrap()
+                .unwrap();
+
+            let journal = fs::read_to_string(
+                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+            )
+            .unwrap();
+            assert!(journal.contains("schema_version = 4"));
+            assert!(journal.contains(if epoch_only {
+                "runtime_failure_consumption = \"latch-removed\""
+            } else {
+                "runtime_failure_consumption = \"none-consumed\""
+            }));
+            assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
+            assert!(!paths.runtime_failure_epoch().exists());
+            assert!(!paths.runtime_failure_latch().exists());
+        }
     }
 
     #[test]

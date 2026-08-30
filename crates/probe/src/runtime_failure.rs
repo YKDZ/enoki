@@ -174,6 +174,22 @@ struct LocalRetryReceipt {
     progress: LocalRetryProgress,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpgradeRuntimeFailureProgress {
+    None,
+    NoneConsumed,
+    Bound,
+    EpochRemoved,
+    LatchRemoved,
+}
+
+#[derive(Debug)]
+struct UpgradeRuntimeFailureIntent {
+    phase: String,
+    progress: Option<UpgradeRuntimeFailureProgress>,
+    generation: Option<String>,
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LocalRetryCrashPoint {
@@ -397,15 +413,7 @@ fn retry_runtime_at(
     let receipt_path = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
     let mut receipt = if receipt_path.exists() {
         let bytes = trusted_file(&receipt_path, expected_uid, 0o600)?;
-        let receipt: LocalRetryReceipt = serde_json::from_slice(&bytes)
-            .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
-        if receipt.schema_version != 1
-            || decode_lower_hex_32(&receipt.generation).is_none()
-            || decode_lower_hex_32(&receipt.epoch_sha256).is_none()
-        {
-            return Err(std::io::Error::other("local retry receipt invalid"));
-        }
-        receipt
+        parse_local_retry_receipt(&bytes)?
     } else {
         let (epoch, _, epoch_bytes) = current_epoch_at_locked(root, expected_uid)?;
         if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
@@ -765,9 +773,8 @@ fn record_runtime_failure_at(
     let retry_receipt = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
     if retry_receipt.exists() {
         let bytes = trusted_file(&retry_receipt, expected_uid, 0o600)?;
-        let receipt: LocalRetryReceipt = serde_json::from_slice(&bytes)
-            .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
-        if receipt.schema_version != 1 || receipt.progress != LocalRetryProgress::RetryInvoked {
+        let receipt = parse_local_retry_receipt(&bytes)?;
+        if receipt.progress != LocalRetryProgress::RetryInvoked {
             return Err(std::io::Error::other("local retry recovery pending"));
         }
         remove_regular_file(&retry_receipt, 0o600, Some((expected_uid, expected_uid)))?;
@@ -807,9 +814,8 @@ fn runtime_failure_consumption_pending_at(
     if let Some(bytes) =
         trusted_optional_file(&rooted(root, LOCAL_RETRY_RECEIPT_PATH), expected_uid, 0o600)?
     {
-        let receipt: LocalRetryReceipt = serde_json::from_slice(&bytes)
-            .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
-        if receipt.schema_version != 1 || receipt.generation != generation {
+        let receipt = parse_local_retry_receipt(&bytes)?;
+        if receipt.generation != generation {
             return Err(std::io::Error::other("local retry receipt binding invalid"));
         }
         if receipt.progress != LocalRetryProgress::RetryInvoked {
@@ -820,79 +826,73 @@ fn runtime_failure_consumption_pending_at(
         ));
     }
 
-    if let Some(bytes) = trusted_optional_file(
+    if let Some(_bytes) = trusted_optional_file(
         &rooted(root, installed_bundle_repair::REPAIR_INTENT_PATH),
         expected_uid,
         0o600,
     )? {
-        let intent: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|_| std::io::Error::other("repair intent invalid"))?;
-        let state = intent
-            .get("state")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
+        let intent = installed_bundle_repair::load_validated_installed_bundle_repair_intent_at(
+            root,
+            expected_uid,
+        )
+        .map_err(|_| std::io::Error::other("repair intent invalid"))?
+        .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
+        let state = intent.state;
         if matches!(
             state,
-            "admitted"
-                | "validation-pending"
-                | "temporary-runtime-healthy"
-                | "probe-active"
-                | "invalidation-committed"
-                | "epoch-removed"
+            installed_bundle_repair::InstalledBundleRepairProgress::Admitted
+                | installed_bundle_repair::InstalledBundleRepairProgress::ValidationPending
+                | installed_bundle_repair::InstalledBundleRepairProgress::TemporaryRuntimeHealthy
+                | installed_bundle_repair::InstalledBundleRepairProgress::ProbeActive
+                | installed_bundle_repair::InstalledBundleRepairProgress::InvalidationCommitted
+                | installed_bundle_repair::InstalledBundleRepairProgress::EpochRemoved
         ) {
-            let bound = intent
-                .get("authority")
-                .and_then(|authority| authority.get("generation"))
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| std::io::Error::other("repair intent binding invalid"))?;
-            if bound != generation {
+            if intent.authority.generation != generation {
                 return Err(std::io::Error::other("repair intent binding invalid"));
             }
             return Ok(true);
         }
         if matches!(
             state,
-            "latch-removed" | "canonical-runtime-healthy" | "status-published"
-        ) {
-            let bound = intent
-                .get("authority")
-                .and_then(|authority| authority.get("generation"))
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| std::io::Error::other("repair intent binding invalid"))?;
-            if bound == generation {
-                return Err(std::io::Error::other(
-                    "completed repair retained a failure pair",
-                ));
-            }
+            installed_bundle_repair::InstalledBundleRepairProgress::LatchRemoved
+                | installed_bundle_repair::InstalledBundleRepairProgress::CanonicalRuntimeHealthy
+                | installed_bundle_repair::InstalledBundleRepairProgress::StatusPublished
+        ) && intent.authority.generation == generation
+        {
+            return Err(std::io::Error::other(
+                "completed repair retained a failure pair",
+            ));
         }
     }
 
     if let Some(bytes) =
         trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
     {
-        let journal = std::str::from_utf8(&bytes)
-            .map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
-        let value: toml::Value =
-            toml::from_str(journal).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
-        if let Some(progress) = metadata_string(&value, "runtime_failure_consumption") {
-            let phase = metadata_string(&value, "phase")
-                .ok_or_else(|| std::io::Error::other("upgrade intent invalid"))?;
-            if matches!(progress.as_str(), "bound" | "epoch-removed") && phase != "aborted" {
-                let bound = metadata_string(&value, "runtime_failure_generation")
-                    .ok_or_else(|| std::io::Error::other("upgrade intent binding invalid"))?;
-                if bound != generation {
+        let intent = parse_upgrade_runtime_failure_intent(&bytes)?;
+        if intent.phase == "aborted" || intent.progress.is_none() {
+            return Ok(intent.phase != "aborted" && intent.phase != "activated");
+        }
+        match intent
+            .progress
+            .ok_or_else(|| std::io::Error::other("upgrade intent progress unexpectedly absent"))?
+        {
+            UpgradeRuntimeFailureProgress::Bound | UpgradeRuntimeFailureProgress::EpochRemoved => {
+                if intent.generation.as_deref() != Some(generation) {
                     return Err(std::io::Error::other("upgrade intent binding invalid"));
                 }
                 return Ok(true);
             }
-            if progress == "latch-removed" {
-                let bound = metadata_string(&value, "runtime_failure_generation")
-                    .ok_or_else(|| std::io::Error::other("upgrade intent binding invalid"))?;
-                if bound == generation {
+            UpgradeRuntimeFailureProgress::LatchRemoved => {
+                if intent.generation.as_deref() == Some(generation) {
                     return Err(std::io::Error::other(
                         "completed upgrade retained a failure pair",
                     ));
                 }
+            }
+            UpgradeRuntimeFailureProgress::None | UpgradeRuntimeFailureProgress::NoneConsumed => {
+                return Err(std::io::Error::other(
+                    "absent-pair upgrade intent retained a failure pair",
+                ));
             }
         }
     }
@@ -900,25 +900,25 @@ fn runtime_failure_consumption_pending_at(
 }
 
 fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::io::Result<bool> {
-    if let Some(bytes) = trusted_optional_file(
+    if let Some(_bytes) = trusted_optional_file(
         &rooted(root, installed_bundle_repair::REPAIR_INTENT_PATH),
         expected_uid,
         0o600,
     )? {
-        let intent: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|_| std::io::Error::other("repair intent invalid"))?;
-        let state = intent
-            .get("state")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
+        let intent = installed_bundle_repair::load_validated_installed_bundle_repair_intent_at(
+            root,
+            expected_uid,
+        )
+        .map_err(|_| std::io::Error::other("repair intent invalid"))?
+        .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
         if matches!(
-            state,
-            "admitted"
-                | "validation-pending"
-                | "temporary-runtime-healthy"
-                | "probe-active"
-                | "invalidation-committed"
-                | "epoch-removed"
+            intent.state,
+            installed_bundle_repair::InstalledBundleRepairProgress::Admitted
+                | installed_bundle_repair::InstalledBundleRepairProgress::ValidationPending
+                | installed_bundle_repair::InstalledBundleRepairProgress::TemporaryRuntimeHealthy
+                | installed_bundle_repair::InstalledBundleRepairProgress::ProbeActive
+                | installed_bundle_repair::InstalledBundleRepairProgress::InvalidationCommitted
+                | installed_bundle_repair::InstalledBundleRepairProgress::EpochRemoved
         ) {
             return Ok(true);
         }
@@ -928,15 +928,131 @@ fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::
     else {
         return Ok(false);
     };
+    let intent = parse_upgrade_runtime_failure_intent(&bytes)?;
+    if intent.phase == "aborted" || intent.phase == "activated" {
+        return Ok(false);
+    }
+    Ok(matches!(
+        intent.progress,
+        None | Some(UpgradeRuntimeFailureProgress::None)
+            | Some(UpgradeRuntimeFailureProgress::Bound)
+            | Some(UpgradeRuntimeFailureProgress::EpochRemoved)
+    ))
+}
+
+fn parse_local_retry_receipt(bytes: &[u8]) -> std::io::Result<LocalRetryReceipt> {
+    let receipt: LocalRetryReceipt = serde_json::from_slice(bytes)
+        .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
+    if receipt.schema_version != 1
+        || decode_lower_hex_32(&receipt.generation).is_none()
+        || decode_lower_hex_32(&receipt.epoch_sha256).is_none()
+    {
+        return Err(std::io::Error::other("local retry receipt invalid"));
+    }
+    Ok(receipt)
+}
+
+fn parse_upgrade_runtime_failure_intent(
+    bytes: &[u8],
+) -> std::io::Result<UpgradeRuntimeFailureIntent> {
     let journal =
-        std::str::from_utf8(&bytes).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
+        std::str::from_utf8(bytes).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
     let value: toml::Value =
         toml::from_str(journal).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
+    let schema = value
+        .get("schema_version")
+        .and_then(toml::Value::as_integer)
+        .filter(|schema| (1..=4).contains(schema))
+        .ok_or_else(|| std::io::Error::other("upgrade intent schema invalid"))?;
+    let phase = metadata_string(&value, "phase")
+        .filter(|phase| {
+            matches!(
+                phase.as_str(),
+                "consumed"
+                    | "admitted"
+                    | "prepared"
+                    | "aborted"
+                    | "activation-started"
+                    | "repair-required"
+                    | "finalizing"
+                    | "stage-cleanup-required"
+                    | "activated"
+            )
+        })
+        .ok_or_else(|| std::io::Error::other("upgrade intent phase invalid"))?;
     let progress = metadata_string(&value, "runtime_failure_consumption");
-    Ok(matches!(
-        progress.as_deref(),
-        Some("none" | "bound" | "epoch-removed")
-    ) && metadata_string(&value, "phase").as_deref() != Some("aborted"))
+    let generation = metadata_string(&value, "runtime_failure_generation");
+    let epoch_sha256 = metadata_string(&value, "runtime_failure_epoch_sha256");
+    if schema != 4 {
+        if progress.is_some() || generation.is_some() || epoch_sha256.is_some() {
+            return Err(std::io::Error::other("legacy upgrade intent invalid"));
+        }
+        return Ok(UpgradeRuntimeFailureIntent {
+            phase,
+            progress: None,
+            generation: None,
+        });
+    }
+    let (progress, generation) = match (progress.as_deref(), generation, epoch_sha256) {
+        (Some("none"), None, None) => (UpgradeRuntimeFailureProgress::None, None),
+        (Some("none-consumed"), None, None) => (UpgradeRuntimeFailureProgress::NoneConsumed, None),
+        (Some("bound"), Some(generation), Some(digest))
+            if decode_lower_hex_32(&generation).is_some()
+                && decode_lower_hex_32(&digest).is_some() =>
+        {
+            (UpgradeRuntimeFailureProgress::Bound, Some(generation))
+        }
+        (Some("epoch-removed"), Some(generation), Some(digest))
+            if decode_lower_hex_32(&generation).is_some()
+                && decode_lower_hex_32(&digest).is_some() =>
+        {
+            (
+                UpgradeRuntimeFailureProgress::EpochRemoved,
+                Some(generation),
+            )
+        }
+        (Some("latch-removed"), Some(generation), Some(digest))
+            if decode_lower_hex_32(&generation).is_some()
+                && decode_lower_hex_32(&digest).is_some() =>
+        {
+            (
+                UpgradeRuntimeFailureProgress::LatchRemoved,
+                Some(generation),
+            )
+        }
+        _ => return Err(std::io::Error::other("upgrade intent progress invalid")),
+    };
+    let progress_matches_phase = match progress {
+        UpgradeRuntimeFailureProgress::None | UpgradeRuntimeFailureProgress::Bound => matches!(
+            phase.as_str(),
+            "consumed"
+                | "admitted"
+                | "prepared"
+                | "aborted"
+                | "activation-started"
+                | "repair-required"
+        ),
+        UpgradeRuntimeFailureProgress::EpochRemoved => {
+            matches!(phase.as_str(), "activation-started" | "repair-required")
+        }
+        UpgradeRuntimeFailureProgress::NoneConsumed
+        | UpgradeRuntimeFailureProgress::LatchRemoved => matches!(
+            phase.as_str(),
+            "activation-started"
+                | "repair-required"
+                | "finalizing"
+                | "stage-cleanup-required"
+                | "activated"
+        ),
+    };
+    if !progress_matches_phase {
+        return Err(std::io::Error::other("upgrade intent progress incoherent"));
+    }
+    Ok(UpgradeRuntimeFailureIntent {
+        phase,
+        progress: Some(progress),
+        generation,
+    })
 }
 
 fn trusted_optional_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Option<Vec<u8>>> {
@@ -1748,6 +1864,85 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn unknown_typed_consumer_state_retains_pair_and_exposes_no_authority_or_effect() {
+        for (path, contents) in [
+            (
+                LOCAL_RETRY_RECEIPT_PATH,
+                serde_json::json!({
+                    "schemaVersion": 1,
+                    "generation": "6a".repeat(32),
+                    "epochSha256": "7b".repeat(32),
+                    "progress": "future-retry-state",
+                })
+                .to_string(),
+            ),
+            (
+                installed_bundle_repair::REPAIR_INTENT_PATH,
+                serde_json::json!({
+                    "schemaVersion": 2,
+                    "state": "future-repair-state",
+                })
+                .to_string(),
+            ),
+            (
+                UPGRADE_ATTEMPT_PATH,
+                "schema_version = 4\nphase = \"activation-started\"\nruntime_failure_consumption = \"future-upgrade-state\"\n"
+                    .to_owned(),
+            ),
+            (
+                UPGRADE_ATTEMPT_PATH,
+                format!(
+                    "schema_version = 4\nphase = \"prepared\"\nruntime_failure_consumption = \"latch-removed\"\nruntime_failure_generation = {:?}\nruntime_failure_epoch_sha256 = {:?}\n",
+                    "8c".repeat(32),
+                    "9d".repeat(32),
+                ),
+            ),
+        ] {
+            let root = fixture();
+            let uid = unsafe { libc::geteuid() };
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(0x6a),
+            )
+            .unwrap();
+            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+            fs::create_dir_all(rooted(root.path(), path).parent().unwrap()).unwrap();
+            write_fixture(root.path(), path, contents.as_bytes(), 0o600);
+
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(0x6b),
+                )
+                .is_err(),
+                "unknown typed state at {path} must fail closed",
+            );
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    100,
+                    60_100,
+                    "request_nonce_unknown_typed_state",
+                )
+                .is_err(),
+            );
+            let mut retry = RetrySystemd::default();
+            assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+            assert_eq!(retry.0, 0);
+            assert_eq!(fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(), epoch_before);
+            assert_eq!(fs::read(rooted(root.path(), LATCH_PATH)).unwrap(), latch_before);
+            assert_eq!(fs::read(rooted(root.path(), path)).unwrap(), contents.as_bytes());
+        }
+    }
+
+    #[test]
     fn concurrent_recorders_publish_one_exact_pair() {
         let root = fixture();
         let uid = unsafe { libc::geteuid() };
@@ -2156,6 +2351,51 @@ pub(super) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn repair_reentry_removes_only_the_exact_bound_latch_and_converges_if_already_absent() {
+        for (index, progress) in [
+            InstalledBundleRepairProgress::InvalidationCommitted,
+            InstalledBundleRepairProgress::EpochRemoved,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for latch in [b"ff".repeat(32), b"corrupt-generation".to_vec()] {
+                let (root, authority) = repair_completion_fixture(progress, (0x70 + index) as u8);
+                if progress == InstalledBundleRepairProgress::EpochRemoved {
+                    fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
+                }
+                write_fixture(root.path(), LATCH_PATH, &latch, 0o600);
+
+                assert_eq!(
+                    invalidate_installed_bundle_failure_at(
+                        root.path(),
+                        unsafe { libc::geteuid() },
+                        &authority,
+                    ),
+                    Err(InstalledBundleRepairError::RecoveryPending),
+                );
+                assert_eq!(fs::read(rooted(root.path(), LATCH_PATH)).unwrap(), latch);
+                let intent: InstalledBundleRepairIntent = serde_json::from_slice(
+                    &fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(intent.state, progress);
+            }
+        }
+
+        let (root, authority) =
+            repair_completion_fixture(InstalledBundleRepairProgress::EpochRemoved, 0x72);
+        fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
+        fs::remove_file(rooted(root.path(), LATCH_PATH)).unwrap();
+        invalidate_installed_bundle_failure_at(root.path(), unsafe { libc::geteuid() }, &authority)
+            .unwrap();
+        let intent: InstalledBundleRepairIntent =
+            serde_json::from_slice(&fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(intent.state, InstalledBundleRepairProgress::LatchRemoved);
     }
 
     #[derive(Default)]
