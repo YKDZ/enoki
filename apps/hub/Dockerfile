@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
+ARG ENOKI_HUB_IMAGE_INPUTS="release"
+
 FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS prepare
 
 ENV PNPM_HOME=/pnpm
@@ -32,12 +34,26 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 
 FROM installer AS builder
 
+ARG ENOKI_HUB_IMAGE_INPUTS
+
 COPY --from=prepare /repo/out/full/ ./
 COPY --from=prepare /repo/tsconfig.base.json ./tsconfig.base.json
 COPY --from=prepare /repo/probe-assets/ /app/probe-assets/
 COPY --from=prepare /repo/probe-bootstrap-publication/ /app/probe-bootstrap-publication/
-RUN mkdir -p /app/probe-assets /app/probe-distribution-root && \
-  cp /app/probe-assets/root-key.pem /app/probe-distribution-root/root-key.pem
+RUN mkdir -p /app/probe-assets /app/probe-bootstrap-publication /app/probe-distribution-root && \
+  case "$ENOKI_HUB_IMAGE_INPUTS" in \
+    standard-ci-non-production) \
+      printf '%s\n' 'ENOKI standard CI non-production fixture; not a release trust root.' > /app/probe-assets/root-key.pem; \
+      cp /app/probe-assets/root-key.pem /app/probe-distribution-root/root-key.pem; \
+      printf '%s\n' 'standard CI non-production Bootstrap fixture' > /app/probe-bootstrap-publication/enoki-probe-bootstrap.py; \
+      recipe_sha256="$(sha256sum /app/probe-bootstrap-publication/enoki-probe-bootstrap.py | cut -d ' ' -f1)"; \
+      recipe_size="$(wc -c < /app/probe-bootstrap-publication/enoki-probe-bootstrap.py)"; \
+      printf '{"bundleVersion":"0.0.0","distribution":"enoki","kind":"enoki-probe-bootstrap-recipe-record","recipe":{"file":"enoki-probe-bootstrap.py","sha256":"%s","size":%s,"version":"v1"},"rootFingerprint":"0000000000000000000000000000000000000000000000000000000000000000","schemaVersion":1,"targets":["aarch64-unknown-linux-gnu","aarch64-unknown-linux-musl","x86_64-unknown-linux-gnu","x86_64-unknown-linux-musl"]}\n' "$recipe_sha256" "$recipe_size" > /app/probe-bootstrap-publication/enoki-probe-bootstrap-recipe.json ;; \
+    release) \
+      cp /app/probe-assets/root-key.pem /app/probe-distribution-root/root-key.pem ;; \
+    *) \
+      echo "unsupported ENOKI_HUB_IMAGE_INPUTS: $ENOKI_HUB_IMAGE_INPUTS" >&2; exit 2 ;; \
+  esac
 
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
@@ -47,12 +63,15 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 
 FROM node:24-alpine@sha256:f70403e87646dc51b45295f4b8b70cdad0b63d2297c4c9899119b03f7af7a6b3 AS runtime
 
+ARG ENOKI_HUB_IMAGE_INPUTS
+
 ENV ENOKI_WEB_DIST=/app/web-dist
 ENV ENOKI_DATA_ROOT=/data
 ENV ENOKI_DEPLOYMENT=docker
 ENV ENOKI_SQLITE_PATH=/data/enoki.db
 ENV HOST=0.0.0.0
 ENV NODE_ENV=production
+ENV ENOKI_HUB_IMAGE_INPUTS=$ENOKI_HUB_IMAGE_INPUTS
 ENV PORT=3000
 
 WORKDIR /app

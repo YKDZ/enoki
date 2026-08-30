@@ -96,6 +96,7 @@ jobs:
         run: >-
           DOCKER_BUILDKIT=1 docker build
           --file source/apps/hub/Dockerfile
+          --build-arg ENOKI_HUB_IMAGE_INPUTS=standard-ci-non-production
           --tag "enoki-hub:${{ inputs.version }}"
           source
 

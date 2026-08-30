@@ -14,6 +14,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node.js for Bootstrap verifier
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install Node workspace dependencies for Bootstrap verifier
+        run: pnpm install --frozen-lockfile
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
