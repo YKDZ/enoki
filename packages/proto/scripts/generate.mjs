@@ -18,6 +18,7 @@ const generatedOut = resolve(packageRoot, "src/generated");
 const tsOut = resolve(generatedOut, "ts");
 const generatedTsFile = resolve(tsOut, "enoki_pb.js");
 const generatedTsTypesFile = resolve(tsOut, "enoki_pb.d.ts");
+const generatedTsTypesInputFile = resolve(tsOut, "enoki_pb.types-input.js");
 const rustOut = resolve(generatedOut, "rust");
 const stagingOut = mkdtempSync(resolve(dirname(generatedOut), ".generated-"));
 const stagingTsOut = resolve(stagingOut, "ts");
@@ -36,11 +37,32 @@ class CommandFailedError extends Error {
   }
 }
 
+class GenerationInterruptedError extends Error {
+  constructor(signal) {
+    super();
+    this.signal = signal;
+  }
+}
+
+const signalExitCodes = {
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+let interruption;
+const signalHandlers = Object.keys(signalExitCodes).map((signal) => {
+  const handler = () => {
+    interruption ??= signal;
+  };
+
+  process.once(signal, handler);
+  return [signal, handler];
+});
+
 try {
   mkdirSync(stagingTsOut, { recursive: true });
   mkdirSync(stagingRustOut, { recursive: true });
 
-  run("pnpm", [
+  await run("pnpm", [
     "exec",
     "pbjs",
     "--target",
@@ -55,7 +77,7 @@ try {
     protoFile,
   ]);
 
-  run("pnpm", [
+  await run("pnpm", [
     "exec",
     "pbjs",
     "--target",
@@ -69,7 +91,7 @@ try {
     protoFile,
   ]);
 
-  run("pnpm", [
+  await run("pnpm", [
     "exec",
     "pbts",
     "--out",
@@ -80,7 +102,7 @@ try {
   rewriteGeneratedEsmImports(stagingTsFile);
   removeGeneratedTsTypesInput(stagingTsTypesInputFile);
 
-  run("cargo", [
+  await run("cargo", [
     "run",
     "--quiet",
     "--package",
@@ -97,13 +119,19 @@ try {
     resolve(stagingRustOut, "enoki.v1.rs"),
     resolve(rustOut, "enoki.v1.rs"),
   );
+  removeGeneratedTsTypesInput(generatedTsTypesInputFile);
 } catch (error) {
   if (error instanceof CommandFailedError) {
     process.exitCode = error.status;
+  } else if (error instanceof GenerationInterruptedError) {
+    process.exitCode = signalExitCodes[error.signal];
   } else {
     throw error;
   }
 } finally {
+  for (const [signal, handler] of signalHandlers) {
+    process.removeListener(signal, handler);
+  }
   rmSync(stagingOut, { force: true, recursive: true });
 }
 
@@ -112,14 +140,20 @@ function publishGeneratedOutput(source, destination) {
   renameSync(source, destination);
 }
 
-function run(command, args) {
+async function run(command, args) {
   const result = spawnSync(command, args, {
     cwd: repoRoot,
     stdio: "inherit",
   });
 
+  await new Promise((resolve) => setImmediate(resolve));
+
   if (result.error) {
     throw result.error;
+  }
+
+  if (interruption) {
+    throw new GenerationInterruptedError(interruption);
   }
 
   if (result.status !== 0) {

@@ -3,6 +3,7 @@ import {
   accessSync,
   chmodSync,
   copyFileSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -17,7 +18,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const generateScript = resolve(packageRoot, "scripts/generate.mjs");
+const generateScript =
+  process.env.PROTO_GENERATE_SCRIPT ??
+  resolve(packageRoot, "scripts/generate.mjs");
 const fixtures: string[] = [];
 
 afterEach(() => {
@@ -32,9 +35,12 @@ describe("protobuf generation", () => {
     const generated = startGenerate(fixture);
 
     await waitForFile(fixture.readyFile);
+    const imported = importInstalledProto(fixture.repoRoot);
+    writeFileSync(fixture.releaseFile, "release");
 
-    expect(importInstalledProto(fixture.repoRoot).status).toBe(0);
+    expect(imported.status).toBe(0);
     expect(await waitForExit(generated)).toBe(0);
+    expect(generatedTypesInputExists(fixture.sourceRoot)).toBe(false);
   });
 
   it("leaves installed consumers on the previous output when generation fails", async () => {
@@ -44,10 +50,25 @@ describe("protobuf generation", () => {
     expect(await waitForExit(generated)).not.toBe(0);
     expect(importInstalledProto(fixture.repoRoot).status).toBe(0);
     expect(stagingDirectories(fixture.sourceRoot)).toEqual([]);
+    expect(generatedTypesInputExists(fixture.sourceRoot)).toBe(true);
   });
+
+  it.each(["SIGTERM", "SIGINT"])(
+    "cleans staging and preserves previous output when interrupted by %s",
+    async (signal) => {
+      const fixture = createFixture({ signal });
+      const generated = startGenerate(fixture);
+
+      expect(await waitForExit(generated)).toBe(128 + signalNumber(signal));
+      expect(importInstalledProto(fixture.repoRoot).status).toBe(0);
+      expect(stagingDirectories(fixture.sourceRoot)).toEqual([]);
+    },
+  );
 });
 
-function createFixture(options: { failFirstPbjs?: boolean } = {}) {
+function createFixture(
+  options: { failFirstPbjs?: boolean; signal?: string } = {},
+) {
   const fixtureRoot = mkdtempSync(join(tmpdir(), "enoki-proto-generate-"));
   fixtures.push(fixtureRoot);
 
@@ -59,6 +80,7 @@ function createFixture(options: { failFirstPbjs?: boolean } = {}) {
   const installedTsOut = join(installedRoot, "src/generated/ts");
   const binRoot = join(fixtureRoot, "bin");
   const readyFile = join(fixtureRoot, "first-pbjs-written");
+  const releaseFile = join(fixtureRoot, "allow-first-pbjs-to-complete");
 
   mkdirSync(join(sourceRoot, "scripts"), { recursive: true });
   mkdirSync(sourceTsOut, { recursive: true });
@@ -77,6 +99,10 @@ function createFixture(options: { failFirstPbjs?: boolean } = {}) {
   writeFileSync(
     join(sourceTsOut, "enoki_pb.d.ts"),
     "declare const root: {};\n",
+  );
+  writeFileSync(
+    join(sourceTsOut, "enoki_pb.types-input.js"),
+    "stale generated input\n",
   );
   writeFileSync(join(sourceRustOut, "enoki.v1.rs"), "pub struct Previous;\n");
   linkSync(
@@ -112,7 +138,9 @@ function createFixture(options: { failFirstPbjs?: boolean } = {}) {
     binRoot,
     failFirstPbjs: options.failFirstPbjs,
     readyFile,
+    releaseFile,
     repoRoot,
+    signal: options.signal,
     sourceRoot,
   };
 }
@@ -124,7 +152,7 @@ function writeMockCommands(binRoot: string) {
   writeFileSync(
     pnpm,
     `#!/usr/bin/env node
-import { mkdirSync, writeFileSync } from "node:fs";
+import { accessSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const args = process.argv.slice(2);
@@ -138,11 +166,27 @@ if (args.includes("pbjs") && wrap === "es6") {
   if (process.env.ATOMIC_GENERATE_FAIL_FIRST_PBJS === "true") {
     process.exit(1);
   }
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  if (process.env.ATOMIC_GENERATE_SIGNAL) {
+    process.kill(process.ppid, process.env.ATOMIC_GENERATE_SIGNAL);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    process.exit(0);
+  }
+  await waitForFile(process.env.ATOMIC_GENERATE_RELEASE_FILE);
 } else if (args.includes("pbjs")) {
   writeFileSync(output, "export default {};\\n");
 } else {
   writeFileSync(output, "declare const root: {};\\n");
+}
+
+async function waitForFile(file) {
+  while (true) {
+    try {
+      accessSync(file);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
 }
 `,
   );
@@ -169,6 +213,8 @@ function startGenerate(fixture: ReturnType<typeof createFixture>) {
         ...process.env,
         ATOMIC_GENERATE_FAIL_FIRST_PBJS: String(Boolean(fixture.failFirstPbjs)),
         ATOMIC_GENERATE_READY_FILE: fixture.readyFile,
+        ATOMIC_GENERATE_RELEASE_FILE: fixture.releaseFile,
+        ATOMIC_GENERATE_SIGNAL: fixture.signal ?? "",
         PATH: `${fixture.binRoot}:${process.env.PATH}`,
       },
     },
@@ -191,6 +237,16 @@ function stagingDirectories(sourceRoot: string) {
   return readdirSync(join(sourceRoot, "src")).filter((entry) =>
     entry.startsWith(".generated-"),
   );
+}
+
+function generatedTypesInputExists(sourceRoot: string) {
+  return existsSync(
+    join(sourceRoot, "src/generated/ts/enoki_pb.types-input.js"),
+  );
+}
+
+function signalNumber(signal: string) {
+  return signal === "SIGTERM" ? 15 : 2;
 }
 
 async function waitForFile(file: string) {
