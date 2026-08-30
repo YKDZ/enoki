@@ -2476,6 +2476,7 @@ async function runFreshInstallUninstallScenario({
 export function createHubLifecycleClient({
   baseUrl,
   fetch: fetch_ = globalThis.fetch,
+  replacementSourceProbeSha256,
   sleep = defaultSleep,
 }) {
   const normalizedBaseUrl = new URL(baseUrl);
@@ -2590,7 +2591,12 @@ export function createHubLifecycleClient({
           "Hub returned an invalid manual Probe reinstall Enrollment response",
         );
       }
-      assertEnrollmentInstallContract(body);
+      assertEnrollmentInstallContract(body, {
+        sourceProbeSha256:
+          typeof replacementSourceProbeSha256 === "function"
+            ? replacementSourceProbeSha256()
+            : replacementSourceProbeSha256,
+      });
       assertEnrollmentTarget(body.target);
       if (
         body.target.kind !== "manual_reinstall" ||
@@ -4767,7 +4773,7 @@ function assertOwnedRun(runId, disposableRunId, runOwnsMutation) {
   }
 }
 
-function assertInstallCommand(command) {
+function assertInstallCommand(command, expectedSourceProbeSha256) {
   if (
     typeof command !== "string" ||
     command.length > 16_384 ||
@@ -4784,6 +4790,7 @@ function assertInstallCommand(command) {
       ...parseBootstrapEnrollmentAuthority(
         decodeShellSingleQuoted(recipe[1]),
         recipe[2],
+        expectedSourceProbeSha256,
       ),
       hubUrl: recipe[2],
       kind: "bootstrap-recipe",
@@ -4798,6 +4805,7 @@ function assertInstallCommand(command) {
       ...parseBootstrapEnrollmentAuthority(
         decodeShellSingleQuoted(production[2]),
         production[1],
+        expectedSourceProbeSha256,
       ),
       hubUrl: production[1],
       kind: "production-bootstrap",
@@ -4820,7 +4828,11 @@ function decodeShellSingleQuoted(value) {
   return value.replaceAll(`'"'"'`, "'");
 }
 
-function parseBootstrapEnrollmentAuthority(authority, commandHubOrigin) {
+function parseBootstrapEnrollmentAuthority(
+  authority,
+  commandHubOrigin,
+  expectedSourceProbeSha256,
+) {
   if (/^enk_enroll_[A-Za-z0-9_-]+$/.test(authority)) {
     return { replacementMigration: null, token: authority };
   }
@@ -4863,10 +4875,11 @@ function parseBootstrapEnrollmentAuthority(authority, commandHubOrigin) {
     !/^enr_[A-Za-z0-9_-]{16,}$/.test(migration.enrollmentId ?? "") ||
     !/^[A-Za-z0-9_-]+$/.test(migration.expectedProbeId ?? "") ||
     !Array.isArray(migration.sourceProbeSha256) ||
-    migration.sourceProbeSha256.length < 1 ||
+    migration.sourceProbeSha256.length !== probeTargets.length ||
     migration.sourceProbeSha256.some(
       (digest) => !/^[0-9a-f]{64}$/.test(digest ?? ""),
     ) ||
+    new Set(migration.sourceProbeSha256).size !== probeTargets.length ||
     !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
       migration.sourceProbeVersion ?? "",
     ) ||
@@ -4876,7 +4889,23 @@ function parseBootstrapEnrollmentAuthority(authority, commandHubOrigin) {
     !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
       migration.targetProbeVersion ?? "",
     ) ||
-    JSON.stringify(parsed) !== authority
+    JSON.stringify({
+      hubOrigin: parsed.hubOrigin,
+      enrollmentToken: parsed.enrollmentToken,
+      replacementMigration: {
+        enrollmentId: migration.enrollmentId,
+        expectedProbeId: migration.expectedProbeId,
+        sourceProbeSha256: migration.sourceProbeSha256,
+        sourceProbeVersion: migration.sourceProbeVersion,
+        targetAssetSetDigest: migration.targetAssetSetDigest,
+        targetHostId: migration.targetHostId,
+        targetProbeVersion: migration.targetProbeVersion,
+      },
+      schemaVersion: parsed.schemaVersion,
+    }) !== authority ||
+    (expectedSourceProbeSha256 !== undefined &&
+      JSON.stringify(migration.sourceProbeSha256) !==
+        JSON.stringify(expectedSourceProbeSha256))
   ) {
     throw new Error("Hub returned an invalid Probe install command");
   }
@@ -4898,8 +4927,11 @@ function assertInstallHubOrigin(value) {
   }
 }
 
-function assertEnrollmentInstallContract(enrollment) {
-  const parsed = assertInstallCommand(enrollment?.installCommand);
+function assertEnrollmentInstallContract(enrollment, options = {}) {
+  const parsed = assertInstallCommand(
+    enrollment?.installCommand,
+    options.sourceProbeSha256,
+  );
   if (
     enrollment?.enrollmentToken !== parsed.token ||
     enrollment?.hubUrl !== parsed.hubUrl

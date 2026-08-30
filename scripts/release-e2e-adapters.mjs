@@ -15,7 +15,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { validateReleaseCandidate } from "./release-candidate-lib.mjs";
+import {
+  releaseTransitionForValidatedCandidate,
+  validateReleaseCandidate,
+} from "./release-candidate-lib.mjs";
 import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.mjs";
 import {
   createHubLifecycleClient,
@@ -407,35 +410,46 @@ function createCandidateBootstrapProvisioner({
           }),
           { root: true, sensitive: true },
         );
-        if (installed.code !== 0 || installed.stdout.trim() !== "installed") {
+        const publication = installed.stdout.trim();
+        if (
+          installed.code !== 0 ||
+          (publication !== "installed" && publication !== "reused")
+        ) {
           throw new Error(
             `Could not install verified Candidate Probe Bootstrap binaries: ${installed.stderr}`,
           );
         }
         stageDir = null;
         provisionedRunId = null;
+        const reused = publication === "reused";
+        if (reused) binaryOwnership = null;
         return {
-          complete: async () => {
-            const completed = await execute(
-              completeCandidateBootstrapBinaryProvisionScript(binaryOwnership),
-              { root: true, sensitive: true },
-            );
-            if (
-              completed.code !== 0 ||
-              completed.stdout.trim() !== "completed"
-            ) {
-              throw new Error(
-                `Could not complete Candidate Bootstrap run ownership: ${completed.stderr}`,
-              );
-            }
-            binaryOwnership = null;
-          },
+          complete: reused
+            ? async () => {}
+            : async () => {
+                const completed = await execute(
+                  completeCandidateBootstrapBinaryProvisionScript(
+                    binaryOwnership,
+                  ),
+                  { root: true, sensitive: true },
+                );
+                if (
+                  completed.code !== 0 ||
+                  completed.stdout.trim() !== "completed"
+                ) {
+                  throw new Error(
+                    `Could not complete Candidate Bootstrap run ownership: ${completed.stderr}`,
+                  );
+                }
+                binaryOwnership = null;
+              },
           evidence: {
             archiveSha256: extracted.archiveSha256,
             assets: extracted.assets.map(
               ({ sourcePath: _, ...asset }) => asset,
             ),
             kind: "enoki-release-e2e-candidate-bootstrap-binaries",
+            reused,
             schemaVersion: 1,
           },
           workingDirectory: null,
@@ -653,7 +667,7 @@ function installCandidateBootstrapBinariesScript({
   const acquirer = byRole["bootstrap-acquirer"];
   const activator = byRole["bootstrap-activator"];
   const intent = candidateBootstrapProvisionIntent(assets);
-  return `# enoki-release-e2e:candidate-bootstrap-binary-install\nset -eu\narchive_sha256=${shellSingleQuote(archiveSha256)}\nstage_dir=${shellSingleQuote(stageDir)}\nclaim=/var/lib/enoki-release-e2e/claim\nintent="$claim/bootstrap-provision-intent"\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\nexpected_intent=$(mktemp "$claim/.bootstrap-provision-intent.XXXXXX")\nprintf %s ${shellSingleQuote(intent)} > "$expected_intent"\ntrap 'rm -f -- "$expected_intent"' EXIT HUP INT TERM\nif [ -e "$intent" ]; then\n  [ -f "$intent" ] && [ ! -L "$intent" ] && [ "$(stat -c %u "$intent")" = 0 ] && [ "$(stat -c %g "$intent")" = 0 ] && [ "$(stat -c %a "$intent")" = 600 ] && [ "$(stat -c %h "$intent")" = 1 ]\n  cmp --silent "$expected_intent" "$intent"\nelse\n  [ ! -e /usr/local/bin/enoki-probe-bootstrap-acquire ]\n  [ ! -e /usr/local/bin/enoki-probe-bootstrap-activate ]\n  install --owner=root --group=root --mode=0600 -- "$expected_intent" "$intent"\nfi\nsource_acquirer="$stage_dir/enoki-probe-bootstrap-acquire"\nsource_activator="$stage_dir/enoki-probe-bootstrap-activate"\n[ -f "$source_acquirer" ] && [ ! -L "$source_acquirer" ] && [ "$(wc -c < "$source_acquirer" | tr -d ' ')" = ${shellSingleQuote(String(acquirer.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(acquirer.sha256)} "$source_acquirer" | sha256sum --check --status\n[ -f "$source_activator" ] && [ ! -L "$source_activator" ] && [ "$(wc -c < "$source_activator" | tr -d ' ')" = ${shellSingleQuote(String(activator.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(activator.sha256)} "$source_activator" | sha256sum --check --status\ntemporary_dir=$(mktemp -d /usr/local/bin/.enoki-release-e2e-bootstrap.XXXXXX)\ntrap 'rm -f -- "$expected_intent" "$temporary_dir/acquirer" "$temporary_dir/activator"; rmdir -- "$temporary_dir" 2>/dev/null || true' EXIT HUP INT TERM\ntemporary_acquirer="$temporary_dir/acquirer"\ntemporary_activator="$temporary_dir/activator"\ninstall --owner=root --group=root --mode=0555 -- "$source_acquirer" "$temporary_acquirer"\ninstall --owner=root --group=root --mode=0555 -- "$source_activator" "$temporary_activator"\nprintf '%s  %s\\n' ${shellSingleQuote(acquirer.sha256)} "$temporary_acquirer" | sha256sum --check --status\nprintf '%s  %s\\n' ${shellSingleQuote(activator.sha256)} "$temporary_activator" | sha256sum --check --status\nmv -- "$temporary_acquirer" /usr/local/bin/enoki-probe-bootstrap-acquire\nmv -- "$temporary_activator" /usr/local/bin/enoki-probe-bootstrap-activate\n${candidateBootstrapInstalledFileChecks(assets)}\nrm -f -- "$source_acquirer" "$source_activator" "$expected_intent"\nrmdir -- "$stage_dir"\nrmdir -- "$temporary_dir"\ntrap - EXIT HUP INT TERM\nprintf 'installed\\n'\n`;
+  return `# enoki-release-e2e:candidate-bootstrap-binary-install\nset -eu\narchive_sha256=${shellSingleQuote(archiveSha256)}\nstage_dir=${shellSingleQuote(stageDir)}\nclaim=/var/lib/enoki-release-e2e/claim\nintent="$claim/bootstrap-provision-intent"\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\nexpected_intent=$(mktemp "$claim/.bootstrap-provision-intent.XXXXXX")\nprintf %s ${shellSingleQuote(intent)} > "$expected_intent"\ntrap 'rm -f -- "$expected_intent"' EXIT HUP INT TERM\nif [ -e "$intent" ]; then\n  [ -f "$intent" ] && [ ! -L "$intent" ] && [ "$(stat -c %u "$intent")" = 0 ] && [ "$(stat -c %g "$intent")" = 0 ] && [ "$(stat -c %a "$intent")" = 600 ] && [ "$(stat -c %h "$intent")" = 1 ]\n  cmp --silent "$expected_intent" "$intent"\n  # enoki-release-e2e:validate-partial-bootstrap-targets\n${candidateBootstrapInstalledOrAbsentChecks(assets)}\nelse\n  if [ -e /usr/local/bin/enoki-probe-bootstrap-acquire ] || [ -L /usr/local/bin/enoki-probe-bootstrap-acquire ] || [ -e /usr/local/bin/enoki-probe-bootstrap-activate ] || [ -L /usr/local/bin/enoki-probe-bootstrap-activate ]; then\n    [ -e /usr/local/bin/enoki-probe-bootstrap-acquire ]\n    [ -e /usr/local/bin/enoki-probe-bootstrap-activate ]\n    resources="$claim/resources"\n    [ -f "$resources" ] && [ ! -L "$resources" ] && [ "$(stat -c %u "$resources")" = 0 ] && [ "$(stat -c %g "$resources")" = 0 ] && [ "$(stat -c %a "$resources")" = 600 ] && [ "$(stat -c %h "$resources")" = 1 ]\n${candidateBootstrapInstalledFileChecks(assets)}\n${candidateBootstrapRunResourceChecks(assets)}\n    rm -f -- "$stage_dir/enoki-probe-bootstrap-acquire" "$stage_dir/enoki-probe-bootstrap-activate" "$expected_intent"\n    rmdir -- "$stage_dir"\n    trap - EXIT HUP INT TERM\n    printf 'reused\\n'\n    exit 0\n  fi\n  install --owner=root --group=root --mode=0600 -- "$expected_intent" "$intent"\nfi\nsource_acquirer="$stage_dir/enoki-probe-bootstrap-acquire"\nsource_activator="$stage_dir/enoki-probe-bootstrap-activate"\n[ -f "$source_acquirer" ] && [ ! -L "$source_acquirer" ] && [ "$(wc -c < "$source_acquirer" | tr -d ' ')" = ${shellSingleQuote(String(acquirer.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(acquirer.sha256)} "$source_acquirer" | sha256sum --check --status\n[ -f "$source_activator" ] && [ ! -L "$source_activator" ] && [ "$(wc -c < "$source_activator" | tr -d ' ')" = ${shellSingleQuote(String(activator.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(activator.sha256)} "$source_activator" | sha256sum --check --status\ntemporary_dir=$(mktemp -d /usr/local/bin/.enoki-release-e2e-bootstrap.XXXXXX)\ntrap 'rm -f -- "$expected_intent" "$temporary_dir/acquirer" "$temporary_dir/activator"; rmdir -- "$temporary_dir" 2>/dev/null || true' EXIT HUP INT TERM\ntemporary_acquirer="$temporary_dir/acquirer"\ntemporary_activator="$temporary_dir/activator"\ninstall --owner=root --group=root --mode=0555 -- "$source_acquirer" "$temporary_acquirer"\ninstall --owner=root --group=root --mode=0555 -- "$source_activator" "$temporary_activator"\nprintf '%s  %s\\n' ${shellSingleQuote(acquirer.sha256)} "$temporary_acquirer" | sha256sum --check --status\nprintf '%s  %s\\n' ${shellSingleQuote(activator.sha256)} "$temporary_activator" | sha256sum --check --status\nmv -- "$temporary_acquirer" /usr/local/bin/enoki-probe-bootstrap-acquire\nmv -- "$temporary_activator" /usr/local/bin/enoki-probe-bootstrap-activate\n${candidateBootstrapInstalledFileChecks(assets)}\nrm -f -- "$source_acquirer" "$source_activator" "$expected_intent"\nrmdir -- "$stage_dir"\nrmdir -- "$temporary_dir"\ntrap - EXIT HUP INT TERM\nprintf 'installed\\n'\n`;
 }
 
 function candidateBootstrapProvisionIntent(assets) {
@@ -674,11 +688,21 @@ function candidateBootstrapInstalledFileChecks(assets) {
     .join("\n");
 }
 
+function candidateBootstrapRunResourceChecks(assets) {
+  const checks = assets
+    .map((asset) => {
+      const destination = `/usr/local/bin/${path.basename(asset.path)}`;
+      return `resource_owns_candidate ${shellSingleQuote(destination)} ${shellSingleQuote(asset.sha256)}`;
+    })
+    .join("\n");
+  return `resource_owns_candidate() {\n  candidate=$1\n  expected_sha256=$2\n  metadata=$(stat -c '%u\\t%g\\t%a\\t%d\\t%i\\t%s' -- "$candidate")\n  path_hash=$(printf '%s' "$candidate" | sha256sum | awk '{print $1}')\n  expected=$(printf 'path\\t%s\\tfile\\t%s\\t%s' "$path_hash" "$metadata" "$expected_sha256")\n  grep -Fxq "$expected" "$resources"\n}\n${checks}`;
+}
+
 function candidateBootstrapInstalledOrAbsentChecks(assets) {
   return assets
     .map((asset) => {
       const destination = `/usr/local/bin/${path.basename(asset.path)}`;
-      return `if [ -e ${shellSingleQuote(destination)} ]; then\n${candidateBootstrapInstalledFileChecks([asset])}\nfi`;
+      return `if [ -e ${shellSingleQuote(destination)} ] || [ -L ${shellSingleQuote(destination)} ]; then\n${candidateBootstrapInstalledFileChecks([asset])}\nfi`;
     })
     .join("\n");
 }
@@ -1293,7 +1317,16 @@ export function createReleaseEnvironment({
           "canonical report evidence transport did not bind the declared Probe origin",
         );
       }
-      const lifecycle = createHubLifecycleClient({ baseUrl: hubOwnerUrl });
+      const lifecycle = createHubLifecycleClient({
+        baseUrl: hubOwnerUrl,
+        replacementSourceProbeSha256: () => {
+          const transition =
+            releaseTransitionForValidatedCandidate(candidateManifest);
+          return transition?.source?.probeComponents?.map(
+            (component) => component.sha256,
+          );
+        },
+      });
       const host = createProbeHostHarness({
         cleanupPreparedInstall: bootstrapProvisioner?.cleanupOwnedProvision,
         execute,
