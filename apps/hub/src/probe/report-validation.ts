@@ -324,9 +324,8 @@ export function reportResponsibilityFor(input: {
     input.report.sequenceEnd === 1 &&
     nonemptyString(input.request.probeAssetBundleVersion);
 
-  // Current Probe Boot Reports only establish the reporting channel. Any
-  // observation-shaped content belongs to a subsequent Observation Batch; do
-  // not let a sequence-one report reach report reconciliation with it.
+  // 当前 Probe Boot Report 仅建立报告通道。任何观测形态内容均属于后续
+  // Observation Batch；不得让带有这些内容的 sequence-one 报告进入报告协调。
   if (
     isCurrentBootReport &&
     ((input.request.metrics ?? []).length > 0 ||
