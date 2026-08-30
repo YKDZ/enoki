@@ -477,6 +477,81 @@ describe("Hub database", () => {
         )
         .get(enrollmentId),
     ).toEqual({ status: "pending", usedAtMs: null });
+    for (const invalidClosure of [
+      { source: sourceProbeSha256.slice(0, 1), targets: frozenBundles },
+      { source: sourceProbeSha256.slice(0, 3), targets: frozenBundles },
+      {
+        source: [...sourceProbeSha256, "e".repeat(64)],
+        targets: frozenBundles,
+      },
+      {
+        source: [
+          sourceProbeSha256[0]!,
+          sourceProbeSha256[0]!,
+          ...sourceProbeSha256.slice(2),
+        ],
+        targets: frozenBundles,
+      },
+      { source: sourceProbeSha256, targets: [...frozenBundles].reverse() },
+    ]) {
+      migrated.sqlite
+        .prepare(
+          `update enrollment_tokens
+           set source_probe_sha256_json = ?, target_bundles_json = ?
+           where enrollment_id = ?`,
+        )
+        .run(
+          JSON.stringify(invalidClosure.source),
+          JSON.stringify(invalidClosure.targets),
+          enrollmentId,
+        );
+      expect(
+        migrated.enrollments.installationInspectionDecision({
+          nowMs: 1_725_000_002_000,
+          tokenHash,
+        }),
+      ).toEqual({ kind: "invalid" });
+      expect(
+        migrated.enrollments.registerNewHost({
+          host,
+          hostProfile: null,
+          registeredAtMs: 1_725_000_002_000,
+          registrationAttempt: registrationInput("1.2.3"),
+          tokenHash,
+          verificationDeadlineAtMs: 1_725_000_062_000,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ status: "pending", usedAtMs: null });
+    expect(
+      migrated.sqlite
+        .prepare("select probe_id as probeId from managed_hosts where id = 74")
+        .get(),
+    ).toEqual({ probeId: "probe-legacy-ordinary" });
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select count(*) as count from audit_log where action = 'probe.manual_reinstall_identity_replaced'",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    migrated.sqlite
+      .prepare(
+        `update enrollment_tokens
+         set source_probe_sha256_json = ?, target_bundles_json = ?
+         where enrollment_id = ?`,
+      )
+      .run(
+        JSON.stringify(sourceProbeSha256),
+        JSON.stringify(frozenBundles),
+        enrollmentId,
+      );
     expect(
       migrated.enrollments.registerNewHost({
         host,
@@ -487,6 +562,17 @@ describe("Hub database", () => {
         verificationDeadlineAtMs: 1_725_000_062_000,
       }),
     ).toMatchObject({ enrollment: { status: "verifying" }, replayed: false });
+    migrated.sqlite
+      .prepare(
+        "update enrollment_tokens set source_probe_sha256_json = ? where enrollment_id = ?",
+      )
+      .run(JSON.stringify([sourceProbeSha256[0]]), enrollmentId);
+    expect(
+      migrated.enrollments.replayRegistrationOutcome({
+        signedAttemptSha256: "f".repeat(64),
+        tokenHash,
+      }),
+    ).toBeNull();
 
     const invalidTokenHash = "legacy-invalid-correlation-token";
     const invalidEnrollmentId = "enr_legacy_invalid_correlation_0002";
@@ -1716,7 +1802,7 @@ describe("Hub database", () => {
         "https://hub.example.test",
         "probe-before-replacement",
         "1.2.3",
-        JSON.stringify(["a".repeat(64)]),
+        JSON.stringify(sourceProbeReceipts()),
         `sha256:${"b".repeat(64)}`,
         "1.2.3",
         7,
@@ -1751,7 +1837,7 @@ describe("Hub database", () => {
           hostId: 7,
           kind: "manual_reinstall",
           replacementPredecessorEnrollmentId: "enr_missing_predecessor_0000",
-          sourceProbeSha256: ["c".repeat(64)],
+          sourceProbeSha256: sourceProbeReceipts(),
           targetBundles: targetBundles(),
           targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
           targetProbeVersion: "1.2.4",
@@ -1772,7 +1858,7 @@ describe("Hub database", () => {
           kind: "manual_reinstall",
           replacementPredecessorAssetSetDigest: `sha256:${"f".repeat(64)}`,
           replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
-          sourceProbeSha256: ["c".repeat(64)],
+          sourceProbeSha256: sourceProbeReceipts(),
           targetBundles: targetBundles(),
           targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
           targetProbeVersion: "1.2.4",
@@ -1791,7 +1877,7 @@ describe("Hub database", () => {
           expectedProbeVersion: "1.2.3",
           hostId: 7,
           kind: "manual_reinstall",
-          sourceProbeSha256: ["c".repeat(64)],
+          sourceProbeSha256: sourceProbeReceipts(),
           targetBundles: targetBundles(),
           targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
           targetProbeVersion: "1.2.4",
@@ -1811,7 +1897,7 @@ describe("Hub database", () => {
         kind: "manual_reinstall",
         replacementPredecessorAssetSetDigest: `sha256:${"b".repeat(64)}`,
         replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
-        sourceProbeSha256: ["c".repeat(64)],
+        sourceProbeSha256: sourceProbeReceipts(),
         targetBundles: targetBundles(),
         targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
         targetProbeVersion: "1.2.4",
@@ -1868,7 +1954,7 @@ describe("Hub database", () => {
       registeredAtMs: 1_725_000_065_000,
       registrationAttempt: {
         candidatePublicKeyPem,
-        committedSourceProbeSha256: "c".repeat(64),
+        committedSourceProbeSha256: sourceProbeReceipts()[0]!,
         enrollmentId: "enr_terminal_successor_0002",
         hostId: 7,
         hubOrigin: "https://hub.example.test",
@@ -1947,6 +2033,10 @@ function targetBundles() {
     bundleManifestSha256: String(index + 1).repeat(64),
     target,
   }));
+}
+
+function sourceProbeReceipts() {
+  return ["a", "b", "c", "d"].map((value) => value.repeat(64));
 }
 
 function migrationHistoryTables(sqlite: {

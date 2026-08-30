@@ -15,6 +15,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   symlink,
   unlink,
@@ -34,13 +35,30 @@ import {
 } from "@enoki/probe-release";
 import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const archiveSnapshotMutation = vi.hoisted(() => ({ afterRead: null }));
+vi.mock("@enoki/probe-release", async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    readRegularFileSnapshot: async (...input) => {
+      const snapshot = await original.readRegularFileSnapshot(...input);
+      await archiveSnapshotMutation.afterRead?.({
+        filePath: input[0],
+        snapshot,
+      });
+      return snapshot;
+    },
+  };
+});
 
 import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
 import {
   createProbeBootstrapPublication,
   inspectProbeAssetSet,
+  prepareUnsignedProbeAssetSet,
   releaseTransitionForValidatedCandidate,
   signProbeAssetSet,
   validateReleaseCandidate,
@@ -1026,6 +1044,63 @@ with open(os.devnull, "rb") as input_stream:
       await rm(workDir, { force: true, recursive: true });
     }
   });
+
+  it.each(["Runtime", "Bootstrap"])(
+    "composes from one opened %s archive snapshot after its pathname is replaced",
+    async (archiveKind) => {
+      const workDir = await mkdtemp(
+        path.join(tmpdir(), "enoki-candidate-input-snapshot-"),
+      );
+      try {
+        const fixture = await createProbeAssetSetFixture(workDir);
+        const target = probeTargets[0];
+        const file =
+          archiveKind === "Runtime"
+            ? `enoki-probe-${target}.tar.gz`
+            : `enoki-probe-bootstrap-${target}.tar.gz`;
+        const archivePath = path.join(
+          archiveKind === "Runtime"
+            ? fixture.archivesDir
+            : fixture.bootstrapArchivesDir,
+          file,
+        );
+        let replacements = 0;
+        archiveSnapshotMutation.afterRead = async ({ filePath, snapshot }) => {
+          if (filePath !== archivePath) return;
+          replacements += 1;
+          const replacement = Buffer.from(snapshot.bytes);
+          replacement[Math.floor(replacement.byteLength / 2)] ^= 0xff;
+          const replacementPath = `${archivePath}.replacement`;
+          await writeFile(replacementPath, replacement);
+          await rename(replacementPath, archivePath);
+        };
+        const outputDir = path.join(workDir, "snapshot-probe-assets");
+        await prepareUnsignedProbeAssetSet({
+          archivesDir: fixture.archivesDir,
+          bootstrapArchivesDir: fixture.bootstrapArchivesDir,
+          delegationBytes: await readFile(
+            path.join(workDir, "trust-delegation.json"),
+          ),
+          delegationSignature: await readFile(
+            path.join(workDir, "trust-delegation.json.sig"),
+          ),
+          distribution: "enoki",
+          outputDir,
+          publicKeyPem: fixture.publicKey,
+          rootPublicKeyPem: fixture.root.publicKey,
+          version: "v1.2.3",
+        });
+
+        expect(replacements).toBe(1);
+        await expect(
+          readFile(path.join(outputDir, `enoki-probe-${target}.tar.gz`)),
+        ).resolves.toBeInstanceOf(Buffer);
+      } finally {
+        archiveSnapshotMutation.afterRead = null;
+        await rm(workDir, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("resolves one replacement transition against the current single-Bundle manifest", async () => {
     const workDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-set-"));

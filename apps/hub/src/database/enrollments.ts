@@ -188,6 +188,9 @@ export function createEnrollmentRepository(
             enrollmentTokens.replacementPredecessorAssetSetDigest,
           replacementPredecessorEnrollmentId:
             enrollmentTokens.replacementPredecessorEnrollmentId,
+          sourceProbeSha256Json: enrollmentTokens.sourceProbeSha256Json,
+          targetBundlesJson: enrollmentTokens.targetBundlesJson,
+          targetKind: enrollmentTokens.targetKind,
         })
         .from(enrollmentTokens)
         .where(
@@ -200,7 +203,10 @@ export function createEnrollmentRepository(
           ),
         )
         .get();
-      return replay?.outcome && parseReplacementPredecessorCorrelation(replay)
+      return replay?.outcome &&
+        parseReplacementPredecessorCorrelation(replay) &&
+        (replay.targetKind !== "manual_reinstall" ||
+          validPersistedManualSourceClosure(replay))
         ? Buffer.from(replay.outcome)
         : null;
     },
@@ -1034,7 +1040,8 @@ export function createEnrollmentRepository(
               : null;
             if (
               attempted?.targetKind === "manual_reinstall" &&
-              !attemptedCorrelation
+              (!attemptedCorrelation ||
+                !validPersistedManualSourceClosure(attempted))
             ) {
               return null;
             }
@@ -1400,8 +1407,7 @@ function parseSourceProbeSha256(value: string) {
 function validSourceProbeSha256(value: unknown): value is string[] {
   return (
     Array.isArray(value) &&
-    value.length >= 1 &&
-    value.length <= 4 &&
+    value.length === probeTargets.length &&
     new Set(value).size === value.length &&
     value.every(
       (digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
@@ -1484,6 +1490,16 @@ function sourceReceiptMatchesTargetBundle(
     targetIndex !== undefined &&
     targetIndex >= 0 &&
     sourceProbeSha256[targetIndex] === sourceReceipt
+  );
+}
+
+function validPersistedManualSourceClosure(input: {
+  sourceProbeSha256Json: string | null;
+  targetBundlesJson: string | null;
+}) {
+  return (
+    parseSourceProbeSha256(input.sourceProbeSha256Json ?? "") !== null &&
+    parseTargetBundles(input.targetBundlesJson ?? "") !== null
   );
 }
 

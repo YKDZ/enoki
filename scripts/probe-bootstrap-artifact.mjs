@@ -17,7 +17,7 @@ import { inflateRawSync } from "node:zlib";
 
 const execFileAsync = promisify(execFile);
 const identityMagic = Buffer.from("ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0");
-const maxProbeBootstrapArchiveBytes = 64 * 1024 * 1024;
+export const probeBootstrapArchiveMaximumBytes = 64 * 1024 * 1024;
 const expectedProbeBootstrapRoles = Object.freeze([
   { name: "enoki-probe-bootstrap-acquire", role: "acquirer" },
   { name: "enoki-probe-bootstrap-activate", role: "activator" },
@@ -90,6 +90,32 @@ async function inspectProbeBootstrapArchiveInput({
     throw new Error("Probe Bootstrap archive path is invalid");
   }
   const archive = await readBoundedArchive(archivePath);
+  return inspectProbeBootstrapArchiveBytes({
+    archive,
+    distribution,
+    expectedArchive,
+    rootKeyId,
+    target,
+    version,
+  });
+}
+
+async function inspectProbeBootstrapArchiveBytes({
+  archive,
+  distribution,
+  expectedArchive,
+  rootKeyId,
+  target,
+  version,
+}) {
+  assertBuildTrust({ distribution, rootKeyId, target, version });
+  if (
+    !Buffer.isBuffer(archive) ||
+    archive.byteLength <= 0 ||
+    archive.byteLength > probeBootstrapArchiveMaximumBytes
+  ) {
+    throw new Error("Probe Bootstrap archive size is invalid");
+  }
   assertExpectedArchive(archive, expectedArchive);
   const archiveRoles = parseExactProbeBootstrapArchive(archive);
   const [acquirer, activator] = await Promise.all(
@@ -183,6 +209,21 @@ export async function withVerifiedProbeBootstrapArtifact(input, callback) {
     throw new Error("Probe Bootstrap extraction requires a callback");
   }
   const inspected = await inspectProbeBootstrapArchiveInput(input);
+  return withVerifiedProbeBootstrapArtifactInspection(inspected, callback);
+}
+
+export async function withVerifiedProbeBootstrapArtifactBytes(input, callback) {
+  if (typeof callback !== "function") {
+    throw new Error("Probe Bootstrap extraction requires a callback");
+  }
+  const inspected = await inspectProbeBootstrapArchiveBytes(input);
+  return withVerifiedProbeBootstrapArtifactInspection(inspected, callback);
+}
+
+async function withVerifiedProbeBootstrapArtifactInspection(
+  inspected,
+  callback,
+) {
   const inspection = inspected.public;
   return withPrivateProbeBootstrapArchive(
     inspected.archive,
@@ -231,7 +272,7 @@ async function readBoundedArchive(archivePath) {
     if (
       !details.isFile() ||
       details.size <= 0 ||
-      details.size > maxProbeBootstrapArchiveBytes
+      details.size > probeBootstrapArchiveMaximumBytes
     ) {
       throw new Error("Probe Bootstrap archive size is invalid");
     }
@@ -272,7 +313,7 @@ function parseExactProbeBootstrapArchive(archive) {
     if (
       !Number.isSafeInteger(size) ||
       size <= 0 ||
-      size > maxProbeBootstrapArchiveBytes
+      size > probeBootstrapArchiveMaximumBytes
     ) {
       throw unsafeBootstrapArchive();
     }
@@ -315,7 +356,7 @@ function decompressOneExactGzipMember(archive) {
   try {
     result = inflateRawSync(archive.subarray(offset), {
       info: true,
-      maxOutputLength: maxProbeBootstrapArchiveBytes,
+      maxOutputLength: probeBootstrapArchiveMaximumBytes,
     });
   } catch {
     throw unsafeBootstrapArchive();
@@ -325,7 +366,7 @@ function decompressOneExactGzipMember(archive) {
   if (
     !Number.isSafeInteger(compressedLength) ||
     trailerOffset + 8 !== archive.byteLength ||
-    result.buffer.byteLength > maxProbeBootstrapArchiveBytes ||
+    result.buffer.byteLength > probeBootstrapArchiveMaximumBytes ||
     archive.readUInt32LE(trailerOffset) !== crc32(result.buffer) ||
     archive.readUInt32LE(trailerOffset + 4) !== result.buffer.byteLength >>> 0
   ) {

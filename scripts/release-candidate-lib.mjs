@@ -42,8 +42,9 @@ import {
 
 import {
   inspectProbeBootstrapBinary,
+  probeBootstrapArchiveMaximumBytes,
   probeBootstrapTargets,
-  withVerifiedProbeBootstrapArtifact,
+  withVerifiedProbeBootstrapArtifactBytes,
 } from "./probe-bootstrap-artifact.mjs";
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
@@ -359,51 +360,45 @@ export async function packageProbeArchive({
 // Bootstrap 输入先绑定精确 size+sha256 快照，再从该私有快照提取固定角色；
 // compose 之后不存在第二个可发布 Bootstrap archive。
 async function composeProbeArchive({
-  bootstrapArchivePath,
+  bootstrapArchive,
   bootstrapExpectedArchive,
   distribution,
   outputPath,
   rootKeyId,
-  runtimeArchivePath,
-  runtimeExpectedSize,
+  runtimeArchive,
+  runtimeArchiveFile,
   sourceDateEpoch,
   target,
   version,
 }) {
-  const runtimeArchive = await readProbeArchiveSnapshot(
-    runtimeArchivePath,
-    runtimeExpectedSize,
-  );
-  await inspectProbeArchiveBytes(
-    runtimeArchive.bytes,
-    path.basename(runtimeArchivePath),
-    {
-      bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
-      target,
-      version,
-    },
-  );
+  await inspectProbeArchiveBytes(runtimeArchive, runtimeArchiveFile, {
+    bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
+    target,
+    version,
+  });
   const stagingDir = await mkdtemp(
     path.join(tmpdir(), "enoki-probe-bundle-compose-"),
   );
   try {
-    await execFileAsync(
-      "tar",
-      [
-        "--extract",
-        "--gzip",
-        "--file",
-        runtimeArchivePath,
-        "--directory",
-        stagingDir,
-        "--no-same-owner",
-      ],
-      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-    );
+    await withPrivateArchiveSnapshot(runtimeArchive, async (archivePath) => {
+      await execFileAsync(
+        "tar",
+        [
+          "--extract",
+          "--gzip",
+          "--file",
+          archivePath,
+          "--directory",
+          stagingDir,
+          "--no-same-owner",
+        ],
+        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
+      );
+    });
     await mkdir(path.join(stagingDir, "bootstrap"), { recursive: true });
-    await withVerifiedProbeBootstrapArtifact(
+    await withVerifiedProbeBootstrapArtifactBytes(
       {
-        archivePath: bootstrapArchivePath,
+        archive: bootstrapArchive,
         distribution,
         expectedArchive: bootstrapExpectedArchive,
         rootKeyId,
@@ -626,7 +621,12 @@ export async function prepareUnsignedProbeAssetSet({
   const assets = [];
   for (const target of probeTargets) {
     const file = `enoki-probe-${target}.tar.gz`;
-    const archive = await readFile(path.join(archivesDir, file));
+    const runtimeArchivePath = path.join(archivesDir, file);
+    const runtimeExpectedSize = (await stat(runtimeArchivePath)).size;
+    const { bytes: archive } = await readProbeArchiveSnapshot(
+      runtimeArchivePath,
+      runtimeExpectedSize,
+    );
     const archiveSha256 = sha256(archive);
     const checksum = await readFile(
       path.join(archivesDir, `${file}.sha256`),
@@ -637,7 +637,15 @@ export async function prepareUnsignedProbeAssetSet({
     }
     const bootstrapFile = `enoki-probe-bootstrap-${target}.tar.gz`;
     const bootstrapArchivePath = path.join(bootstrapArchivesDir, bootstrapFile);
-    const bootstrapArchive = await readFile(bootstrapArchivePath);
+    const bootstrapExpectedSize = (await stat(bootstrapArchivePath)).size;
+    const { bytes: bootstrapArchive } = await readRegularFileSnapshot(
+      bootstrapArchivePath,
+      "Probe Bootstrap archive",
+      {
+        expectedSize: bootstrapExpectedSize,
+        maximumSize: probeBootstrapArchiveMaximumBytes,
+      },
+    );
     const bootstrapChecksum = await readFile(
       `${bootstrapArchivePath}.sha256`,
       "utf8",
@@ -650,7 +658,7 @@ export async function prepareUnsignedProbeAssetSet({
     }
     const bundledArchivePath = path.join(bundledArchivesDir, file);
     await composeProbeArchive({
-      bootstrapArchivePath,
+      bootstrapArchive,
       bootstrapExpectedArchive: {
         sha256: bootstrapSha256,
         size: bootstrapArchive.byteLength,
@@ -658,8 +666,8 @@ export async function prepareUnsignedProbeAssetSet({
       distribution,
       outputPath: bundledArchivePath,
       rootKeyId,
-      runtimeArchivePath: path.join(archivesDir, file),
-      runtimeExpectedSize: archive.byteLength,
+      runtimeArchive: archive,
+      runtimeArchiveFile: file,
       sourceDateEpoch: "0",
       target,
       version: stableVersion,
@@ -1649,6 +1657,20 @@ async function readProbeArchiveSnapshot(archivePath, expectedSize) {
       );
     }
     throw error;
+  }
+}
+
+async function withPrivateArchiveSnapshot(archive, callback) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(tmpdir(), "enoki-probe-runtime-snapshot-"),
+  );
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    const archivePath = path.join(temporaryDirectory, "probe-runtime.tar.gz");
+    await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 });
+    return await callback(archivePath);
+  } finally {
+    await rm(temporaryDirectory, { force: true, recursive: true });
   }
 }
 
