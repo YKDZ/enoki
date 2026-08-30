@@ -17,20 +17,139 @@ concurrency:
 jobs:
   node-checks:
     name: Node checks
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/reusable-node-checks.yml
 
   rust-checks:
     name: Rust checks
+    if: github.event_name != 'workflow_dispatch'
     uses: ./.github/workflows/reusable-rust-checks.yml
 
   probe-binaries:
     name: Probe binaries
+    if: github.event_name != 'workflow_dispatch'
     needs: rust-checks
     uses: ./.github/workflows/reusable-build-probe.yml
 
   hub-image:
     name: Hub Docker image
+    if: github.event_name != 'workflow_dispatch'
     needs: node-checks
     uses: ./.github/workflows/reusable-hub-image.yml
     with:
       version: ci
+
+  transition-probe-binaries:
+    name: Prepare v0.1.75 Probe closure
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/reusable-build-probe.yml
+    with:
+      commit: a5df8786c69dd1d08793aeb6d31a21b8d963faa9
+      package-artifacts: true
+      verify-reproducible: true
+      version: v0.1.75
+
+  transition-bootstrap-binaries:
+    name: Prepare v0.1.75 Bootstrap closure
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/reusable-build-probe-bootstrap.yml
+    with:
+      commit: a5df8786c69dd1d08793aeb6d31a21b8d963faa9
+      distribution: enoki
+      version: v0.1.75
+
+  transition-target-manifest:
+    name: Compose exact unsigned target manifest
+    if: github.event_name == 'workflow_dispatch'
+    needs: [transition-probe-binaries, transition-bootstrap-binaries]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact candidate tooling
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          path: source
+          persist-credentials: false
+          ref: a5df8786c69dd1d08793aeb6d31a21b8d963faa9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: source/package.json
+
+      - name: Download x86_64 musl Probe build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-x86_64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download aarch64 musl Probe build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download x86_64 GNU Probe build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download aarch64 GNU Probe build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download x86_64 musl Bootstrap build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-bootstrap-builds
+
+      - name: Download aarch64 musl Bootstrap build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-bootstrap-builds
+
+      - name: Download x86_64 GNU Bootstrap build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-bootstrap-builds
+
+      - name: Download aarch64 GNU Bootstrap build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-bootstrap-builds
+
+      - name: Compose the exact unsigned Probe Asset Set
+        env:
+          PROBE_ASSET_SIGNING_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
+          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          PROBE_TRUST_DELEGATION: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
+          PROBE_TRUST_DELEGATION_SIGNATURE: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
+        run: |
+          printf '%s' "$PROBE_TRUST_DELEGATION" > trust-delegation.json
+          printf '%s' "$PROBE_TRUST_DELEGATION_SIGNATURE" | base64 --decode > trust-delegation.json.sig
+          node source/scripts/release-candidate.mjs prepare-unsigned-probe-assets \
+            --version v0.1.75 \
+            --archives-dir probe-builds \
+            --bootstrap-archives-dir probe-bootstrap-builds \
+            --output unsigned-probe-assets \
+            --public-key-env PROBE_ASSET_SIGNING_PUBLIC_KEY \
+            --root-public-key-env PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY \
+            --distribution enoki \
+            --trust-delegation trust-delegation.json \
+            --trust-delegation-signature trust-delegation.json.sig
+
+      - name: Upload the exact target closure
+        uses: actions/upload-artifact@v7
+        with:
+          name: v0.1.75-transition-target-${{ github.run_id }}
+          path: unsigned-probe-assets/manifest.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
