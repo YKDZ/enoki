@@ -1484,6 +1484,17 @@ struct UpgradeEffects<'a, S> {
     prepared: Option<PreparedUpgrade>,
 }
 
+enum UpgradeActivationEffectFailure {
+    CustodyRejected(InstallError),
+    Repairable(InstallError),
+}
+
+impl From<InstallError> for UpgradeActivationEffectFailure {
+    fn from(error: InstallError) -> Self {
+        Self::Repairable(error)
+    }
+}
+
 impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
     type Error = InstallError;
 
@@ -1531,7 +1542,7 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             .take()
             .ok_or(UpgradeActivationFailure::Preactivation(InstallError::Io))?;
         prepared.retain_for_repair = true;
-        let activated: Result<(), InstallError> = (|| {
+        let activated: Result<(), UpgradeActivationEffectFailure> = (|| {
             if let Some(attempt) = self.attempt {
                 write_upgrade_attempt(
                     self.paths,
@@ -1569,7 +1580,13 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             }
             self.systemd.daemon_reload()?;
             if self.attempt.is_some() {
-                consume_runtime_failure_pair_for_upgrade(self.paths)?;
+                consume_runtime_failure_pair_for_upgrade(self.paths).map_err(|error| {
+                    if error == InstallError::ExistingResidue {
+                        UpgradeActivationEffectFailure::CustodyRejected(error)
+                    } else {
+                        UpgradeActivationEffectFailure::Repairable(error)
+                    }
+                })?;
             }
             self.systemd.start()?;
             self.systemd.wait_local_activated()?;
@@ -1622,7 +1639,10 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         })();
         let error = match activated {
             Ok(()) => return Ok(()),
-            Err(error) => error,
+            Err(UpgradeActivationEffectFailure::CustodyRejected(error)) => {
+                return Err(UpgradeActivationFailure::RecoveryPersistence(error));
+            }
+            Err(UpgradeActivationEffectFailure::Repairable(error)) => error,
         };
         let Some(attempt) = self.attempt else {
             return Err(UpgradeActivationFailure::Postactivation(error));

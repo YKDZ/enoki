@@ -472,6 +472,12 @@ mod tests {
         fail_restart: bool,
         residue: bool,
         registration_identity: Option<PathBuf>,
+        reload_topology_tamper: Option<ReloadTopologyTamper>,
+    }
+    struct ReloadTopologyTamper {
+        protected_paths: Vec<PathBuf>,
+        protected_before: Option<Vec<Vec<u8>>>,
+        residue_path: PathBuf,
     }
     impl SystemdPort for Systemd {
         fn require_absent(&mut self) -> Result<(), InstallError> {
@@ -482,6 +488,20 @@ mod tests {
         }
         fn daemon_reload(&mut self) -> Result<(), InstallError> {
             self.calls.push("reload");
+            if let Some(tamper) = self.reload_topology_tamper.as_mut() {
+                fs::write(&tamper.residue_path, b"postactivation topology tamper")
+                    .map_err(|_| InstallError::Io)?;
+                fs::set_permissions(&tamper.residue_path, fs::Permissions::from_mode(0o755))
+                    .map_err(|_| InstallError::Io)?;
+                tamper.protected_before = Some(
+                    tamper
+                        .protected_paths
+                        .iter()
+                        .map(fs::read)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|_| InstallError::Io)?,
+                );
+            }
             (!self.fail_reload)
                 .then_some(())
                 .ok_or(InstallError::Systemd)
@@ -1702,6 +1722,110 @@ mod tests {
         assert!(journal.contains("phase = \"activated\""));
         assert!(journal.contains("activated_targets = 21"));
         assert!(journal.contains("finalized_targets = 21"));
+    }
+
+    #[test]
+    fn normal_activation_custody_rejection_preserves_facts_without_repair_authority() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let source = &fixture.installed;
+        let generation = "2c".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        let mut target = fixture.bundle.clone();
+        target.version = "1.2.4".to_owned();
+        target.manifest_sha256 = "d".repeat(64);
+        target.asset_set_manifest_sha256 = "e".repeat(64);
+        let [
+            mut probe,
+            mut runtime,
+            mut system_state,
+            mut disk_health,
+            mut lifecycle,
+            mut acquirer,
+            mut activator,
+        ] = std::array::from_fn(|_| component());
+        let attempt = consume_probe_upgrade_authority(
+            paths,
+            &UpgradeAuthorityConsumption {
+                operation_id: "custody-rejection".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                hub_origin: source.hub_origin.clone(),
+                host_id: "host_01".to_owned(),
+                probe_id: source.probe_id.clone(),
+                source_bundle_version: source.source_bundle_version.clone(),
+                source_install_state_sha256: source.source_install_state_sha256.clone(),
+                source_manifest_sha256: source.source_manifest_sha256.clone(),
+                target_bundle_version: target.version.clone(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    target.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: target.manifest_sha256.clone(),
+                verified_stage_sha256: "9".repeat(64),
+            },
+        )
+        .unwrap();
+        let destination = &upgrade_destinations(paths)[0];
+        let name = destination.file_name().unwrap().to_str().unwrap();
+        let residue_path = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let status_path = paths.state().join("probe-operation-status.toml");
+        let protected_paths = vec![
+            journal_path.clone(),
+            status_path.clone(),
+            paths.runtime_failure_epoch(),
+            paths.runtime_failure_latch(),
+        ];
+        let mut systemd = Systemd {
+            reload_topology_tamper: Some(ReloadTopologyTamper {
+                protected_paths: protected_paths.clone(),
+                protected_before: None,
+                residue_path: residue_path.clone(),
+            }),
+            ..Systemd::default()
+        };
+
+        let result = upgrade_current_probe_for_operation(
+            VerifiedUpgradeComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                system_state_provider: &mut system_state,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &target,
+            source,
+            &attempt,
+            paths,
+            &mut systemd,
+        );
+
+        assert_eq!(result, Err(InstallError::ExistingResidue));
+        assert_eq!(systemd.calls, ["stop", "reload"]);
+        let protected_before = systemd
+            .reload_topology_tamper
+            .as_ref()
+            .and_then(|tamper| tamper.protected_before.as_ref())
+            .unwrap();
+        assert_eq!(
+            protected_paths.iter().map(fs::read).collect::<Result<Vec<_>, _>>().unwrap(),
+            *protected_before,
+        );
+        assert_eq!(
+            fs::read(&residue_path).unwrap(),
+            b"postactivation topology tamper"
+        );
+        let status = fs::read_to_string(status_path).unwrap();
+        assert!(status.contains("status = \"running\""));
+        assert!(!status.contains("repair_eligibility"));
+        assert!(!status.contains("lifecycle.upgrade_repair_required"));
+        let journal = fs::read_to_string(journal_path).unwrap();
+        assert!(journal.contains("phase = \"activation-started\""));
+        assert!(journal.contains("activated_targets = 21"));
+        assert!(journal.contains("finalized_targets = 0"));
+        assert!(journal.contains("runtime_failure_consumption = \"bound\""));
     }
 
     #[test]
