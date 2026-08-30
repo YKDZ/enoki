@@ -77,7 +77,7 @@ describe("Release E2E business assertions", () => {
     expect(calls).toEqual(["cleanup.owned", "docker.start"]);
   });
 
-  it("binds and cleans the canonical report transport around the direct Hub owner origin", async () => {
+  it("binds the canonical report transport to the verified Probe upstream origin", async () => {
     const calls = [];
     const environment = createReleaseEnvironment({
       candidateDir: "/tmp/release-candidate",
@@ -101,7 +101,10 @@ describe("Release E2E business assertions", () => {
         },
         async start() {
           calls.push("docker.start");
-          return { activeHub: "candidate" };
+          return {
+            activeHub: "candidate",
+            probeUpstreamOrigin: "http://127.0.0.1:49152",
+          };
         },
       },
       execute: async () => ({ code: 0, stderr: "", stdout: "" }),
@@ -123,7 +126,7 @@ describe("Release E2E business assertions", () => {
         "transport.create",
         {
           listenUrl: "http://127.0.0.1:33000",
-          upstreamUrl: "http://127.0.0.1:33001",
+          upstreamUrl: "http://127.0.0.1:49152",
         },
       ],
       "transport.start",
@@ -7586,11 +7589,12 @@ describe("Release E2E command", () => {
     );
   });
 
-  it("binds Hub runtime evidence to the Candidate and verifies clean removal", async () => {
+  it("binds Hub runtime evidence and rejects unsafe Probe upstream mappings", async () => {
     const manifestDigest = `sha256:${"d".repeat(64)}`;
     const configDigest = `sha256:${"e".repeat(64)}`;
     const commands = [];
     const state = { container: false, image: false, volume: false };
+    let probePortEvidence = "127.0.0.1:49151\n";
     const exec = async (command, arguments_) => {
       commands.push([command, ...arguments_].join(" "));
       if (command === "tar" && arguments_.at(-1) === "index.json") {
@@ -7613,6 +7617,9 @@ describe("Release E2E command", () => {
       if (arguments_[0] === "run") {
         state.container = true;
         return successfulCommandText("container-id\n");
+      }
+      if (arguments_[0] === "port") {
+        return successfulCommandText(probePortEvidence);
       }
       if (arguments_[0] === "logs") {
         return successfulCommandText(
@@ -7702,16 +7709,18 @@ describe("Release E2E command", () => {
       fetch: async () => jsonResponse({ service: "enoki-hub", status: "ok" }),
       sleep: async () => {},
     });
-    const resources = await controller.start({
-      candidateDir: "/candidate",
-      candidateManifest: {
-        hub: { archive: "hub/candidate.oci.tar", digest: manifestDigest },
-      },
-      hubOwnerUrl: "http://127.0.0.1:33000",
-      hubPublicUrl: "http://192.0.2.20:33000",
-      ownerPassword: "owner-secret",
-      runId: "run-runtime",
-    });
+    const start = () =>
+      controller.start({
+        candidateDir: "/candidate",
+        candidateManifest: {
+          hub: { archive: "hub/candidate.oci.tar", digest: manifestDigest },
+        },
+        hubOwnerUrl: "http://127.0.0.1:33000",
+        hubPublicUrl: "http://192.0.2.20:33000",
+        ownerPassword: "owner-secret",
+        runId: "run-runtime",
+      });
+    const resources = await start();
 
     expect(commands).toEqual(
       expect.arrayContaining([
@@ -7740,6 +7749,25 @@ describe("Release E2E command", () => {
     await expect(
       controller.cleanup({ resources, runId: "run-runtime" }),
     ).resolves.toEqual({ clean: true });
+    for (const [label, evidence] of [
+      ["absent", ""],
+      ["multiple", "127.0.0.1:49151\n127.0.0.1:49152\n"],
+      ["wildcard", "0.0.0.0:49151\n"],
+      ["non-loopback", "192.0.2.10:49151\n"],
+      ["malformed", "not-a-mapping\n"],
+      ["malformed IPv4", "999.0.0.1:49151\n"],
+      ["wrong-family", "[::1]:49151\n"],
+      ["unsafe", "127.0.0.1:65536\n"],
+    ]) {
+      probePortEvidence = evidence;
+      await expect(start(), label).rejects.toThrow(
+        /Docker Probe upstream port evidence/,
+      );
+      await expect(
+        controller.cleanup({ runId: "run-runtime" }),
+        label,
+      ).resolves.toEqual({ clean: true });
+    }
     expect(state).toEqual({ container: false, image: false, volume: false });
   });
 
@@ -7749,6 +7777,7 @@ describe("Release E2E command", () => {
     const candidateManifestDigest = `sha256:${"d".repeat(64)}`;
     const candidateConfigDigest = `sha256:${"e".repeat(64)}`;
     const commands = [];
+    const runArguments = [];
     const runMounts = [];
     const images = new Map();
     let stagedImage = null;
@@ -7801,8 +7830,16 @@ describe("Release E2E command", () => {
       if (arguments_[0] === "run") {
         container = true;
         activeImage = images.get(arguments_.at(-1));
+        runArguments.push([...arguments_]);
         runMounts.push(arguments_[arguments_.indexOf("--mount") + 1]);
         return successfulCommandText("container-id\n");
+      }
+      if (arguments_[0] === "port") {
+        return successfulCommandText(
+          arguments_[2] === "3000/tcp"
+            ? "0.0.0.0:33000\n127.0.0.1:49152\n"
+            : "127.0.0.1:49152\n",
+        );
       }
       if (arguments_[0] === "rm") {
         container = false;
@@ -7889,8 +7926,28 @@ describe("Release E2E command", () => {
     });
 
     expect(resources.activeHub).toBe("baseline");
+    expect(resources.probeUpstreamOrigin).toBe("http://127.0.0.1:49152");
     await controller.switchToCandidate({ resources, runId: "run-switch" });
     expect(resources.activeHub).toBe("candidate");
+    expect(resources.probeUpstreamOrigin).toBe("http://127.0.0.1:49152");
+    expect(
+      runArguments.map((arguments_) =>
+        arguments_.filter(
+          (_value, index) => arguments_[index - 1] === "--publish",
+        ),
+      ),
+    ).toEqual([
+      ["33000:3000", "127.0.0.1::3000"],
+      ["33000:3000", "127.0.0.1:49152:3001"],
+    ]);
+    expect(
+      commands.filter((command) =>
+        command.startsWith("docker port enoki-e2e-hub-run-switch "),
+      ),
+    ).toEqual([
+      "docker port enoki-e2e-hub-run-switch 3000/tcp",
+      "docker port enoki-e2e-hub-run-switch 3001/tcp",
+    ]);
     expect(runMounts).toEqual([
       "type=volume,source=enoki-e2e-data-run-switch,target=/data",
       "type=volume,source=enoki-e2e-data-run-switch,target=/data",
@@ -7943,6 +8000,7 @@ describe("Release E2E command", () => {
     let stagedTag = null;
     let activeImage = null;
     let container = false;
+    let probePortEvidence = "127.0.0.1:49153\n";
     const snapshotResult = (operation) => ({
       manifest: {
         directories: [{ logicalRoot: "data-root", path: "metrics-archive" }],
@@ -8018,6 +8076,13 @@ describe("Release E2E command", () => {
         container = true;
         activeImage = images.get(arguments_.at(-1));
         return successfulCommandText("container-id\n");
+      }
+      if (arguments_[0] === "port") {
+        return successfulCommandText(
+          arguments_[2] === "3000/tcp"
+            ? `0.0.0.0:33000\n${probePortEvidence}`
+            : probePortEvidence,
+        );
       }
       if (arguments_[0] === "stop") {
         container = false;
@@ -8151,6 +8216,11 @@ describe("Release E2E command", () => {
       ),
     );
     expect(commands.join("\n")).not.toContain("sqlite3");
+
+    probePortEvidence = "127.0.0.1:49154\n";
+    await expect(
+      controller.switchToCandidate({ resources, runId: "run-restore" }),
+    ).rejects.toThrow(/changed.*Probe upstream port/i);
 
     await expect(
       controller.cleanup({ resources, runId: "run-restore" }),
