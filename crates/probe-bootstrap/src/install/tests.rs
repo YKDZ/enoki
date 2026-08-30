@@ -815,6 +815,45 @@ mod tests {
         target
     }
 
+    fn prepare_legacy_postactivation_effect_phase(
+        fixture: &InstalledBundleFixture,
+        phase: &str,
+        finalized_targets: usize,
+    ) -> VerifiedBundle {
+        let target = prepare_legacy_partial_upgrade_with_unreceipted_next_target(fixture, 21);
+        let paths = &fixture.paths;
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal = fs::read_to_string(&journal_path).unwrap();
+        if phase == "stage-cleanup-required" {
+            upgrade::write_upgrade_attempt_from_journal(paths, &journal, "finalizing", 21, 21)
+                .unwrap();
+            let finalizing = fs::read_to_string(&journal_path).unwrap();
+            upgrade::write_upgrade_attempt_from_journal(
+                paths,
+                &finalizing,
+                "stage-cleanup-required",
+                21,
+                21,
+            )
+            .unwrap();
+        } else {
+            upgrade::write_upgrade_attempt_from_journal(
+                paths,
+                &journal,
+                phase,
+                21,
+                finalized_targets,
+            )
+            .unwrap();
+        }
+        for destination in upgrade_destinations(paths).iter().take(finalized_targets) {
+            let name = destination.file_name().unwrap().to_str().unwrap();
+            let backup = destination.with_file_name(format!(".{name}.enoki-upgrade-old"));
+            fs::remove_file(backup).unwrap();
+        }
+        target
+    }
+
     fn restore_bundle_fixture(
         fixture: &InstalledBundleFixture,
         systemd: &mut Systemd,
@@ -1797,6 +1836,128 @@ mod tests {
             assert!(!paths.runtime_failure_epoch().exists());
             assert!(!paths.runtime_failure_latch().exists());
         }
+    }
+
+    #[test]
+    fn legacy_repair_required_with_partial_finalization_binds_before_remaining_effects() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "7c".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        prepare_legacy_postactivation_effect_phase(&fixture, "repair-required", 7);
+        let mut systemd = Systemd::default();
+
+        let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
+            .unwrap()
+            .unwrap();
+
+        assert!(systemd.calls.is_empty());
+        assert!(!paths.runtime_failure_epoch().exists());
+        assert!(!paths.runtime_failure_latch().exists());
+        let journal = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains("schema_version = 4"));
+        assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
+        assert!(journal.contains("phase = \"stage-cleanup-required\""));
+        assert!(journal.contains("finalized_targets = 21"));
+        finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
+    }
+
+    #[test]
+    fn legacy_late_effect_phases_complete_absent_pair_custody_before_forward_progress() {
+        for (phase, finalized_targets) in
+            [("finalizing", 7), ("stage-cleanup-required", 21)]
+        {
+            let fixture = installed_bundle_fixture();
+            let paths = &fixture.paths;
+            prepare_legacy_postactivation_effect_phase(&fixture, phase, finalized_targets);
+            let mut systemd = Systemd::default();
+
+            let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
+                .unwrap()
+                .unwrap();
+
+            assert!(systemd.calls.is_empty());
+            let journal = fs::read_to_string(
+                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+            )
+            .unwrap();
+            assert!(journal.contains("schema_version = 4"));
+            assert!(journal.contains("runtime_failure_consumption = \"none-consumed\""));
+            assert!(journal.contains("phase = \"stage-cleanup-required\""));
+            finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_late_recovery_with_retired_binding_backup_preserves_facts_and_has_zero_effects() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "8d".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 9);
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal_before = fs::read(&journal_path).unwrap();
+        let next = &upgrade_destinations(paths)[9];
+        let next_name = next.file_name().unwrap().to_str().unwrap();
+        let next_backup = next.with_file_name(format!(".{next_name}.enoki-upgrade-old"));
+        let next_backup_before = fs::read(&next_backup).unwrap();
+        let mut systemd = Systemd::default();
+
+        assert!(recover_incomplete_probe_upgrade(paths, &mut systemd).is_err());
+
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
+        assert!(paths.runtime_failure_epoch().exists());
+    }
+
+    #[test]
+    fn fresh_recovery_completes_a_durable_legacy_custody_write_before_any_effect() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "9e".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        prepare_legacy_postactivation_effect_phase(&fixture, "repair-required", 7);
+        let next = &upgrade_destinations(paths)[7];
+        let next_name = next.file_name().unwrap().to_str().unwrap();
+        let next_backup = next.with_file_name(format!(".{next_name}.enoki-upgrade-old"));
+        let next_backup_before = fs::read(&next_backup).unwrap();
+        upgrade::crash_after_runtime_failure_custody_write();
+        let mut crashed_systemd = Systemd::default();
+
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = recover_incomplete_probe_upgrade(paths, &mut crashed_systemd);
+        }));
+
+        assert!(crashed.is_err());
+        assert!(crashed_systemd.calls.is_empty());
+        assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
+        let bound = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(bound.contains("schema_version = 4"));
+        assert!(bound.contains("runtime_failure_consumption = \"bound\""));
+        assert!(paths.runtime_failure_epoch().exists());
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
+
+        let mut fresh_systemd = Systemd::default();
+        recover_incomplete_probe_upgrade(paths, &mut fresh_systemd)
+            .unwrap()
+            .unwrap();
+        assert!(fresh_systemd.calls.is_empty());
+        assert!(!paths.runtime_failure_epoch().exists());
+        assert!(!paths.runtime_failure_latch().exists());
+        let completed = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(completed.contains("runtime_failure_consumption = \"latch-removed\""));
+        assert!(completed.contains("phase = \"stage-cleanup-required\""));
     }
 
     #[test]

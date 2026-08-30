@@ -869,13 +869,13 @@ fn runtime_failure_consumption_pending_at(
         trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
     {
         let intent = parse_upgrade_runtime_failure_intent(&bytes)?;
-        if intent.phase == "aborted" || intent.progress.is_none() {
-            return Ok(intent.phase != "aborted" && intent.phase != "activated");
+        if intent.phase == "aborted" {
+            return Ok(false);
         }
-        match intent
-            .progress
-            .ok_or_else(|| std::io::Error::other("upgrade intent progress unexpectedly absent"))?
-        {
+        let Some(progress) = intent.progress else {
+            return Ok(true);
+        };
+        match progress {
             UpgradeRuntimeFailureProgress::Bound | UpgradeRuntimeFailureProgress::EpochRemoved => {
                 if intent.generation.as_deref() != Some(generation) {
                     return Err(std::io::Error::other("upgrade intent binding invalid"));
@@ -889,11 +889,12 @@ fn runtime_failure_consumption_pending_at(
                     ));
                 }
             }
-            UpgradeRuntimeFailureProgress::None | UpgradeRuntimeFailureProgress::NoneConsumed => {
+            UpgradeRuntimeFailureProgress::None => {
                 return Err(std::io::Error::other(
                     "absent-pair upgrade intent retained a failure pair",
                 ));
             }
+            UpgradeRuntimeFailureProgress::NoneConsumed => return Ok(false),
         }
     }
     Ok(false)
@@ -929,7 +930,7 @@ fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::
         return Ok(false);
     };
     let intent = parse_upgrade_runtime_failure_intent(&bytes)?;
-    if intent.phase == "aborted" || intent.phase == "activated" {
+    if intent.phase == "aborted" {
         return Ok(false);
     }
     Ok(matches!(
@@ -963,28 +964,88 @@ fn parse_upgrade_runtime_failure_intent(
         .get("schema_version")
         .and_then(toml::Value::as_integer)
         .filter(|schema| (1..=4).contains(schema))
+        .and_then(|schema| u16::try_from(schema).ok())
         .ok_or_else(|| std::io::Error::other("upgrade intent schema invalid"))?;
-    let phase = metadata_string(&value, "phase")
-        .filter(|phase| {
-            matches!(
-                phase.as_str(),
-                "consumed"
-                    | "admitted"
-                    | "prepared"
-                    | "aborted"
-                    | "activation-started"
-                    | "repair-required"
-                    | "finalizing"
-                    | "stage-cleanup-required"
-                    | "activated"
-            )
-        })
-        .ok_or_else(|| std::io::Error::other("upgrade intent phase invalid"))?;
+    let operation_id = upgrade_journal_string(&value, "operation_id")?;
+    let _stage_owner_uid: u32 = upgrade_journal_usize(&value, "stage_owner_uid")?
+        .try_into()
+        .map_err(|_| std::io::Error::other("upgrade intent binding invalid"))?;
+    let authority_sha256 = upgrade_journal_string(&value, "authority_sha256")?;
+    let source_probe_id = upgrade_journal_string(&value, "source_probe_id")?;
+    let source_bundle_version = upgrade_journal_string(&value, "source_bundle_version")?;
+    let source_install_state_sha256 =
+        upgrade_journal_string(&value, "source_install_state_sha256")?;
+    let source_manifest_sha256 = upgrade_journal_string(&value, "source_manifest_sha256")?;
+    let target_bundle_version = upgrade_journal_string(&value, "target_bundle_version")?;
+    let target_manifest_sha256 = upgrade_journal_string(&value, "target_manifest_sha256")?;
+    if !valid_upgrade_identifier(&operation_id)
+        || !valid_upgrade_identifier(&source_probe_id)
+        || decode_lower_hex_32(&authority_sha256).is_none()
+        || !valid_upgrade_version(&source_bundle_version)
+        || !valid_upgrade_version(&target_bundle_version)
+        || decode_lower_hex_32(&source_install_state_sha256).is_none()
+        || decode_lower_hex_32(&source_manifest_sha256).is_none()
+        || decode_lower_hex_32(&target_manifest_sha256).is_none()
+    {
+        return Err(std::io::Error::other("upgrade intent binding invalid"));
+    }
+    let has_authority_scope = [
+        "hub_origin",
+        "host_id",
+        "target_asset_set_digest",
+        "verified_stage_sha256",
+    ]
+    .iter()
+    .any(|key| value.get(*key).is_some());
+    if has_authority_scope {
+        let hub_origin = upgrade_journal_string(&value, "hub_origin")?;
+        let host_id = upgrade_journal_string(&value, "host_id")?;
+        let target_asset_set_digest = upgrade_journal_string(&value, "target_asset_set_digest")?;
+        let verified_stage_sha256 = upgrade_journal_string(&value, "verified_stage_sha256")?;
+        if hub_origin.is_empty()
+            || !valid_upgrade_identifier(&host_id)
+            || target_asset_set_digest
+                .strip_prefix("sha256:")
+                .and_then(decode_lower_hex_32)
+                .is_none()
+            || decode_lower_hex_32(&verified_stage_sha256).is_none()
+        {
+            return Err(std::io::Error::other("upgrade intent authority invalid"));
+        }
+    } else if schema == 2 {
+        return Err(std::io::Error::other("upgrade intent authority missing"));
+    }
+    let phase = upgrade_journal_string(&value, "phase")?;
+    let activated_targets = upgrade_journal_usize(&value, "activated_targets")?;
+    let finalized_targets = upgrade_journal_usize(&value, "finalized_targets")?;
+    let activation_started = match schema {
+        3 | 4 => value
+            .get("activation_started")
+            .and_then(toml::Value::as_bool)
+            .ok_or_else(|| std::io::Error::other("upgrade intent activation marker invalid"))?,
+        2 => match value.get("activation_started") {
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| std::io::Error::other("upgrade intent activation marker invalid"))?,
+            None => infer_upgrade_activation_started(&phase, activated_targets, finalized_targets)?,
+        },
+        1 => infer_upgrade_activation_started(&phase, activated_targets, finalized_targets)?,
+        _ => unreachable!(),
+    };
+    validate_upgrade_attempt_tuple(
+        &phase,
+        activation_started,
+        activated_targets,
+        finalized_targets,
+    )?;
     let progress = metadata_string(&value, "runtime_failure_consumption");
     let generation = metadata_string(&value, "runtime_failure_generation");
     let epoch_sha256 = metadata_string(&value, "runtime_failure_epoch_sha256");
     if schema != 4 {
-        if progress.is_some() || generation.is_some() || epoch_sha256.is_some() {
+        if value.get("runtime_failure_consumption").is_some()
+            || value.get("runtime_failure_generation").is_some()
+            || value.get("runtime_failure_epoch_sha256").is_some()
+        {
             return Err(std::io::Error::other("legacy upgrade intent invalid"));
         }
         return Ok(UpgradeRuntimeFailureIntent {
@@ -993,9 +1054,15 @@ fn parse_upgrade_runtime_failure_intent(
             generation: None,
         });
     }
+    let generation_present = value.get("runtime_failure_generation").is_some();
+    let epoch_sha256_present = value.get("runtime_failure_epoch_sha256").is_some();
     let (progress, generation) = match (progress.as_deref(), generation, epoch_sha256) {
-        (Some("none"), None, None) => (UpgradeRuntimeFailureProgress::None, None),
-        (Some("none-consumed"), None, None) => (UpgradeRuntimeFailureProgress::NoneConsumed, None),
+        (Some("none"), None, None) if !generation_present && !epoch_sha256_present => {
+            (UpgradeRuntimeFailureProgress::None, None)
+        }
+        (Some("none-consumed"), None, None) if !generation_present && !epoch_sha256_present => {
+            (UpgradeRuntimeFailureProgress::NoneConsumed, None)
+        }
         (Some("bound"), Some(generation), Some(digest))
             if decode_lower_hex_32(&generation).is_some()
                 && decode_lower_hex_32(&digest).is_some() =>
@@ -1022,30 +1089,7 @@ fn parse_upgrade_runtime_failure_intent(
         }
         _ => return Err(std::io::Error::other("upgrade intent progress invalid")),
     };
-    let progress_matches_phase = match progress {
-        UpgradeRuntimeFailureProgress::None | UpgradeRuntimeFailureProgress::Bound => matches!(
-            phase.as_str(),
-            "consumed"
-                | "admitted"
-                | "prepared"
-                | "aborted"
-                | "activation-started"
-                | "repair-required"
-        ),
-        UpgradeRuntimeFailureProgress::EpochRemoved => {
-            matches!(phase.as_str(), "activation-started" | "repair-required")
-        }
-        UpgradeRuntimeFailureProgress::NoneConsumed
-        | UpgradeRuntimeFailureProgress::LatchRemoved => matches!(
-            phase.as_str(),
-            "activation-started"
-                | "repair-required"
-                | "finalizing"
-                | "stage-cleanup-required"
-                | "activated"
-        ),
-    };
-    if !progress_matches_phase {
+    if !upgrade_runtime_failure_progress_matches_phase(progress, &phase) {
         return Err(std::io::Error::other("upgrade intent progress incoherent"));
     }
     Ok(UpgradeRuntimeFailureIntent {
@@ -1053,6 +1097,106 @@ fn parse_upgrade_runtime_failure_intent(
         progress: Some(progress),
         generation,
     })
+}
+
+fn upgrade_runtime_failure_progress_matches_phase(
+    progress: UpgradeRuntimeFailureProgress,
+    phase: &str,
+) -> bool {
+    match progress {
+        UpgradeRuntimeFailureProgress::None | UpgradeRuntimeFailureProgress::Bound => matches!(
+            phase,
+            "consumed"
+                | "admitted"
+                | "prepared"
+                | "aborted"
+                | "activation-started"
+                | "repair-required"
+                | "finalizing"
+                | "stage-cleanup-required"
+        ),
+        UpgradeRuntimeFailureProgress::EpochRemoved => matches!(
+            phase,
+            "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
+        ),
+        UpgradeRuntimeFailureProgress::NoneConsumed
+        | UpgradeRuntimeFailureProgress::LatchRemoved => matches!(
+            phase,
+            "activation-started"
+                | "repair-required"
+                | "finalizing"
+                | "stage-cleanup-required"
+                | "activated"
+        ),
+    }
+}
+
+fn infer_upgrade_activation_started(
+    phase: &str,
+    activated: usize,
+    finalized: usize,
+) -> std::io::Result<bool> {
+    match phase {
+        "consumed" | "admitted" | "prepared" | "aborted" => Ok(false),
+        "activation-started" | "finalizing" | "stage-cleanup-required" | "activated" => Ok(true),
+        "repair-required" if activated > 0 || finalized > 0 => Ok(true),
+        _ => Err(std::io::Error::other("upgrade intent phase invalid")),
+    }
+}
+
+fn validate_upgrade_attempt_tuple(
+    phase: &str,
+    activation_started: bool,
+    activated: usize,
+    finalized: usize,
+) -> std::io::Result<()> {
+    const UPGRADE_TARGET_COUNT: usize = 21;
+
+    if finalized > activated || activated > UPGRADE_TARGET_COUNT {
+        return Err(std::io::Error::other(
+            "upgrade intent progress tuple invalid",
+        ));
+    }
+    let valid = match phase {
+        "consumed" | "admitted" | "prepared" | "aborted" => {
+            !activation_started && activated == 0 && finalized == 0
+        }
+        "activation-started" => activation_started && finalized == 0,
+        "repair-required" => activation_started,
+        "finalizing" => activation_started && activated == UPGRADE_TARGET_COUNT,
+        "stage-cleanup-required" | "activated" => {
+            activation_started
+                && activated == UPGRADE_TARGET_COUNT
+                && finalized == UPGRADE_TARGET_COUNT
+        }
+        _ => false,
+    };
+    valid
+        .then_some(())
+        .ok_or_else(|| std::io::Error::other("upgrade intent progress tuple invalid"))
+}
+
+fn upgrade_journal_string(value: &toml::Value, key: &str) -> std::io::Result<String> {
+    metadata_string(value, key).ok_or_else(|| std::io::Error::other("upgrade intent field invalid"))
+}
+
+fn upgrade_journal_usize(value: &toml::Value, key: &str) -> std::io::Result<usize> {
+    value
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| std::io::Error::other("upgrade intent field invalid"))
+}
+
+fn valid_upgrade_identifier(value: &str) -> bool {
+    (1..=96).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_upgrade_version(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_whitespace)
 }
 
 fn trusted_optional_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Option<Vec<u8>>> {
@@ -1368,6 +1512,32 @@ pub(super) mod tests {
         let path = rooted(root, path);
         fs::write(&path, bytes).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn upgrade_journal_fixture(
+        phase: &str,
+        activation_started: bool,
+        activated_targets: usize,
+        finalized_targets: usize,
+        progress: &str,
+        binding: Option<(&str, &str)>,
+    ) -> String {
+        let mut journal = format!(
+            "schema_version = 4\noperation_id = \"runtime-failure-test\"\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host_01\"\nsource_probe_id = \"probe_01\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = {phase:?}\nactivation_started = {activation_started}\nactivated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\nruntime_failure_consumption = {progress:?}\n",
+            unsafe { libc::geteuid() },
+            "1a".repeat(32),
+            "2b".repeat(32),
+            "3c".repeat(32),
+            format!("sha256:{}", "4d".repeat(32)),
+            "5e".repeat(32),
+            "6f".repeat(32),
+        );
+        if let Some((generation, epoch_sha256)) = binding {
+            journal.push_str(&format!(
+                "runtime_failure_generation = {generation:?}\nruntime_failure_epoch_sha256 = {epoch_sha256:?}\n"
+            ));
+        }
+        journal
     }
 
     #[test]
@@ -1746,10 +1916,13 @@ pub(super) mod tests {
             ),
             (
                 UPGRADE_ATTEMPT_PATH,
-                format!(
-                    "schema_version = 4\nphase = \"activation-started\"\nruntime_failure_consumption = \"epoch-removed\"\nruntime_failure_generation = {:?}\nruntime_failure_epoch_sha256 = {:?}\n",
-                    "1b".repeat(32),
-                    "2c".repeat(32),
+                upgrade_journal_fixture(
+                    "activation-started",
+                    true,
+                    21,
+                    0,
+                    "epoch-removed",
+                    Some((&"1b".repeat(32), &"2c".repeat(32))),
                 ),
             ),
         ] {
@@ -1803,7 +1976,7 @@ pub(super) mod tests {
         write_fixture(
             root.path(),
             UPGRADE_ATTEMPT_PATH,
-            b"schema_version = 4\nphase = \"prepared\"\nruntime_failure_consumption = \"none\"\n",
+            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
             0o600,
         );
 
@@ -1822,7 +1995,8 @@ pub(super) mod tests {
         write_fixture(
             root.path(),
             UPGRADE_ATTEMPT_PATH,
-            b"schema_version = 4\nphase = \"activation-started\"\nruntime_failure_consumption = \"none-consumed\"\n",
+            upgrade_journal_fixture("activation-started", true, 0, 0, "none-consumed", None)
+                .as_bytes(),
             0o600,
         );
         assert_eq!(
@@ -1839,10 +2013,13 @@ pub(super) mod tests {
         write_fixture(
             root.path(),
             UPGRADE_ATTEMPT_PATH,
-            format!(
-                "schema_version = 4\nphase = \"prepared\"\nruntime_failure_consumption = \"bound\"\nruntime_failure_generation = {:?}\nruntime_failure_epoch_sha256 = {:?}\n",
-                "3d".repeat(32),
-                "4e".repeat(32),
+            upgrade_journal_fixture(
+                "prepared",
+                false,
+                0,
+                0,
+                "bound",
+                Some((&"3d".repeat(32), &"4e".repeat(32))),
             )
             .as_bytes(),
             0o600,
@@ -1940,6 +2117,215 @@ pub(super) mod tests {
             assert_eq!(fs::read(rooted(root.path(), LATCH_PATH)).unwrap(), latch_before);
             assert_eq!(fs::read(rooted(root.path(), path)).unwrap(), contents.as_bytes());
         }
+    }
+
+    #[test]
+    fn incoherent_full_upgrade_journal_retains_pair_and_blocks_all_runtime_effects() {
+        let completed_generation = "a7".repeat(32);
+        let completed_digest = "b8".repeat(32);
+        let valid = upgrade_journal_fixture(
+            "activated",
+            true,
+            21,
+            21,
+            "latch-removed",
+            Some((&completed_generation, &completed_digest)),
+        );
+        let invalid = [
+            upgrade_journal_fixture(
+                "activated",
+                false,
+                0,
+                0,
+                "latch-removed",
+                Some((&completed_generation, &completed_digest)),
+            ),
+            upgrade_journal_fixture(
+                "finalizing",
+                true,
+                20,
+                7,
+                "latch-removed",
+                Some((&completed_generation, &completed_digest)),
+            ),
+            upgrade_journal_fixture(
+                "activation-started",
+                true,
+                21,
+                1,
+                "latch-removed",
+                Some((&completed_generation, &completed_digest)),
+            ),
+            valid.replacen("operation_id = \"runtime-failure-test\"\n", "", 1),
+            valid.replacen(
+                &format!("authority_sha256 = {:?}", "1a".repeat(32)),
+                "authority_sha256 = \"invalid\"",
+                1,
+            ),
+            valid.replacen("activation_started = true\n", "", 1),
+        ];
+        for (index, journal) in invalid.into_iter().enumerate() {
+            let root = fixture();
+            let uid = unsafe { libc::geteuid() };
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(0x76),
+            )
+            .unwrap();
+            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+            fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap())
+                .unwrap();
+            write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
+
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(0x77),
+                )
+                .is_err(),
+                "invalid full upgrade journal case {index} must block the recorder",
+            );
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    100,
+                    60_100,
+                    "request_nonce_incoherent_upgrade",
+                )
+                .is_err(),
+                "invalid full upgrade journal case {index} must expose no Evidence",
+            );
+            let mut retry = RetrySystemd::default();
+            assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+            assert_eq!(retry.0, 0);
+            assert_eq!(
+                fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
+                epoch_before
+            );
+            assert_eq!(
+                fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+                latch_before
+            );
+            assert_eq!(
+                fs::read(rooted(root.path(), UPGRADE_ATTEMPT_PATH)).unwrap(),
+                journal.as_bytes(),
+            );
+        }
+    }
+
+    #[test]
+    fn strictly_completed_upgrade_journal_allows_a_later_runtime_failure_generation() {
+        for (progress, binding) in [
+            ("none-consumed", None),
+            ("latch-removed", Some(("c9".repeat(32), "da".repeat(32)))),
+        ] {
+            let root = fixture();
+            let uid = unsafe { libc::geteuid() };
+            fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap())
+                .unwrap();
+            let journal = upgrade_journal_fixture(
+                "activated",
+                true,
+                21,
+                21,
+                progress,
+                binding
+                    .as_ref()
+                    .map(|(generation, digest)| (generation.as_str(), digest.as_str())),
+            );
+            write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
+
+            assert_eq!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(0xeb),
+                )
+                .unwrap(),
+                RuntimeFailureRecordOutcome::Latched,
+            );
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "request_nonce_completed_upgrade",
+            )
+            .unwrap();
+            let mut retry = RetrySystemd::default();
+            retry_runtime_at(root.path(), uid, &mut retry).unwrap();
+            assert_eq!(retry.0, 1);
+            assert!(!rooted(root.path(), EPOCH_PATH).exists());
+            assert!(!rooted(root.path(), LATCH_PATH).exists());
+        }
+    }
+
+    #[test]
+    fn legacy_activated_upgrade_without_typed_completion_blocks_a_new_generation() {
+        let typed = upgrade_journal_fixture("activated", true, 21, 21, "none-consumed", None);
+        let legacy = typed
+            .replacen("schema_version = 4", "schema_version = 3", 1)
+            .replacen("runtime_failure_consumption = \"none-consumed\"\n", "", 1);
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap()).unwrap();
+        write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, legacy.as_bytes(), 0o600);
+
+        assert!(
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(0xec),
+            )
+            .is_err(),
+        );
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+
+        let root = fixture();
+        record_runtime_failure_at(
+            root.path(),
+            uid,
+            &mut FailedRuntime(0),
+            &mut Generation(0xed),
+        )
+        .unwrap();
+        let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+        let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+        fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap()).unwrap();
+        write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, legacy.as_bytes(), 0o600);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "request_nonce_legacy_upgrade",
+            )
+            .is_err(),
+        );
+        let mut retry = RetrySystemd::default();
+        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+        assert_eq!(retry.0, 0);
+        assert_eq!(
+            fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
+            epoch_before
+        );
+        assert_eq!(
+            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+            latch_before
+        );
     }
 
     #[test]

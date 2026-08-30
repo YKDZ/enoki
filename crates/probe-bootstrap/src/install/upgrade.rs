@@ -883,10 +883,13 @@ fn runtime_failure_consumption_matches_phase(
                 | "aborted"
                 | "activation-started"
                 | "repair-required"
+                | "finalizing"
+                | "stage-cleanup-required"
         ),
-        RuntimeFailureConsumption::EpochRemoved { .. } => {
-            matches!(phase, "activation-started" | "repair-required")
-        }
+        RuntimeFailureConsumption::EpochRemoved { .. } => matches!(
+            phase,
+            "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
+        ),
         RuntimeFailureConsumption::NoneConsumed
         | RuntimeFailureConsumption::LatchRemoved { .. } => matches!(
             phase,
@@ -1619,6 +1622,38 @@ struct RuntimeFailurePairLock {
     _file: File,
 }
 
+fn complete_runtime_failure_custody_before_recovery_effects(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<(), InstallError> {
+    if !state.activation_started
+        || !matches!(
+            state.phase.as_str(),
+            "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
+        )
+    {
+        return Ok(());
+    }
+    let current = load_validated_upgrade_attempt(paths)?;
+    if current.schema_version == 3 {
+        bind_runtime_failure_pair_to_upgrade(paths)?;
+        #[cfg(test)]
+        crash_after_runtime_failure_custody_write_for_test();
+    }
+    let current = load_validated_upgrade_attempt(paths)?;
+    if matches!(
+        current.runtime_failure_consumption.as_ref(),
+        Some(
+            RuntimeFailureConsumption::None
+                | RuntimeFailureConsumption::Bound { .. }
+                | RuntimeFailureConsumption::EpochRemoved { .. }
+        )
+    ) {
+        consume_runtime_failure_pair_for_upgrade(paths)?;
+    }
+    Ok(())
+}
+
 fn acquire_runtime_failure_pair_lock(
     paths: &FixedInstallPaths,
 ) -> Result<RuntimeFailurePairLock, InstallError> {
@@ -1998,7 +2033,7 @@ fn legacy_upgrade_runtime_failure_epoch_binding(
         || !state.activation_started
         || !matches!(
             state.phase.as_str(),
-            "activation-started" | "repair-required"
+            "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
         )
     {
         return Err(InstallError::ExistingResidue);
@@ -2784,6 +2819,8 @@ fn recover_incomplete_probe_upgrade_with_status(
         authority_sha256: Some(state.binding.authority_sha256.clone()),
     };
 
+    complete_runtime_failure_custody_before_recovery_effects(paths, &state)?;
+
     let recovered = (|| {
         match phase {
             "consumed" | "admitted" | "prepared" => {
@@ -2804,12 +2841,6 @@ fn recover_incomplete_probe_upgrade_with_status(
             }
             "aborted" => {}
             "activation-started" | "repair-required" => {
-                // A candidate companion can inherit a schema-3 journal from an
-                // older binary. Establish custody from its retained source
-                // closure before any further stop or target rename.
-                if finalized_targets == 0 {
-                    bind_runtime_failure_pair_to_upgrade(paths)?;
-                }
                 if activated_targets < destinations.len() || finalized_targets == 0 {
                     systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
                     systemd.stop()?;
@@ -2831,7 +2862,6 @@ fn recover_incomplete_probe_upgrade_with_status(
                         advance_upgrade_attempt(paths, phase, index + 1, finalized_targets)?;
                     }
                     systemd.daemon_reload()?;
-                    consume_runtime_failure_pair_for_upgrade(paths)?;
                     systemd.start()?;
                     systemd.wait_local_activated()?;
                 }
@@ -3273,12 +3303,29 @@ thread_local! {
     static FAIL_NEXT_ATOMIC_WRITE_CONTAINING: std::cell::RefCell<Option<String>> = const {
         std::cell::RefCell::new(None)
     };
+    static CRASH_AFTER_RUNTIME_FAILURE_CUSTODY_WRITE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
 }
 
 #[cfg(test)]
 pub(super) fn fail_next_atomic_write_containing(needle: &str) {
     FAIL_NEXT_ATOMIC_WRITE_CONTAINING.with(|configured| {
         *configured.borrow_mut() = Some(needle.to_owned());
+    });
+}
+
+#[cfg(test)]
+pub(super) fn crash_after_runtime_failure_custody_write() {
+    CRASH_AFTER_RUNTIME_FAILURE_CUSTODY_WRITE.with(|configured| configured.set(true));
+}
+
+#[cfg(test)]
+fn crash_after_runtime_failure_custody_write_for_test() {
+    CRASH_AFTER_RUNTIME_FAILURE_CUSTODY_WRITE.with(|configured| {
+        if configured.replace(false) {
+            panic!("crash after runtime failure custody write");
+        }
     });
 }
 
