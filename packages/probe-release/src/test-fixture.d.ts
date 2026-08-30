@@ -24,4 +24,10 @@ export function createGenericReleaseTransitionContractFixture(input: {
     sha256: string;
     target: string;
   }>;
+  targetProbeComponents?: Array<{
+    file: string;
+    role: string;
+    sha256: string;
+    target: string;
+  }>;
 }): { bytes: Buffer; signature: Buffer };

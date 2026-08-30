@@ -248,9 +248,11 @@ function compatibleReleaseContext(
     },
     releaseTransition: {
       classification,
+      sourceAssetSetDigest: `sha256:${"b".repeat(64)}`,
       sourceProbeSha256: ["b".repeat(64)],
       sourceProbeVersion: "1.3.0",
       targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      targetProbeSha256: ["c".repeat(64)],
       targetProbeVersion: "1.4.0",
     },
   };

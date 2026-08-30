@@ -5,24 +5,28 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { terminalReplacementRecovery } from "../src/enrollment/routes.js";
+import type { VerifiedReleaseTransition } from "../src/probe/asset-set.js";
 import { readVerifiedReleaseTransitionFromDirectory } from "../src/probe/release-transition.js";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture.js";
 
 describe("verified Probe release transition", () => {
   it("selects terminal recovery components only from the exact verified asset closure", () => {
     const transition = {
+      classification: "replacement-required" as const,
       sourceAssetSetDigest: `sha256:${"1".repeat(64)}`,
       sourceProbeSha256: ["a", "b", "c", "d"].map((value) => value.repeat(64)),
       sourceProbeVersion: "1.3.0",
       targetAssetSetDigest: `sha256:${"2".repeat(64)}`,
       targetProbeSha256: ["e", "f", "0", "9"].map((value) => value.repeat(64)),
       targetProbeVersion: "1.4.0",
-    } as never;
+    } satisfies VerifiedReleaseTransition;
     const predecessor = {
       enrollmentId: "enr_terminal",
       targetAssetSetDigest: `sha256:${"2".repeat(64)}`,
       targetProbeVersion: "1.4.0",
-    } as never;
+    } as NonNullable<
+      Parameters<typeof terminalReplacementRecovery>[0]["predecessor"]
+    >;
 
     expect(
       terminalReplacementRecovery({

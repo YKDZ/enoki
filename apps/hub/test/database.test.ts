@@ -1,10 +1,10 @@
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { generateKeyPairSync } from "node:crypto";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
@@ -1401,12 +1401,14 @@ describe("Hub database", () => {
     });
     createHost(database, { id: 7, probeId: "probe-current" });
     const outcome = Buffer.from(
-      (enoki.v1.ProbeRegistrationResponse as any).encode(
-        (enoki.v1.ProbeRegistrationResponse as any).create({
-          hostId: "7",
-          probeId: "probe-current",
-        }),
-      ).finish(),
+      (enoki.v1.ProbeRegistrationResponse as any)
+        .encode(
+          (enoki.v1.ProbeRegistrationResponse as any).create({
+            hostId: "7",
+            probeId: "probe-current",
+          }),
+        )
+        .finish(),
     );
     database.sqlite
       .prepare(
@@ -1435,10 +1437,11 @@ describe("Hub database", () => {
         1_725_000_062_000,
         outcome,
       );
-    const predecessor = database.enrollments.terminalReplacementPredecessorForHost({
-      currentProbeId: "probe-current",
-      hostId: 7,
-    });
+    const predecessor =
+      database.enrollments.terminalReplacementPredecessorForHost({
+        currentProbeId: "probe-current",
+        hostId: 7,
+      });
     expect(predecessor).toEqual({
       enrollmentId: "enr_terminal_predecessor_0001",
       targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
@@ -1536,10 +1539,12 @@ describe("Hub database", () => {
       targetKind: "manual_reinstall",
     });
     const candidate = generateKeyPairSync("rsa", { modulusLength: 2048 });
-    const candidatePublicKeyPem = candidate.publicKey.export({
-      format: "pem",
-      type: "spki",
-    });
+    const candidatePublicKeyPem = String(
+      candidate.publicKey.export({
+        format: "pem",
+        type: "spki",
+      }),
+    );
     const registration = database.enrollments.registerNewHost({
       host: {
         architecture: null,
@@ -1564,12 +1569,14 @@ describe("Hub database", () => {
         oldProbeId: "probe-current",
         outcome: (host) =>
           Buffer.from(
-            (enoki.v1.ProbeRegistrationResponse as any).encode(
-              (enoki.v1.ProbeRegistrationResponse as any).create({
-                hostId: String(host.id),
-                probeId: host.probeId,
-              }),
-            ).finish(),
+            (enoki.v1.ProbeRegistrationResponse as any)
+              .encode(
+                (enoki.v1.ProbeRegistrationResponse as any).create({
+                  hostId: String(host.id),
+                  probeId: host.probeId,
+                }),
+              )
+              .finish(),
           ),
         signedAttemptSha256: "e".repeat(64),
         sourceProbeVersion: "1.2.3",

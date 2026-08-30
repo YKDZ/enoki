@@ -52,6 +52,7 @@ function app(
       registerNewHost: () => null,
       rejectInstallation: () => null,
       resolveStartupReport: () => null,
+      terminalReplacementPredecessorForHost: () => null,
     },
     now: () => 1_725_000_000_000,
   });
