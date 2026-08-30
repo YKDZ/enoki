@@ -20,20 +20,34 @@ use enoki_probe_bootstrap::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
+
+const REPLACEMENT_COORDINATOR_LOCK_PATH: &str = "/var/lib/enoki-probe-bootstrap/activation.lock";
+const REPLACEMENT_COORDINATOR_LOCK_BUDGET: Duration = Duration::from_secs(90);
 
 pub(super) fn coordinate(request: &LifecycleRequest) -> LifecycleResponse {
     let production_root = match production_root() {
         Ok(root) => root,
         Err(()) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
     };
-    if let Some(response) = resume_committed_from_exact_request(request, production_root.as_deref())
     {
-        return response;
+        let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root.as_deref()) else {
+            return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
+        };
+        if let Some(response) =
+            resume_committed_from_exact_request(request, production_root.as_deref())
+        {
+            return response;
+        }
     }
     let metadata_path =
         production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root.as_deref());
@@ -134,6 +148,65 @@ fn run(
     if authority != claimed_authority {
         return LifecycleResponse::failed("lifecycle.authority_mismatch");
     }
+    coordinate_inspected_replacement(
+        request,
+        &claimed_authority,
+        intent,
+        registration_binding,
+        production_root,
+    )
+}
+
+fn coordinate_inspected_replacement(
+    request: &LifecycleRequest,
+    claimed_authority: &crate::registration::ProbeReplacementAuthorization,
+    intent: ReplacementIntent,
+    registration_binding: enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding,
+    production_root: Option<&Path>,
+) -> LifecycleResponse {
+    let LifecycleRequestAuthority::ReplacementEnrollment {
+        enrollment_token,
+        hub_origin,
+        target_asset_set_digest,
+        bundle_version,
+        ..
+    } = request.authority()
+    else {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    };
+    let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root) else {
+        return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
+    };
+    if let Some(response) = resume_committed_from_exact_request(request, production_root) {
+        return response;
+    }
+    let metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
+    let current_metadata = match read_trusted_probe_install_metadata(&metadata_path, None) {
+        Ok(metadata) => metadata,
+        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
+    };
+    let current_identity =
+        match read_trusted_probe_install_preflight(&metadata_path, production_root) {
+            Ok(identity) => identity,
+            Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+        };
+    let current_probe_sha256 =
+        match fixed_installed_probe_sha256(&current_metadata.install_path, production_root) {
+            Ok(digest) => digest,
+            Err(_) => return LifecycleResponse::failed("lifecycle.authority_invalid"),
+        };
+    if !post_inspection_source_remains_exact(
+        &intent,
+        hub_origin,
+        target_asset_set_digest,
+        bundle_version,
+        claimed_authority,
+        &current_metadata,
+        &current_identity,
+        &current_probe_sha256,
+    ) {
+        return LifecycleResponse::failed("lifecycle.authority_mismatch");
+    }
     let mut store = FileReplacementCommitStore::at(
         production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, production_root),
         0,
@@ -173,6 +246,110 @@ fn run(
         production_root,
         &mut systemd,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn post_inspection_source_remains_exact(
+    intent: &ReplacementIntent,
+    hub_origin: &str,
+    target_asset_set_digest: &str,
+    bundle_version: &str,
+    claimed_authority: &crate::registration::ProbeReplacementAuthorization,
+    current_metadata: &TrustedProbeInstallMetadata,
+    current_identity: &TrustedProbeInstallPreflight,
+    current_probe_sha256: &str,
+) -> bool {
+    current_probe_sha256 == intent.source_probe_sha256
+        && authority_matches(
+            hub_origin,
+            target_asset_set_digest,
+            bundle_version,
+            claimed_authority,
+            current_metadata,
+            current_identity,
+            current_probe_sha256,
+        ) == AuthorityMatch::Matches
+}
+
+/// Serializes the post-inspection proof, capsule publication, and Replacement
+/// commit with every production activation process. The lock is intentionally
+/// not authority: a fresh holder always re-reads every durable fact.
+struct ReplacementCoordinatorGuard {
+    file: File,
+}
+
+impl ReplacementCoordinatorGuard {
+    fn acquire(production_root: Option<&Path>) -> Result<Self, std::io::Error> {
+        let path = production_path(REPLACEMENT_COORDINATOR_LOCK_PATH, production_root);
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing lock parent")
+        })?;
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if parent_metadata.file_type().is_symlink()
+            || !parent_metadata.is_dir()
+            || parent_metadata.uid() != 0
+            || parent_metadata.mode() & 0o077 != 0
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "replacement coordinator lock parent is not root-private",
+            ));
+        }
+        let (file, created) = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&path)?,
+                false,
+            ),
+            Err(error) => return Err(error),
+        };
+        if created {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            file.sync_all()?;
+            File::open(parent)?.sync_all()?;
+        }
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "replacement coordinator lock is not root-private",
+            ));
+        }
+        let deadline = Instant::now() + REPLACEMENT_COORDINATOR_LOCK_BUDGET;
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self { file });
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "replacement coordinator lock timed out",
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for ReplacementCoordinatorGuard {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 
 pub(super) fn resume_committed_from_exact_request(
@@ -458,6 +635,56 @@ fn authority_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enoki_probe_bootstrap::handoff::Enrollment;
+    use std::{sync::mpsc, time::Duration};
+
+    fn replacement_intent(enrollment_id: &str, token: &str) -> ReplacementIntent {
+        ReplacementIntent {
+            enrollment_id: enrollment_id.to_owned(),
+            enrollment_token_sha256: format!("{:x}", Sha256::digest(token.as_bytes())),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_old_01".to_owned(),
+            source_probe_version: "1.2.2".to_owned(),
+            source_probe_sha256: "a".repeat(64),
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+            target_probe_version: "1.2.3".to_owned(),
+            target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
+            target_manifest_sha256: "c".repeat(64),
+        }
+    }
+
+    fn replacement_request(intent: &ReplacementIntent, token: &str) -> LifecycleRequest {
+        let input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"{token}\",\"replacementMigration\":{{\"enrollmentId\":\"{}\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            intent.enrollment_id, intent.source_probe_sha256, intent.target_asset_set_digest,
+        );
+        let enrollment = Enrollment::from_install_input("https://hub.example", input.as_bytes())
+            .expect("canonical replacement enrollment");
+        LifecycleRequest::replacement_migration(
+            &enrollment,
+            &intent.target_asset_set_digest,
+            &intent.target_bundle_target,
+            &intent.target_manifest_sha256,
+            &intent.target_probe_version,
+        )
+        .expect("replacement request")
+    }
+
+    fn replacement_authority(
+        intent: &ReplacementIntent,
+    ) -> crate::registration::ProbeReplacementAuthorization {
+        crate::registration::ProbeReplacementAuthorization {
+            enrollment_id: intent.enrollment_id.clone(),
+            host_id: intent.host_id.clone(),
+            expected_hub_origin: intent.hub_origin.clone(),
+            expected_probe_id: intent.old_probe_id.clone(),
+            source_probe_version: intent.source_probe_version.clone(),
+            source_probe_sha256: vec![intent.source_probe_sha256.clone()],
+            target_asset_set_digest: intent.target_asset_set_digest.clone(),
+            target_probe_version: intent.target_probe_version.clone(),
+        }
+    }
 
     #[test]
     fn migration_requires_one_exact_hub_identity_and_source_authority() {
@@ -529,6 +756,59 @@ mod tests {
     }
 
     #[test]
+    fn post_inspection_metadata_identity_and_probe_changes_are_rejected_before_precommit() {
+        let temporary = tempfile::tempdir().unwrap();
+        let status = temporary.path().join("probe-operation-status.toml");
+        let mut metadata = metadata_for_hub(
+            "https://hub.example",
+            Path::new(PRODUCTION_PROBE_BINARY_PATH),
+            &status,
+        );
+        metadata.schema_version = 4;
+        metadata.bundle_version = Some("1.2.2".to_owned());
+        let identity = TrustedProbeInstallPreflight {
+            hub_url: "https://hub.example".to_owned(),
+            probe_id: "probe_old_01".to_owned(),
+        };
+        let intent = replacement_intent("enr_0123456789abcdef", "enk_enroll_old");
+        let authority = replacement_authority(&intent);
+        let exact = |metadata: &TrustedProbeInstallMetadata,
+                     identity: &TrustedProbeInstallPreflight,
+                     digest: &str| {
+            post_inspection_source_remains_exact(
+                &intent,
+                "https://hub.example",
+                &intent.target_asset_set_digest,
+                &intent.target_probe_version,
+                &authority,
+                metadata,
+                identity,
+                digest,
+            )
+        };
+
+        assert!(exact(&metadata, &identity, &intent.source_probe_sha256));
+
+        let mut changed_metadata = metadata.clone();
+        changed_metadata.bundle_version = Some("1.2.1".to_owned());
+        assert!(!exact(
+            &changed_metadata,
+            &identity,
+            &intent.source_probe_sha256
+        ));
+
+        let mut changed_identity = identity.clone();
+        changed_identity.probe_id = "probe_other".to_owned();
+        assert!(!exact(
+            &metadata,
+            &changed_identity,
+            &intent.source_probe_sha256
+        ));
+
+        assert!(!exact(&metadata, &identity, &"f".repeat(64)));
+    }
+
+    #[test]
     fn root_owned_binary_facts_prove_one_bounded_legacy_component() {
         let facts = InstalledProbeBinaryFacts {
             device: 11,
@@ -550,6 +830,72 @@ mod tests {
             digest,
             "d7f57fc65a2c73a675a0952208f072d22e3c9e65995b07753e53946e2638966e"
         );
+    }
+
+    #[test]
+    fn concurrent_commit_cannot_split_a_stale_capsule_from_its_commit() {
+        assert_eq!(unsafe { libc::geteuid() }, 0, "test requires root custody");
+        let temporary = tempfile::tempdir().unwrap();
+        let bootstrap_state =
+            production_path("/var/lib/enoki-probe-bootstrap", Some(temporary.path()));
+        let registration_state =
+            production_path("/var/lib/enoki-probe-registration", Some(temporary.path()));
+        fs::create_dir_all(&bootstrap_state).unwrap();
+        fs::create_dir_all(&registration_state).unwrap();
+        fs::set_permissions(&bootstrap_state, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&registration_state, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let old_token = "enk_enroll_old";
+        let old_intent = replacement_intent("enr_0123456789abcdef", old_token);
+        let attempt_path = production_path(
+            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+            Some(temporary.path()),
+        );
+        crate::registration::prepare_root_replacement_registration_attempt(
+            &attempt_path,
+            crate::registration::RootReplacementRegistrationAttemptInput {
+                enrollment_token: old_token.to_owned(),
+                binding: old_intent.registration_binding().unwrap(),
+            },
+        )
+        .unwrap();
+        let original_capsule = fs::read(&attempt_path).unwrap();
+
+        let guard = ReplacementCoordinatorGuard::acquire(Some(temporary.path())).unwrap();
+        let new_token = "enk_enroll_new";
+        let new_intent = replacement_intent("enr_abcdef0123456789", new_token);
+        let request = replacement_request(&new_intent, new_token);
+        let authority = replacement_authority(&new_intent);
+        let binding = new_intent.registration_binding().unwrap();
+        let root = temporary.path().to_path_buf();
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            coordinate_inspected_replacement(&request, &authority, new_intent, binding, Some(&root))
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+
+        let commit = ReplacementCommitFact {
+            schema_version: 1,
+            canonical_intent_sha256: old_intent.canonical_sha256().unwrap(),
+            intent: old_intent,
+            cleanup_complete: false,
+            candidate_layout_complete: false,
+        };
+        let mut store = FileReplacementCommitStore::at(
+            production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path())),
+            0,
+        );
+        store.persist(&commit).unwrap();
+        drop(guard);
+
+        assert_eq!(
+            worker.join().unwrap(),
+            LifecycleResponse::failed("lifecycle.replacement_commit_conflict")
+        );
+        assert_eq!(fs::read(&attempt_path).unwrap(), original_capsule);
+        assert_eq!(store.load().unwrap(), Some(commit));
     }
 
     fn metadata_for_hub(
