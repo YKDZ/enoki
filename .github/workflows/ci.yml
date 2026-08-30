@@ -5,6 +5,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Disposable transition operation to run
+        required: true
+        default: build-target
+        type: choice
+        options:
+          - build-target
+          - sign-existing-target
 
 permissions:
   actions: read
@@ -41,7 +50,7 @@ jobs:
 
   transition-probe-binaries:
     name: Prepare v0.1.75 Probe closure
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'build-target'
     uses: ./.github/workflows/reusable-build-probe.yml
     with:
       commit: 81cab7937e1c1c2658041304e7b68b0e7a77889b
@@ -51,7 +60,7 @@ jobs:
 
   transition-bootstrap-binaries:
     name: Prepare v0.1.75 Bootstrap closure
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'build-target'
     uses: ./.github/workflows/reusable-build-probe-bootstrap.yml
     with:
       commit: 81cab7937e1c1c2658041304e7b68b0e7a77889b
@@ -60,7 +69,7 @@ jobs:
 
   transition-target-manifest:
     name: Compose exact unsigned target manifest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'build-target'
     needs: [transition-probe-binaries, transition-bootstrap-binaries]
     runs-on: ubuntu-24.04
     steps:
@@ -150,6 +159,194 @@ jobs:
         with:
           name: v0.1.75-transition-target-${{ github.run_id }}
           path: unsigned-probe-assets/manifest.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  prepare-existing-target-signing-input:
+    name: Reassemble existing v0.1.75 target closure without signing credentials
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'sign-existing-target'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact protected composition tooling
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          path: trusted-tool
+          persist-credentials: false
+          repository: YKDZ/enoki
+          ref: 81cab7937e1c1c2658041304e7b68b0e7a77889b
+
+      - name: Verify immutable composition tooling revision
+        working-directory: trusted-tool
+        run: test "$(git rev-parse HEAD)" = "81cab7937e1c1c2658041304e7b68b0e7a77889b"
+
+      - name: Set up exact trusted composition dependencies
+        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+        with:
+          working-directory: trusted-tool
+
+      - name: Download x86_64 musl Probe build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-x86_64-unknown-linux-musl-33325474820
+          path: probe-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download aarch64 musl Probe build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-musl-33325474820
+          path: probe-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download x86_64 GNU Probe build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-x86_64-unknown-linux-gnu-33325474820
+          path: probe-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download aarch64 GNU Probe build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-gnu-33325474820
+          path: probe-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download x86_64 musl Bootstrap build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-musl-33325474820
+          path: probe-bootstrap-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download aarch64 musl Bootstrap build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-musl-33325474820
+          path: probe-bootstrap-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download x86_64 GNU Bootstrap build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-gnu-33325474820
+          path: probe-bootstrap-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Download aarch64 GNU Bootstrap build from the source run
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-gnu-33325474820
+          path: probe-bootstrap-builds
+          repository: YKDZ/enoki
+          run-id: 33325474820
+          github-token: ${{ github.token }}
+
+      - name: Deep-validate and prepare the existing unsigned Probe Asset Set
+        env:
+          ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_PROBE_TRUST_DELEGATION_JSON: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
+          ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
+        run: |
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_JSON" > trust-delegation.json
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64" | base64 --decode > trust-delegation.json.sig
+          node trusted-tool/scripts/release-candidate.mjs prepare-unsigned-probe-assets \
+            --version v0.1.75 \
+            --archives-dir probe-builds \
+            --bootstrap-archives-dir probe-bootstrap-builds \
+            --output unsigned-probe-assets \
+            --public-key-env ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
+            --distribution enoki \
+            --trust-delegation trust-delegation.json \
+            --trust-delegation-signature trust-delegation.json.sig
+
+      - name: Upload exact unsigned signing input
+        uses: actions/upload-artifact@v7
+        with:
+          name: v0.1.75-transition-unsigned-${{ github.run_id }}
+          path: unsigned-probe-assets
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  sign-existing-target:
+    name: Sign the existing v0.1.75 target closure at the trusted boundary
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'sign-existing-target'
+    needs: prepare-existing-target-signing-input
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact protected signer
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          path: trusted-signer
+          persist-credentials: false
+          repository: YKDZ/enoki
+          ref: 81cab7937e1c1c2658041304e7b68b0e7a77889b
+
+      - name: Verify immutable trusted signer revision
+        working-directory: trusted-signer
+        run: test "$(git rev-parse HEAD)" = "81cab7937e1c1c2658041304e7b68b0e7a77889b"
+
+      - name: Set up exact trusted signer dependencies
+        uses: ./trusted-signer/.github/actions/setup-release-workspace-dependencies
+        with:
+          working-directory: trusted-signer
+
+      - name: Download exact unsigned signing input
+        uses: actions/download-artifact@v8
+        with:
+          name: v0.1.75-transition-unsigned-${{ github.run_id }}
+          path: unsigned-probe-assets
+
+      - name: Sign only the allowlisted existing closure
+        env:
+          ENOKI_PROBE_ASSET_SIGNING_KEY_PEM: ${{ secrets.ENOKI_PROBE_ASSET_SIGNING_KEY_PEM }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_PROBE_TRUST_DELEGATION_JSON: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
+          ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
+        run: |
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_JSON" > trust-delegation.json
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64" | base64 --decode > trust-delegation.json.sig
+          node trusted-signer/scripts/release-candidate.mjs sign-probe-assets \
+            --input unsigned-probe-assets \
+            --output probe-assets \
+            --private-key-env ENOKI_PROBE_ASSET_SIGNING_KEY_PEM \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
+            --trust-delegation trust-delegation.json \
+            --trust-delegation-signature trust-delegation.json.sig
+
+      - name: Validate exact signed output without signing credentials
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: >-
+          node trusted-signer/scripts/release-candidate.mjs
+          validate-probe-assets probe-assets
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
+
+      - name: Upload signed Probe Asset Set
+        uses: actions/upload-artifact@v7
+        with:
+          name: v0.1.75-transition-signed-${{ github.run_id }}
+          path: probe-assets
           if-no-files-found: error
           overwrite: true
           retention-days: 1
