@@ -881,16 +881,9 @@ mod tests {
 
     fn legacy_upgrade_recovery_receipt(
         fixture: &InstalledBundleFixture,
-        target: &VerifiedBundle,
+        _target: &VerifiedBundle,
     ) -> UpgradeRecoveryReceipt {
-        UpgradeRecoveryReceipt {
-            operation_id: "legacy-runtime-pair".to_owned(),
-            probe_id: fixture.installed.probe_id.clone(),
-            stage_owner_uid: unsafe { libc::geteuid() },
-            source_bundle_version: fixture.installed.source_bundle_version.clone(),
-            target_bundle_version: target.version.clone(),
-            activated: true,
-        }
+        upgrade::validated_upgrade_recovery_receipt_for_test(&fixture.paths).unwrap()
     }
 
     fn restore_bundle_fixture(
@@ -1568,18 +1561,10 @@ mod tests {
 
         assert_eq!(completion, UpgradeCompletion::Activated);
         assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-        finalize_probe_upgrade_stage_cleanup(
-            &paths,
-            &UpgradeRecoveryReceipt {
-                operation_id: "41".to_owned(),
-                probe_id: "probe_01".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                source_bundle_version: "1.2.3".to_owned(),
-                target_bundle_version: "1.2.4".to_owned(),
-                activated: true,
-            },
-        )
-        .unwrap();
+        let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
+            .unwrap()
+            .unwrap();
+        finalize_probe_upgrade_stage_cleanup(&paths, &receipt).unwrap();
         let identity_after = fs::read_to_string(paths.identity()).unwrap();
         assert_ne!(identity_after, identity_before);
         assert!(identity_after.contains("probe_id = \"probe_01\""));
@@ -1699,30 +1684,15 @@ mod tests {
 
         systemd.fail_start = false;
         systemd.calls.clear();
-        assert_eq!(
-            recover_incomplete_probe_upgrade(&paths, &mut systemd).unwrap(),
-            Some(UpgradeRecoveryReceipt {
-                operation_id: "42".to_owned(),
-                probe_id: "probe_01".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                source_bundle_version: "1.2.4".to_owned(),
-                target_bundle_version: "1.2.5".to_owned(),
-                activated: true,
-            })
-        );
+        let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
+            .unwrap()
+            .unwrap();
+        assert!(receipt.activated());
+        assert_eq!(receipt.operation_id(), "42");
+        assert_eq!(receipt.source_bundle_version(), "1.2.4");
+        assert_eq!(receipt.target_bundle_version(), "1.2.5");
         assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-        finalize_probe_upgrade_stage_cleanup(
-            &paths,
-            &UpgradeRecoveryReceipt {
-                operation_id: "42".to_owned(),
-                probe_id: "probe_01".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                source_bundle_version: "1.2.4".to_owned(),
-                target_bundle_version: "1.2.5".to_owned(),
-                activated: true,
-            },
-        )
-        .unwrap();
+        finalize_probe_upgrade_stage_cleanup(&paths, &receipt).unwrap();
         let journal = fs::read_to_string(
             temporary
                 .path()
@@ -1798,8 +1768,11 @@ mod tests {
                 })
                 .unwrap();
 
-            assert_eq!(receipt.source_bundle_version, fixture.installed.source_bundle_version);
-            assert_eq!(receipt.target_bundle_version, target.version);
+            assert_eq!(
+                receipt.source_bundle_version(),
+                fixture.installed.source_bundle_version
+            );
+            assert_eq!(receipt.target_bundle_version(), target.version);
             assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
             let journal = fs::read_to_string(
                 paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
@@ -1986,22 +1959,31 @@ mod tests {
     }
 
     #[test]
-    fn direct_stage_cleanup_finalizer_rejects_a_mismatched_receipt_before_any_effect() {
+    fn direct_stage_cleanup_finalizer_rejects_a_stale_full_binding_receipt_before_any_effect() {
         let fixture = installed_bundle_fixture();
         let paths = &fixture.paths;
         let target =
             prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
         write_runtime_failure_pair_fixture(paths, &"bc".repeat(32));
         let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read(&journal_path).unwrap();
+        let journal_before = fs::read_to_string(&journal_path).unwrap();
         let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
         let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
-        let mut receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
-        receipt.probe_id = "different-probe".to_owned();
+        let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
+        let authority_line = journal_before
+            .lines()
+            .find(|line| line.starts_with("authority_sha256 = "))
+            .unwrap();
+        let different_binding = journal_before.replacen(
+            authority_line,
+            &format!("authority_sha256 = {:?}", "12".repeat(32)),
+            1,
+        );
+        fs::write(&journal_path, &different_binding).unwrap();
 
         assert!(finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_err());
 
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        assert_eq!(fs::read_to_string(&journal_path).unwrap(), different_binding);
         assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
         assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
         assert!(!paths.state().join("probe-operation-status.toml").exists());
@@ -2017,16 +1999,13 @@ mod tests {
             write_runtime_failure_pair_fixture(paths, &"cd".repeat(32));
             let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
             let journal = fs::read_to_string(&journal_path).unwrap();
+            let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
             let invalid = scope_less_upgrade_journal(&journal, target_install_state);
             fs::write(&journal_path, &invalid).unwrap();
             let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
             let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
 
-            assert!(finalize_probe_upgrade_stage_cleanup(
-                paths,
-                &legacy_upgrade_recovery_receipt(&fixture, &target),
-            )
-            .is_err());
+            assert!(finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_err());
 
             assert_eq!(fs::read_to_string(&journal_path).unwrap(), invalid);
             assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
@@ -2046,12 +2025,9 @@ mod tests {
             scope_less_upgrade_journal(&journal, Some(&target.install_state_sha256())),
         )
         .unwrap();
+        let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
 
-        finalize_probe_upgrade_stage_cleanup(
-            paths,
-            &legacy_upgrade_recovery_receipt(&fixture, &target),
-        )
-        .unwrap();
+        finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
 
         let journal = fs::read_to_string(&journal_path).unwrap();
         assert!(journal.contains("schema_version = 4"));
@@ -2081,6 +2057,95 @@ mod tests {
         assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
         assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
         assert!(paths.runtime_failure_epoch().exists());
+    }
+
+    #[test]
+    fn legacy_source_proof_mismatch_never_falls_back_to_the_current_target() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 8);
+        let generation = "8e".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal_before = fs::read(&journal_path).unwrap();
+        let next = &upgrade_destinations(paths)[8];
+        let next_name = next.file_name().unwrap().to_str().unwrap();
+        let next_backup = next.with_file_name(format!(".{next_name}.enoki-upgrade-old"));
+        let next_backup_before = fs::read(&next_backup).unwrap();
+        let mut systemd = Systemd::default();
+
+        assert!(recover_incomplete_probe_upgrade(paths, &mut systemd).is_err());
+
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
+        assert!(paths.runtime_failure_epoch().exists());
+    }
+
+    #[test]
+    fn legacy_target_proof_converges_after_every_protected_source_is_retired() {
+        for next_backup_unlinked_before_receipt in [false, true] {
+            let fixture = installed_bundle_fixture();
+            let paths = &fixture.paths;
+            prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 20);
+            if next_backup_unlinked_before_receipt {
+                let next = &upgrade_destinations(paths)[20];
+                let next_name = next.file_name().unwrap().to_str().unwrap();
+                fs::remove_file(next.with_file_name(format!(".{next_name}.enoki-upgrade-old")))
+                    .unwrap();
+            }
+            let generation = "8f".repeat(32);
+            write_runtime_failure_pair_fixture(paths, &generation);
+            let mut systemd = Systemd::default();
+
+            let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
+                .unwrap()
+                .unwrap();
+
+            assert!(receipt.activated());
+            assert!(systemd.calls.is_empty());
+            assert!(!paths.runtime_failure_epoch().exists());
+            assert!(!paths.runtime_failure_latch().exists());
+            let journal = fs::read_to_string(
+                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+            )
+            .unwrap();
+            assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
+            assert!(journal.contains("phase = \"stage-cleanup-required\""));
+            assert!(journal.contains("finalized_targets = 21"));
+        }
+    }
+
+    #[test]
+    fn activated_finalizer_receipt_retries_the_status_effect_without_replaying_custody() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let target =
+            prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
+        write_runtime_failure_pair_fixture(paths, &"90".repeat(32));
+        let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
+        upgrade::fail_next_atomic_write_containing("status = \"running\"");
+
+        assert_eq!(
+            finalize_probe_upgrade_stage_cleanup(paths, &receipt),
+            Err(InstallError::Io),
+        );
+        let activated = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(activated.contains("phase = \"activated\""));
+        assert!(activated.contains("runtime_failure_consumption = \"latch-removed\""));
+        assert!(!paths.state().join("probe-operation-status.toml").exists());
+
+        finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
+
+        assert!(
+            fs::read_to_string(paths.state().join("probe-operation-status.toml"))
+                .unwrap()
+                .contains("status = \"running\"")
+        );
     }
 
     #[test]
@@ -2337,17 +2402,13 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(
-            recover_incomplete_probe_upgrade(&paths, &mut Systemd::default()).unwrap(),
-            Some(UpgradeRecoveryReceipt {
-                operation_id: "consume-1".to_owned(),
-                probe_id: "probe_01".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                source_bundle_version: "1.2.3".to_owned(),
-                target_bundle_version: "1.2.4".to_owned(),
-                activated: false,
-            })
-        );
+        let receipt = recover_incomplete_probe_upgrade(&paths, &mut Systemd::default())
+            .unwrap()
+            .unwrap();
+        assert!(!receipt.activated());
+        assert_eq!(receipt.operation_id(), "consume-1");
+        assert_eq!(receipt.source_bundle_version(), "1.2.3");
+        assert_eq!(receipt.target_bundle_version(), "1.2.4");
         let recovered = fs::read_to_string(&journal_path).unwrap();
         assert!(recovered.contains("phase = \"aborted\""));
         assert!(
@@ -3414,7 +3475,7 @@ mod tests {
             let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
                 .unwrap()
                 .expect("explicit retry must complete the preactivation cleanup");
-            assert!(!receipt.activated);
+            assert!(!receipt.activated());
             assert!(systemd.calls.is_empty());
             assert!(
                 fs::read_to_string(&journal_path)

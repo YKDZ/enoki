@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     ConsumeBeforeOuterError, FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd,
-    UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeRecoveryReceipt, VerifiedUpgradeComponents,
+    UpgradeAttempt, UpgradeAuthorityConsumption, VerifiedUpgradeComponents,
     abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     finalize_probe_upgrade_stage_cleanup, inspect_installed_probe_for_upgrade,
     recover_incomplete_probe_upgrade, upgrade_current_probe_for_operation,
@@ -316,26 +316,28 @@ mod mechanics {
         );
         match result {
             Ok(UpgradeCompletion::Activated) => {
-                let receipt = activated_recovery_receipt(&plan);
-                if remove_verified_probe_upgrade_stage(
-                    &plan.consumed.operation_id,
-                    plan.consumed.stage_owner_uid,
-                )
-                .is_ok()
-                    && finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_ok()
-                {
-                    CompatibleUpgradeOutcome::Activated
-                } else {
-                    CompatibleUpgradeOutcome::RepairRequired
+                match recover_incomplete_probe_upgrade(paths, systemd) {
+                    Ok(Some(receipt))
+                        if receipt.activated()
+                            && remove_verified_probe_upgrade_stage(
+                                receipt.operation_id(),
+                                receipt.stage_owner_uid(),
+                            )
+                            .is_ok()
+                            && finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_ok() =>
+                    {
+                        CompatibleUpgradeOutcome::Activated
+                    }
+                    _ => CompatibleUpgradeOutcome::RepairRequired,
                 }
             }
             Ok(UpgradeCompletion::RepairRequired) => CompatibleUpgradeOutcome::RepairRequired,
             Err(_) => match recover_incomplete_probe_upgrade(paths, systemd) {
                 Ok(Some(receipt))
-                    if !receipt.activated
+                    if !receipt.activated()
                         && remove_verified_probe_upgrade_stage(
-                            &receipt.operation_id,
-                            receipt.stage_owner_uid,
+                            receipt.operation_id(),
+                            receipt.stage_owner_uid(),
                         )
                         .is_ok()
                         && finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_ok() =>
@@ -344,17 +346,6 @@ mod mechanics {
                 }
                 _ => CompatibleUpgradeOutcome::RepairRequired,
             },
-        }
-    }
-
-    fn activated_recovery_receipt(plan: &VerifiedMutationPlan) -> UpgradeRecoveryReceipt {
-        UpgradeRecoveryReceipt {
-            operation_id: plan.consumed.operation_id.clone(),
-            probe_id: plan.expected_source.probe_id.clone(),
-            stage_owner_uid: plan.consumed.stage_owner_uid,
-            source_bundle_version: plan.expected_source.source_bundle_version.clone(),
-            target_bundle_version: plan.stage.bundle.version.clone(),
-            activated: true,
         }
     }
 }

@@ -1076,12 +1076,37 @@ fn decode_lower_sha256(value: &str) -> Option<[u8; 32]> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeRecoveryReceipt {
-    pub operation_id: String,
-    pub probe_id: String,
-    pub stage_owner_uid: u32,
-    pub source_bundle_version: String,
-    pub target_bundle_version: String,
-    pub activated: bool,
+    operation_id: String,
+    probe_id: String,
+    stage_owner_uid: u32,
+    source_bundle_version: String,
+    target_bundle_version: String,
+    activated: bool,
+    validated_binding_sha256: String,
+}
+
+impl UpgradeRecoveryReceipt {
+    pub(super) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(super) fn stage_owner_uid(&self) -> u32 {
+        self.stage_owner_uid
+    }
+
+    pub(super) fn activated(&self) -> bool {
+        self.activated
+    }
+
+    #[cfg(test)]
+    pub(super) fn source_bundle_version(&self) -> &str {
+        &self.source_bundle_version
+    }
+
+    #[cfg(test)]
+    pub(super) fn target_bundle_version(&self) -> &str {
+        &self.target_bundle_version
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2066,8 +2091,114 @@ fn legacy_upgrade_runtime_failure_epoch_binding(
     {
         return Err(InstallError::ExistingResidue);
     }
-    legacy_upgrade_source_runtime_failure_epoch_binding(paths, state)
-        .or_else(|_| legacy_upgrade_target_runtime_failure_epoch_binding(paths, state))
+    match legacy_upgrade_runtime_failure_epoch_proof_mode(paths, state)? {
+        LegacyUpgradeRuntimeFailureEpochProofMode::RetainedSource => {
+            legacy_upgrade_source_runtime_failure_epoch_binding(paths, state)
+        }
+        LegacyUpgradeRuntimeFailureEpochProofMode::CurrentTarget => {
+            validate_legacy_upgrade_target_proof_residue(paths, state)?;
+            legacy_upgrade_target_runtime_failure_epoch_binding(paths, state)
+        }
+    }
+}
+
+enum LegacyUpgradeRuntimeFailureEpochProofMode {
+    RetainedSource,
+    CurrentTarget,
+}
+
+fn legacy_upgrade_runtime_failure_epoch_proof_mode(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<LegacyUpgradeRuntimeFailureEpochProofMode, InstallError> {
+    let registry = super::installed_layout::registry(paths);
+    let protected_indexes = ["runtime-unit", "identity", "metadata"]
+        .iter()
+        .map(|target_id| {
+            registry
+                .iter()
+                .position(|target| target.id == *target_id)
+                .ok_or(InstallError::ExistingResidue)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = protected_indexes
+        .iter()
+        .copied()
+        .min()
+        .ok_or(InstallError::ExistingResidue)?;
+    let last = protected_indexes
+        .iter()
+        .copied()
+        .max()
+        .ok_or(InstallError::ExistingResidue)?;
+    if state.finalized_targets <= first {
+        return Ok(LegacyUpgradeRuntimeFailureEpochProofMode::RetainedSource);
+    }
+    if state.activated_targets == registry.len() && state.finalized_targets > last {
+        return Ok(LegacyUpgradeRuntimeFailureEpochProofMode::CurrentTarget);
+    }
+    Err(InstallError::ExistingResidue)
+}
+
+fn validate_legacy_upgrade_target_proof_residue(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    for (index, target) in super::installed_layout::registry(paths).iter().enumerate() {
+        let name = target
+            .destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(InstallError::ExistingResidue)?;
+        let staged = target
+            .destination
+            .with_file_name(format!(".{name}.enoki-upgrade-new"));
+        require_legacy_upgrade_residue_absent(&staged)?;
+        let backup = target
+            .destination
+            .with_file_name(format!(".{name}.enoki-upgrade-old"));
+        if index < state.finalized_targets {
+            require_legacy_upgrade_residue_absent(&backup)?;
+            continue;
+        }
+        if index == state.finalized_targets
+            && matches!(
+                fs::symlink_metadata(&backup),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        {
+            // The unlink effect for the next target may be durable before its
+            // finalized_targets receipt.  Only that single boundary can be absent.
+            continue;
+        }
+        let (_, current) = open_legacy_upgrade_target(&target.destination)?;
+        let (_, retained) = open_legacy_upgrade_target(&backup)?;
+        let empty_recorder_placeholder = target.id == "runtime-failure-recorder-unit"
+            && retained.len() == 0
+            && retained.mode() & 0o7777 == 0o600;
+        if current.dev() == retained.dev() && current.ino() == retained.ino()
+            || current.nlink() != 1
+            || retained.nlink() != 1
+            || current.mode() & 0o7777 != target.mode
+            || (!empty_recorder_placeholder && retained.mode() & 0o7777 != target.mode)
+            || current.uid() != paths.expected_root_uid()
+            || current.gid() != paths.expected_root_uid()
+            || retained.uid() != paths.expected_root_uid()
+            || retained.gid() != paths.expected_root_uid()
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+    }
+    Ok(())
+}
+
+fn require_legacy_upgrade_residue_absent(path: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(InstallError::ExistingResidue),
+    }
 }
 
 fn legacy_upgrade_source_runtime_failure_epoch_binding(
@@ -2866,22 +2997,12 @@ fn recover_incomplete_probe_upgrade_with_status(
     }
     let state = load_validated_upgrade_attempt(paths)?;
     let operation_id = state.binding.operation_id.clone();
-    let probe_id = state.binding.source_probe_id.clone();
     let target_bundle_version = state.binding.target_bundle_version.clone();
-    let source_bundle_version = state.binding.source_bundle_version.clone();
     let stage_owner_uid = state.binding.stage_owner_uid;
     let phase = state.phase.as_str();
     let destinations = upgrade_destinations(paths);
     let activated_targets = state.activated_targets;
     let finalized_targets = state.finalized_targets;
-    let receipt = UpgradeRecoveryReceipt {
-        operation_id: operation_id.clone(),
-        probe_id,
-        stage_owner_uid,
-        source_bundle_version,
-        target_bundle_version: target_bundle_version.clone(),
-        activated: !matches!(phase, "consumed" | "admitted" | "prepared" | "aborted"),
-    };
     let attempt = UpgradeAttempt {
         operation_id,
         stage_owner_uid,
@@ -2996,7 +3117,10 @@ fn recover_incomplete_probe_upgrade_with_status(
             "activated" => return Ok(None),
             _ => return Err(InstallError::ExistingResidue),
         }
-        Ok(Some(receipt))
+        let terminal = load_validated_upgrade_attempt_without_schema2_migration(paths)?;
+        Ok(Some(upgrade_recovery_receipt_from_terminal_journal(
+            &terminal,
+        )?))
     })();
     match recovered {
         Ok(receipt) => Ok(receipt),
@@ -3022,6 +3146,87 @@ fn recover_incomplete_probe_upgrade_with_status(
     }
 }
 
+fn upgrade_recovery_receipt_from_terminal_journal(
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<UpgradeRecoveryReceipt, InstallError> {
+    let activated = match state.phase.as_str() {
+        "stage-cleanup-required" => true,
+        "aborted" => false,
+        _ => return Err(InstallError::ExistingResidue),
+    };
+    Ok(UpgradeRecoveryReceipt {
+        operation_id: state.binding.operation_id.clone(),
+        probe_id: state.binding.source_probe_id.clone(),
+        stage_owner_uid: state.binding.stage_owner_uid,
+        source_bundle_version: state.binding.source_bundle_version.clone(),
+        target_bundle_version: state.binding.target_bundle_version.clone(),
+        activated,
+        validated_binding_sha256: upgrade_recovery_binding_sha256(state, &state.phase),
+    })
+}
+
+fn upgrade_recovery_binding_sha256(
+    state: &ValidatedUpgradeAttemptJournal,
+    recovery_phase: &str,
+) -> String {
+    fn update(digest: &mut Sha256, value: &[u8]) {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(b"enoki/upgrade-recovery-receipt/v1\0");
+    for value in [
+        state.binding.operation_id.as_bytes(),
+        state.binding.authority_sha256.as_bytes(),
+        state.binding.source_probe_id.as_bytes(),
+        state.binding.source_bundle_version.as_bytes(),
+        state.binding.source_install_state_sha256.as_bytes(),
+        state.binding.source_manifest_sha256.as_bytes(),
+        state.binding.target_bundle_version.as_bytes(),
+        state.binding.target_manifest_sha256.as_bytes(),
+        recovery_phase.as_bytes(),
+    ] {
+        update(&mut digest, value);
+    }
+    update(&mut digest, &state.binding.stage_owner_uid.to_be_bytes());
+    update(
+        &mut digest,
+        state
+            .binding
+            .target_install_state_sha256
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    match state.binding.authority_scope.as_ref() {
+        Some(scope) => {
+            update(&mut digest, b"scoped");
+            for value in [
+                scope.hub_origin.as_bytes(),
+                scope.host_id.as_bytes(),
+                scope.target_asset_set_digest.as_bytes(),
+                scope.verified_stage_sha256.as_bytes(),
+            ] {
+                update(&mut digest, value);
+            }
+        }
+        None => update(&mut digest, b"scope-less"),
+    }
+    update(&mut digest, &[u8::from(state.activation_started)]);
+    update(&mut digest, &(state.activated_targets as u64).to_be_bytes());
+    update(&mut digest, &(state.finalized_targets as u64).to_be_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+pub(super) fn validated_upgrade_recovery_receipt_for_test(
+    paths: &FixedInstallPaths,
+) -> Result<UpgradeRecoveryReceipt, InstallError> {
+    let state = load_validated_upgrade_attempt_without_schema2_migration(paths)?;
+    upgrade_recovery_receipt_from_terminal_journal(&state)
+}
+
 pub fn finalize_probe_upgrade_stage_cleanup(
     paths: &FixedInstallPaths,
     receipt: &UpgradeRecoveryReceipt,
@@ -3042,26 +3247,34 @@ fn finalize_probe_upgrade_stage_cleanup_with_status(
     publish_upgrade_status: bool,
 ) -> Result<(), InstallError> {
     let state = load_validated_upgrade_attempt_without_schema2_migration(paths)?;
+    let expected_phase = if receipt.activated {
+        "stage-cleanup-required"
+    } else {
+        "aborted"
+    };
+    let activated_status_retry = receipt.activated && state.phase == "activated";
     if state.binding.operation_id != receipt.operation_id
         || state.binding.source_probe_id != receipt.probe_id
         || state.binding.stage_owner_uid != receipt.stage_owner_uid
         || state.binding.source_bundle_version != receipt.source_bundle_version
         || state.binding.target_bundle_version != receipt.target_bundle_version
         || state.activation_started != receipt.activated
+        || (state.phase != expected_phase && !activated_status_retry)
+        || upgrade_recovery_binding_sha256(&state, expected_phase)
+            != receipt.validated_binding_sha256
     {
         return Err(InstallError::ExistingResidue);
     }
-    let expected_phase = if receipt.activated {
-        "stage-cleanup-required"
-    } else {
-        "aborted"
-    };
-    if state.phase != expected_phase {
-        return Err(InstallError::ExistingResidue);
+    if !activated_status_retry {
+        complete_runtime_failure_custody_before_recovery_effects(paths, &state)?;
     }
-    complete_runtime_failure_custody_before_recovery_effects(paths, &state)?;
     if receipt.activated {
-        transition_upgrade_attempt_phase(paths, UpgradeAttemptTerminalTransition::MarkActivated)?;
+        if !activated_status_retry {
+            transition_upgrade_attempt_phase(
+                paths,
+                UpgradeAttemptTerminalTransition::MarkActivated,
+            )?;
+        }
         if publish_upgrade_status {
             write_operation_status(
                 paths,
