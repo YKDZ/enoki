@@ -10,6 +10,7 @@ import {
 import {
   chmod,
   cp,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -27,6 +28,7 @@ import { gzipSync } from "node:zlib";
 import {
   createProbeTrustDelegation,
   createReleaseTransitionContract,
+  probeBundleComponentProfiles,
   releaseTransitionContractSigningInput,
   verifyProbeTrustDelegation,
 } from "@enoki/probe-release";
@@ -1109,6 +1111,58 @@ with open(os.devnull, "rb") as input_stream:
       await rm(workDir, { force: true, recursive: true });
     }
   });
+
+  it("requires both bundled Bootstrap roles in every current target archive", async () => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-bootstrap-closure-"),
+    );
+    try {
+      const { outputDir, privateKey, root } =
+        await createProbeAssetSetFixture(workDir);
+      await removeBundledBootstrapFromTarget(outputDir, {
+        privateKey,
+        target: probeTargets[0],
+      });
+
+      await expect(
+        inspectProbeAssetSet(outputDir, {
+          trustedRootPublicKeyPem: root.publicKey,
+        }),
+      ).rejects.toThrow("Probe bundle Bootstrap closure is invalid");
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it.each(["symlink", "directory", "hardlink"])(
+    "rejects a %s current target archive before deriving its receipt",
+    async (kind) => {
+      const workDir = await mkdtemp(
+        path.join(tmpdir(), "enoki-candidate-archive-kind-"),
+      );
+      try {
+        const { outputDir, root } = await createProbeAssetSetFixture(workDir);
+        const archive = path.join(
+          outputDir,
+          `enoki-probe-${probeTargets[0]}.tar.gz`,
+        );
+        const retained = path.join(workDir, "retained-target.tar.gz");
+        await cp(archive, retained);
+        await rm(archive);
+        if (kind === "symlink") await symlink(retained, archive);
+        if (kind === "directory") await mkdir(archive);
+        if (kind === "hardlink") await link(retained, archive);
+
+        await expect(
+          inspectProbeAssetSet(outputDir, {
+            trustedRootPublicKeyPem: root.publicKey,
+          }),
+        ).rejects.toThrow("must be a regular single-link file");
+      } finally {
+        await rm(workDir, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("rejects an attacker-created Root, Delegation, and complete signed Asset Set without an external anchor", async () => {
     const workDir = await mkdtemp(
@@ -2402,6 +2456,64 @@ async function writeProbeArchive(
         ]),
   ]);
   await rm(binaryDir, { force: true, recursive: true });
+}
+
+async function removeBundledBootstrapFromTarget(
+  assetDir,
+  { privateKey, target },
+) {
+  const file = `enoki-probe-${target}.tar.gz`;
+  const archivePath = path.join(assetDir, file);
+  const contents = await mkdtemp(
+    path.join(tmpdir(), "enoki-probe-without-bootstrap-"),
+  );
+  try {
+    await execFileAsync("tar", [
+      "--extract",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+    ]);
+    const bundleManifestPath = path.join(contents, "bundle-manifest.json");
+    const bundleManifest = JSON.parse(await readFile(bundleManifestPath));
+    delete bundleManifest.bootstrapAssets;
+    const bundleManifestBytes = Buffer.from(
+      `${JSON.stringify(bundleManifest)}\n`,
+    );
+    await writeFile(bundleManifestPath, bundleManifestBytes);
+    await execFileAsync("tar", [
+      "--create",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+      "bundle-manifest.json",
+      ...Object.values(probeBundleComponentProfiles).map(
+        ({ path: componentPath }) => componentPath,
+      ),
+    ]);
+    const archive = await readFile(archivePath);
+    const manifestPath = path.join(assetDir, "manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath));
+    const asset = manifest.assets.find((entry) => entry.file === file);
+    asset.bundleManifestSha256 = sha256(bundleManifestBytes);
+    asset.sha256 = sha256(archive);
+    asset.size = archive.byteLength;
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+    await Promise.all([
+      writeFile(manifestPath, manifestBytes),
+      writeFile(
+        path.join(assetDir, "manifest.json.sig"),
+        signBytes("RSA-SHA256", manifestBytes, privateKey),
+      ),
+      writeFile(`${archivePath}.sha256`, `${asset.sha256}  ${file}\n`),
+    ]);
+  } finally {
+    await rm(contents, { force: true, recursive: true });
+  }
 }
 
 function createProbeElf({ interpreter: interpreterOverride, target, version }) {

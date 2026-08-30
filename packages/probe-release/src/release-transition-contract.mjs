@@ -14,6 +14,7 @@ import {
   probeTargets,
 } from "./probe-asset-bundle.mjs";
 import { verifyProbeTrustDelegation } from "./probe-trust-delegation.mjs";
+import { readRegularFileSnapshot } from "./regular-file-snapshot.mjs";
 import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const signingDomain = Buffer.from(
@@ -201,11 +202,17 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
       );
     }
     const archivePath = path.join(assetDir, file);
-    const archive = await readFile(archivePath);
-    const details = await stat(archivePath);
+    const archive = await readRegularFileSnapshot(
+      archivePath,
+      "Release Transition Contract target Probe archive",
+    ).catch(() => {
+      throw new Error(
+        "Release Transition Contract target Probe asset closure is invalid",
+      );
+    });
     if (
-      details.size !== asset.size ||
-      sha256(archive) !== asset.sha256 ||
+      archive.size !== asset.size ||
+      sha256(archive.bytes) !== asset.sha256 ||
       (await readFile(`${archivePath}.sha256`, "utf8")) !==
         `${asset.sha256}  ${file}\n`
     ) {
@@ -213,11 +220,14 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
         "Release Transition Contract target Probe asset closure is invalid",
       );
     }
-    const inspectedBundle = await inspectProbeBundleArchiveBytes(archive, {
-      bundledBootstrap: input.bundledBootstrap,
-      target: targetName,
-      version: `v${target.version}`,
-    });
+    const inspectedBundle = await inspectProbeBundleArchiveBytes(
+      archive.bytes,
+      {
+        bundledBootstrap: input.bundledBootstrap,
+        target: targetName,
+        version: `v${target.version}`,
+      },
+    );
     if (inspectedBundle.bundleManifestSha256 !== asset.bundleManifestSha256) {
       throw new Error(
         "Release Transition Contract target Probe asset closure is invalid",

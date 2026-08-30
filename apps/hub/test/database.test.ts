@@ -347,6 +347,36 @@ describe("Hub database", () => {
         targetAssetSetDigest,
         "1.2.4",
       );
+    createHost(legacy, { id: 75, probeId: "probe-invalid-correlation" });
+    legacy.sqlite
+      .prepare("update managed_hosts set probe_version = ? where id = ?")
+      .run("1.2.3", 75);
+    legacy.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms,
+          target_kind, target_host_id, expected_hub_origin,
+          expected_probe_id, expected_probe_version, source_probe_sha256_json,
+          target_asset_set_digest, target_probe_version, status,
+          replacement_predecessor_enrollment_id,
+          replacement_predecessor_asset_set_digest
+        ) values (?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      )
+      .run(
+        "enr_legacy_invalid_correlation_0002",
+        "legacy-invalid-correlation-token",
+        1_725_000_000_000,
+        1_725_003_600_000,
+        75,
+        "https://hub.example.test",
+        "probe-invalid-correlation",
+        "1.2.3",
+        JSON.stringify(sourceProbeSha256),
+        targetAssetSetDigest,
+        "1.2.4",
+        "",
+        null,
+      );
     legacy.close();
 
     await cp(
@@ -457,6 +487,88 @@ describe("Hub database", () => {
         verificationDeadlineAtMs: 1_725_000_062_000,
       }),
     ).toMatchObject({ enrollment: { status: "verifying" }, replayed: false });
+
+    const invalidTokenHash = "legacy-invalid-correlation-token";
+    const invalidEnrollmentId = "enr_legacy_invalid_correlation_0002";
+    migrated.sqlite
+      .prepare(
+        "update enrollment_tokens set target_bundles_json = ? where enrollment_id = ?",
+      )
+      .run(JSON.stringify(frozenBundles), invalidEnrollmentId);
+    for (const [predecessorId, predecessorDigest] of [
+      ["enr_terminal_predecessor_0001", null],
+      ["", ""],
+      ["not-an-enrollment", "sha256:not-a-digest"],
+    ] as const) {
+      migrated.sqlite
+        .prepare(
+          `update enrollment_tokens
+           set replacement_predecessor_enrollment_id = ?,
+               replacement_predecessor_asset_set_digest = ?
+           where enrollment_id = ?`,
+        )
+        .run(predecessorId, predecessorDigest, invalidEnrollmentId);
+      expect(
+        migrated.enrollments.installationInspectionDecision({
+          nowMs: 1_725_000_002_000,
+          tokenHash: invalidTokenHash,
+        }),
+      ).toEqual({ kind: "invalid" });
+      expect(
+        migrated.enrollments.inspectPending({
+          nowMs: 1_725_000_002_000,
+          tokenHash: invalidTokenHash,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      migrated.enrollments.registerNewHost({
+        host: { ...host, probeId: "probe-invalid-successor" },
+        hostProfile: null,
+        registeredAtMs: 1_725_000_002_000,
+        registrationAttempt: {
+          ...registrationInput("1.2.3"),
+          enrollmentId: invalidEnrollmentId,
+          hostId: 75,
+          oldProbeId: "probe-invalid-correlation",
+          signedAttemptSha256: "9".repeat(64),
+        },
+        tokenHash: invalidTokenHash,
+        verificationDeadlineAtMs: 1_725_000_062_000,
+      }),
+    ).toBeNull();
+    expect(
+      migrated.sqlite
+        .prepare(
+          `select status, used_at_ms as usedAtMs
+           from enrollment_tokens where enrollment_id = ?`,
+        )
+        .get(invalidEnrollmentId),
+    ).toEqual({ status: "pending", usedAtMs: null });
+    expect(
+      migrated.sqlite
+        .prepare("select probe_id as probeId from managed_hosts where id = 75")
+        .get(),
+    ).toEqual({ probeId: "probe-invalid-correlation" });
+    migrated.sqlite
+      .prepare(
+        `update enrollment_tokens
+         set registration_attempt_sha256 = ?, registration_outcome = ?,
+             used_at_ms = ?, status = 'verifying'
+         where enrollment_id = ?`,
+      )
+      .run(
+        "9".repeat(64),
+        Buffer.from("untrusted legacy replay"),
+        1_725_000_002_000,
+        invalidEnrollmentId,
+      );
+    expect(
+      migrated.enrollments.replayRegistrationOutcome({
+        signedAttemptSha256: "9".repeat(64),
+        tokenHash: invalidTokenHash,
+      }),
+    ).toBeNull();
     migrated.close();
   });
 

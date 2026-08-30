@@ -182,7 +182,13 @@ export function createEnrollmentRepository(
   return {
     replayRegistrationOutcome(input) {
       const replay = database
-        .select({ outcome: enrollmentTokens.registrationOutcome })
+        .select({
+          outcome: enrollmentTokens.registrationOutcome,
+          replacementPredecessorAssetSetDigest:
+            enrollmentTokens.replacementPredecessorAssetSetDigest,
+          replacementPredecessorEnrollmentId:
+            enrollmentTokens.replacementPredecessorEnrollmentId,
+        })
         .from(enrollmentTokens)
         .where(
           and(
@@ -194,7 +200,9 @@ export function createEnrollmentRepository(
           ),
         )
         .get();
-      return replay?.outcome ? Buffer.from(replay.outcome) : null;
+      return replay?.outcome && parseReplacementPredecessorCorrelation(replay)
+        ? Buffer.from(replay.outcome)
+        : null;
     },
     terminalReplacementPredecessorForHost(input) {
       const predecessor = database
@@ -273,6 +281,9 @@ export function createEnrollmentRepository(
         const sourceProbeSha256 = parseSourceProbeSha256(
           pending?.sourceProbeSha256Json ?? "",
         );
+        const predecessorCorrelation = pending
+          ? parseReplacementPredecessorCorrelation(pending)
+          : null;
         const host =
           pending?.targetHostId === null || pending?.targetHostId === undefined
             ? null
@@ -292,8 +303,7 @@ export function createEnrollmentRepository(
         if (
           !pending ||
           pending.targetKind !== "manual_reinstall" ||
-          pending.replacementPredecessorEnrollmentId !== null ||
-          pending.replacementPredecessorAssetSetDigest !== null ||
+          predecessorCorrelation?.kind !== "ordinary" ||
           pending.targetBundlesJson !== null ||
           !sourceProbeSha256 ||
           !validLegacyOrdinaryImmutableFields(pending, sourceProbeSha256) ||
@@ -380,6 +390,9 @@ export function createEnrollmentRepository(
         ) {
           return { kind: "invalid" };
         }
+        const predecessorCorrelation =
+          parseReplacementPredecessorCorrelation(pending);
+        if (!predecessorCorrelation) return { kind: "invalid" };
         const host = transaction
           .select({
             id: hosts.id,
@@ -394,9 +407,9 @@ export function createEnrollmentRepository(
         if (
           !host ||
           host.probeId !== pending.expectedProbeId ||
-          (!pending.replacementPredecessorEnrollmentId &&
+          (predecessorCorrelation.kind === "ordinary" &&
             host.probeVersion !== pending.expectedProbeVersion) ||
-          (pending.replacementPredecessorEnrollmentId &&
+          (predecessorCorrelation.kind === "terminal" &&
             !terminalReplacementPredecessorMatches(transaction, {
               currentProbeId: host.probeId,
               hostId: host.id,
@@ -416,8 +429,7 @@ export function createEnrollmentRepository(
         }
         if (
           pending.targetBundlesJson === null &&
-          pending.replacementPredecessorEnrollmentId === null &&
-          pending.replacementPredecessorAssetSetDigest === null
+          predecessorCorrelation.kind === "ordinary"
         ) {
           return { kind: "legacy_ordinary_hydration_required" };
         }
@@ -491,6 +503,9 @@ export function createEnrollmentRepository(
         ) {
           return null;
         }
+        const predecessorCorrelation =
+          parseReplacementPredecessorCorrelation(pending);
+        if (!predecessorCorrelation) return null;
         const host = database
           .select({
             id: hosts.id,
@@ -505,9 +520,9 @@ export function createEnrollmentRepository(
         if (
           !host ||
           host.probeId !== pending.expectedProbeId ||
-          (!pending.replacementPredecessorEnrollmentId &&
+          (predecessorCorrelation.kind === "ordinary" &&
             host.probeVersion !== pending.expectedProbeVersion) ||
-          (pending.replacementPredecessorEnrollmentId &&
+          (predecessorCorrelation.kind === "terminal" &&
             !terminalReplacementPredecessorMatches(database, {
               currentProbeId: host.probeId,
               hostId: host.id,
@@ -744,6 +759,18 @@ export function createEnrollmentRepository(
       ) {
         throw new Error("Invalid pending Enrollment lifecycle input.");
       }
+      const predecessorCorrelation =
+        input.target.kind === "manual_reinstall"
+          ? parseReplacementPredecessorCorrelation({
+              replacementPredecessorAssetSetDigest:
+                input.target.replacementPredecessorAssetSetDigest ?? null,
+              replacementPredecessorEnrollmentId:
+                input.target.replacementPredecessorEnrollmentId ?? null,
+            })
+          : { kind: "ordinary" as const };
+      if (!predecessorCorrelation) {
+        return { kind: "existing_host_unavailable" };
+      }
 
       return database.transaction((transaction) => {
         if (input.target.kind === "existing_host") {
@@ -858,9 +885,9 @@ export function createEnrollmentRepository(
           if (
             !target ||
             target.probeId !== input.target.expectedProbeId ||
-            (!input.target.replacementPredecessorEnrollmentId &&
+            (predecessorCorrelation.kind === "ordinary" &&
               target.probeVersion !== input.target.expectedProbeVersion) ||
-            (input.target.replacementPredecessorEnrollmentId &&
+            (predecessorCorrelation.kind === "terminal" &&
               !terminalReplacementPredecessorMatches(transaction, {
                 currentProbeId: target.probeId,
                 hostId: target.id,
@@ -868,9 +895,9 @@ export function createEnrollmentRepository(
                   expectedProbeId: input.target.expectedProbeId,
                   expectedProbeVersion: input.target.expectedProbeVersion,
                   replacementPredecessorEnrollmentId:
-                    input.target.replacementPredecessorEnrollmentId,
+                    predecessorCorrelation.enrollmentId,
                   replacementPredecessorAssetSetDigest:
-                    input.target.replacementPredecessorAssetSetDigest ?? null,
+                    predecessorCorrelation.assetSetDigest,
                   targetAssetSetDigest: input.target.targetAssetSetDigest,
                   targetHostId: input.target.hostId,
                   targetProbeVersion: input.target.targetProbeVersion,
@@ -958,11 +985,15 @@ export function createEnrollmentRepository(
                 : null,
             replacementPredecessorEnrollmentId:
               input.target.kind === "manual_reinstall"
-                ? (input.target.replacementPredecessorEnrollmentId ?? null)
+                ? predecessorCorrelation.kind === "terminal"
+                  ? predecessorCorrelation.enrollmentId
+                  : null
                 : null,
             replacementPredecessorAssetSetDigest:
               input.target.kind === "manual_reinstall"
-                ? (input.target.replacementPredecessorAssetSetDigest ?? null)
+                ? predecessorCorrelation.kind === "terminal"
+                  ? predecessorCorrelation.assetSetDigest
+                  : null
                 : null,
             targetKind: input.target.kind,
             tokenHash: input.tokenHash,
@@ -998,6 +1029,15 @@ export function createEnrollmentRepository(
               .from(enrollmentTokens)
               .where(eq(enrollmentTokens.tokenHash, input.tokenHash))
               .get();
+            const attemptedCorrelation = attempted
+              ? parseReplacementPredecessorCorrelation(attempted)
+              : null;
+            if (
+              attempted?.targetKind === "manual_reinstall" &&
+              !attemptedCorrelation
+            ) {
+              return null;
+            }
             if (
               attempted?.usedAtMs !== null &&
               attempted?.registrationAttemptSha256 ===
@@ -1041,6 +1081,11 @@ export function createEnrollmentRepository(
           if (!pending) {
             return null;
           }
+          const predecessorCorrelation =
+            pending.targetKind === "manual_reinstall"
+              ? parseReplacementPredecessorCorrelation(pending)
+              : { kind: "ordinary" as const };
+          if (!predecessorCorrelation) return null;
 
           const existingHost =
             (pending.targetKind === "existing_host" ||
@@ -1089,9 +1134,9 @@ export function createEnrollmentRepository(
               !pending.targetBundlesJson ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
-              (!pending.replacementPredecessorEnrollmentId &&
+              (predecessorCorrelation.kind === "ordinary" &&
                 existingHost.probeVersion !== pending.expectedProbeVersion) ||
-              (pending.replacementPredecessorEnrollmentId &&
+              (predecessorCorrelation.kind === "terminal" &&
                 !terminalReplacementPredecessorMatches(transaction, {
                   currentProbeId: existingHost.probeId,
                   hostId: existingHost.id,
@@ -1442,6 +1487,39 @@ function sourceReceiptMatchesTargetBundle(
   );
 }
 
+type ReplacementPredecessorCorrelation =
+  | { kind: "ordinary" }
+  | {
+      assetSetDigest: string;
+      enrollmentId: string;
+      kind: "terminal";
+    };
+
+function parseReplacementPredecessorCorrelation(input: {
+  replacementPredecessorAssetSetDigest: string | null;
+  replacementPredecessorEnrollmentId: string | null;
+}): ReplacementPredecessorCorrelation | null {
+  if (
+    input.replacementPredecessorEnrollmentId === null &&
+    input.replacementPredecessorAssetSetDigest === null
+  ) {
+    return { kind: "ordinary" };
+  }
+  if (
+    validEnrollmentId(input.replacementPredecessorEnrollmentId) &&
+    /^sha256:[0-9a-f]{64}$/.test(
+      input.replacementPredecessorAssetSetDigest ?? "",
+    )
+  ) {
+    return {
+      assetSetDigest: input.replacementPredecessorAssetSetDigest as string,
+      enrollmentId: input.replacementPredecessorEnrollmentId,
+      kind: "terminal",
+    };
+  }
+  return null;
+}
+
 /**
  * 终态 replacement recovery 只承认 pending 行显式指向的那一条已消费
  * Enrollment；不能以“最近一条”历史代替这项关联。这里故意在每个事务
@@ -1463,10 +1541,16 @@ function terminalReplacementPredecessorMatches(
     };
   },
 ) {
-  const predecessorId = input.pending.replacementPredecessorEnrollmentId;
-  if (!predecessorId || input.pending.targetHostId !== input.hostId) {
+  const predecessorCorrelation = parseReplacementPredecessorCorrelation(
+    input.pending,
+  );
+  if (
+    predecessorCorrelation?.kind !== "terminal" ||
+    input.pending.targetHostId !== input.hostId
+  ) {
     return false;
   }
+  const predecessorId = predecessorCorrelation.enrollmentId;
   const predecessor = database
     .select()
     .from(enrollmentTokens)
@@ -1480,7 +1564,7 @@ function terminalReplacementPredecessorMatches(
     predecessor.hostId !== input.hostId ||
     predecessor.targetProbeVersion !== input.pending.expectedProbeVersion ||
     predecessor.targetAssetSetDigest !==
-      input.pending.replacementPredecessorAssetSetDigest ||
+      predecessorCorrelation.assetSetDigest ||
     !predecessor.registrationOutcome
   ) {
     return false;

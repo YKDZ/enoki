@@ -41,12 +41,33 @@ export const probeTargets: readonly string[];
 export function inspectProbeBundleArchiveBytes(
   archive: Buffer,
   input: {
+    bundledBootstrap: { distribution: string; rootKeyId: string };
+    requireEmbeddedProbeIdentity?: boolean;
+    target: string;
+    version: string;
+  },
+): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
+export function inspectHistoricalProbeBundleArchiveBytes(
+  archive: Buffer,
+  input: {
     bundledBootstrap?: { distribution: string; rootKeyId: string };
     requireEmbeddedProbeIdentity?: boolean;
     target: string;
     version: string;
   },
 ): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
+export function inspectRuntimeProbeBundleArchiveBytes(
+  archive: Buffer,
+  input: {
+    requireEmbeddedProbeIdentity?: boolean;
+    target: string;
+    version: string;
+  },
+): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
+export function readRegularFileSnapshot(
+  filePath: string,
+  label: string,
+): Promise<{ bytes: Buffer; size: number }>;
 
 export function canonicalPublicKeyPem(value: string | Buffer): Buffer;
 export function createProbeTrustDelegation(input: {

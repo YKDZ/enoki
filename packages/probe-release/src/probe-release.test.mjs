@@ -1,13 +1,51 @@
 import { generateKeyPairSync } from "node:crypto";
+import { appendFileSync, renameSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createProbeTrustDelegation,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
+  readRegularFileSnapshot,
   verifyProbeTrustDelegation,
 } from "./index.mjs";
+
+const regularFileSnapshotMutation = vi.hoisted(() => ({
+  afterOpen: null,
+  afterStat: null,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    async open(...args) {
+      const handle = await original.open(...args);
+      const openedPath = String(args[0]);
+      regularFileSnapshotMutation.afterOpen?.(openedPath);
+      regularFileSnapshotMutation.afterOpen = null;
+      if (!regularFileSnapshotMutation.afterStat) return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "stat") {
+            return async (...statArgs) => {
+              const details = await target.stat(...statArgs);
+              regularFileSnapshotMutation.afterStat?.(openedPath);
+              regularFileSnapshotMutation.afterStat = null;
+              return details;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+  };
+});
 
 const rsa4096TestIdentities = new Map();
 
@@ -27,6 +65,48 @@ function rsa4096TestKeyPair(slot) {
 }
 
 describe("Probe release primitives", () => {
+  it("keeps one opened regular-file snapshot when its pathname is replaced", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "enoki-snapshot-"));
+    const filePath = path.join(directory, "archive.tar.gz");
+    const replacementPath = path.join(directory, "replacement.tar.gz");
+    const original = Buffer.from("one verified archive encoding");
+    const replacement = Buffer.from("same inner closure, alternate encoding");
+    try {
+      await Promise.all([
+        writeFile(filePath, original),
+        writeFile(replacementPath, replacement),
+      ]);
+      regularFileSnapshotMutation.afterOpen = (openedPath) => {
+        if (openedPath === filePath) renameSync(replacementPath, filePath);
+      };
+
+      const snapshot = await readRegularFileSnapshot(filePath, "Probe archive");
+      expect(snapshot).toEqual({ bytes: original, size: original.byteLength });
+      expect(await readFile(filePath)).toEqual(replacement);
+    } finally {
+      regularFileSnapshotMutation.afterOpen = null;
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a regular-file snapshot whose size changes after fstat", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "enoki-snapshot-"));
+    const filePath = path.join(directory, "archive.tar.gz");
+    try {
+      await writeFile(filePath, Buffer.from("verified archive"));
+      regularFileSnapshotMutation.afterStat = (openedPath) => {
+        if (openedPath === filePath) appendFileSync(filePath, Buffer.from("!"));
+      };
+
+      await expect(
+        readRegularFileSnapshot(filePath, "Probe archive"),
+      ).rejects.toThrow("Probe archive changed while reading");
+    } finally {
+      regularFileSnapshotMutation.afterStat = null;
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   it("keeps the fixed Probe Asset Bundle roles in one package", () => {
     expect(Object.keys(probeBundleComponentProfiles)).toEqual([
       "probe",

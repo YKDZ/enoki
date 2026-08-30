@@ -27,12 +27,15 @@ import { promisify } from "node:util";
 import {
   canonicalPublicKeyPem,
   createProbeTrustDelegation,
+  inspectHistoricalProbeBundleArchiveBytes,
   inspectLegacyProbeAssetSet,
   inspectProbeBundleArchiveBytes,
   inspectProbeElf,
+  inspectRuntimeProbeBundleArchiveBytes,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
+  readRegularFileSnapshot,
   verifyReleaseTransitionContract,
   verifyProbeTrustDelegation,
 } from "@enoki/probe-release";
@@ -51,6 +54,7 @@ const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const bootstrapRecipeFile = "enoki-probe-bootstrap.py";
 const bootstrapRecipeRecordFile = "enoki-probe-bootstrap-recipe.json";
 const verifiedCandidateReleaseTransitions = new WeakMap();
+const verifiedProbeAssetSetArchiveSnapshots = new WeakMap();
 export function releaseTransitionForValidatedCandidate(manifest) {
   if (!verifiedCandidateReleaseTransitions.has(manifest)) {
     throw new Error("Candidate Manifest has not passed release verification");
@@ -335,11 +339,13 @@ export async function packageProbeArchive({
       ],
       { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
     );
-    await inspectProbeArchive(archivePath, {
+    const archive = await readProbeArchiveSnapshot(archivePath);
+    await inspectProbeArchiveBytes(archive.bytes, file, {
+      bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
       target,
       version: stableVersion,
     });
-    const archiveSha256 = await fileSha256(archivePath);
+    const archiveSha256 = sha256(archive.bytes);
     await writeFile(`${archivePath}.sha256`, `${archiveSha256}  ${file}\n`);
     return { archivePath, archiveSha256, file };
   } finally {
@@ -361,7 +367,16 @@ async function composeProbeArchive({
   target,
   version,
 }) {
-  await inspectProbeArchive(runtimeArchivePath, { target, version });
+  const runtimeArchive = await readProbeArchiveSnapshot(runtimeArchivePath);
+  await inspectProbeArchiveBytes(
+    runtimeArchive.bytes,
+    path.basename(runtimeArchivePath),
+    {
+      bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
+      target,
+      version,
+    },
+  );
   const stagingDir = await mkdtemp(
     path.join(tmpdir(), "enoki-probe-bundle-compose-"),
   );
@@ -648,11 +663,15 @@ export async function prepareUnsignedProbeAssetSet({
       `${bundledArchivePath}.sha256`,
       `${bundledArchiveSha256}  ${file}\n`,
     );
-    const inspectedArchive = await inspectProbeArchive(bundledArchivePath, {
-      bundledBootstrap: { distribution, rootKeyId },
-      target,
-      version: stableVersion,
-    });
+    const inspectedArchive = await inspectProbeArchiveBytes(
+      bundledArchive,
+      file,
+      {
+        bundledBootstrap: { distribution, rootKeyId },
+        target,
+        version: stableVersion,
+      },
+    );
     assets.push({
       bundleManifestSha256: inspectedArchive.bundleManifestSha256,
       file,
@@ -759,7 +778,11 @@ export async function signProbeAssetSet({
   const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
 
   try {
-    await cp(unsignedAssetDir, stagingDir, { recursive: true });
+    await materializeVerifiedProbeAssetSet({
+      inspected,
+      outputDir: stagingDir,
+      sourceDir: unsignedAssetDir,
+    });
     await writeFile(path.join(stagingDir, "manifest.json.sig"), signature);
     await inspectProbeAssetSet(stagingDir, {
       expectedDelegationBytes,
@@ -811,7 +834,7 @@ export async function assembleReleaseCandidate({
   );
   const baselineProbeClosure =
     releaseBaseline.kind === "enoki-release-baseline"
-      ? await inspectProbeAssetSet(
+      ? await inspectHistoricalProbeAssetSet(
           path.join(releaseBaselineDir, "probe-assets"),
           {
             expectedVersion: releaseBaseline.probeAssetSet.version,
@@ -872,8 +895,10 @@ export async function assembleReleaseCandidate({
   try {
     await mkdir(path.join(stagingDir, "hub"), { recursive: true });
     await mkdir(path.join(stagingDir, "recipe"), { recursive: true });
-    await cp(probeAssetSetDir, path.join(stagingDir, "probe-assets"), {
-      recursive: true,
+    await materializeVerifiedProbeAssetSet({
+      inspected: probeAssetSet,
+      outputDir: path.join(stagingDir, "probe-assets"),
+      sourceDir: probeAssetSetDir,
     });
     await cp(releaseBaselineDir, path.join(stagingDir, "release-baseline"), {
       recursive: true,
@@ -1109,7 +1134,7 @@ export async function validateReleaseCandidate(
   );
   const baselineProbeClosure =
     releaseBaseline.kind === "enoki-release-baseline"
-      ? await inspectProbeAssetSet(
+      ? await inspectHistoricalProbeAssetSet(
           path.join(candidateDir, "release-baseline", "probe-assets"),
           {
             expectedVersion: releaseBaseline.probeAssetSet.version,
@@ -1187,7 +1212,23 @@ export async function validateReleaseCandidate(
   return manifest;
 }
 
-export async function inspectProbeAssetSet(
+export async function inspectProbeAssetSet(assetDir, options = {}) {
+  return inspectProbeAssetSetWithBundleInspector(
+    assetDir,
+    options,
+    inspectProbeBundleArchiveBytes,
+  );
+}
+
+export async function inspectHistoricalProbeAssetSet(assetDir, options = {}) {
+  return inspectProbeAssetSetWithBundleInspector(
+    assetDir,
+    options,
+    inspectHistoricalProbeBundleArchiveBytes,
+  );
+}
+
+async function inspectProbeAssetSetWithBundleInspector(
   assetDir,
   {
     expectedDelegationBytes,
@@ -1199,6 +1240,7 @@ export async function inspectProbeAssetSet(
     trustedRootPublicKeySha256,
     unsigned = false,
   } = {},
+  bundleInspector,
 ) {
   const transitionFileNames = [
     "release-transition-contract.json",
@@ -1315,6 +1357,7 @@ export async function inspectProbeAssetSet(
     rootKeyId: sha256(packagedRootPublicKey),
   };
   const targetProbeComponents = [];
+  const archiveSnapshots = new Map();
 
   for (let index = 0; index < probeTargets.length; index += 1) {
     const target = probeTargets[index];
@@ -1339,11 +1382,8 @@ export async function inspectProbeAssetSet(
       throw new Error(`Probe Asset Set target ${target} is malformed`);
     }
     const archivePath = path.join(assetDir, asset.file);
-    const archiveDetails = await stat(archivePath);
-    if (
-      archiveDetails.size !== asset.size ||
-      (await fileSha256(archivePath)) !== asset.sha256
-    ) {
+    const archive = await readProbeArchiveSnapshot(archivePath);
+    if (archive.size !== asset.size || sha256(archive.bytes) !== asset.sha256) {
       throw new Error(`Probe Asset Set checksum does not match ${asset.file}`);
     }
     const sidecar = await readFile(`${archivePath}.sha256`, "utf8");
@@ -1352,12 +1392,17 @@ export async function inspectProbeAssetSet(
         `Probe Asset Set checksum sidecar does not match ${asset.file}`,
       );
     }
-    const inspectedArchive = await inspectProbeArchive(archivePath, {
-      bundledBootstrap,
-      requireEmbeddedProbeIdentity,
-      target,
-      version: `v${manifest.version}`,
-    });
+    const inspectedArchive = await inspectProbeArchiveBytes(
+      archive.bytes,
+      asset.file,
+      {
+        bundleInspector,
+        bundledBootstrap,
+        requireEmbeddedProbeIdentity,
+        target,
+        version: `v${manifest.version}`,
+      },
+    );
     if (inspectedArchive.bundleManifestSha256 !== asset.bundleManifestSha256) {
       throw new Error(
         `Probe Asset Set bundle manifest does not match ${asset.file}`,
@@ -1367,6 +1412,7 @@ export async function inspectProbeAssetSet(
       sha256: inspectedArchive.probeSha256,
       target,
     });
+    archiveSnapshots.set(asset.file, archive.bytes);
   }
 
   const publicKey = await readFile(path.join(assetDir, "signing-key.pem"));
@@ -1527,14 +1573,17 @@ export async function inspectProbeAssetSet(
   const files = [];
   for (const file of expectedFiles) {
     const filePath = path.join(assetDir, file);
-    const details = await stat(filePath);
+    const archive = archiveSnapshots.get(file);
+    const details = archive
+      ? { size: archive.byteLength }
+      : await stat(filePath);
     files.push({
       file,
-      sha256: await fileSha256(filePath),
+      sha256: archive ? sha256(archive) : await fileSha256(filePath),
       size: details.size,
     });
   }
-  return {
+  const result = {
     assetSetManifestSha256: sha256(manifestBytes),
     files,
     ...(releaseTransition ? { releaseTransition } : {}),
@@ -1553,6 +1602,8 @@ export async function inspectProbeAssetSet(
     },
     version: manifest.version,
   };
+  verifiedProbeAssetSetArchiveSnapshots.set(result, archiveSnapshots);
+  return result;
 }
 
 function assertSigningPublicKey(publicKeyPem) {
@@ -1563,12 +1614,52 @@ function assertSigningPublicKey(publicKeyPem) {
   }
 }
 
-async function inspectProbeArchive(
-  archivePath,
-  { bundledBootstrap, requireEmbeddedProbeIdentity = true, target, version },
+async function readProbeArchiveSnapshot(archivePath) {
+  try {
+    return await readRegularFileSnapshot(archivePath, "Probe archive");
+  } catch {
+    throw new Error(
+      `Probe archive ${path.basename(archivePath)} must be a regular single-link file`,
+    );
+  }
+}
+
+async function materializeVerifiedProbeAssetSet({
+  inspected,
+  outputDir,
+  sourceDir,
+}) {
+  const archiveSnapshots = verifiedProbeAssetSetArchiveSnapshots.get(inspected);
+  if (!archiveSnapshots) {
+    throw new Error("Probe Asset Set has not passed archive verification");
+  }
+  await mkdir(outputDir, { recursive: false });
+  for (const { file } of inspected.files) {
+    const archive = archiveSnapshots.get(file);
+    if (archive) {
+      await writeFile(path.join(outputDir, file), archive, {
+        flag: "wx",
+        mode: 0o644,
+      });
+    } else {
+      await copyFile(path.join(sourceDir, file), path.join(outputDir, file));
+    }
+  }
+}
+
+async function inspectProbeArchiveBytes(
+  archiveBytes,
+  archive,
+  {
+    bundleInspector = inspectProbeBundleArchiveBytes,
+    bundledBootstrap,
+    requireEmbeddedProbeIdentity = true,
+    target,
+    version,
+  },
 ) {
   try {
-    return await inspectProbeBundleArchiveBytes(await readFile(archivePath), {
+    return await bundleInspector(archiveBytes, {
       bundledBootstrap,
       requireEmbeddedProbeIdentity,
       target,
@@ -1576,7 +1667,6 @@ async function inspectProbeArchive(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
-    const archive = path.basename(archivePath);
     if (message === "Probe bundle archive is invalid") {
       throw new Error(
         `Probe archive ${archive} is not a valid gzip/tar archive`,

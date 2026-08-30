@@ -24,7 +24,7 @@ import {
   validateMigrationBaselineContents,
   verifyLegacyProbeAssetSet,
 } from "./release-baseline-migration-lib.mjs";
-import { inspectProbeAssetSet } from "./release-candidate-lib.mjs";
+import { inspectHistoricalProbeAssetSet } from "./release-candidate-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -402,7 +402,7 @@ async function resolveRootedReleaseBaseline({
       await writeFile(path.join(probeAssetDir, name), bytes);
     }
 
-    const inspectedProbe = await inspectProbeAssetSet(probeAssetDir, {
+    const inspectedProbe = await inspectHistoricalProbeAssetSet(probeAssetDir, {
       expectedVersion: selected.tagName.slice(1),
       requireEmbeddedProbeIdentity: false,
       trustedRootPublicKeyPem: trustedRootPublicKey,
@@ -878,7 +878,7 @@ export async function validateReleaseBaselineBundle(
       );
     }
   }
-  const inspectedProbe = await inspectProbeAssetSet(
+  const inspectedProbe = await inspectHistoricalProbeAssetSet(
     path.join(bundleDir, "probe-assets"),
     {
       expectedVersion: probe.version,

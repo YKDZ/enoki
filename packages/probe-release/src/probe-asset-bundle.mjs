@@ -67,9 +67,40 @@ export const probeTargets = Object.freeze([
   "x86_64-unknown-linux-musl",
 ]);
 
-export async function inspectProbeBundleArchiveBytes(
+const bootstrapClosurePolicies = Object.freeze({
+  historicalOptional: Symbol("historical-optional"),
+  required: Symbol("required"),
+  runtimeForbidden: Symbol("runtime-forbidden"),
+});
+
+export function inspectProbeBundleArchiveBytes(archive, input) {
+  return inspectProbeBundleArchiveBytesWithPolicy(
+    archive,
+    input,
+    bootstrapClosurePolicies.required,
+  );
+}
+
+export function inspectHistoricalProbeBundleArchiveBytes(archive, input) {
+  return inspectProbeBundleArchiveBytesWithPolicy(
+    archive,
+    input,
+    bootstrapClosurePolicies.historicalOptional,
+  );
+}
+
+export function inspectRuntimeProbeBundleArchiveBytes(archive, input) {
+  return inspectProbeBundleArchiveBytesWithPolicy(
+    archive,
+    input,
+    bootstrapClosurePolicies.runtimeForbidden,
+  );
+}
+
+async function inspectProbeBundleArchiveBytesWithPolicy(
   archive,
   { bundledBootstrap, requireEmbeddedProbeIdentity = true, target, version },
+  bootstrapClosurePolicy,
 ) {
   const extractionDir = await mkdtemp(
     path.join(tmpdir(), "enoki-probe-bundle-"),
@@ -101,6 +132,14 @@ export async function inspectProbeBundleArchiveBytes(
       listing !== `${componentListing.join("\n")}\n`
     ) {
       throw new Error("Probe bundle archive closure is invalid");
+    }
+    if (
+      (bootstrapClosurePolicy === bootstrapClosurePolicies.required &&
+        !hasBundledBootstrap) ||
+      (bootstrapClosurePolicy === bootstrapClosurePolicies.runtimeForbidden &&
+        hasBundledBootstrap)
+    ) {
+      throw new Error("Probe bundle Bootstrap closure is invalid");
     }
     try {
       await execFileAsync(

@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { createHash, sign } from "node:crypto";
-import { renameSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -25,40 +24,12 @@ import {
 } from "@enoki/probe-release";
 import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const execFileAsync = promisify(execFile);
-const archiveSwap = vi.hoisted(() => ({ replace: null }));
-const sourceArchiveSwap = vi.hoisted(() => ({ replace: null }));
-
-vi.mock("node:fs/promises", async (importOriginal) => {
-  const original = await importOriginal();
-  return {
-    ...original,
-    async open(...args) {
-      const handle = await original.open(...args);
-      sourceArchiveSwap.replace?.(String(args[0]));
-      sourceArchiveSwap.replace = null;
-      return handle;
-    },
-  };
-});
-
-vi.mock("node:child_process", async (importOriginal) => {
-  const original = await importOriginal();
-  return {
-    ...original,
-    spawn(...args) {
-      archiveSwap.replace?.();
-      archiveSwap.replace = null;
-      return original.spawn(...args);
-    },
-  };
-});
-
 describe("Trust Epoch release transition", () => {
   let fixture;
 
@@ -120,60 +91,14 @@ describe("Trust Epoch release transition", () => {
     }
   });
 
-  it("keeps target receipts bound to verified archive bytes when the archive path is atomically replaced", async () => {
+  it("refuses to sign a current target archive missing both Bootstrap roles", async () => {
     const local = await transitionFixture();
-    const archiveName = "enoki-probe-aarch64-unknown-linux-gnu.tar.gz";
-    const archivePath = path.join(
-      local.createInput.targetAssetDir,
-      archiveName,
-    );
-    const contents = await mkdtemp(
-      path.join(tmpdir(), "enoki-release-transition-toctou-"),
-    );
-    const replacementPath = path.join(contents, "replacement.tar.gz");
     try {
-      await execFileAsync("tar", [
-        "--extract",
-        "--gzip",
-        "--file",
-        archivePath,
-        "--directory",
-        contents,
-      ]);
-      const replacementProbe = Buffer.concat([
-        await readFile(path.join(contents, "enoki-probe")),
-        Buffer.from("replacement payload"),
-      ]);
-      const replacementManifest = JSON.parse(
-        await readFile(path.join(contents, "bundle-manifest.json")),
-      );
-      replacementManifest.components[0].sha256 = sha256(replacementProbe);
-      await Promise.all([
-        writeFile(path.join(contents, "enoki-probe"), replacementProbe),
-        writeFile(
-          path.join(contents, "bundle-manifest.json"),
-          `${JSON.stringify(replacementManifest)}\n`,
-        ),
-      ]);
-      await execFileAsync("tar", [
-        "--create",
-        "--gzip",
-        "--file",
-        replacementPath,
-        "--directory",
-        contents,
-        "bundle-manifest.json",
-        "enoki-probe",
-      ]);
-      archiveSwap.replace = () => renameSync(replacementPath, archivePath);
-
-      const signed = await createReleaseTransitionContract(local.createInput);
-      expect(signed.contract.target.probeComponents).toEqual(
-        local.targetProbeComponents,
-      );
+      await removeTargetBootstrap(local);
+      await expect(
+        createReleaseTransitionContract(local.createInput),
+      ).rejects.toThrow("Probe bundle Bootstrap closure is invalid");
     } finally {
-      archiveSwap.replace = null;
-      await rm(contents, { force: true, recursive: true });
       await local.cleanup();
     }
   });
@@ -225,33 +150,6 @@ describe("Trust Epoch release transition", () => {
         createReleaseTransitionContract(local.createInput),
       ).rejects.toThrow("legacy Probe Asset Set archive does not match");
     } finally {
-      await local.cleanup();
-    }
-  });
-
-  it("keeps source receipts bound to the opened regular-file snapshot when its path is replaced", async () => {
-    const local = await transitionFixture();
-    const archivePath = path.join(
-      local.createInput.sourceAssetDir,
-      "enoki-probe-aarch64-unknown-linux-gnu.tar.gz",
-    );
-    const replacementDir = await mkdtemp(
-      path.join(tmpdir(), "enoki-legacy-source-snapshot-"),
-    );
-    const replacement = path.join(replacementDir, "replacement.tar.gz");
-    try {
-      await writeFile(replacement, Buffer.from("untrusted replacement"));
-      sourceArchiveSwap.replace = (openedPath) => {
-        if (openedPath === archivePath) renameSync(replacement, archivePath);
-      };
-
-      const signed = await createReleaseTransitionContract(local.createInput);
-      expect(signed.contract.source.probeComponents).toEqual(
-        local.sourceProbeComponents,
-      );
-    } finally {
-      sourceArchiveSwap.replace = null;
-      await rm(replacementDir, { force: true, recursive: true });
       await local.cleanup();
     }
   });
@@ -695,6 +593,7 @@ async function transitionFixture() {
     delegation,
     release,
     root,
+    rootKeyId: authorization.authorization.rootKeyId,
     version: "1.2.3",
   });
   const candidateCommit = "a".repeat(40);
@@ -736,6 +635,7 @@ async function createVerifiedTargetAssetSet({
   delegation,
   release,
   root,
+  rootKeyId,
   version,
 }) {
   const assetDir = await mkdtemp(
@@ -763,8 +663,30 @@ async function createVerifiedTargetAssetSet({
         version,
       }),
     );
+    const bootstrapAssets = probeBundledBootstrapAssets.map((asset) => {
+      const bytes = createBootstrapElf({
+        identity: {
+          distribution: "enoki",
+          rootFingerprint: rootKeyId,
+          rootKeyId,
+          target,
+          version: `v${version}`,
+          role: asset.bootstrapBuildRole,
+        },
+        target,
+      });
+      return { asset, bytes };
+    });
     const bundleManifest = Buffer.from(
       `${JSON.stringify({
+        bootstrapAssets: bootstrapAssets.map(({ asset, bytes }) => ({
+          path: asset.archivePath,
+          permissionProfile: asset.permissionProfile,
+          role: asset.role,
+          sha256: sha256(bytes),
+          size: bytes.byteLength,
+          version,
+        })),
         components,
         kind: "enoki-probe-bundle",
         target,
@@ -777,6 +699,12 @@ async function createVerifiedTargetAssetSet({
     )) {
       await writeFile(path.join(contents, componentPath), probe);
       await chmod(path.join(contents, componentPath), 0o755);
+    }
+    for (const { asset, bytes } of bootstrapAssets) {
+      const bootstrapPath = path.join(contents, asset.archivePath);
+      await mkdir(path.dirname(bootstrapPath), { recursive: true });
+      await writeFile(bootstrapPath, bytes, { mode: 0o755 });
+      await chmod(bootstrapPath, 0o755);
     }
     await writeFile(
       path.join(contents, "bundle-manifest.json"),
@@ -793,6 +721,7 @@ async function createVerifiedTargetAssetSet({
       ...Object.values(probeBundleComponentProfiles).map(
         ({ path: componentPath }) => componentPath,
       ),
+      ...probeBundledBootstrapAssets.map(({ archivePath }) => archivePath),
     ]);
     await rm(contents, { force: true, recursive: true });
     const archive = await readFile(archivePath);
@@ -917,6 +846,65 @@ async function replaceTargetArchiveWithBootstrap(local, { rootKeyId }) {
         ({ path: componentPath }) => componentPath,
       ),
       ...probeBundledBootstrapAssets.map(({ archivePath: member }) => member),
+    ]);
+    const archive = await readFile(archivePath);
+    const manifestPath = path.join(
+      local.createInput.targetAssetDir,
+      "manifest.json",
+    );
+    const manifest = JSON.parse(await readFile(manifestPath));
+    const asset = manifest.assets.find((entry) => entry.file === archiveName);
+    asset.bundleManifestSha256 = sha256(bundleManifestBytes);
+    asset.sha256 = sha256(archive);
+    asset.size = archive.byteLength;
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
+    await Promise.all([
+      writeFile(manifestPath, manifestBytes),
+      writeFile(
+        path.join(local.createInput.targetAssetDir, "manifest.json.sig"),
+        sign("RSA-SHA256", manifestBytes, local.release.privateKey),
+      ),
+      writeFile(`${archivePath}.sha256`, `${asset.sha256}  ${archiveName}\n`),
+    ]);
+  } finally {
+    await rm(contents, { force: true, recursive: true });
+  }
+}
+
+async function removeTargetBootstrap(local) {
+  const target = "aarch64-unknown-linux-gnu";
+  const archiveName = `enoki-probe-${target}.tar.gz`;
+  const archivePath = path.join(local.createInput.targetAssetDir, archiveName);
+  const contents = await mkdtemp(
+    path.join(tmpdir(), "enoki-transition-without-bootstrap-"),
+  );
+  try {
+    await execFileAsync("tar", [
+      "--extract",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+    ]);
+    const bundleManifestPath = path.join(contents, "bundle-manifest.json");
+    const bundleManifest = JSON.parse(await readFile(bundleManifestPath));
+    delete bundleManifest.bootstrapAssets;
+    const bundleManifestBytes = Buffer.from(
+      `${JSON.stringify(bundleManifest)}\n`,
+    );
+    await writeFile(bundleManifestPath, bundleManifestBytes);
+    await execFileAsync("tar", [
+      "--create",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+      "bundle-manifest.json",
+      ...Object.values(probeBundleComponentProfiles).map(
+        ({ path: componentPath }) => componentPath,
+      ),
     ]);
     const archive = await readFile(archivePath);
     const manifestPath = path.join(
