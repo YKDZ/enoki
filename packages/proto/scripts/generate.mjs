@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -7,65 +14,103 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(packageRoot, "../..");
 const protoRoot = resolve(packageRoot, "proto");
 const protoFile = resolve(packageRoot, "proto/enoki/v1/probe.proto");
-const tsOut = resolve(packageRoot, "src/generated/ts");
+const generatedOut = resolve(packageRoot, "src/generated");
+const tsOut = resolve(generatedOut, "ts");
 const generatedTsFile = resolve(tsOut, "enoki_pb.js");
 const generatedTsTypesFile = resolve(tsOut, "enoki_pb.d.ts");
-const generatedTsTypesInputFile = resolve(tsOut, "enoki_pb.types-input.js");
-const rustOut = resolve(packageRoot, "src/generated/rust");
+const rustOut = resolve(generatedOut, "rust");
+const stagingOut = mkdtempSync(resolve(dirname(generatedOut), ".generated-"));
+const stagingTsOut = resolve(stagingOut, "ts");
+const stagingTsFile = resolve(stagingTsOut, "enoki_pb.js");
+const stagingTsTypesFile = resolve(stagingTsOut, "enoki_pb.d.ts");
+const stagingTsTypesInputFile = resolve(
+  stagingTsOut,
+  "enoki_pb.types-input.js",
+);
+const stagingRustOut = resolve(stagingOut, "rust");
 
-mkdirSync(tsOut, { recursive: true });
-mkdirSync(rustOut, { recursive: true });
+class CommandFailedError extends Error {
+  constructor(status) {
+    super();
+    this.status = status;
+  }
+}
 
-run("pnpm", [
-  "exec",
-  "pbjs",
-  "--target",
-  "static-module",
-  "--path",
-  protoRoot,
-  "--wrap",
-  "es6",
-  "--force-long",
-  "--out",
-  generatedTsFile,
-  protoFile,
-]);
+try {
+  mkdirSync(stagingTsOut, { recursive: true });
+  mkdirSync(stagingRustOut, { recursive: true });
 
-run("pnpm", [
-  "exec",
-  "pbjs",
-  "--target",
-  "static-module",
-  "--path",
-  protoRoot,
-  "--wrap",
-  "default",
-  "--out",
-  generatedTsTypesInputFile,
-  protoFile,
-]);
+  run("pnpm", [
+    "exec",
+    "pbjs",
+    "--target",
+    "static-module",
+    "--path",
+    protoRoot,
+    "--wrap",
+    "es6",
+    "--force-long",
+    "--out",
+    stagingTsFile,
+    protoFile,
+  ]);
 
-run("pnpm", [
-  "exec",
-  "pbts",
-  "--out",
-  generatedTsTypesFile,
-  generatedTsTypesInputFile,
-]);
+  run("pnpm", [
+    "exec",
+    "pbjs",
+    "--target",
+    "static-module",
+    "--path",
+    protoRoot,
+    "--wrap",
+    "default",
+    "--out",
+    stagingTsTypesInputFile,
+    protoFile,
+  ]);
 
-rewriteGeneratedEsmImports(generatedTsFile);
-removeGeneratedTsTypesInput(generatedTsTypesInputFile);
+  run("pnpm", [
+    "exec",
+    "pbts",
+    "--out",
+    stagingTsTypesFile,
+    stagingTsTypesInputFile,
+  ]);
 
-run("cargo", [
-  "run",
-  "--quiet",
-  "--package",
-  "enoki-proto-gen",
-  "--",
-  protoFile,
-  protoRoot,
-  rustOut,
-]);
+  rewriteGeneratedEsmImports(stagingTsFile);
+  removeGeneratedTsTypesInput(stagingTsTypesInputFile);
+
+  run("cargo", [
+    "run",
+    "--quiet",
+    "--package",
+    "enoki-proto-gen",
+    "--",
+    protoFile,
+    protoRoot,
+    stagingRustOut,
+  ]);
+
+  publishGeneratedOutput(stagingTsFile, generatedTsFile);
+  publishGeneratedOutput(stagingTsTypesFile, generatedTsTypesFile);
+  publishGeneratedOutput(
+    resolve(stagingRustOut, "enoki.v1.rs"),
+    resolve(rustOut, "enoki.v1.rs"),
+  );
+} catch (error) {
+  if (error instanceof CommandFailedError) {
+    process.exitCode = error.status;
+  } else {
+    throw error;
+  }
+} finally {
+  rmSync(stagingOut, { force: true, recursive: true });
+}
+
+function publishGeneratedOutput(source, destination) {
+  mkdirSync(dirname(destination), { recursive: true });
+  renameSync(source, destination);
+}
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -78,7 +123,7 @@ function run(command, args) {
   }
 
   if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+    throw new CommandFailedError(result.status ?? 1);
   }
 }
 
