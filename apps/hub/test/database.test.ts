@@ -1,4 +1,5 @@
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { generateKeyPairSync } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -1469,6 +1470,55 @@ describe("Hub database", () => {
     ).toMatchObject({
       sourceProbeVersion: "1.2.3",
       targetKind: "manual_reinstall",
+    });
+    const candidate = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const candidatePublicKeyPem = candidate.publicKey.export({
+      format: "pem",
+      type: "spki",
+    });
+    const registration = database.enrollments.registerNewHost({
+      host: {
+        architecture: null,
+        clockSkewDetected: false,
+        connectAddress: "10.0.0.20",
+        createdAtMs: 1_725_000_065_000,
+        displayName: "Recovered Host",
+        displayNameEdited: false,
+        probeConfigurationVersion: "default-v1",
+        probeId: "probe-terminal-successor",
+        probePublicKeyPem: candidatePublicKeyPem,
+        probeSecretHash: "successor-secret",
+      },
+      hostProfile: null,
+      registeredAtMs: 1_725_000_065_000,
+      registrationAttempt: {
+        candidatePublicKeyPem,
+        committedSourceProbeSha256: "c".repeat(64),
+        enrollmentId: "enr_terminal_successor_0002",
+        hostId: 7,
+        hubOrigin: "https://hub.example.test",
+        oldProbeId: "probe-current",
+        outcome: (host) =>
+          Buffer.from(
+            (enoki.v1.ProbeRegistrationResponse as any).encode(
+              (enoki.v1.ProbeRegistrationResponse as any).create({
+                hostId: String(host.id),
+                probeId: host.probeId,
+              }),
+            ).finish(),
+          ),
+        signedAttemptSha256: "e".repeat(64),
+        sourceProbeVersion: "1.2.3",
+        targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetProbeVersion: "1.2.4",
+      },
+      tokenHash: "successor-token",
+      verificationDeadlineAtMs: 1_725_000_125_000,
+    });
+    expect(registration).toMatchObject({
+      enrollment: { status: "verifying" },
+      host: { id: 7, probeId: "probe-terminal-successor" },
+      replayed: false,
     });
     database.close();
   });
