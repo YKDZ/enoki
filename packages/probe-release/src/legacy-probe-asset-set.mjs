@@ -152,7 +152,11 @@ export async function inspectLegacyProbeAssetSet(
   if (!installer.includes(expectedSigningKeySha256)) {
     throw new Error("legacy Probe installer does not pin its signing identity");
   }
-  return { probeComponents, version: manifest.version };
+  return {
+    assetSetManifestSha256: sha256(manifestBytes),
+    probeComponents,
+    version: manifest.version,
+  };
 }
 
 async function inspectLegacyProbeArchive(archivePath, { target, version }) {

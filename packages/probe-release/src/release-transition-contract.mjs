@@ -5,7 +5,6 @@ import {
   sign,
   verify,
 } from "node:crypto";
-import { readFile } from "node:fs/promises";
 
 import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
 import { probeTargets } from "./probe-asset-bundle.mjs";
@@ -75,9 +74,6 @@ export async function createReleaseTransitionContract(input) {
       expectedVersion: authorization.legacyRelease.githubRelease.tag.slice(1),
     },
   );
-  const sourceAssetSetManifestSha256 = sha256(
-    await readFile(`${input.sourceAssetDir}/manifest.json`),
-  );
   const contract = validateContract({
     candidateCommit: input.candidateCommit,
     distribution: authorization.distribution,
@@ -87,7 +83,7 @@ export async function createReleaseTransitionContract(input) {
     rootKeyId: authorization.rootKeyId,
     schemaVersion: 1,
     source: {
-      assetSetManifestSha256: sourceAssetSetManifestSha256,
+      assetSetManifestSha256: sourceAssetSet.assetSetManifestSha256,
       assets: authorization.legacyRelease.assets,
       commit: authorization.legacyRelease.githubRelease.peeledCommitSha,
       hubDigest: authorization.legacyRelease.hub.digest,
