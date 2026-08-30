@@ -44,7 +44,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/reusable-build-probe.yml
     with:
-      commit: a5df8786c69dd1d08793aeb6d31a21b8d963faa9
+      commit: 81cab7937e1c1c2658041304e7b68b0e7a77889b
       package-artifacts: true
       verify-reproducible: true
       version: v0.1.75
@@ -54,7 +54,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/reusable-build-probe-bootstrap.yml
     with:
-      commit: a5df8786c69dd1d08793aeb6d31a21b8d963faa9
+      commit: 81cab7937e1c1c2658041304e7b68b0e7a77889b
       distribution: enoki
       version: v0.1.75
 
@@ -70,7 +70,7 @@ jobs:
           fetch-depth: 1
           path: source
           persist-credentials: false
-          ref: a5df8786c69dd1d08793aeb6d31a21b8d963faa9
+          ref: 81cab7937e1c1c2658041304e7b68b0e7a77889b
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
