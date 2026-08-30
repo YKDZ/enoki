@@ -153,17 +153,23 @@ describe("Release Baseline resolution", () => {
     }
   });
 
-  it("resolves the exact root-authorized v0.1.74 baseline as replacement-required", async () => {
+  it("normalizes the root-authorized migration identity for the strict E2E baseline schema", async () => {
     const fixture = await createLegacyTrustEpochFixture();
     try {
-      await expect(
-        resolveReleaseBaseline(fixture.arguments_),
-      ).resolves.toMatchObject({
+      const descriptor = await resolveReleaseBaseline(fixture.arguments_);
+      expect(descriptor).toMatchObject({
         kind: "enoki-trust-epoch-migration-baseline",
         schemaVersion: 1,
         tag: "v0.1.74",
         transition: "replacement-required",
       });
+      expect(Object.keys(descriptor.githubRelease).sort()).toEqual([
+        "id",
+        "peeledCommitSha",
+        "repository",
+        "tagRefSha",
+        "targetCommitish",
+      ]);
       await expect(
         recheckReleaseBaseline({
           bundleDir: fixture.outputDir,
@@ -173,6 +179,20 @@ describe("Release Baseline resolution", () => {
           trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
       ).resolves.toMatchObject({ transition: "replacement-required" });
+
+      const descriptorPath = path.join(
+        fixture.outputDir,
+        "release-baseline.json",
+      );
+      const persisted = JSON.parse(await readFile(descriptorPath, "utf8"));
+      persisted.githubRelease.tag = persisted.tag;
+      await writeFile(descriptorPath, `${JSON.stringify(persisted)}\n`);
+      await expect(
+        validateResolvedReleaseBaseline(fixture.outputDir, {
+          candidateVersion: "v0.1.75",
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow("fields are invalid");
     } finally {
       await fixture.cleanup();
     }

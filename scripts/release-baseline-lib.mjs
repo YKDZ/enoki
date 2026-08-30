@@ -617,7 +617,13 @@ async function resolveTrustEpochMigrationBaseline({
         signatureSha256: sha256(trustEpochMigrationAuthorizationSignature),
       },
       catalogSnapshot,
-      githubRelease: expectedLegacyRelease.githubRelease,
+      githubRelease: {
+        id: expectedLegacyRelease.githubRelease.id,
+        peeledCommitSha: expectedLegacyRelease.githubRelease.peeledCommitSha,
+        repository: expectedLegacyRelease.githubRelease.repository,
+        tagRefSha: expectedLegacyRelease.githubRelease.tagRefSha,
+        targetCommitish: expectedLegacyRelease.githubRelease.targetCommitish,
+      },
       hub: {
         archive: `hub/${hubArchiveFile}`,
         archiveSha256: await fileSha256(hubArchivePath),
