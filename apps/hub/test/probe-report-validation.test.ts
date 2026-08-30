@@ -23,9 +23,9 @@ describe("Probe report admission", () => {
   it("admits an ordinary observation without reclassifying it as startup", () => {
     const admitted = admitProbeReport({
       bootId: "boot-1",
-      metrics: [{ collectedAtMs: 1234, sequence: 7 }],
-      sequenceEnd: 7,
-      sequenceStart: 7,
+      metrics: [{ collectedAtMs: 1234, sequence: 1 }],
+      sequenceEnd: 1,
+      sequenceStart: 1,
       snapshots: [],
     });
 

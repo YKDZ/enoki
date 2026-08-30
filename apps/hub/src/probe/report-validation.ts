@@ -319,6 +319,23 @@ export function reportResponsibilityFor(input: {
   | null {
   const snapshots = (input.request.snapshots ?? []) as ProtoMessage[];
   const snapshot = input.hostProfileSnapshot;
+  const isCurrentBootReport =
+    input.report.sequenceStart === 1 &&
+    input.report.sequenceEnd === 1 &&
+    nonemptyString(input.request.probeAssetBundleVersion);
+
+  // Current Probe Boot Reports only establish the reporting channel. Any
+  // observation-shaped content belongs to a subsequent Observation Batch; do
+  // not let a sequence-one report reach report reconciliation with it.
+  if (
+    isCurrentBootReport &&
+    ((input.request.metrics ?? []).length > 0 ||
+      snapshots.length > 0 ||
+      (input.request.cpuResourceCollectionOutcomes ?? []).length > 0 ||
+      input.request.observationWindowFailure != null)
+  ) {
+    return null;
+  }
 
   // 旧版 Probe 早于紧凑 snapshot reference。保留其普通 Observation Batch
   // 兼容性，包括从未作为 Probe Startup Report 的旧版 sequence-one metrics
