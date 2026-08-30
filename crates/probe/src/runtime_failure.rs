@@ -3,6 +3,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::Read,
+    os::fd::AsRawFd,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
@@ -25,6 +26,10 @@ const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
+const PAIR_LOCK_PATH: &str = "/run/enoki-probe/runtime-failure-pair.lock";
+const LOCAL_RETRY_RECEIPT_PATH: &str =
+    "/var/lib/enoki-probe/runtime-failure/local-retry-receipt.json";
+const UPGRADE_ATTEMPT_PATH: &str = "/var/lib/enoki-probe-bootstrap/probe-upgrade-attempt.toml";
 
 mod installed_bundle_repair;
 use installed_bundle_repair::write_installed_bundle_repair_status;
@@ -151,6 +156,161 @@ struct RuntimeFailureEpoch {
     result: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LocalRetryProgress {
+    Committed,
+    EpochRemoved,
+    LatchRemoved,
+    RetryInvoked,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LocalRetryReceipt {
+    schema_version: u16,
+    generation: String,
+    epoch_sha256: String,
+    progress: LocalRetryProgress,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalRetryCrashPoint {
+    ReceiptCommitted,
+    EpochUnlinked,
+    EpochRemovedReceipt,
+    LatchUnlinked,
+    LatchRemovedReceipt,
+    SystemdInvoked,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCAL_RETRY_CRASH_POINT: std::cell::Cell<Option<LocalRetryCrashPoint>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn fail_local_retry_after(point: LocalRetryCrashPoint) {
+    LOCAL_RETRY_CRASH_POINT.set(Some(point));
+}
+
+#[cfg(test)]
+fn local_retry_crash_after(point: LocalRetryCrashPoint) -> std::io::Result<()> {
+    if LOCAL_RETRY_CRASH_POINT.get() == Some(point) {
+        LOCAL_RETRY_CRASH_POINT.set(None);
+        return Err(std::io::Error::other("injected abrupt local retry exit"));
+    }
+    Ok(())
+}
+
+/// The OS releases this guard after an abrupt process exit.  Recovery never
+/// interprets the lock as a durable fact; it only serializes one short pair
+/// transition against recorder, evidence, and typed consumers.
+pub(crate) struct RuntimeFailurePairLock {
+    _file: File,
+}
+
+pub(crate) fn acquire_runtime_failure_pair_lock_for_state(
+    state_dir: &Path,
+    expected_uid: u32,
+) -> std::io::Result<RuntimeFailurePairLock> {
+    let path = runtime_failure_pair_lock_path_for_state(state_dir)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("runtime failure lock path invalid"))?;
+    ensure_directory(parent, 0o700, Some((expected_uid, expected_uid)))?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.file_type().is_symlink()
+        || parent_metadata.uid() != expected_uid
+        || parent_metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(std::io::Error::other("runtime failure lock parent invalid"));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file()
+        || opened.uid() != expected_uid
+        || opened.mode() & 0o7777 != 0o600
+        || opened.nlink() != 1
+    {
+        return Err(std::io::Error::other(
+            "runtime failure lock boundary invalid",
+        ));
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(RuntimeFailurePairLock { _file: file })
+}
+
+pub(crate) fn acquire_runtime_failure_pair_cleanup_lock_for_state(
+    state_dir: &Path,
+    expected_uid: u32,
+) -> std::io::Result<RuntimeFailurePairLock> {
+    let lock = acquire_runtime_failure_pair_lock_for_state(state_dir, expected_uid)?;
+    let failure_dir = state_dir.join("runtime-failure");
+    let metadata = match fs::symlink_metadata(&failure_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(lock),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(std::io::Error::other(
+            "runtime failure cleanup boundary invalid",
+        ));
+    }
+    let directory = File::open(&failure_dir)?;
+    for name in ["epoch.toml", "latch"] {
+        match fs::remove_file(failure_dir.join(name)) {
+            Ok(()) => directory.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(lock)
+}
+
+pub(crate) fn runtime_failure_pair_lock_path_for_state(
+    state_dir: &Path,
+) -> std::io::Result<PathBuf> {
+    let root = if state_dir.ends_with("var/lib/enoki-probe") {
+        state_dir
+            .ancestors()
+            .nth(3)
+            .ok_or_else(|| std::io::Error::other("Probe state path invalid"))?
+    } else {
+        state_dir
+            .parent()
+            .ok_or_else(|| std::io::Error::other("Probe state path invalid"))?
+    };
+    Ok(root.join(PAIR_LOCK_PATH.trim_start_matches('/')))
+}
+
+fn acquire_runtime_failure_pair_lock_at(
+    root: &Path,
+    expected_uid: u32,
+) -> std::io::Result<RuntimeFailurePairLock> {
+    debug_assert_eq!(
+        rooted(root, PAIR_LOCK_PATH),
+        runtime_failure_pair_lock_path_for_state(&rooted(root, "/var/lib/enoki-probe"))?
+    );
+    acquire_runtime_failure_pair_lock_for_state(&rooted(root, "/var/lib/enoki-probe"), expected_uid)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SignedInstalledBundleFailureEvidence {
     pub evidence: InstalledBundleFailureEvidenceV1,
@@ -231,34 +391,137 @@ fn retry_runtime_at(
     expected_uid: u32,
     systemd: &mut impl RuntimeRetrySystemd,
 ) -> std::io::Result<()> {
+    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
     let epoch_path = rooted(root, EPOCH_PATH);
     let latch_path = rooted(root, LATCH_PATH);
-    let epoch_bytes = trusted_file(&epoch_path, expected_uid, 0o600)?;
-    let epoch: RuntimeFailureEpoch = toml::from_str(
-        std::str::from_utf8(&epoch_bytes)
-            .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
-    )
-    .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
-    if latch != epoch.generation.as_bytes()
-        || epoch.boot_id
-            != String::from_utf8(trusted_file(
-                &rooted(root, BOOT_ID_PATH),
-                expected_uid,
-                0o444,
-            )?)
-            .map_err(|_| std::io::Error::other("boot binding invalid"))?
-            .trim()
-    {
-        return Err(std::io::Error::other("failure epoch binding invalid"));
+    let receipt_path = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
+    let mut receipt = if receipt_path.exists() {
+        let bytes = trusted_file(&receipt_path, expected_uid, 0o600)?;
+        let receipt: LocalRetryReceipt = serde_json::from_slice(&bytes)
+            .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
+        if receipt.schema_version != 1
+            || decode_lower_hex_32(&receipt.generation).is_none()
+            || decode_lower_hex_32(&receipt.epoch_sha256).is_none()
+        {
+            return Err(std::io::Error::other("local retry receipt invalid"));
+        }
+        receipt
+    } else {
+        let (epoch, _, epoch_bytes) = current_epoch_at_locked(root, expected_uid)?;
+        if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
+            || runtime_failure_creation_reserved_at(root, expected_uid)?
+        {
+            return Err(std::io::Error::other("failure pair consumption pending"));
+        }
+        let receipt = LocalRetryReceipt {
+            schema_version: 1,
+            generation: epoch.generation,
+            epoch_sha256: sha256(&epoch_bytes),
+            progress: LocalRetryProgress::Committed,
+        };
+        write_local_retry_receipt(root, expected_uid, &receipt)?;
+        #[cfg(test)]
+        local_retry_crash_after(LocalRetryCrashPoint::ReceiptCommitted)?;
+        receipt
+    };
+
+    if receipt.progress == LocalRetryProgress::RetryInvoked {
+        if epoch_path.exists() || latch_path.exists() {
+            return Err(std::io::Error::other("local retry receipt binding invalid"));
+        }
+        return systemd.retry_fixed_runtime();
     }
-    fs::remove_file(&latch_path)?;
-    fs::remove_file(&epoch_path)?;
-    File::open(rooted(root, FAILURE_DIR))?.sync_all()?;
-    systemd.retry_fixed_runtime()
+
+    if receipt.progress == LocalRetryProgress::Committed {
+        if epoch_path.exists() {
+            let (epoch, _, epoch_bytes) = current_epoch_binding_at(root, expected_uid)?;
+            let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
+            if epoch.generation != receipt.generation
+                || sha256(&epoch_bytes) != receipt.epoch_sha256
+                || latch != receipt.generation.as_bytes()
+            {
+                return Err(std::io::Error::other("local retry receipt binding invalid"));
+            }
+            remove_regular_file(&epoch_path, 0o600, Some((expected_uid, expected_uid)))?;
+            #[cfg(test)]
+            local_retry_crash_after(LocalRetryCrashPoint::EpochUnlinked)?;
+        } else {
+            let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
+            if latch != receipt.generation.as_bytes() {
+                return Err(std::io::Error::other("local retry receipt binding invalid"));
+            }
+        }
+        receipt.progress = LocalRetryProgress::EpochRemoved;
+        write_local_retry_receipt(root, expected_uid, &receipt)?;
+        #[cfg(test)]
+        local_retry_crash_after(LocalRetryCrashPoint::EpochRemovedReceipt)?;
+    }
+
+    if receipt.progress == LocalRetryProgress::EpochRemoved {
+        if epoch_path.exists() {
+            return Err(std::io::Error::other("local retry receipt binding invalid"));
+        }
+        match trusted_file(&latch_path, expected_uid, 0o600) {
+            Ok(latch) if latch == receipt.generation.as_bytes() => {
+                remove_regular_file(&latch_path, 0o600, Some((expected_uid, expected_uid)))?;
+                #[cfg(test)]
+                local_retry_crash_after(LocalRetryCrashPoint::LatchUnlinked)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(std::io::Error::other("local retry receipt binding invalid")),
+        }
+        receipt.progress = LocalRetryProgress::LatchRemoved;
+        write_local_retry_receipt(root, expected_uid, &receipt)?;
+        #[cfg(test)]
+        local_retry_crash_after(LocalRetryCrashPoint::LatchRemovedReceipt)?;
+    }
+
+    if receipt.progress != LocalRetryProgress::LatchRemoved {
+        return Err(std::io::Error::other("local retry recovery invalid"));
+    }
+    let retry_result = systemd.retry_fixed_runtime();
+    #[cfg(test)]
+    local_retry_crash_after(LocalRetryCrashPoint::SystemdInvoked)?;
+    receipt.progress = LocalRetryProgress::RetryInvoked;
+    write_local_retry_receipt(root, expected_uid, &receipt)?;
+    retry_result
+}
+
+fn write_local_retry_receipt(
+    root: &Path,
+    expected_uid: u32,
+    receipt: &LocalRetryReceipt,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(receipt)
+        .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
+    atomic_write(
+        &rooted(root, LOCAL_RETRY_RECEIPT_PATH),
+        &bytes,
+        0o600,
+        Some((expected_uid, expected_uid)),
+    )
 }
 
 fn issue_installed_bundle_failure_evidence_at(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    request_nonce: &str,
+) -> std::io::Result<SignedInstalledBundleFailureEvidence> {
+    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
+    issue_installed_bundle_failure_evidence_at_locked(
+        root,
+        expected_uid,
+        systemd,
+        issued_at_ms,
+        expires_at_ms,
+        request_nonce,
+    )
+}
+
+fn issue_installed_bundle_failure_evidence_at_locked(
     root: &Path,
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
@@ -276,7 +539,12 @@ fn issue_installed_bundle_failure_evidence_at(
     if state.active_state != "failed" || state.result != "start-limit-hit" {
         return Err(std::io::Error::other("failure epoch is no longer current"));
     }
-    let (epoch, metadata) = current_epoch_at(root, expected_uid)?;
+    let (epoch, metadata, _) = current_epoch_at_locked(root, expected_uid)?;
+    if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
+        || runtime_failure_creation_reserved_at(root, expected_uid)?
+    {
+        return Err(std::io::Error::other("failure pair consumption pending"));
+    }
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
         .ok_or_else(|| std::io::Error::other("install authority unavailable"))?;
@@ -314,7 +582,9 @@ fn validate_installed_bundle_repair_authority_at(
     authority_signature: &str,
     now_ms: u64,
 ) -> Result<InstalledBundleRepairGrant, InstalledBundleRepairError> {
-    let current = issue_installed_bundle_failure_evidence_at(
+    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
+        .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
+    let current = issue_installed_bundle_failure_evidence_at_locked(
         root,
         expected_uid,
         systemd,
@@ -323,7 +593,7 @@ fn validate_installed_bundle_repair_authority_at(
         &signed.evidence.request_nonce,
     )
     .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
-    let (_, metadata) = current_epoch_at(root, expected_uid)
+    let (_, metadata, _) = current_epoch_at_locked(root, expected_uid)
         .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
@@ -352,10 +622,22 @@ fn validate_installed_bundle_repair_authority_at(
     })
 }
 
-fn current_epoch_at(
+fn current_epoch_at_locked(
     root: &Path,
     expected_uid: u32,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value)> {
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
+    let (epoch, metadata, epoch_bytes) = current_epoch_binding_at(root, expected_uid)?;
+    let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)?;
+    if latch != epoch.generation.as_bytes() {
+        return Err(std::io::Error::other("failure epoch binding invalid"));
+    }
+    Ok((epoch, metadata, epoch_bytes))
+}
+
+fn current_epoch_binding_at(
+    root: &Path,
+    expected_uid: u32,
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
     trusted_state_directory(
         &rooted(root, "/var/lib/enoki-probe"),
         &rooted(root, IDENTITY_PATH),
@@ -366,7 +648,6 @@ fn current_epoch_at(
             .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
     )
     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)?;
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
     let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
@@ -389,7 +670,7 @@ fn current_epoch_at(
     if epoch.schema_version != 1
         || epoch.result != "start-limit-hit"
         || epoch.unit != RUNTIME_UNIT
-        || latch != epoch.generation.as_bytes()
+        || decode_lower_hex_32(&epoch.generation).is_none()
         || epoch.boot_id != boot_id.trim()
         || epoch.unit_sha256 != sha256(&unit)
         || epoch.identity_receipt_sha256 != sha256(&identity)
@@ -405,7 +686,7 @@ fn current_epoch_at(
     {
         return Err(std::io::Error::other("failure epoch binding invalid"));
     }
-    Ok((epoch, metadata))
+    Ok((epoch, metadata, epoch_bytes))
 }
 
 fn record_runtime_failure_at(
@@ -414,6 +695,7 @@ fn record_runtime_failure_at(
     systemd: &mut impl RuntimeFailureSystemd,
     generations: &mut impl FailureGenerationSource,
 ) -> std::io::Result<RuntimeFailureRecordOutcome> {
+    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
     let state = systemd.fixed_runtime_state()?;
     if state.active_state != "failed" || state.result != "start-limit-hit" {
         return Ok(RuntimeFailureRecordOutcome::Ignored);
@@ -425,9 +707,70 @@ fn record_runtime_failure_at(
         &rooted(root, "/var/lib/enoki-probe"),
         &rooted(root, IDENTITY_PATH),
     )?;
-    if epoch_path.exists() || latch_path.exists() {
-        current_epoch_at(root, expected_uid)?;
-        return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
+    let creation_reserved = runtime_failure_creation_reserved_at(root, expected_uid)?;
+    match (epoch_path.exists(), latch_path.exists()) {
+        (true, true) => {
+            let (epoch, _, _) = current_epoch_at_locked(root, expected_uid)?;
+            if creation_reserved
+                || runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
+            {
+                return Err(std::io::Error::other("failure pair consumption pending"));
+            }
+            return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
+        }
+        (true, false) => {
+            let (epoch, _, _) = current_epoch_binding_at(root, expected_uid)?;
+            if creation_reserved
+                || runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
+            {
+                return Err(std::io::Error::other("failure pair consumption pending"));
+            }
+            atomic_write(
+                &latch_path,
+                epoch.generation.as_bytes(),
+                0o600,
+                Some((expected_uid, expected_uid)),
+            )?;
+            return Ok(RuntimeFailureRecordOutcome::Latched);
+        }
+        (false, true) => {
+            let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
+            let generation = std::str::from_utf8(&latch)
+                .ok()
+                .filter(|value| decode_lower_hex_32(value).is_some())
+                .ok_or_else(|| std::io::Error::other("failure latch invalid"))?;
+            if creation_reserved
+                || runtime_failure_consumption_pending_at(root, expected_uid, generation)?
+            {
+                return Err(std::io::Error::other("failure pair consumption pending"));
+            }
+            let epoch = build_current_epoch(root, expected_uid, &state, generation)?;
+            let encoded = toml::to_string(&epoch)
+                .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
+            atomic_write(
+                &epoch_path,
+                encoded.as_bytes(),
+                0o600,
+                Some((expected_uid, expected_uid)),
+            )?;
+            return Ok(RuntimeFailureRecordOutcome::Latched);
+        }
+        (false, false) => {}
+    }
+
+    if creation_reserved {
+        return Err(std::io::Error::other("failure pair creation reserved"));
+    }
+
+    let retry_receipt = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
+    if retry_receipt.exists() {
+        let bytes = trusted_file(&retry_receipt, expected_uid, 0o600)?;
+        let receipt: LocalRetryReceipt = serde_json::from_slice(&bytes)
+            .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
+        if receipt.schema_version != 1 || receipt.progress != LocalRetryProgress::RetryInvoked {
+            return Err(std::io::Error::other("local retry recovery pending"));
+        }
+        remove_regular_file(&retry_receipt, 0o600, Some((expected_uid, expected_uid)))?;
     }
 
     if failure_dir.exists() {
@@ -435,6 +778,186 @@ fn record_runtime_failure_at(
     } else {
         ensure_directory(&failure_dir, 0o700, Some((expected_uid, expected_uid)))?;
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
+    }
+    let mut generation = [0_u8; 32];
+    generations.fill_generation(&mut generation)?;
+    let epoch = build_current_epoch(root, expected_uid, &state, &hex(&generation))?;
+    let encoded =
+        toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
+    atomic_write(
+        &epoch_path,
+        encoded.as_bytes(),
+        0o600,
+        Some((expected_uid, expected_uid)),
+    )?;
+    atomic_write(
+        &latch_path,
+        epoch.generation.as_bytes(),
+        0o600,
+        Some((expected_uid, expected_uid)),
+    )?;
+    Ok(RuntimeFailureRecordOutcome::Latched)
+}
+
+fn runtime_failure_consumption_pending_at(
+    root: &Path,
+    expected_uid: u32,
+    generation: &str,
+) -> std::io::Result<bool> {
+    if let Some(bytes) =
+        trusted_optional_file(&rooted(root, LOCAL_RETRY_RECEIPT_PATH), expected_uid, 0o600)?
+    {
+        let receipt: LocalRetryReceipt = serde_json::from_slice(&bytes)
+            .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
+        if receipt.schema_version != 1 || receipt.generation != generation {
+            return Err(std::io::Error::other("local retry receipt binding invalid"));
+        }
+        if receipt.progress != LocalRetryProgress::RetryInvoked {
+            return Ok(true);
+        }
+        return Err(std::io::Error::other(
+            "completed local retry retained a latch",
+        ));
+    }
+
+    if let Some(bytes) = trusted_optional_file(
+        &rooted(root, installed_bundle_repair::REPAIR_INTENT_PATH),
+        expected_uid,
+        0o600,
+    )? {
+        let intent: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| std::io::Error::other("repair intent invalid"))?;
+        let state = intent
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
+        if matches!(
+            state,
+            "admitted"
+                | "validation-pending"
+                | "temporary-runtime-healthy"
+                | "probe-active"
+                | "invalidation-committed"
+                | "epoch-removed"
+        ) {
+            let bound = intent
+                .get("authority")
+                .and_then(|authority| authority.get("generation"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| std::io::Error::other("repair intent binding invalid"))?;
+            if bound != generation {
+                return Err(std::io::Error::other("repair intent binding invalid"));
+            }
+            return Ok(true);
+        }
+        if matches!(
+            state,
+            "latch-removed" | "canonical-runtime-healthy" | "status-published"
+        ) {
+            let bound = intent
+                .get("authority")
+                .and_then(|authority| authority.get("generation"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| std::io::Error::other("repair intent binding invalid"))?;
+            if bound == generation {
+                return Err(std::io::Error::other(
+                    "completed repair retained a failure pair",
+                ));
+            }
+        }
+    }
+
+    if let Some(bytes) =
+        trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
+    {
+        let journal = std::str::from_utf8(&bytes)
+            .map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
+        let value: toml::Value =
+            toml::from_str(journal).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
+        if let Some(progress) = metadata_string(&value, "runtime_failure_consumption") {
+            let phase = metadata_string(&value, "phase")
+                .ok_or_else(|| std::io::Error::other("upgrade intent invalid"))?;
+            if matches!(progress.as_str(), "bound" | "epoch-removed") && phase != "aborted" {
+                let bound = metadata_string(&value, "runtime_failure_generation")
+                    .ok_or_else(|| std::io::Error::other("upgrade intent binding invalid"))?;
+                if bound != generation {
+                    return Err(std::io::Error::other("upgrade intent binding invalid"));
+                }
+                return Ok(true);
+            }
+            if progress == "latch-removed" {
+                let bound = metadata_string(&value, "runtime_failure_generation")
+                    .ok_or_else(|| std::io::Error::other("upgrade intent binding invalid"))?;
+                if bound == generation {
+                    return Err(std::io::Error::other(
+                        "completed upgrade retained a failure pair",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::io::Result<bool> {
+    if let Some(bytes) = trusted_optional_file(
+        &rooted(root, installed_bundle_repair::REPAIR_INTENT_PATH),
+        expected_uid,
+        0o600,
+    )? {
+        let intent: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| std::io::Error::other("repair intent invalid"))?;
+        let state = intent
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
+        if matches!(
+            state,
+            "admitted"
+                | "validation-pending"
+                | "temporary-runtime-healthy"
+                | "probe-active"
+                | "invalidation-committed"
+                | "epoch-removed"
+        ) {
+            return Ok(true);
+        }
+    }
+    let Some(bytes) =
+        trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
+    else {
+        return Ok(false);
+    };
+    let journal =
+        std::str::from_utf8(&bytes).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
+    let value: toml::Value =
+        toml::from_str(journal).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
+    let progress = metadata_string(&value, "runtime_failure_consumption");
+    Ok(matches!(
+        progress.as_deref(),
+        Some("none" | "bound" | "epoch-removed")
+    ) && metadata_string(&value, "phase").as_deref() != Some("aborted"))
+}
+
+fn trusted_optional_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Option<Vec<u8>>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => trusted_file(path, uid, mode).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn build_current_epoch(
+    root: &Path,
+    expected_uid: u32,
+    state: &RuntimeUnitState,
+    generation: &str,
+) -> std::io::Result<RuntimeFailureEpoch> {
+    if decode_lower_hex_32(generation).is_none() {
+        return Err(std::io::Error::other("failure generation invalid"));
+    }
+    if state.active_state != "failed" || state.result != "start-limit-hit" {
+        return Err(std::io::Error::other("Runtime failure is not terminal"));
     }
     let metadata = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
     let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
@@ -474,11 +997,9 @@ fn record_runtime_failure_at(
     if string(&identity_value, "hub_url")? != hub_origin {
         return Err(std::io::Error::other("identity binding mismatch"));
     }
-    let mut generation = [0_u8; 32];
-    generations.fill_generation(&mut generation)?;
-    let epoch = RuntimeFailureEpoch {
+    Ok(RuntimeFailureEpoch {
         schema_version: 1,
-        generation: hex(&generation),
+        generation: generation.to_owned(),
         boot_id: boot_id.trim().to_owned(),
         unit: RUNTIME_UNIT.to_owned(),
         unit_sha256: sha256(&unit),
@@ -489,23 +1010,8 @@ fn record_runtime_failure_at(
         install_state_sha256: string(&metadata, "install_state_sha256")?,
         manifest_sha256: string(&metadata, "target_manifest_sha256")?,
         bundle_version: string(&metadata, "bundle_version")?,
-        result: state.result,
-    };
-    let encoded =
-        toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    atomic_write(
-        &epoch_path,
-        encoded.as_bytes(),
-        0o600,
-        Some((expected_uid, expected_uid)),
-    )?;
-    atomic_write(
-        &latch_path,
-        epoch.generation.as_bytes(),
-        0o600,
-        Some((expected_uid, expected_uid)),
-    )?;
-    Ok(RuntimeFailureRecordOutcome::Latched)
+        result: state.result.clone(),
+    })
 }
 
 fn rooted(root: &Path, absolute: &str) -> PathBuf {
@@ -708,12 +1214,18 @@ pub(super) mod tests {
             "var/lib/enoki-probe/identity",
             "etc/systemd/system",
             "proc/sys/kernel/random",
+            "run/enoki-probe",
         ] {
             fs::create_dir_all(root.path().join(directory)).unwrap();
         }
         fs::set_permissions(
             root.path().join("var/lib/enoki-probe"),
             fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+        fs::set_permissions(
+            root.path().join("run/enoki-probe"),
+            fs::Permissions::from_mode(0o700),
         )
         .unwrap();
         let metadata = format!(
@@ -818,6 +1330,85 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn failure_evidence_accepts_only_the_current_exact_epoch_latch_pair() {
+        let uid = unsafe { libc::geteuid() };
+        let issue = |root: &Path| {
+            issue_installed_bundle_failure_evidence_at(
+                root,
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "request_nonce_pair_classification",
+            )
+        };
+
+        let none = fixture();
+        assert!(issue(none.path()).is_err());
+
+        let epoch_only = fixture();
+        record_runtime_failure_at(
+            epoch_only.path(),
+            uid,
+            &mut FailedRuntime(0),
+            &mut Generation(4),
+        )
+        .unwrap();
+        remove_regular_file(
+            &rooted(epoch_only.path(), LATCH_PATH),
+            0o600,
+            Some((uid, uid)),
+        )
+        .unwrap();
+        assert!(issue(epoch_only.path()).is_err());
+
+        let latch_only = fixture();
+        record_runtime_failure_at(
+            latch_only.path(),
+            uid,
+            &mut FailedRuntime(0),
+            &mut Generation(5),
+        )
+        .unwrap();
+        remove_regular_file(
+            &rooted(latch_only.path(), EPOCH_PATH),
+            0o600,
+            Some((uid, uid)),
+        )
+        .unwrap();
+        assert!(issue(latch_only.path()).is_err());
+
+        let exact = fixture();
+        record_runtime_failure_at(exact.path(), uid, &mut FailedRuntime(0), &mut Generation(6))
+            .unwrap();
+        assert!(issue(exact.path()).is_ok());
+
+        let mismatch = fixture();
+        record_runtime_failure_at(
+            mismatch.path(),
+            uid,
+            &mut FailedRuntime(0),
+            &mut Generation(7),
+        )
+        .unwrap();
+        write_fixture(mismatch.path(), LATCH_PATH, &b"aa".repeat(32), 0o600);
+        assert!(issue(mismatch.path()).is_err());
+        assert!(rooted(mismatch.path(), LATCH_PATH).exists());
+
+        let corrupt = fixture();
+        record_runtime_failure_at(
+            corrupt.path(),
+            uid,
+            &mut FailedRuntime(0),
+            &mut Generation(8),
+        )
+        .unwrap();
+        write_fixture(corrupt.path(), EPOCH_PATH, b"not toml", 0o600);
+        assert!(issue(corrupt.path()).is_err());
+        assert!(rooted(corrupt.path(), LATCH_PATH).exists());
+    }
+
+    #[test]
     fn systemd_255_only_latches_the_terminal_start_limit_hit() {
         let root = fixture();
         let ignored = record_runtime_failure_at(
@@ -863,7 +1454,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn typed_local_retry_consumes_the_latch_before_one_fixed_retry() {
+    fn typed_local_retry_invalidates_epoch_before_one_fixed_retry() {
         let root = fixture();
         record_runtime_failure_at(
             root.path(),
@@ -880,6 +1471,307 @@ pub(super) mod tests {
         assert_eq!(systemd.0, 1);
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
+        let receipt: LocalRetryReceipt = serde_json::from_slice(
+            &fs::read(rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.progress, LocalRetryProgress::RetryInvoked);
+    }
+
+    #[test]
+    fn recorder_reconciles_exact_single_file_publish_windows_and_rejects_corrupt_latch() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        let mut terminal = State(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "start-limit-hit".into(),
+        });
+        record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(20)).unwrap();
+        let generation = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+
+        remove_regular_file(&rooted(root.path(), LATCH_PATH), 0o600, Some((uid, uid))).unwrap();
+        assert_eq!(
+            record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(21))
+                .unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        assert_eq!(
+            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+            generation
+        );
+
+        remove_regular_file(&rooted(root.path(), EPOCH_PATH), 0o600, Some((uid, uid))).unwrap();
+        assert_eq!(
+            record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(22))
+                .unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
+
+        remove_regular_file(&rooted(root.path(), EPOCH_PATH), 0o600, Some((uid, uid))).unwrap();
+        write_fixture(root.path(), LATCH_PATH, b"not-a-generation", 0o600);
+        assert!(
+            record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(23))
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+            b"not-a-generation"
+        );
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+    }
+
+    #[test]
+    fn explicit_local_retry_resumes_every_effect_receipt_crash_from_fresh_durable_facts() {
+        let uid = unsafe { libc::geteuid() };
+        for (index, crash) in [
+            LocalRetryCrashPoint::ReceiptCommitted,
+            LocalRetryCrashPoint::EpochUnlinked,
+            LocalRetryCrashPoint::EpochRemovedReceipt,
+            LocalRetryCrashPoint::LatchUnlinked,
+            LocalRetryCrashPoint::LatchRemovedReceipt,
+            LocalRetryCrashPoint::SystemdInvoked,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = fixture();
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(24 + index as u8),
+            )
+            .unwrap();
+            fail_local_retry_after(crash);
+            assert!(
+                retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err(),
+                "{crash:?} must interrupt the production retry entrypoint",
+            );
+
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(40),
+                )
+                .is_err(),
+                "{crash:?} must not let recorder revive or replace consumed authority",
+            );
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    100,
+                    60_100,
+                    "request_nonce_retry_crash",
+                )
+                .is_err(),
+                "{crash:?} must not expose authority after typed consumption",
+            );
+
+            let mut restarted_systemd = RetrySystemd::default();
+            retry_runtime_at(root.path(), uid, &mut restarted_systemd).unwrap();
+            assert_eq!(restarted_systemd.0, 1);
+            assert!(!rooted(root.path(), EPOCH_PATH).exists());
+            assert!(!rooted(root.path(), LATCH_PATH).exists());
+            let completed: LocalRetryReceipt = serde_json::from_slice(
+                &fs::read(rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(completed.progress, LocalRetryProgress::RetryInvoked);
+        }
+    }
+
+    #[test]
+    fn local_retry_systemd_failure_is_durable_and_only_a_new_recorder_generation_returns() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(50))
+            .unwrap();
+        let old_generation = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+
+        assert!(retry_runtime_at(root.path(), uid, &mut RejectedRepair).is_err());
+        let attempted: LocalRetryReceipt = serde_json::from_slice(
+            &fs::read(rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(attempted.progress, LocalRetryProgress::RetryInvoked);
+
+        assert_eq!(
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(51),
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Latched,
+        );
+        assert_ne!(
+            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+            old_generation
+        );
+        assert!(!rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH).exists());
+    }
+
+    #[test]
+    fn recorder_never_revives_latch_only_pair_owned_by_repair_or_upgrade_intent() {
+        for (path, contents) in [
+            (
+                installed_bundle_repair::REPAIR_INTENT_PATH,
+                serde_json::json!({
+                    "state": "epoch-removed",
+                    "authority": { "generation": "1b".repeat(32) }
+                })
+                .to_string(),
+            ),
+            (
+                UPGRADE_ATTEMPT_PATH,
+                format!(
+                    "schema_version = 4\nphase = \"activation-started\"\nruntime_failure_consumption = \"epoch-removed\"\nruntime_failure_generation = {:?}\nruntime_failure_epoch_sha256 = {:?}\n",
+                    "1b".repeat(32),
+                    "2c".repeat(32),
+                ),
+            ),
+        ] {
+            let root = fixture();
+            let uid = unsafe { libc::geteuid() };
+            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(27))
+                .unwrap();
+            remove_regular_file(&rooted(root.path(), EPOCH_PATH), 0o600, Some((uid, uid))).unwrap();
+            let intent = rooted(root.path(), path);
+            fs::create_dir_all(intent.parent().unwrap()).unwrap();
+            write_fixture(root.path(), path, contents.as_bytes(), 0o600);
+
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(28),
+                )
+                .is_err()
+            );
+            assert!(!rooted(root.path(), EPOCH_PATH).exists());
+            assert_eq!(
+                fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+                b"1b".repeat(32)
+            );
+            assert_eq!(fs::read(intent).unwrap(), contents.as_bytes());
+
+            remove_regular_file(&rooted(root.path(), LATCH_PATH), 0o600, Some((uid, uid))).unwrap();
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(29),
+                )
+                .is_err(),
+                "typed consumer must close the latch-unlink-before-receipt window",
+            );
+            assert!(!rooted(root.path(), EPOCH_PATH).exists());
+            assert!(!rooted(root.path(), LATCH_PATH).exists());
+        }
+    }
+
+    #[test]
+    fn recorder_cannot_race_an_upgrade_that_reserved_an_absent_pair() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
+        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            b"schema_version = 4\nphase = \"prepared\"\nruntime_failure_consumption = \"none\"\n",
+            0o600,
+        );
+
+        assert!(
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(60),
+            )
+            .is_err()
+        );
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            b"schema_version = 4\nphase = \"activation-started\"\nruntime_failure_consumption = \"none-consumed\"\n",
+            0o600,
+        );
+        assert_eq!(
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(61),
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Latched,
+        );
+
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            format!(
+                "schema_version = 4\nphase = \"prepared\"\nruntime_failure_consumption = \"bound\"\nruntime_failure_generation = {:?}\nruntime_failure_epoch_sha256 = {:?}\n",
+                "3d".repeat(32),
+                "4e".repeat(32),
+            )
+            .as_bytes(),
+            0o600,
+        );
+        assert!(retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err());
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "request_nonce_upgrade_custody",
+            )
+            .is_err()
+        );
+        assert!(!rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH).exists());
+        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
+    }
+
+    #[test]
+    fn concurrent_recorders_publish_one_exact_pair() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        let path = root.path().to_path_buf();
+        let outcomes = std::thread::scope(|scope| {
+            let first_path = path.clone();
+            let first = scope.spawn(move || {
+                record_runtime_failure_at(
+                    &first_path,
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(25),
+                )
+                .unwrap()
+            });
+            let second = scope.spawn(move || {
+                record_runtime_failure_at(&path, uid, &mut FailedRuntime(0), &mut Generation(26))
+                    .unwrap()
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert!(outcomes.contains(&RuntimeFailureRecordOutcome::Latched));
+        assert!(outcomes.contains(&RuntimeFailureRecordOutcome::AlreadyLatched));
+        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
     }
 
     #[test]

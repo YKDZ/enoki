@@ -604,6 +604,7 @@ pub(super) fn remove_uninstall_local_state_with(
 ) -> Result<(), ProbeUpgraderRunError> {
     remove(plan.install_metadata_path)?;
     remove(&plan.input.bootstrap_config_path)?;
+    let _runtime_failure_lock = runtime_failure_cleanup_lock(&plan.install_metadata.state_dir)?;
     remove(&plan.install_metadata.state_dir)
 }
 
@@ -614,8 +615,29 @@ pub(super) fn finalize_replacement_local_state_with(
     verify: impl FnOnce() -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
     remove(bootstrap_config_path)?;
+    let _runtime_failure_lock = runtime_failure_cleanup_lock(state_dir)?;
     remove(state_dir)?;
     verify()
+}
+
+fn runtime_failure_cleanup_lock(
+    state_dir: &Path,
+) -> Result<Option<crate::runtime_failure::RuntimeFailurePairLock>, ProbeUpgraderRunError> {
+    match fs::symlink_metadata(state_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            crate::runtime_failure::acquire_runtime_failure_pair_cleanup_lock_for_state(
+                state_dir,
+                unsafe { libc::geteuid() },
+            )
+            .map(Some)
+            .map_err(ProbeUpgraderRunError::Io)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(_) => Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        )),
+        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
+    }
 }
 
 pub(super) fn verify_uninstall_residue_absent(
@@ -964,6 +986,9 @@ mod tests {
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::{Path, PathBuf},
+        sync::mpsc::{self, RecvTimeoutError},
+        thread,
+        time::Duration,
     };
 
     #[derive(Default)]
@@ -1629,6 +1654,75 @@ mod tests {
             assert!(!calls.iter().any(|path| path == metadata));
             assert_eq!(result.is_err(), verification_fails);
         }
+    }
+
+    #[test]
+    fn runtime_failure_cleanup_and_a_waiting_recorder_share_one_stable_lock_inode() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        let config = state.join("identity/probe-bootstrap.toml");
+        let failure_dir = state.join("runtime-failure");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::create_dir_all(&failure_dir).unwrap();
+        fs::set_permissions(&failure_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(failure_dir.join("epoch.toml"), b"epoch").unwrap();
+        fs::write(failure_dir.join("latch"), b"generation").unwrap();
+        fs::create_dir_all(temporary.path().join("run")).unwrap();
+        fs::write(&config, b"identity").unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let mut contender = None;
+        finalize_replacement_local_state_with(
+            &config,
+            &state,
+            |path| {
+                if path == state {
+                    assert!(
+                        !failure_dir.join("epoch.toml").exists(),
+                        "cleanup custody must invalidate epoch authority first",
+                    );
+                    assert!(
+                        !failure_dir.join("latch").exists(),
+                        "cleanup custody must remove the latch only after epoch",
+                    );
+                    fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)?;
+                    let contender_state = state.clone();
+                    let started_tx = started_tx.clone();
+                    let acquired_tx = acquired_tx.clone();
+                    contender = Some(thread::spawn(move || {
+                        started_tx.send(()).unwrap();
+                        let _lock =
+                            crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
+                                &contender_state,
+                                unsafe { libc::geteuid() },
+                            )
+                            .unwrap();
+                        acquired_tx.send(()).unwrap();
+                    }));
+                    started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                    assert_eq!(
+                        acquired_rx.recv_timeout(Duration::from_millis(100)),
+                        Err(RecvTimeoutError::Timeout),
+                        "state cleanup must not let a contender lock a replacement inode",
+                    );
+                } else {
+                    fs::remove_file(path).map_err(ProbeUpgraderRunError::Io)?;
+                }
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
+
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        contender.unwrap().join().unwrap();
+        assert!(!state.exists());
+        assert!(
+            crate::runtime_failure::runtime_failure_pair_lock_path_for_state(&state)
+                .unwrap()
+                .is_file()
+        );
     }
 
     fn replacement_intent() -> ReplacementIntent {

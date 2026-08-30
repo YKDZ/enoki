@@ -587,7 +587,7 @@ fn repair_eligibility_from_postactivation_journal(
     paths: &FixedInstallPaths,
 ) -> Result<RepairEligibilityV1, InstallError> {
     let state = load_validated_upgrade_attempt(paths)?;
-    if state.schema_version != 3 || !state.activation_started {
+    if !matches!(state.schema_version, 3 | 4) || !state.activation_started {
         return Err(InstallError::ExistingResidue);
     }
     let journal = state.contents;
@@ -631,6 +631,25 @@ struct ValidatedUpgradeAttemptJournal {
     activation_started: bool,
     activated_targets: usize,
     finalized_targets: usize,
+    runtime_failure_consumption: Option<RuntimeFailureConsumption>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RuntimeFailureConsumption {
+    None,
+    NoneConsumed,
+    Bound {
+        generation: String,
+        epoch_sha256: String,
+    },
+    EpochRemoved {
+        generation: String,
+        epoch_sha256: String,
+    },
+    LatchRemoved {
+        generation: String,
+        epoch_sha256: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -665,7 +684,7 @@ fn load_validated_upgrade_attempt(
         .ok_or(InstallError::ExistingResidue)?
         .parse::<u16>()
         .map_err(|_| InstallError::ExistingResidue)?;
-    if !matches!(schema_version, 1..=3) {
+    if !matches!(schema_version, 1..=4) {
         return Err(InstallError::ExistingResidue);
     }
     let operation_id = journal_string(&contents, "operation_id")?.to_owned();
@@ -736,9 +755,45 @@ fn load_validated_upgrade_attempt(
     let phase = journal_string(&contents, "phase")?.to_owned();
     let activated_targets = journal_usize(&contents, "activated_targets")?;
     let finalized_targets = journal_usize(&contents, "finalized_targets")?;
+    let runtime_failure_consumption = if schema_version == 4 {
+        let progress = journal_string(&contents, "runtime_failure_consumption")?;
+        let generation = metadata_string(&contents, "runtime_failure_generation");
+        let epoch_sha256 = metadata_string(&contents, "runtime_failure_epoch_sha256");
+        match (progress, generation, epoch_sha256) {
+            ("none", None, None) => Some(RuntimeFailureConsumption::None),
+            ("none-consumed", None, None) => Some(RuntimeFailureConsumption::NoneConsumed),
+            ("bound", Some(generation), Some(epoch_sha256))
+                if valid_sha256(&generation) && valid_sha256(&epoch_sha256) =>
+            {
+                Some(RuntimeFailureConsumption::Bound {
+                    generation,
+                    epoch_sha256,
+                })
+            }
+            ("epoch-removed", Some(generation), Some(epoch_sha256))
+                if valid_sha256(&generation) && valid_sha256(&epoch_sha256) =>
+            {
+                Some(RuntimeFailureConsumption::EpochRemoved {
+                    generation,
+                    epoch_sha256,
+                })
+            }
+            ("latch-removed", Some(generation), Some(epoch_sha256))
+                if valid_sha256(&generation) && valid_sha256(&epoch_sha256) =>
+            {
+                Some(RuntimeFailureConsumption::LatchRemoved {
+                    generation,
+                    epoch_sha256,
+                })
+            }
+            _ => return Err(InstallError::ExistingResidue),
+        }
+    } else {
+        None
+    };
     let target_count = upgrade_destinations(paths).len();
     let activation_started = match schema_version {
-        3 => match metadata_scalar(&contents, "activation_started").as_deref() {
+        3 | 4 => match metadata_scalar(&contents, "activation_started").as_deref() {
             Some("true") => true,
             Some("false") => false,
             _ => return Err(InstallError::ExistingResidue),
@@ -796,6 +851,7 @@ fn load_validated_upgrade_attempt(
         activation_started,
         activated_targets,
         finalized_targets,
+        runtime_failure_consumption,
     })
 }
 
@@ -1347,6 +1403,9 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             .as_mut()
             .ok_or(InstallError::InvalidVerifiedComponent)?;
         verify_component_lengths(components, self.bundle)?;
+        if self.attempt.is_some() {
+            bind_runtime_failure_pair_to_upgrade(self.paths)?;
+        }
         let prepared = prepare_upgrade(components, self.bundle, self.paths, &actual)?;
         if let Some(attempt) = self.attempt
             && write_upgrade_attempt(
@@ -1409,7 +1468,9 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
                 }
             }
             self.systemd.daemon_reload()?;
-            invalidate_runtime_failure_epoch(self.paths)?;
+            if self.attempt.is_some() {
+                consume_runtime_failure_pair_for_upgrade(self.paths)?;
+            }
             self.systemd.start()?;
             self.systemd.wait_local_activated()?;
             if let Some(attempt) = self.attempt {
@@ -1510,19 +1571,410 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
     }
 }
 
-fn invalidate_runtime_failure_epoch(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    let mut changed = false;
-    for path in [paths.runtime_failure_latch(), paths.runtime_failure_epoch()] {
-        match fs::remove_file(path) {
-            Ok(()) => changed = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(InstallError::Io),
+struct RuntimeFailurePairLock {
+    _file: File,
+}
+
+fn acquire_runtime_failure_pair_lock(
+    paths: &FixedInstallPaths,
+) -> Result<RuntimeFailurePairLock, InstallError> {
+    let lock_path = paths.runtime_failure_lock();
+    let lock_parent = lock_path.parent().ok_or(InstallError::Io)?;
+    let runtime_parent = lock_parent.parent().ok_or(InstallError::Io)?;
+    match fs::symlink_metadata(runtime_parent) {
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == paths.expected_root_uid()
+                && metadata.mode() & 0o022 == 0 => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(runtime_parent).map_err(|_| InstallError::Io)?;
+            fs::set_permissions(runtime_parent, fs::Permissions::from_mode(0o755))
+                .map_err(|_| InstallError::Io)?;
+            sync_directory(runtime_parent.parent().ok_or(InstallError::Io)?)?;
+        }
+        _ => return Err(InstallError::ExistingResidue),
+    }
+    match fs::symlink_metadata(lock_parent) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(lock_parent).map_err(|_| InstallError::Io)?;
+            fs::set_permissions(lock_parent, fs::Permissions::from_mode(0o700))
+                .map_err(|_| InstallError::Io)?;
+            sync_directory(lock_parent.parent().ok_or(InstallError::Io)?)?;
+        }
+        _ => return Err(InstallError::ExistingResidue),
+    }
+    let lock_parent_metadata =
+        fs::symlink_metadata(lock_parent).map_err(|_| InstallError::ExistingResidue)?;
+    if lock_parent_metadata.uid() != paths.expected_root_uid()
+        || lock_parent_metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let state = fs::symlink_metadata(paths.state()).map_err(|_| InstallError::ExistingResidue)?;
+    if !state.is_dir() || state.file_type().is_symlink() || state.nlink() < 2 {
+        return Err(InstallError::ExistingResidue);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(lock_path)
+        .map_err(|_| InstallError::Io)?;
+    let metadata = file.metadata().map_err(|_| InstallError::Io)?;
+    if !metadata.is_file()
+        || metadata.uid() != paths.expected_root_uid()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(InstallError::Io);
+    }
+    Ok(RuntimeFailurePairLock { _file: file })
+}
+
+pub(super) fn bind_runtime_failure_pair_to_upgrade(
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
+    let lock = acquire_runtime_failure_pair_lock(paths)?;
+    let state = load_validated_upgrade_attempt(paths)?;
+    if state.runtime_failure_consumption.is_some() {
+        return Ok(());
+    }
+    let local_retry_receipt = paths.runtime_failure_dir().join("local-retry-receipt.json");
+    let local_retry_receipt = trusted_optional_runtime_failure_bytes(
+        &local_retry_receipt,
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    if managed_runtime_failure_path_exists(&paths.runtime_failure_dir().join("repair-intent.json"))?
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let epoch_exists = fs::symlink_metadata(paths.runtime_failure_epoch())
+        .map(|_| true)
+        .or_else(|error| {
+            (error.kind() == std::io::ErrorKind::NotFound)
+                .then_some(false)
+                .ok_or(InstallError::Io)
+        })?;
+    let latch_exists = fs::symlink_metadata(paths.runtime_failure_latch())
+        .map(|_| true)
+        .or_else(|error| {
+            (error.kind() == std::io::ErrorKind::NotFound)
+                .then_some(false)
+                .ok_or(InstallError::Io)
+        })?;
+    let binding = match (epoch_exists, latch_exists) {
+        (false, false) => {
+            if let Some(receipt) = local_retry_receipt {
+                let receipt: serde_json::Value =
+                    serde_json::from_slice(&receipt).map_err(|_| InstallError::ExistingResidue)?;
+                if receipt
+                    .get("schemaVersion")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || receipt.get("progress").and_then(serde_json::Value::as_str)
+                        != Some("retry-invoked")
+                {
+                    return Err(InstallError::ExistingResidue);
+                }
+                fs::remove_file(paths.runtime_failure_dir().join("local-retry-receipt.json"))
+                    .map_err(|_| InstallError::Io)?;
+                sync_directory(&paths.runtime_failure_dir())?;
+            }
+            RuntimeFailureConsumption::None
+        }
+        (false, true) => return Err(InstallError::ExistingResidue),
+        (true, latch_exists) => {
+            if local_retry_receipt.is_some() {
+                return Err(InstallError::ExistingResidue);
+            }
+            let (generation, epoch_sha256) = current_runtime_failure_epoch_binding(paths)?;
+            if latch_exists {
+                let latch = trusted_runtime_failure_bytes(
+                    &paths.runtime_failure_latch(),
+                    paths.expected_root_uid(),
+                    0o600,
+                )?;
+                if latch != generation.as_bytes() {
+                    return Err(InstallError::ExistingResidue);
+                }
+            }
+            RuntimeFailureConsumption::Bound {
+                generation,
+                epoch_sha256,
+            }
+        }
+    };
+    write_runtime_failure_consumption(paths, None, &binding)?;
+    drop(lock);
+    Ok(())
+}
+
+pub(super) fn consume_runtime_failure_pair_for_upgrade(
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
+    let lock = acquire_runtime_failure_pair_lock(paths)?;
+    let mut consumption = load_validated_upgrade_attempt(paths)?
+        .runtime_failure_consumption
+        .ok_or(InstallError::ExistingResidue)?;
+    if consumption == RuntimeFailureConsumption::None {
+        if managed_runtime_failure_path_exists(&paths.runtime_failure_epoch())?
+            || managed_runtime_failure_path_exists(&paths.runtime_failure_latch())?
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        let next = RuntimeFailureConsumption::NoneConsumed;
+        write_runtime_failure_consumption(paths, Some(&consumption), &next)?;
+        consumption = next;
+    }
+    if consumption == RuntimeFailureConsumption::NoneConsumed {
+        drop(lock);
+        return Ok(());
+    }
+    if let RuntimeFailureConsumption::Bound {
+        generation,
+        epoch_sha256,
+    } = &consumption
+    {
+        match trusted_optional_runtime_failure_bytes(
+            &paths.runtime_failure_epoch(),
+            paths.expected_root_uid(),
+            0o600,
+        )? {
+            Some(epoch) => {
+                let epoch_text =
+                    std::str::from_utf8(&epoch).map_err(|_| InstallError::ExistingResidue)?;
+                if metadata_string(epoch_text, "generation").as_deref() != Some(generation)
+                    || format!("{:x}", Sha256::digest(&epoch)) != *epoch_sha256
+                {
+                    return Err(InstallError::ExistingResidue);
+                }
+                fs::remove_file(paths.runtime_failure_epoch()).map_err(|_| InstallError::Io)?;
+                sync_directory(&paths.runtime_failure_dir())?;
+            }
+            None => {
+                let latch = trusted_optional_runtime_failure_bytes(
+                    &paths.runtime_failure_latch(),
+                    paths.expected_root_uid(),
+                    0o600,
+                )?
+                .ok_or(InstallError::ExistingResidue)?;
+                if latch != generation.as_bytes() {
+                    return Err(InstallError::ExistingResidue);
+                }
+            }
+        }
+        let next = RuntimeFailureConsumption::EpochRemoved {
+            generation: generation.clone(),
+            epoch_sha256: epoch_sha256.clone(),
+        };
+        write_runtime_failure_consumption(paths, Some(&consumption), &next)?;
+        consumption = next;
+    }
+    if let RuntimeFailureConsumption::EpochRemoved {
+        generation,
+        epoch_sha256,
+    } = &consumption
+    {
+        if managed_runtime_failure_path_exists(&paths.runtime_failure_epoch())? {
+            return Err(InstallError::ExistingResidue);
+        }
+        match trusted_optional_runtime_failure_bytes(
+            &paths.runtime_failure_latch(),
+            paths.expected_root_uid(),
+            0o600,
+        )? {
+            Some(latch) if latch == generation.as_bytes() => {
+                fs::remove_file(paths.runtime_failure_latch()).map_err(|_| InstallError::Io)?;
+                sync_directory(&paths.runtime_failure_dir())?;
+            }
+            None => {}
+            _ => return Err(InstallError::ExistingResidue),
+        }
+        let next = RuntimeFailureConsumption::LatchRemoved {
+            generation: generation.clone(),
+            epoch_sha256: epoch_sha256.clone(),
+        };
+        write_runtime_failure_consumption(paths, Some(&consumption), &next)?;
+        consumption = next;
+    }
+    if let RuntimeFailureConsumption::LatchRemoved { .. } = consumption {
+        if managed_runtime_failure_path_exists(&paths.runtime_failure_epoch())?
+            || managed_runtime_failure_path_exists(&paths.runtime_failure_latch())?
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        drop(lock);
+        return Ok(());
+    }
+    Err(InstallError::ExistingResidue)
+}
+
+fn write_runtime_failure_consumption(
+    paths: &FixedInstallPaths,
+    expected: Option<&RuntimeFailureConsumption>,
+    next: &RuntimeFailureConsumption,
+) -> Result<(), InstallError> {
+    let state = load_validated_upgrade_attempt(paths)?;
+    if state.runtime_failure_consumption.as_ref() != expected {
+        return Err(InstallError::ExistingResidue);
+    }
+    let mut output = if state.schema_version == 3 {
+        state
+            .contents
+            .replacen("schema_version = 3", "schema_version = 4", 1)
+    } else if state.schema_version == 4 {
+        let current = expected.ok_or(InstallError::ExistingResidue)?;
+        state.contents.replacen(
+            &format!(
+                "runtime_failure_consumption = {:?}",
+                runtime_failure_progress(current)
+            ),
+            &format!(
+                "runtime_failure_consumption = {:?}",
+                runtime_failure_progress(next)
+            ),
+            1,
+        )
+    } else {
+        return Err(InstallError::ExistingResidue);
+    };
+    if state.schema_version == 3 {
+        output.push_str(&format!(
+            "runtime_failure_consumption = {:?}\n",
+            runtime_failure_progress(next)
+        ));
+        if let Some((generation, epoch_sha256)) = runtime_failure_binding(next) {
+            output.push_str(&format!(
+                "runtime_failure_generation = {generation:?}\nruntime_failure_epoch_sha256 = {epoch_sha256:?}\n"
+            ));
         }
     }
-    if changed {
-        sync_directory(&paths.runtime_failure_dir())?;
+    atomic_durable_write(
+        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+        output.as_bytes(),
+        0o600,
+    )
+}
+
+fn runtime_failure_progress(consumption: &RuntimeFailureConsumption) -> &'static str {
+    match consumption {
+        RuntimeFailureConsumption::None => "none",
+        RuntimeFailureConsumption::NoneConsumed => "none-consumed",
+        RuntimeFailureConsumption::Bound { .. } => "bound",
+        RuntimeFailureConsumption::EpochRemoved { .. } => "epoch-removed",
+        RuntimeFailureConsumption::LatchRemoved { .. } => "latch-removed",
     }
-    Ok(())
+}
+
+fn runtime_failure_binding(consumption: &RuntimeFailureConsumption) -> Option<(&str, &str)> {
+    match consumption {
+        RuntimeFailureConsumption::None | RuntimeFailureConsumption::NoneConsumed => None,
+        RuntimeFailureConsumption::Bound {
+            generation,
+            epoch_sha256,
+        }
+        | RuntimeFailureConsumption::EpochRemoved {
+            generation,
+            epoch_sha256,
+        }
+        | RuntimeFailureConsumption::LatchRemoved {
+            generation,
+            epoch_sha256,
+        } => Some((generation, epoch_sha256)),
+    }
+}
+
+pub(super) fn current_runtime_failure_epoch_binding(
+    paths: &FixedInstallPaths,
+) -> Result<(String, String), InstallError> {
+    let epoch = trusted_runtime_failure_bytes(
+        &paths.runtime_failure_epoch(),
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    let epoch_text = std::str::from_utf8(&epoch).map_err(|_| InstallError::ExistingResidue)?;
+    let (metadata, identity) = trusted_complete_installed_layout(paths)?;
+    let identity_bytes = identity.as_bytes();
+    let unit = trusted_runtime_failure_bytes(
+        &paths.observation_runtime_unit(),
+        paths.expected_root_uid(),
+        0o644,
+    )?;
+    let boot_id =
+        trusted_runtime_failure_bytes(&paths.boot_id(), paths.expected_root_uid(), 0o444)?;
+    let boot_id = std::str::from_utf8(&boot_id).map_err(|_| InstallError::ExistingResidue)?;
+    let epoch_string =
+        |key: &str| metadata_string(epoch_text, key).ok_or(InstallError::ExistingResidue);
+    let identity_string =
+        |key: &str| metadata_string(&identity, key).ok_or(InstallError::ExistingResidue);
+    let generation = epoch_string("generation")?;
+    if metadata_scalar(epoch_text, "schema_version").as_deref() != Some("1")
+        || epoch_string("result")? != "start-limit-hit"
+        || epoch_string("unit")? != "enoki-observation-runtime.service"
+        || !valid_sha256(&generation)
+        || epoch_string("boot_id")? != boot_id.trim()
+        || epoch_string("unit_sha256")? != format!("{:x}", Sha256::digest(&unit))
+        || epoch_string("identity_receipt_sha256")?
+            != format!("{:x}", Sha256::digest(identity_bytes))
+        || epoch_string("hub_origin")?
+            != metadata_string(&metadata, "hub_url").ok_or(InstallError::ExistingResidue)?
+        || epoch_string("hub_origin")? != identity_string("hub_url")?
+        || epoch_string("host_id")? != identity_string("host_id")?
+        || epoch_string("probe_id")? != identity_string("probe_id")?
+        || epoch_string("install_state_sha256")?
+            != metadata_string(&metadata, "install_state_sha256")
+                .ok_or(InstallError::ExistingResidue)?
+        || epoch_string("manifest_sha256")?
+            != metadata_string(&metadata, "target_manifest_sha256")
+                .ok_or(InstallError::ExistingResidue)?
+        || epoch_string("bundle_version")?
+            != metadata_string(&metadata, "bundle_version").ok_or(InstallError::ExistingResidue)?
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok((generation, format!("{:x}", Sha256::digest(&epoch))))
+}
+
+fn trusted_runtime_failure_bytes(
+    path: &Path,
+    uid: u32,
+    mode: u32,
+) -> Result<Vec<u8>, InstallError> {
+    use std::io::Read as _;
+    let mut file = trusted_file(path, uid, mode)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
+    if bytes.len() > 64 * 1024 {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(bytes)
+}
+
+fn trusted_optional_runtime_failure_bytes(
+    path: &Path,
+    uid: u32,
+    mode: u32,
+) -> Result<Option<Vec<u8>>, InstallError> {
+    if !managed_runtime_failure_path_exists(path)? {
+        return Ok(None);
+    }
+    trusted_runtime_failure_bytes(path, uid, mode).map(Some)
+}
+
+fn managed_runtime_failure_path_exists(path: &Path) -> Result<bool, InstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(InstallError::Io),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2165,6 +2617,8 @@ fn recover_incomplete_probe_upgrade_with_status(
                         advance_upgrade_attempt(paths, phase, index + 1, finalized_targets)?;
                     }
                     systemd.daemon_reload()?;
+                    bind_runtime_failure_pair_to_upgrade(paths)?;
+                    consume_runtime_failure_pair_for_upgrade(paths)?;
                     systemd.start()?;
                     systemd.wait_local_activated()?;
                 }
@@ -2347,7 +2801,7 @@ pub(super) fn write_upgrade_attempt_from_journal(
     }
     let prior = current.as_str();
     let schema_version = metadata_scalar(prior, "schema_version");
-    let marker_required = schema_version.as_deref() == Some("3");
+    let marker_required = matches!(schema_version.as_deref(), Some("3" | "4"));
     let mut counts = [0_u8; 4];
     let mut output = String::new();
     for line in prior.lines() {

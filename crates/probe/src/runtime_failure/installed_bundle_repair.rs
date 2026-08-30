@@ -107,6 +107,22 @@ impl InstalledBundleRepairGrant {
         stage_receipt: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
         stage_owner_uid: u32,
     ) -> Result<(), InstalledBundleRepairError> {
+        let _lock = acquire_runtime_failure_pair_lock_at(&self.root, self.expected_uid)
+            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+        let (epoch, _, _) = current_epoch_at_locked(&self.root, self.expected_uid)
+            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+        if epoch.generation != self.authority.generation
+            || runtime_failure_consumption_pending_at(
+                &self.root,
+                self.expected_uid,
+                &epoch.generation,
+            )
+            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
+            || runtime_failure_creation_reserved_at(&self.root, self.expected_uid)
+                .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
+        {
+            return Err(InstalledBundleRepairError::RecoveryPending);
+        }
         write_installed_bundle_repair_intent(
             &self.root,
             &InstalledBundleRepairIntent {
@@ -382,8 +398,11 @@ pub(super) fn installed_bundle_failure_is_current_at(
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
 ) -> bool {
+    let Ok(_lock) = acquire_runtime_failure_pair_lock_at(root, expected_uid) else {
+        return false;
+    };
     if matches!(
-        resume_installed_bundle_repair_at(root, expected_uid),
+        resume_installed_bundle_repair_at_locked(root, expected_uid),
         Ok(Some(_))
     ) {
         return true;
@@ -392,10 +411,19 @@ pub(super) fn installed_bundle_failure_is_current_at(
         systemd.fixed_runtime_state(),
         Ok(RuntimeUnitState { active_state, result })
             if active_state == "failed" && result == "start-limit-hit"
-    ) && current_epoch_at(root, expected_uid).is_ok()
+    ) && current_epoch_at_locked(root, expected_uid).is_ok()
 }
 
 pub(super) fn resume_installed_bundle_repair_at(
+    root: &Path,
+    expected_uid: u32,
+) -> Result<Option<ResumableInstalledBundleRepair>, InstalledBundleRepairError> {
+    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
+        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+    resume_installed_bundle_repair_at_locked(root, expected_uid)
+}
+
+fn resume_installed_bundle_repair_at_locked(
     root: &Path,
     expected_uid: u32,
 ) -> Result<Option<ResumableInstalledBundleRepair>, InstalledBundleRepairError> {
@@ -458,7 +486,7 @@ fn repair_generation_is_still_terminal(
     if intent.state.is_forward_only() {
         return Ok(intent.authority.generation == intent.signed_evidence.evidence.generation);
     }
-    if let Ok((epoch, _)) = current_epoch_at(root, expected_uid) {
+    if let Ok((epoch, _, _)) = current_epoch_at_locked(root, expected_uid) {
         return Ok(intent.authority.generation == epoch.generation);
     }
     if intent.state != InstalledBundleRepairProgress::TemporaryRuntimeHealthy {
@@ -488,6 +516,8 @@ pub(super) fn invalidate_installed_bundle_failure_at(
     expected_uid: u32,
     authority: &InstalledBundleRepairAuthorityV1,
 ) -> Result<(), InstalledBundleRepairError> {
+    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
+        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     let intent_path = rooted(root, REPAIR_INTENT_PATH);
     let intent_bytes = trusted_file(&intent_path, expected_uid, 0o600)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
@@ -505,8 +535,8 @@ pub(super) fn invalidate_installed_bundle_failure_at(
     }
     let epoch_path = rooted(root, EPOCH_PATH);
     let generation_matches = if epoch_path.exists() {
-        current_epoch_at(root, expected_uid)
-            .map(|(epoch, _)| epoch.generation == authority.generation)
+        current_epoch_at_locked(root, expected_uid)
+            .map(|(epoch, _, _)| epoch.generation == authority.generation)
             .unwrap_or(false)
     } else {
         intent.state.is_forward_only()

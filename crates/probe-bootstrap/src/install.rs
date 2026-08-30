@@ -65,6 +65,11 @@ const STATE: &str = "/var/lib/enoki-probe";
 const RUNTIME_FAILURE_EPOCH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const RUNTIME_FAILURE_LATCH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
 const RUNTIME_FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
+// Volatile synchronization only. This path deliberately lives outside every
+// durable Runtime-failure state directory so cleanup can never unlink the
+// inode while another recorder or typed consumer is waiting on it.
+const RUNTIME_FAILURE_LOCK: &str = "/run/enoki-probe/runtime-failure-pair.lock";
+const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const IDENTITY_DIR: &str = "/var/lib/enoki-probe/identity";
 const IDENTITY: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
@@ -457,6 +462,12 @@ impl FixedInstallPaths {
     }
     fn runtime_failure_latch(&self) -> PathBuf {
         self.map(RUNTIME_FAILURE_LATCH)
+    }
+    fn runtime_failure_lock(&self) -> PathBuf {
+        self.map(RUNTIME_FAILURE_LOCK)
+    }
+    fn boot_id(&self) -> PathBuf {
+        self.map(BOOT_ID)
     }
     fn identity_dir(&self) -> PathBuf {
         self.map(IDENTITY_DIR)
@@ -1922,7 +1933,7 @@ fn lifecycle_companion_socket_unit() -> &'static str {
 
 fn lifecycle_companion_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /var/lib/enoki-probe-registration /run/enoki-probe /run/systemd/system/enoki-observation-runtime.service.d /run/systemd/system/enoki-observation-runtime.socket\n"
+        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\nRuntimeDirectory=enoki-probe\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /var/lib/enoki-probe-registration /run/enoki-probe /run/systemd/system/enoki-observation-runtime.service.d /run/systemd/system/enoki-observation-runtime.socket\n"
     )
 }
 
@@ -1932,7 +1943,7 @@ fn lifecycle_upgrade_socket_unit() -> &'static str {
 
 fn lifecycle_upgrade_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Upgrade Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap\n"
+        "[Unit]\nDescription=Enoki Probe Upgrade Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade\nTimeoutStartSec=90s\nRuntimeDirectory=enoki-probe\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe\n"
     )
 }
 
@@ -1948,7 +1959,7 @@ fn observation_runtime_unit() -> String {
 
 fn observation_runtime_failure_recorder_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Observation Runtime failure recorder\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure\nTimeoutStartSec=15s\nStateDirectory=enoki-probe/runtime-failure\nStateDirectoryMode=0700\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=64M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nReadOnlyPaths=/etc/enoki/probe-install.toml /var/lib/enoki-probe/identity/probe-bootstrap.toml /etc/systemd/system/enoki-observation-runtime.service /proc/sys/kernel/random/boot_id\nReadWritePaths=/var/lib/enoki-probe/runtime-failure\n"
+        "[Unit]\nDescription=Enoki Observation Runtime failure recorder\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure\nTimeoutStartSec=15s\nStateDirectory=enoki-probe/runtime-failure\nStateDirectoryMode=0700\nRuntimeDirectory=enoki-probe\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=64M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nReadOnlyPaths=/etc/enoki/probe-install.toml /var/lib/enoki-probe/identity/probe-bootstrap.toml /etc/systemd/system/enoki-observation-runtime.service /proc/sys/kernel/random/boot_id\nReadWritePaths=/var/lib/enoki-probe/runtime-failure /run/enoki-probe\n"
     )
 }
 

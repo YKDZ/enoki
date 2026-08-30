@@ -707,6 +707,44 @@ mod tests {
         }
     }
 
+    fn write_runtime_failure_pair_fixture(paths: &FixedInstallPaths, generation: &str) {
+        fs::create_dir_all(paths.runtime_failure_dir()).unwrap();
+        fs::set_permissions(
+            paths.runtime_failure_dir(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::create_dir_all(paths.boot_id().parent().unwrap()).unwrap();
+        fs::write(paths.boot_id(), b"boot-01\n").unwrap();
+        fs::set_permissions(paths.boot_id(), fs::Permissions::from_mode(0o444)).unwrap();
+        let metadata = fs::read_to_string(paths.metadata()).unwrap();
+        let identity = fs::read_to_string(paths.identity()).unwrap();
+        let unit = fs::read(paths.observation_runtime_unit()).unwrap();
+        let epoch = format!(
+            "schema_version = 1\ngeneration = {generation:?}\nboot_id = \"boot-01\"\nunit = \"enoki-observation-runtime.service\"\nunit_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nprobe_id = {:?}\nidentity_receipt_sha256 = {:?}\ninstall_state_sha256 = {:?}\nmanifest_sha256 = {:?}\nbundle_version = {:?}\nresult = \"start-limit-hit\"\n",
+            format!("{:x}", Sha256::digest(&unit)),
+            upgrade::metadata_string(&metadata, "hub_url").unwrap(),
+            upgrade::metadata_string(&identity, "host_id").unwrap(),
+            upgrade::metadata_string(&identity, "probe_id").unwrap(),
+            format!("{:x}", Sha256::digest(identity.as_bytes())),
+            upgrade::metadata_string(&metadata, "install_state_sha256").unwrap(),
+            upgrade::metadata_string(&metadata, "target_manifest_sha256").unwrap(),
+            upgrade::metadata_string(&metadata, "bundle_version").unwrap(),
+        );
+        fs::write(paths.runtime_failure_epoch(), epoch).unwrap();
+        fs::set_permissions(
+            paths.runtime_failure_epoch(),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::write(paths.runtime_failure_latch(), generation).unwrap();
+        fs::set_permissions(
+            paths.runtime_failure_latch(),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+
     fn restore_bundle_fixture(
         fixture: &InstalledBundleFixture,
         systemd: &mut Systemd,
@@ -1319,11 +1357,13 @@ mod tests {
         )
         .unwrap();
         let mut registered_identity = fs::read_to_string(paths.identity()).unwrap();
-        registered_identity.push_str("probe_id = \"probe_01\"\n");
+        registered_identity.push_str("probe_id = \"probe_01\"\nhost_id = \"host_01\"\n");
         fs::write(paths.identity(), &registered_identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         let identity_before = fs::read_to_string(paths.identity()).unwrap();
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
+        write_runtime_failure_pair_fixture(&paths, &"17".repeat(32));
+        assert!(upgrade::current_runtime_failure_epoch_binding(&paths).is_ok());
         let mut target_bundle = bundle().with_test_complete_receipts(5);
         target_bundle.version = "1.2.4".to_owned();
         target_bundle.manifest_sha256 = "d".repeat(64);
@@ -1425,8 +1465,11 @@ mod tests {
         assert!(journal.contains("host_id = \"host_01\""));
         assert!(journal.contains("source_probe_id = \"probe_01\""));
         assert!(journal.contains("phase = \"activated\""));
-        assert!(journal.contains("schema_version = 3"));
+        assert!(journal.contains("schema_version = 4"));
         assert!(journal.contains("activation_started = true"));
+        assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
+        assert!(!paths.runtime_failure_epoch().exists());
+        assert!(!paths.runtime_failure_latch().exists());
 
         let next_source = inspect_installed_probe_for_upgrade(&paths).unwrap();
         let mut failed_target = bundle().with_test_complete_receipts(5);
@@ -1502,8 +1545,9 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"42\""));
         assert!(journal.contains("phase = \"repair-required\""));
-        assert!(journal.contains("schema_version = 3"));
+        assert!(journal.contains("schema_version = 4"));
         assert!(journal.contains("activation_started = true"));
+        assert!(journal.contains("runtime_failure_consumption = \"none-consumed\""));
 
         systemd.fail_start = false;
         systemd.calls.clear();
@@ -1540,6 +1584,97 @@ mod tests {
         assert!(journal.contains("phase = \"activated\""));
         assert!(journal.contains("activated_targets = 21"));
         assert!(journal.contains("finalized_targets = 21"));
+    }
+
+    #[test]
+    fn upgrade_pair_consumption_resumes_epoch_unlink_before_receipt_without_opening_latch_early() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "2d".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        write_authority_upgrade_journal(paths, 3, "activation-started", Some(true), 0, 0);
+        upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
+        upgrade::fail_next_atomic_write_containing("epoch-removed");
+
+        assert!(upgrade::consume_runtime_failure_pair_for_upgrade(paths).is_err());
+        assert!(!paths.runtime_failure_epoch().exists());
+        assert_eq!(
+            fs::read(paths.runtime_failure_latch()).unwrap(),
+            generation.as_bytes()
+        );
+        let interrupted = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(interrupted.contains("runtime_failure_consumption = \"bound\""));
+
+        upgrade::consume_runtime_failure_pair_for_upgrade(paths).unwrap();
+        assert!(!paths.runtime_failure_epoch().exists());
+        assert!(!paths.runtime_failure_latch().exists());
+        let completed = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(completed.contains("runtime_failure_consumption = \"latch-removed\""));
+        assert!(completed.contains(&format!("runtime_failure_generation = {generation:?}")));
+    }
+
+    #[test]
+    fn upgrade_does_not_claim_a_pair_owned_by_another_typed_consumer() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "3e".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        fs::write(
+            paths.runtime_failure_dir().join("repair-intent.json"),
+            b"typed repair custody",
+        )
+        .unwrap();
+        fs::set_permissions(
+            paths.runtime_failure_dir().join("repair-intent.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        write_authority_upgrade_journal(paths, 3, "admitted", Some(false), 0, 0);
+
+        assert_eq!(
+            upgrade::bind_runtime_failure_pair_to_upgrade(paths),
+            Err(InstallError::ExistingResidue),
+        );
+        assert!(paths.runtime_failure_epoch().exists());
+        assert_eq!(
+            fs::read(paths.runtime_failure_latch()).unwrap(),
+            generation.as_bytes(),
+        );
+        let journal = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains("schema_version = 3"));
+
+        fs::remove_file(paths.runtime_failure_dir().join("repair-intent.json")).unwrap();
+        fs::remove_file(paths.runtime_failure_epoch()).unwrap();
+        fs::remove_file(paths.runtime_failure_latch()).unwrap();
+        let completed_retry = paths
+            .runtime_failure_dir()
+            .join("local-retry-receipt.json");
+        fs::write(
+            &completed_retry,
+            format!(
+                "{{\"schemaVersion\":1,\"generation\":{:?},\"epochSha256\":{:?},\"progress\":\"retry-invoked\"}}",
+                "3e".repeat(32),
+                "4f".repeat(32),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&completed_retry, fs::Permissions::from_mode(0o600)).unwrap();
+        upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
+        assert!(!completed_retry.exists());
+        let journal = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains("runtime_failure_consumption = \"none\""));
     }
 
     #[test]
@@ -2852,6 +2987,9 @@ mod tests {
         assert!(upgrade.contains("PrivateNetwork=true"));
         assert!(upgrade.contains("RestrictAddressFamilies=AF_UNIX"));
         assert!(upgrade.contains("IPAddressDeny=any"));
+        assert!(upgrade.contains("RuntimeDirectory=enoki-probe"));
+        assert!(upgrade.contains("RuntimeDirectoryPreserve=yes"));
+        assert!(upgrade.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe"));
     }
 
     #[test]
@@ -2949,7 +3087,10 @@ mod tests {
             "IPAddressDeny=any",
             "SocketBindDeny=any",
             "ProtectSystem=strict",
-            "ReadWritePaths=/var/lib/enoki-probe/runtime-failure",
+            "RuntimeDirectory=enoki-probe",
+            "RuntimeDirectoryMode=0700",
+            "RuntimeDirectoryPreserve=yes",
+            "ReadWritePaths=/var/lib/enoki-probe/runtime-failure /run/enoki-probe",
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
@@ -3106,6 +3247,8 @@ mod tests {
         assert!(lifecycle.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion"));
         assert!(lifecycle.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
         assert!(lifecycle.contains("SocketBindDeny=ipv4:any"));
+        assert!(lifecycle.contains("RuntimeDirectory=enoki-probe"));
+        assert!(lifecycle.contains("RuntimeDirectoryPreserve=yes"));
         assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
