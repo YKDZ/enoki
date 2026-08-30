@@ -977,6 +977,8 @@ fn parse_upgrade_runtime_failure_intent(
         upgrade_journal_string(&value, "source_install_state_sha256")?;
     let source_manifest_sha256 = upgrade_journal_string(&value, "source_manifest_sha256")?;
     let target_bundle_version = upgrade_journal_string(&value, "target_bundle_version")?;
+    let target_install_state_present = value.get("target_install_state_sha256").is_some();
+    let target_install_state_sha256 = metadata_string(&value, "target_install_state_sha256");
     let target_manifest_sha256 = upgrade_journal_string(&value, "target_manifest_sha256")?;
     if !valid_upgrade_identifier(&operation_id)
         || !valid_upgrade_identifier(&source_probe_id)
@@ -985,6 +987,11 @@ fn parse_upgrade_runtime_failure_intent(
         || !valid_upgrade_version(&target_bundle_version)
         || decode_lower_hex_32(&source_install_state_sha256).is_none()
         || decode_lower_hex_32(&source_manifest_sha256).is_none()
+        || (target_install_state_present
+            && target_install_state_sha256
+                .as_deref()
+                .and_then(decode_lower_hex_32)
+                .is_none())
         || decode_lower_hex_32(&target_manifest_sha256).is_none()
     {
         return Err(std::io::Error::other("upgrade intent binding invalid"));
@@ -1012,8 +1019,15 @@ fn parse_upgrade_runtime_failure_intent(
         {
             return Err(std::io::Error::other("upgrade intent authority invalid"));
         }
-    } else if schema == 2 {
-        return Err(std::io::Error::other("upgrade intent authority missing"));
+    } else {
+        if schema == 2 {
+            return Err(std::io::Error::other("upgrade intent authority missing"));
+        }
+        if target_install_state_sha256.is_none() {
+            return Err(std::io::Error::other(
+                "upgrade intent target binding missing",
+            ));
+        }
     }
     let phase = upgrade_journal_string(&value, "phase")?;
     let activated_targets = upgrade_journal_usize(&value, "activated_targets")?;
@@ -1538,6 +1552,34 @@ pub(super) mod tests {
             ));
         }
         journal
+    }
+
+    fn scope_less_upgrade_journal_fixture(
+        journal: &str,
+        target_install_state: Option<&str>,
+    ) -> String {
+        let mut output = String::new();
+        for line in journal.lines() {
+            if [
+                "hub_origin = ",
+                "host_id = ",
+                "target_asset_set_digest = ",
+                "verified_stage_sha256 = ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+            {
+                continue;
+            }
+            if line.starts_with("target_manifest_sha256 = ")
+                && let Some(digest) = target_install_state
+            {
+                output.push_str(&format!("target_install_state_sha256 = {digest:?}\n"));
+            }
+            output.push_str(line);
+            output.push('\n');
+        }
+        output
     }
 
     #[test]
@@ -2218,6 +2260,96 @@ pub(super) mod tests {
                 journal.as_bytes(),
             );
         }
+    }
+
+    #[test]
+    fn scope_less_upgrade_journal_requires_a_valid_target_install_binding() {
+        let scoped = upgrade_journal_fixture("aborted", false, 0, 0, "none-consumed", None)
+            .replacen("schema_version = 4", "schema_version = 3", 1)
+            .replacen("runtime_failure_consumption = \"none-consumed\"\n", "", 1);
+        for journal in [
+            scope_less_upgrade_journal_fixture(&scoped, None),
+            scope_less_upgrade_journal_fixture(&scoped, Some("invalid")),
+        ] {
+            let root = fixture();
+            let uid = unsafe { libc::geteuid() };
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(0x78),
+            )
+            .unwrap();
+            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+            fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap())
+                .unwrap();
+            write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
+
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(0x79),
+                )
+                .is_err()
+            );
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    100,
+                    60_100,
+                    "request_nonce_scope_less_target_binding",
+                )
+                .is_err()
+            );
+            let mut retry = RetrySystemd::default();
+            assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+            assert_eq!(retry.0, 0);
+            assert_eq!(
+                fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
+                epoch_before
+            );
+            assert_eq!(
+                fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+                latch_before
+            );
+            assert_eq!(
+                fs::read(rooted(root.path(), UPGRADE_ATTEMPT_PATH)).unwrap(),
+                journal.as_bytes(),
+            );
+        }
+
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap()).unwrap();
+        let journal = scope_less_upgrade_journal_fixture(&scoped, Some(&"ca".repeat(32)));
+        write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
+        assert_eq!(
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                &mut Generation(0x7a),
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Latched,
+        );
+        issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            uid,
+            &mut FailedRuntime(0),
+            100,
+            60_100,
+            "request_nonce_valid_scope_less_target_binding",
+        )
+        .unwrap();
+        let mut retry = RetrySystemd::default();
+        retry_runtime_at(root.path(), uid, &mut retry).unwrap();
+        assert_eq!(retry.0, 1);
     }
 
     #[test]

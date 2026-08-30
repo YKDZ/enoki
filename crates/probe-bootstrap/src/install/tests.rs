@@ -854,6 +854,45 @@ mod tests {
         target
     }
 
+    fn scope_less_upgrade_journal(journal: &str, target_install_state: Option<&str>) -> String {
+        let mut output = String::new();
+        for line in journal.lines() {
+            if [
+                "hub_origin = ",
+                "host_id = ",
+                "target_asset_set_digest = ",
+                "verified_stage_sha256 = ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+            {
+                continue;
+            }
+            if line.starts_with("target_manifest_sha256 = ")
+                && let Some(digest) = target_install_state
+            {
+                output.push_str(&format!("target_install_state_sha256 = {digest:?}\n"));
+            }
+            output.push_str(line);
+            output.push('\n');
+        }
+        output
+    }
+
+    fn legacy_upgrade_recovery_receipt(
+        fixture: &InstalledBundleFixture,
+        target: &VerifiedBundle,
+    ) -> UpgradeRecoveryReceipt {
+        UpgradeRecoveryReceipt {
+            operation_id: "legacy-runtime-pair".to_owned(),
+            probe_id: fixture.installed.probe_id.clone(),
+            stage_owner_uid: unsafe { libc::geteuid() },
+            source_bundle_version: fixture.installed.source_bundle_version.clone(),
+            target_bundle_version: target.version.clone(),
+            activated: true,
+        }
+    }
+
     fn restore_bundle_fixture(
         fixture: &InstalledBundleFixture,
         systemd: &mut Systemd,
@@ -1889,6 +1928,135 @@ mod tests {
             assert!(journal.contains("phase = \"stage-cleanup-required\""));
             finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
         }
+    }
+
+    #[test]
+    fn direct_stage_cleanup_finalizer_establishes_legacy_pair_custody_before_status_effects() {
+        for (schema, pair_present) in [(3, true), (3, false), (2, true), (2, false)] {
+            let fixture = installed_bundle_fixture();
+            let paths = &fixture.paths;
+            let target =
+                prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
+            let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+            if schema == 2 {
+                let journal = fs::read_to_string(&journal_path).unwrap();
+                fs::write(
+                    &journal_path,
+                    journal.replacen("schema_version = 3", "schema_version = 2", 1),
+                )
+                .unwrap();
+            }
+            if pair_present {
+                write_runtime_failure_pair_fixture(paths, &"ab".repeat(32));
+            }
+            let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
+            if schema == 3 && pair_present {
+                upgrade::crash_after_runtime_failure_custody_write();
+                let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = finalize_probe_upgrade_stage_cleanup(paths, &receipt);
+                }));
+                assert!(crashed.is_err());
+                let journal = fs::read_to_string(&journal_path).unwrap();
+                assert!(journal.contains("schema_version = 4"));
+                assert!(journal.contains("runtime_failure_consumption = \"bound\""));
+                assert!(journal.contains("phase = \"stage-cleanup-required\""));
+                assert!(!paths.state().join("probe-operation-status.toml").exists());
+                assert!(paths.runtime_failure_epoch().exists());
+                assert!(paths.runtime_failure_latch().exists());
+            }
+
+            finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
+
+            let journal = fs::read_to_string(&journal_path).unwrap();
+            assert!(journal.contains("schema_version = 4"));
+            assert!(journal.contains("phase = \"activated\""));
+            assert!(journal.contains(if pair_present {
+                "runtime_failure_consumption = \"latch-removed\""
+            } else {
+                "runtime_failure_consumption = \"none-consumed\""
+            }));
+            assert!(!paths.runtime_failure_epoch().exists());
+            assert!(!paths.runtime_failure_latch().exists());
+            assert!(
+                fs::read_to_string(paths.state().join("probe-operation-status.toml"))
+                    .unwrap()
+                    .contains("status = \"running\"")
+            );
+        }
+    }
+
+    #[test]
+    fn direct_stage_cleanup_finalizer_rejects_a_mismatched_receipt_before_any_effect() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let target =
+            prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
+        write_runtime_failure_pair_fixture(paths, &"bc".repeat(32));
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal_before = fs::read(&journal_path).unwrap();
+        let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
+        let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
+        let mut receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
+        receipt.probe_id = "different-probe".to_owned();
+
+        assert!(finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_err());
+
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
+        assert!(!paths.state().join("probe-operation-status.toml").exists());
+    }
+
+    #[test]
+    fn scope_less_stage_cleanup_requires_its_historical_target_install_binding() {
+        for target_install_state in [None, Some("invalid")] {
+            let fixture = installed_bundle_fixture();
+            let paths = &fixture.paths;
+            let target =
+                prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
+            write_runtime_failure_pair_fixture(paths, &"cd".repeat(32));
+            let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+            let journal = fs::read_to_string(&journal_path).unwrap();
+            let invalid = scope_less_upgrade_journal(&journal, target_install_state);
+            fs::write(&journal_path, &invalid).unwrap();
+            let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
+            let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
+
+            assert!(finalize_probe_upgrade_stage_cleanup(
+                paths,
+                &legacy_upgrade_recovery_receipt(&fixture, &target),
+            )
+            .is_err());
+
+            assert_eq!(fs::read_to_string(&journal_path).unwrap(), invalid);
+            assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
+            assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
+            assert!(!paths.state().join("probe-operation-status.toml").exists());
+        }
+
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let target =
+            prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
+        write_runtime_failure_pair_fixture(paths, &"de".repeat(32));
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal = fs::read_to_string(&journal_path).unwrap();
+        fs::write(
+            &journal_path,
+            scope_less_upgrade_journal(&journal, Some(&target.install_state_sha256())),
+        )
+        .unwrap();
+
+        finalize_probe_upgrade_stage_cleanup(
+            paths,
+            &legacy_upgrade_recovery_receipt(&fixture, &target),
+        )
+        .unwrap();
+
+        let journal = fs::read_to_string(&journal_path).unwrap();
+        assert!(journal.contains("schema_version = 4"));
+        assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
+        assert!(journal.contains("phase = \"activated\""));
     }
 
     #[test]

@@ -671,6 +671,7 @@ struct ValidatedUpgradeAttemptBinding {
     source_install_state_sha256: String,
     source_manifest_sha256: String,
     target_bundle_version: String,
+    target_install_state_sha256: Option<String>,
     target_manifest_sha256: String,
     authority_scope: Option<ValidatedUpgradeAuthorityScope>,
 }
@@ -685,6 +686,19 @@ struct ValidatedUpgradeAuthorityScope {
 
 fn load_validated_upgrade_attempt(
     paths: &FixedInstallPaths,
+) -> Result<ValidatedUpgradeAttemptJournal, InstallError> {
+    load_validated_upgrade_attempt_with_schema2_migration(paths, true)
+}
+
+fn load_validated_upgrade_attempt_without_schema2_migration(
+    paths: &FixedInstallPaths,
+) -> Result<ValidatedUpgradeAttemptJournal, InstallError> {
+    load_validated_upgrade_attempt_with_schema2_migration(paths, false)
+}
+
+fn load_validated_upgrade_attempt_with_schema2_migration(
+    paths: &FixedInstallPaths,
+    migrate_schema2: bool,
 ) -> Result<ValidatedUpgradeAttemptJournal, InstallError> {
     let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
     let mut contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
@@ -707,6 +721,13 @@ fn load_validated_upgrade_attempt(
         journal_string(&contents, "source_install_state_sha256")?.to_owned();
     let source_manifest_sha256 = journal_string(&contents, "source_manifest_sha256")?.to_owned();
     let target_bundle_version = journal_string(&contents, "target_bundle_version")?.to_owned();
+    let has_target_install_state_sha256 = contents.lines().any(|line| {
+        line.split_once('=')
+            .is_some_and(|(key, _)| key.trim() == "target_install_state_sha256")
+    });
+    let target_install_state_sha256 = has_target_install_state_sha256
+        .then(|| journal_string(&contents, "target_install_state_sha256").map(ToOwned::to_owned))
+        .transpose()?;
     let target_manifest_sha256 = journal_string(&contents, "target_manifest_sha256")?.to_owned();
     if !valid_upgrade_identifier(&operation_id)
         || !valid_upgrade_identifier(&source_probe_id)
@@ -715,6 +736,9 @@ fn load_validated_upgrade_attempt(
         || !valid_upgrade_version(&target_bundle_version)
         || !valid_sha256(&source_install_state_sha256)
         || !valid_sha256(&source_manifest_sha256)
+        || target_install_state_sha256
+            .as_deref()
+            .is_some_and(|digest| !valid_sha256(digest))
         || !valid_sha256(&target_manifest_sha256)
     {
         return Err(InstallError::ExistingResidue);
@@ -749,6 +773,9 @@ fn load_validated_upgrade_attempt(
     } else {
         None
     };
+    if authority_scope.is_none() && target_install_state_sha256.is_none() {
+        return Err(InstallError::ExistingResidue);
+    }
     let binding = ValidatedUpgradeAttemptBinding {
         operation_id,
         stage_owner_uid,
@@ -758,6 +785,7 @@ fn load_validated_upgrade_attempt(
         source_install_state_sha256,
         source_manifest_sha256,
         target_bundle_version,
+        target_install_state_sha256,
         target_manifest_sha256,
         authority_scope,
     };
@@ -839,7 +867,7 @@ fn load_validated_upgrade_attempt(
     {
         return Err(InstallError::ExistingResidue);
     }
-    if schema_version == 2 {
+    if schema_version == 2 && migrate_schema2 {
         let mut migrated = contents.replacen("schema_version = 2", "schema_version = 3", 1);
         if metadata_scalar(&contents, "activation_started").is_none() {
             migrated = migrated.replacen(
@@ -856,7 +884,7 @@ fn load_validated_upgrade_attempt(
     }
     Ok(ValidatedUpgradeAttemptJournal {
         contents,
-        schema_version: if schema_version == 2 {
+        schema_version: if schema_version == 2 && migrate_schema2 {
             3
         } else {
             schema_version
@@ -2038,6 +2066,14 @@ fn legacy_upgrade_runtime_failure_epoch_binding(
     {
         return Err(InstallError::ExistingResidue);
     }
+    legacy_upgrade_source_runtime_failure_epoch_binding(paths, state)
+        .or_else(|_| legacy_upgrade_target_runtime_failure_epoch_binding(paths, state))
+}
+
+fn legacy_upgrade_source_runtime_failure_epoch_binding(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<(String, String), InstallError> {
     let epoch = trusted_runtime_failure_bytes(
         &paths.runtime_failure_epoch(),
         paths.expected_root_uid(),
@@ -2091,6 +2127,39 @@ fn legacy_upgrade_runtime_failure_epoch_binding(
         return Err(InstallError::ExistingResidue);
     }
     Ok((generation, format!("{:x}", Sha256::digest(&epoch))))
+}
+
+fn legacy_upgrade_target_runtime_failure_epoch_binding(
+    paths: &FixedInstallPaths,
+    state: &ValidatedUpgradeAttemptJournal,
+) -> Result<(String, String), InstallError> {
+    let binding = current_runtime_failure_epoch_binding(paths)?;
+    let (metadata, identity) = trusted_complete_installed_layout(paths)?;
+    let metadata_value =
+        |key: &str| metadata_string(&metadata, key).ok_or(InstallError::ExistingResidue);
+    let identity_value =
+        |key: &str| metadata_string(&identity, key).ok_or(InstallError::ExistingResidue);
+    let target_install_state_matches = match state.binding.target_install_state_sha256.as_ref() {
+        Some(digest) => metadata_value("install_state_sha256")? == *digest,
+        None => true,
+    };
+    let target_matches_authority = match state.binding.authority_scope.as_ref() {
+        Some(scope) => {
+            metadata_value("hub_url")? == scope.hub_origin
+                && identity_value("hub_url")? == scope.hub_origin
+                && identity_value("host_id")? == scope.host_id
+        }
+        None => true,
+    };
+    if metadata_value("bundle_version")? != state.binding.target_bundle_version
+        || metadata_value("target_manifest_sha256")? != state.binding.target_manifest_sha256
+        || identity_value("probe_id")? != state.binding.source_probe_id
+        || !target_install_state_matches
+        || !target_matches_authority
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(binding)
 }
 
 fn trusted_legacy_upgrade_source_target(
@@ -2972,19 +3041,26 @@ fn finalize_probe_upgrade_stage_cleanup_with_status(
     receipt: &UpgradeRecoveryReceipt,
     publish_upgrade_status: bool,
 ) -> Result<(), InstallError> {
-    let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
-    let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
-    if journal_string(&contents, "operation_id")? != receipt.operation_id
-        || journal_usize(&contents, "stage_owner_uid")? != receipt.stage_owner_uid as usize
-        || journal_string(&contents, "target_bundle_version")? != receipt.target_bundle_version
+    let state = load_validated_upgrade_attempt_without_schema2_migration(paths)?;
+    if state.binding.operation_id != receipt.operation_id
+        || state.binding.source_probe_id != receipt.probe_id
+        || state.binding.stage_owner_uid != receipt.stage_owner_uid
+        || state.binding.source_bundle_version != receipt.source_bundle_version
+        || state.binding.target_bundle_version != receipt.target_bundle_version
+        || state.activation_started != receipt.activated
     {
         return Err(InstallError::ExistingResidue);
     }
-    let phase = journal_string(&contents, "phase")?;
+    let expected_phase = if receipt.activated {
+        "stage-cleanup-required"
+    } else {
+        "aborted"
+    };
+    if state.phase != expected_phase {
+        return Err(InstallError::ExistingResidue);
+    }
+    complete_runtime_failure_custody_before_recovery_effects(paths, &state)?;
     if receipt.activated {
-        if phase != "stage-cleanup-required" {
-            return Err(InstallError::ExistingResidue);
-        }
         transition_upgrade_attempt_phase(paths, UpgradeAttemptTerminalTransition::MarkActivated)?;
         if publish_upgrade_status {
             write_operation_status(
@@ -3002,9 +3078,6 @@ fn finalize_probe_upgrade_stage_cleanup_with_status(
             Ok(())
         }
     } else {
-        if phase != "aborted" {
-            return Err(InstallError::ExistingResidue);
-        }
         write_operation_status(
             paths,
             &UpgradeAttempt {
@@ -3174,6 +3247,8 @@ fn write_upgrade_attempt(
             || state.binding.source_install_state_sha256 != source.source_install_state_sha256
             || state.binding.source_manifest_sha256 != source.source_manifest_sha256
             || state.binding.target_bundle_version != bundle.version
+            || state.binding.target_install_state_sha256.as_deref()
+                != Some(bundle.install_state_sha256().as_str())
             || state.binding.target_manifest_sha256 != bundle.manifest_sha256
             || state.binding.authority_scope.is_some()
         {
