@@ -600,12 +600,9 @@ async function createResolverFixture(options = {}) {
       rootPrivateKeyPem: probe.root.privateKey,
       rootPublicKeyPem: probe.root.publicKey,
       sourceAssetDir: source.assetDir,
-      targetProbeComponents: probeTargets.map((target) => ({
-        file: "enoki-probe",
-        role: "probe",
-        sha256: "a".repeat(64),
-        target,
-      })),
+      targetProbeComponents: await targetProbeComponentsFromAssetSet(
+        probe.outputDir,
+      ),
       targetManifestBytes: await readFile(
         path.join(probe.outputDir, "manifest.json"),
       ),
@@ -1277,6 +1274,31 @@ function jsonResponse(value, headers = {}) {
     headers: { "content-type": "application/json", ...headers },
     status: 200,
   });
+}
+
+async function targetProbeComponentsFromAssetSet(assetDir) {
+  return Promise.all(
+    probeTargets.map(async (target) => {
+      const { stdout } = await execFileAsync(
+        "tar",
+        [
+          "--extract",
+          "--gzip",
+          "--file",
+          path.join(assetDir, `enoki-probe-${target}.tar.gz`),
+          "--to-stdout",
+          "enoki-probe",
+        ],
+        { encoding: "buffer" },
+      );
+      return {
+        file: "enoki-probe",
+        role: "probe",
+        sha256: sha256(stdout),
+        target,
+      };
+    }),
+  );
 }
 
 function sha256(contents) {
