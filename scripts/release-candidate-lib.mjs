@@ -1289,6 +1289,7 @@ export async function inspectProbeAssetSet(
     distribution: "enoki",
     rootKeyId: sha256(packagedRootPublicKey),
   };
+  const targetProbeComponents = [];
 
   for (let index = 0; index < probeTargets.length; index += 1) {
     const target = probeTargets[index];
@@ -1337,6 +1338,10 @@ export async function inspectProbeAssetSet(
         `Probe Asset Set bundle manifest does not match ${asset.file}`,
       );
     }
+    targetProbeComponents.push({
+      sha256: inspectedArchive.probeSha256,
+      target,
+    });
   }
 
   const publicKey = await readFile(path.join(assetDir, "signing-key.pem"));
@@ -1476,6 +1481,21 @@ export async function inspectProbeAssetSet(
       },
       rootPublicKeyPem: trustedRootPublicKey ?? canonicalRootPublicKey,
     });
+    if (
+      !Array.isArray(releaseTransition.target?.probeComponents) ||
+      releaseTransition.target.probeComponents.length !==
+        targetProbeComponents.length ||
+      releaseTransition.target.probeComponents.some((component, index) =>
+        component?.file !== "enoki-probe" ||
+        component?.role !== "probe" ||
+        component?.target !== targetProbeComponents[index]?.target ||
+        component?.sha256 !== targetProbeComponents[index]?.sha256,
+      )
+    ) {
+      throw new Error(
+        "Release Transition Contract target Probe closure does not match verified bundles",
+      );
+    }
   }
   const publicKeySha256 = sha256(publicKey);
   const files = [];
@@ -1633,7 +1653,10 @@ async function inspectProbeArchive(
       target,
       version: version.slice(1),
     });
-    return { bundleManifestSha256: sha256(bundleManifest) };
+    return {
+      bundleManifestSha256: sha256(bundleManifest),
+      probeSha256: componentDetails.get("enoki-probe")?.sha256,
+    };
   } finally {
     await rm(extractionDir, { force: true, recursive: true });
   }

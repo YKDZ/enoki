@@ -1025,12 +1025,9 @@ with open(os.devnull, "rb") as input_stream:
         rootPrivateKeyPem: fixture.root.privateKey,
         rootPublicKeyPem: fixture.root.publicKey,
         sourceAssetDir: source.assetDir,
-        targetProbeComponents: probeTargets.map((target) => ({
-          file: "enoki-probe",
-          role: "probe",
-          sha256: "a".repeat(64),
-          target,
-        })),
+        targetProbeComponents: await targetProbeComponentsFromAssetSet(
+          fixture.outputDir,
+        ),
         targetManifestBytes,
         targetVersion: "1.2.3",
       });
@@ -2678,12 +2675,7 @@ async function writeOrdinaryTransitionContract({
       assetClosure: manifest.assets,
       assetSetManifestSha256: sha256(manifestBytes),
       delegationGeneration: manifest.signature.delegationGeneration,
-      probeComponents: probeTargets.map((target) => ({
-        file: "enoki-probe",
-        role: "probe",
-        sha256: "d".repeat(64),
-        target,
-      })),
+      probeComponents: await targetProbeComponentsFromAssetSet(probeAssetSetDir),
       signingKeyId: manifest.signature.delegationKeyId,
       version: manifest.version,
     },
@@ -2704,6 +2696,27 @@ async function writeOrdinaryTransitionContract({
       ),
     ),
   ]);
+}
+
+async function targetProbeComponentsFromAssetSet(assetDir) {
+  return Promise.all(
+    probeTargets.map(async (target) => {
+      const { stdout } = await execFileAsync("tar", [
+        "--extract",
+        "--gzip",
+        "--file",
+        path.join(assetDir, `enoki-probe-${target}.tar.gz`),
+        "--to-stdout",
+        "enoki-probe",
+      ]);
+      return {
+        file: "enoki-probe",
+        role: "probe",
+        sha256: sha256(stdout),
+        target,
+      };
+    }),
+  );
 }
 
 async function createProbeBootstrapArtifactFixture(workDir, { root, version }) {
