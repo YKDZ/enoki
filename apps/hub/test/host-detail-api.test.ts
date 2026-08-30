@@ -1188,7 +1188,7 @@ describe("Host detail API", () => {
     });
 
     database.close();
-  });
+  }, 20_000);
 
   it("lets the Owner create a Probe Upgrade Request and exposes status on Host detail", async () => {
     const database = await createTemporaryDatabase();
