@@ -376,13 +376,13 @@ describe("candidate-image UI Contract gate", () => {
     expect(start).toHaveBeenCalledWith({
       candidateDir: "/candidate",
       candidateManifest: manifest,
-      hubOwnerUrl: "http://127.0.0.1:39123/",
-      hubPublicUrl: "http://127.0.0.1:39123/",
+      hubOwnerUrl: "http://127.0.0.1:39123",
+      hubPublicUrl: "http://127.0.0.1:39123",
       ownerPassword: "temporary-owner-password",
       runId: "ui-contract-test",
     });
     expect(runPlaywright).toHaveBeenCalledWith({
-      baseUrl: "http://127.0.0.1:39123/",
+      baseUrl: "http://127.0.0.1:39123",
       candidateVersion: "7.8.9",
       ownerPassword: "temporary-owner-password",
     });
