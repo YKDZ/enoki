@@ -275,7 +275,7 @@ describe("verify-only release workflow", () => {
       outcome: "succeeded",
     };
 
-    const summary = createReleaseVerificationSummary({
+    const validSummaryInput = {
       artifactIndex: releaseArtifactIndex(hostGates, uiGate),
       candidateManifest,
       gateResults: {
@@ -293,7 +293,8 @@ describe("verify-only release workflow", () => {
       },
       standardCi: standardCiEvidence(candidateManifest.candidate),
       uiGate,
-    });
+    };
+    const summary = createReleaseVerificationSummary(validSummaryInput);
 
     expect(summary).toMatchObject({
       candidate: candidateManifest.candidate,
@@ -341,6 +342,28 @@ describe("verify-only release workflow", () => {
       ).resolves.toMatchObject({
         stdout: "Release Verification Evidence is complete\n",
       });
+
+      for (const identityError of [
+        "Probe Asset Set identity unavailable: Probe Asset Set root key does not match the trusted Probe Distribution Trust Root",
+        "Hub OCI identity unavailable: Hub OCI embedded Probe asset differs from enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+      ]) {
+        const failedSummary = createReleaseVerificationSummary({
+          ...validSummaryInput,
+          evidenceErrors: [identityError],
+        });
+        expect(failedSummary.verified).toBe(false);
+        expect(failedSummary.failureReasons).toContain(identityError);
+
+        await writeFile(summaryPath, `${JSON.stringify(failedSummary)}\n`);
+        await expect(
+          execFileAsync(process.execPath, [
+            "scripts/release-verification.mjs",
+            "assert-verified",
+            "--summary",
+            summaryPath,
+          ]),
+        ).rejects.toMatchObject({ code: 1 });
+      }
     } finally {
       await rm(workDir, { force: true, recursive: true });
     }
