@@ -1,5 +1,4 @@
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -13,7 +12,12 @@ use crate::secure_file::{
     SystemdProbeDirectory, open_systemd_probe_state_projection_for_finalization,
 };
 use crate::{
-    handoff::Enrollment, replacement::ReplacementRegistrationBinding, verifier::VerifiedBundle,
+    handoff::Enrollment,
+    replacement::{
+        ReplacementRegistrationAttemptProof, ReplacementRegistrationBinding,
+        prove_replacement_registration_attempt_capsule,
+    },
+    verifier::VerifiedBundle,
 };
 
 use super::{FixedInstallPaths, InstallError, installed_layout, upgrade};
@@ -148,7 +152,7 @@ pub(super) fn canonical_identity_sha256(
 ) -> Result<String, InstallError> {
     let (identity, _) = read_identity(paths)?;
     if !canonical_identity_matches_contents(paths, &identity, binding)
-        || (require_attempt_capsule && !matches!(read_attempt_receipt(paths), Ok(Some(_))))
+        || (require_attempt_capsule && !matches!(read_attempt_proof(paths), Ok(Some(_))))
     {
         return Err(InstallError::ExistingResidue);
     }
@@ -223,30 +227,12 @@ pub(super) fn registered_identity_matches(
     else {
         return false;
     };
-    let Ok(capsule) = installed_layout::trusted_text(
-        &paths.replacement_registration_attempt_source(),
-        paths.expected_root_uid(),
-        paths.expected_root_gid(),
-        0o600,
-    )
-    .and_then(|contents| {
-        serde_json::from_str::<ReplacementRegistrationAttemptReceipt>(&contents)
-            .map_err(|_| InstallError::ExistingResidue)
-    }) else {
+    let Ok(Some(proof)) = read_attempt_proof(paths) else {
         return false;
     };
     let value = |key| upgrade::metadata_string(&identity, key);
     let private_key = value("probe_private_key_pem");
-    capsule.schema_version == 1
-        && capsule.hub_origin.trim_end_matches('/') == binding.hub_origin.trim_end_matches('/')
-        && capsule.local_clock_reference_ms > 0
-        && valid_lower_sha256(&capsule.enrollment_token_sha256)
-        && valid_lower_sha256(&capsule.signed_attempt_sha256)
-        && !capsule.request_hex.is_empty()
-        && capsule
-            .request_hex
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    proof.binding() == binding
         && value("enrollment_token").is_none()
         && value("hub_url")
             .as_deref()
@@ -257,7 +243,7 @@ pub(super) fn registered_identity_matches(
         && value("probe_id")
             .is_some_and(|probe_id| !probe_id.is_empty() && probe_id != binding.old_probe_id)
         && private_key.as_deref().is_some_and(|pem| {
-            pem == capsule.candidate_private_key_pem && RsaPrivateKey::from_pkcs8_pem(pem).is_ok()
+            pem == proof.candidate_private_key_pem() && RsaPrivateKey::from_pkcs8_pem(pem).is_ok()
         })
         && value("registration_attempt_credential_path").as_deref() == Some(ATTEMPT_CREDENTIAL)
         && value("registration_committed_source_probe_sha256").as_deref()
@@ -271,7 +257,7 @@ pub(super) fn registered_identity_matches(
         && value("registration_source_probe_version").as_deref()
             == Some(binding.source_probe_version.as_str())
         && value("registration_signed_attempt_sha256").as_deref()
-            == Some(capsule.signed_attempt_sha256.as_str())
+            == Some(proof.signed_attempt_sha256())
         && value("registration_target_asset_set_digest").as_deref()
             == Some(binding.target_asset_set_digest.as_str())
         && value("registration_target_bundle_target").as_deref()
@@ -318,8 +304,10 @@ fn canonical_identity_matches_contents(
         return false;
     }
 
-    match read_attempt_receipt(paths) {
-        Ok(Some(capsule)) => private_key == capsule.candidate_private_key_pem,
+    match read_attempt_proof(paths) {
+        Ok(Some(proof)) => {
+            proof.binding() == binding && private_key == proof.candidate_private_key_pem()
+        }
         Ok(None) => true,
         Err(()) => false,
     }
@@ -388,9 +376,9 @@ fn write_identity(
         .map_err(|_| InstallError::ExistingResidue)
 }
 
-fn read_attempt_receipt(
+fn read_attempt_proof(
     paths: &FixedInstallPaths,
-) -> Result<Option<ReplacementRegistrationAttemptReceipt>, ()> {
+) -> Result<Option<ReplacementRegistrationAttemptProof>, ()> {
     match fs::symlink_metadata(paths.replacement_registration_attempt_source()) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
@@ -400,12 +388,11 @@ fn read_attempt_receipt(
             paths.expected_root_gid(),
             0o600,
         )
+        .map_err(|_| ())
         .and_then(|contents| {
-            serde_json::from_str::<ReplacementRegistrationAttemptReceipt>(&contents)
-                .map_err(|_| InstallError::ExistingResidue)
+            prove_replacement_registration_attempt_capsule(contents.as_bytes()).map_err(|_| ())
         })
-        .map(Some)
-        .map_err(|_| ()),
+        .map(Some),
     }
 }
 
@@ -489,23 +476,4 @@ fn retire_private_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallErr
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(InstallError::ExistingResidue),
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ReplacementRegistrationAttemptReceipt {
-    candidate_private_key_pem: String,
-    enrollment_token_sha256: String,
-    hub_origin: String,
-    local_clock_reference_ms: u64,
-    request_hex: String,
-    schema_version: u8,
-    signed_attempt_sha256: String,
-}
-
-fn valid_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }

@@ -41,7 +41,7 @@ pub(super) fn verify_exact_layout(
     let identity_custody = identity_custody(paths)?;
     let identity_owner_receipt = identity_custody.owner_receipt;
     let identity_owner = paths.observed_identity_owner(identity_owner_receipt);
-    if !matches!(commit.schema_version, 1 | 2)
+    if !commit.has_valid_binding()
         || !commit.cleanup_complete
         || !commit.candidate_layout_complete
         || commit.intent.target_probe_version != bundle.version

@@ -7,6 +7,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod registration_attempt;
+#[cfg(test)]
+pub(crate) use registration_attempt::mutate_signed_replacement_capsule_for_test;
+#[cfg(test)]
+pub(crate) use registration_attempt::signed_replacement_registration_attempt_capsule_for_test;
+pub use registration_attempt::{
+    ReplacementRegistrationAttemptError, validate_replacement_registration_attempt_capsule,
+};
+pub(crate) use registration_attempt::{
+    ReplacementRegistrationAttemptProof, prove_replacement_registration_attempt_capsule,
+};
+
 const MAX_COMMIT_FACT_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -109,14 +121,17 @@ impl ReplacementCommitFact {
     }
 
     pub(crate) fn has_valid_binding(&self) -> bool {
-        matches!(self.schema_version, 1 | 2)
-            && canonical_intent_sha256(&self.intent).ok().as_deref()
-                == Some(self.canonical_intent_sha256.as_str())
-            && self
-                .canonical_identity_sha256
-                .as_deref()
-                .is_none_or(valid_lower_sha256)
-            && (self.schema_version == 2 || self.canonical_identity_sha256.is_none())
+        (matches!(
+            (
+                self.schema_version,
+                self.canonical_identity_sha256.as_deref()
+            ),
+            (1, None)
+        ) || matches!(
+            (self.schema_version, self.canonical_identity_sha256.as_deref()),
+            (2, Some(digest)) if valid_lower_sha256(digest)
+        )) && canonical_intent_sha256(&self.intent).ok().as_deref()
+            == Some(self.canonical_intent_sha256.as_str())
     }
 
     #[cfg(feature = "activator")]
@@ -126,7 +141,8 @@ impl ReplacementCommitFact {
 
     #[cfg(feature = "activator")]
     pub(crate) fn bind_canonical_identity_sha256(&mut self, digest: String) -> Result<(), ()> {
-        if !valid_lower_sha256(&digest)
+        if !self.has_valid_binding()
+            || !valid_lower_sha256(&digest)
             || self
                 .canonical_identity_sha256
                 .as_ref()
@@ -146,7 +162,7 @@ impl ReplacementCommitFact {
         candidate_layout_complete: bool,
     ) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 1,
             canonical_intent_sha256: canonical_intent_sha256(&intent).expect("canonical intent"),
             intent,
             cleanup_complete,
@@ -256,7 +272,10 @@ impl FileReplacementCommitStore {
         bound: &ReplacementCommitFact,
     ) -> std::io::Result<()> {
         if self.load()?.as_ref() != Some(expected)
+            || expected.schema_version != 1
             || expected.canonical_identity_sha256.is_some()
+            || !expected.has_valid_binding()
+            || !bound.has_valid_binding()
             || bound.schema_version != 2
             || bound.canonical_identity_sha256.is_none()
             || bound.intent != expected.intent
@@ -377,7 +396,7 @@ where
         canonical_intent_sha256(&intent).map_err(|_| ReplacementCommitError::ConflictingCommit)?;
     let mut fact = match store.load().map_err(ReplacementCommitError::Store)? {
         Some(existing)
-            if matches!(existing.schema_version, 1 | 2)
+            if existing.has_valid_binding()
                 && existing.canonical_intent_sha256 == digest
                 && existing.intent == intent =>
         {
@@ -386,7 +405,7 @@ where
         Some(_) => return Err(ReplacementCommitError::ConflictingCommit),
         None => {
             let committed = ReplacementCommitFact {
-                schema_version: 2,
+                schema_version: 1,
                 canonical_intent_sha256: digest,
                 intent,
                 cleanup_complete: false,
@@ -627,7 +646,6 @@ mod tests {
         let path = temporary.path().join("replacement-migration.json");
         let mut store = FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() });
         let mut legacy = ReplacementCommitFact::for_test(intent(), true, true);
-        legacy.schema_version = 1;
         store.persist(&legacy).unwrap();
         assert_eq!(store.load().unwrap(), Some(legacy.clone()));
 
@@ -661,11 +679,20 @@ mod tests {
         );
 
         let mut malformed = ReplacementCommitFact::for_test(intent(), true, true);
+        malformed.schema_version = 2;
         malformed.canonical_identity_sha256 = Some("not-a-digest".into());
         store.persist(&malformed).unwrap();
         assert!(
             store.load().is_err(),
             "malformed schema 2 custody fails closed"
+        );
+
+        let mut missing = ReplacementCommitFact::for_test(intent(), true, true);
+        missing.schema_version = 2;
+        store.persist(&missing).unwrap();
+        assert!(
+            store.load().is_err(),
+            "schema 2 requires durable identity custody"
         );
     }
 

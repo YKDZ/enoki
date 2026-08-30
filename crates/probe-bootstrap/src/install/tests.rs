@@ -516,7 +516,7 @@ mod tests {
                 let registered = pending.replace(
                     "enrollment_token = \"enk_enroll_secret\"\n",
                     &format!(
-                        "enrollment_id = \"enrollment_01\"\nprobe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = {:?}\n",
+                        "enrollment_id = \"enr_0123456789abcdef\"\nprobe_id = \"probe-registered\"\nhost_id = \"7\"\nprobe_private_key_pem = {:?}\n",
                         valid_probe_private_key_pem()
                     ),
                 );
@@ -637,9 +637,9 @@ mod tests {
     fn replacement_commit(bundle: &VerifiedBundle) -> ReplacementCommitFact {
         ReplacementCommitFact::for_test(
             crate::replacement::ReplacementIntent {
-                enrollment_id: "enrollment_01".to_owned(),
+                enrollment_id: "enr_0123456789abcdef".to_owned(),
                 enrollment_token_sha256: "1".repeat(64),
-                host_id: "host-registered".to_owned(),
+                host_id: "7".to_owned(),
                 hub_origin: "https://hub.example".to_owned(),
                 old_probe_id: "probe-old".to_owned(),
                 source_probe_version: "1.2.2".to_owned(),
@@ -3450,7 +3450,7 @@ mod tests {
         let bundle = bundle().with_test_complete_receipts(5);
         let predecessor = ReplacementCommitFact::for_test(
             crate::replacement::ReplacementIntent {
-                enrollment_id: "enrollment_01".to_owned(),
+                enrollment_id: "enr_0123456789abcdef".to_owned(),
                 enrollment_token_sha256: "1".repeat(64),
                 host_id: "7".to_owned(),
                 hub_origin: "https://hub.example".to_owned(),
@@ -3469,7 +3469,7 @@ mod tests {
         fs::write(
             paths.identity(),
             format!(
-                "hub_url = \"https://hub.example\"\nenrollment_id = \"enrollment_01\"\nhost_id = \"7\"\nprobe_id = \"probe-current\"\nprobe_private_key_pem = {:?}\n",
+                "hub_url = \"https://hub.example\"\nenrollment_id = \"enr_0123456789abcdef\"\nhost_id = \"7\"\nprobe_id = \"probe-current\"\nprobe_private_key_pem = {:?}\n",
                 valid_probe_private_key_pem()
             ),
         )
@@ -3598,8 +3598,8 @@ mod tests {
             "publish-source",
             None,
         ));
-        let capsule: serde_json::Value =
-            serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+        let capsule_bytes = fs::read(&source).unwrap();
+        let capsule: serde_json::Value = serde_json::from_slice(&capsule_bytes).unwrap();
 
         for point in ["before-rename", "after-rename"] {
             assert!(!run_replacement_lifecycle_child(
@@ -3673,6 +3673,36 @@ mod tests {
         assert!(runtime_credential.exists());
         assert!(!fs::read_to_string(paths.unit()).unwrap().contains("LoadCredential="));
 
+        let exact_identity = fs::read(paths.identity()).unwrap();
+        let exact_commit = fs::read(&commit_path).unwrap();
+        for mutation in [
+            "token-hash",
+            "raw-token",
+            "key",
+            "signature",
+            "signed-digest",
+            "binding",
+        ] {
+            let corrupted = crate::replacement::mutate_signed_replacement_capsule_for_test(
+                &capsule_bytes,
+                mutation,
+            );
+            fs::write(&source, &corrupted).unwrap();
+            assert!(
+                run_replacement_lifecycle_child(
+                    temporary.path(),
+                    "reject-retirement",
+                    None,
+                ),
+                "{mutation} capsule must fail before identity custody or retirement"
+            );
+            assert_eq!(fs::read(&source).unwrap(), corrupted);
+            assert_eq!(fs::read(&commit_path).unwrap(), exact_commit);
+            assert_eq!(fs::read(paths.identity()).unwrap(), exact_identity);
+            assert!(runtime_credential.exists(), "{mutation} has zero restart effect");
+        }
+        fs::write(&source, &capsule_bytes).unwrap();
+
         for tampered in [
             registered_identity
                 .lines()
@@ -3681,7 +3711,7 @@ mod tests {
                 .collect::<String>(),
             format!("{registered_identity}registration_unknown = \"tamper\"\n"),
             format!(
-                "{registered_identity}registration_host_id = \"host-registered\"\n"
+                "{registered_identity}registration_host_id = \"8\"\n"
             ),
         ] {
             fs::write(paths.identity(), tampered).unwrap();
@@ -3925,16 +3955,14 @@ mod tests {
                     fs::Permissions::from_mode(0o700),
                 )
                 .unwrap();
-                let capsule = serde_json::to_vec(&serde_json::json!({
-                    "candidatePrivateKeyPem": valid_probe_private_key_pem(),
-                    "enrollmentTokenSha256": "e".repeat(64),
-                    "hubOrigin": "https://hub.example",
-                    "localClockReferenceMs": 1_725_000_000_000_u64,
-                    "requestHex": "00",
-                    "schemaVersion": 1,
-                    "signedAttemptSha256": "f".repeat(64),
-                }))
-                .unwrap();
+                let binding = replacement_commit(&bundle().with_test_complete_receipts(5))
+                    .registration_binding()
+                    .expect("test replacement binding");
+                let capsule = crate::replacement::
+                    signed_replacement_registration_attempt_capsule_for_test(
+                        &binding,
+                        "enk_enroll_replacement_recovery",
+                    );
                 crate::secure_file::atomic_write(
                     &source,
                     &capsule,
@@ -4132,7 +4160,7 @@ mod tests {
                 let registered = pending.replace(
                     "enrollment_token = \"enk_enroll_secret\"\n",
                     &format!(
-                        "enrollment_id = \"enrollment_01\"\nprobe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = {candidate_private_key:?}\nregistration_signed_attempt_sha256 = {signed_attempt_sha256:?}\n",
+                        "enrollment_id = \"enr_0123456789abcdef\"\nprobe_id = \"probe-registered\"\nhost_id = \"7\"\nprobe_private_key_pem = {candidate_private_key:?}\nregistration_signed_attempt_sha256 = {signed_attempt_sha256:?}\n",
                     ),
                 );
                 fs::write(identity, registered).map_err(|_| InstallError::Io)?;
@@ -4700,7 +4728,7 @@ mod tests {
         let registered_identity = fs::read_to_string(paths.identity()).unwrap();
         fs::write(
             paths.identity(),
-            registered_identity.replace("enrollment_01", "enrollment_wrong"),
+            registered_identity.replace("enr_0123456789abcdef", "enr_wrong_0123456789"),
         )
         .unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();

@@ -1,11 +1,11 @@
 use enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding as BootstrapReplacementRegistrationBinding;
 use prost::Message;
 use rsa::{
-    RsaPrivateKey, RsaPublicKey,
-    pkcs1v15::{Signature as RsaPkcs1v15Signature, SigningKey, VerifyingKey},
-    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
+    RsaPrivateKey,
+    pkcs1v15::SigningKey,
+    pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey},
     rand_core::{OsRng, RngCore},
-    signature::{RandomizedSigner, SignatureEncoding, Verifier},
+    signature::{RandomizedSigner, SignatureEncoding},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,7 +16,7 @@ use crate::{
     protocol::enoki::v1::{ProbeRegistrationAttempt, ProbeRegistrationRequest},
     secure_file::{
         atomic_write, ensure_directory, read_private_regular_file,
-        read_registration_attempt_credential_bytes,
+        read_registration_attempt_credential_bytes, reject_atomic_write_residue,
     },
 };
 
@@ -301,48 +301,6 @@ impl From<BootstrapReplacementRegistrationBinding> for ReplacementRegistrationBi
 }
 
 impl ReplacementRegistrationBinding {
-    fn from_valid_proto(attempt: &ProbeRegistrationAttempt) -> Result<Self, RegistrationError> {
-        let binding = Self {
-            committed_source_probe_sha256: attempt.committed_source_probe_sha256.clone(),
-            enrollment_id: attempt.enrollment_id.clone(),
-            host_id: attempt.host_id.clone(),
-            hub_origin: attempt.hub_origin.clone(),
-            old_probe_id: attempt.old_probe_id.clone(),
-            replacement_commit_sha256: attempt.replacement_commit_sha256.clone(),
-            source_probe_version: attempt.source_probe_version.clone(),
-            target_asset_set_digest: attempt.target_asset_set_digest.clone(),
-            target_bundle_target: attempt.target_bundle_target.clone(),
-            target_manifest_sha256: attempt.target_manifest_sha256.clone(),
-            target_probe_version: attempt.target_probe_version.clone(),
-        };
-        if !valid_enrollment_id(&binding.enrollment_id)
-            || binding.host_id.parse::<u64>().ok().is_none_or(|id| id == 0)
-            || !bounded_identifier(&binding.old_probe_id)
-            || !valid_semver(&binding.source_probe_version)
-            || !valid_semver(&binding.target_probe_version)
-            || !valid_sha256(&binding.committed_source_probe_sha256)
-            || !valid_sha256(&binding.replacement_commit_sha256)
-            || !valid_sha256(&binding.target_manifest_sha256)
-            || !binding
-                .target_asset_set_digest
-                .strip_prefix("sha256:")
-                .is_some_and(valid_sha256)
-            || !matches!(
-                binding.target_bundle_target.as_str(),
-                "aarch64-unknown-linux-gnu"
-                    | "aarch64-unknown-linux-musl"
-                    | "x86_64-unknown-linux-gnu"
-                    | "x86_64-unknown-linux-musl"
-            )
-            || !binding.matches_proto(attempt)
-        {
-            return Err(RegistrationError::InvalidResponse(
-                "invalid replacement registration binding",
-            ));
-        }
-        Ok(binding)
-    }
-
     fn to_proto(
         &self,
         nonce: String,
@@ -364,26 +322,6 @@ impl ReplacementRegistrationBinding {
             target_manifest_sha256: self.target_manifest_sha256.clone(),
             target_probe_version: self.target_probe_version.clone(),
         }
-    }
-
-    fn matches_proto(&self, attempt: &ProbeRegistrationAttempt) -> bool {
-        attempt.schema_version == 1
-            && attempt.enrollment_id == self.enrollment_id
-            && attempt.host_id == self.host_id
-            && attempt.hub_origin == self.hub_origin
-            && attempt.old_probe_id == self.old_probe_id
-            && attempt.source_probe_version == self.source_probe_version
-            && attempt.committed_source_probe_sha256 == self.committed_source_probe_sha256
-            && attempt.target_probe_version == self.target_probe_version
-            && attempt.target_bundle_target == self.target_bundle_target
-            && attempt.target_asset_set_digest == self.target_asset_set_digest
-            && attempt.target_manifest_sha256 == self.target_manifest_sha256
-            && attempt.replacement_commit_sha256 == self.replacement_commit_sha256
-            && attempt.nonce.len() == 64
-            && attempt
-                .nonce
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     }
 }
 
@@ -525,6 +463,7 @@ fn persist_registration_attempt_capsule(
             "registration attempt capsule is too large",
         ));
     }
+    reject_atomic_write_residue(path)?;
     atomic_write(path, &bytes, 0o600, Some(ROOT_CAPSULE_OWNER))?;
     Ok(())
 }
@@ -532,6 +471,7 @@ fn persist_registration_attempt_capsule(
 fn read_registration_attempt_capsule(
     path: &Path,
 ) -> Result<Option<ProbeRegistrationAttemptCapsule>, std::io::Error> {
+    reject_atomic_write_residue(path)?;
     let bytes = match read_private_regular_file(
         path,
         0o600,
@@ -589,57 +529,14 @@ fn validate_registration_attempt_capsule(
 fn validate_self_bound_registration_attempt_capsule(
     capsule: &ProbeRegistrationAttemptCapsule,
 ) -> Result<ReplacementRegistrationBinding, RegistrationError> {
-    if capsule.schema_version != 1 || capsule.local_clock_reference_ms == 0 {
-        return Err(RegistrationError::InvalidResponse(
-            "registration attempt capsule binding mismatch",
-        ));
-    }
-    let request_body = decode_lower_hex(&capsule.request_hex).ok_or(
-        RegistrationError::InvalidResponse("invalid registration attempt capsule"),
-    )?;
-    let request = ProbeRegistrationRequest::decode(request_body.as_slice())
+    let bytes = serde_json::to_vec(capsule)
         .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    let attempt = ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
+    let binding =
+        enoki_probe_bootstrap::replacement::validate_replacement_registration_attempt_capsule(
+            &bytes,
+        )
         .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    let binding = ReplacementRegistrationBinding::from_valid_proto(&attempt)?;
-    if attempt.encode_to_vec() != request.canonical_attempt
-        || capsule.enrollment_token_sha256 != sha256_hex(request.enrollment_token.as_bytes())
-        || capsule.hub_origin != binding.hub_origin
-        || request.installation_inspection.is_some()
-        || request.installation_rejection.is_some()
-        || !request.snapshots.is_empty()
-    {
-        return Err(RegistrationError::InvalidResponse(
-            "registration attempt capsule binding mismatch",
-        ));
-    }
-    let private_key = RsaPrivateKey::from_pkcs8_pem(&capsule.candidate_private_key_pem)
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    let public_key = RsaPublicKey::from(&private_key)
-        .to_public_key_pem(Default::default())
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    if public_key != request.probe_public_key_pem
-        || public_key != attempt.candidate_public_key_pem
-        || capsule.signed_attempt_sha256
-            != signed_attempt_sha256(&request.canonical_attempt, &request.candidate_signature)
-    {
-        return Err(RegistrationError::InvalidResponse(
-            "registration attempt capsule key mismatch",
-        ));
-    }
-    let signature = RsaPkcs1v15Signature::try_from(request.candidate_signature.as_slice())
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    VerifyingKey::<Sha256>::new(
-        RsaPublicKey::from_public_key_pem(&public_key).map_err(|_| {
-            RegistrationError::InvalidResponse("invalid registration attempt capsule")
-        })?,
-    )
-    .verify(
-        registration_attempt_signature_payload(&request.canonical_attempt).as_bytes(),
-        &signature,
-    )
-    .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    Ok(binding)
+    Ok(ReplacementRegistrationBinding::from(binding))
 }
 
 fn registration_request(

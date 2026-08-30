@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CString, OsStr},
+    ffi::{CStr, CString, OsStr},
     fs::File,
     io::{self, Read},
     os::{
@@ -192,6 +192,51 @@ pub fn read_private_regular_file(
         ));
     }
     Ok(contents)
+}
+
+/// Rejects any unresolved atomic-write sibling for the managed target while
+/// holding its verified parent directory. A prior publisher may have crashed
+/// before rename; callers must not guess whether those bytes can be discarded.
+pub fn reject_atomic_write_residue(path: &Path) -> io::Result<()> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    let duplicate = unsafe { libc::fcntl(parent.raw(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    let mut prefix = Vec::with_capacity(target.as_bytes().len() + 14);
+    prefix.push(b'.');
+    prefix.extend_from_slice(target.as_bytes());
+    prefix.extend_from_slice(b"-enoki-write-");
+    let result = loop {
+        unsafe { *libc::__errno_location() = 0 };
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break if error.raw_os_error() == Some(0) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes().starts_with(&prefix) {
+            break Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unresolved registration capsule atomic-write residue",
+            ));
+        }
+    };
+    if unsafe { libc::closedir(directory) } != 0 && result.is_ok() {
+        return Err(io::Error::last_os_error());
+    }
+    result
 }
 
 /// 读取大小受限的一次性 systemd 凭据。该凭据可归 root 或 DynamicUser
