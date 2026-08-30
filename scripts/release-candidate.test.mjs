@@ -984,6 +984,26 @@ with open(os.devnull, "rb") as input_stream:
     );
   });
 
+  it("gives the reproducible Hub comparison its required public trust root without signer credentials", async () => {
+    const workflow = await readFile(
+      ".github/workflows/reusable-hub-image.yml",
+      "utf8",
+    );
+    const compareStep = workflow.slice(
+      workflow.indexOf("- name: Compare independently built Hub image digests"),
+      workflow.indexOf("- name: Upload Hub OCI archive"),
+    );
+
+    expect(compareStep).toContain("compare-hub-builds");
+    expect(compareStep).toContain(
+      "--root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM",
+    );
+    expect(compareStep).toContain(
+      "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}",
+    );
+    expect(compareStep).not.toContain("secrets.");
+  });
+
   it("grants callers the read permission requested by the shared Hub workflow", async () => {
     const [ciWorkflow, hubWorkflow] = await Promise.all([
       readFile(".github/workflows/ci.yml", "utf8"),

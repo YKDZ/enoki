@@ -138,6 +138,7 @@ jobs:
         if: inputs.package-artifact && inputs.verify-reproducible
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node source/scripts/release-candidate.mjs compare-hub-builds
           --first "hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
