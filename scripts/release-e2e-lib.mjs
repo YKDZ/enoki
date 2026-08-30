@@ -1586,7 +1586,14 @@ async function runForwardLifecycleScenario({
       );
     }
     evidence.baselineInstall = await host.install(enrollment, runId);
-    await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
+    if (isTrustEpochMigrationBaseline(baseline)) {
+      await host.assertLegacyReleaseBaselineInstalled(
+        runId,
+        releaseBaselineProbeVersion(baseline),
+      );
+    } else {
+      await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
+    }
 
     const hostSummary = await waitForObservation({
       code: "probe_enrollment_timeout",
@@ -3150,6 +3157,108 @@ export function createProbeHostHarness({
       };
     },
 
+    async assertLegacyReleaseBaselineInstalled(runId, expectedProbeVersion) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      if (expectedProbeVersion !== "0.1.74") {
+        throw new Error(
+          "Legacy Release Baseline boundary is fixed to Probe v0.1.74",
+        );
+      }
+      const [
+        inspected,
+        serviceResult,
+        sudoersResult,
+        binaryVersionResult,
+        metadataResult,
+      ] = await Promise.all([
+        inventory(),
+        execute(serviceBoundaryScript()),
+        execute(legacySudoersBoundaryScript(), { root: true }),
+        execute(binaryVersionScript()),
+        execute(legacyInstallMetadataBoundaryScript(), { root: true }),
+      ]);
+      const residue = inventoryResidue(inspected);
+      const required = [
+        "user:enoki-probe",
+        "group:enoki-probe",
+        "/usr/local/bin/enoki-probe",
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        "/etc/enoki/probe-install.toml",
+        "/etc/systemd/system/enoki-probe.service",
+        "/var/lib/enoki-probe",
+        "/etc/sudoers.d/enoki-probe-operations",
+        "enoki-probe.service",
+      ];
+      const missing = required.filter((entry) => !residue.includes(entry));
+      if (missing.length > 0) {
+        throw new Error(
+          `Legacy Probe v0.1.74 installation is incomplete: missing ${missing.join(", ")}`,
+        );
+      }
+      const unexpectedCandidateResources = [
+        "/usr/local/bin/enoki-probe-bootstrap-acquire",
+        "/usr/local/bin/enoki-probe-bootstrap-activate",
+        "/var/lib/enoki-probe-bootstrap",
+      ].filter((entry) => residue.includes(entry));
+      if (unexpectedCandidateResources.length > 0) {
+        throw new Error(
+          `Legacy Probe v0.1.74 installation contains Candidate Bootstrap resources: ${unexpectedCandidateResources.join(", ")}`,
+        );
+      }
+      if (
+        metadataResult.code !== 0 ||
+        metadataResult.stdout.trim() !== "verified"
+      ) {
+        throw new Error(
+          `Legacy Probe v0.1.74 install metadata boundary is invalid: ${metadataResult.stderr}`,
+        );
+      }
+      if (serviceResult.code !== 0) {
+        throw new Error(
+          `Legacy Probe service inspection failed: ${serviceResult.stderr}`,
+        );
+      }
+      const service = parseKeyValues(serviceResult.stdout);
+      if (
+        service.LoadState !== "loaded" ||
+        service.ActiveState !== "active" ||
+        service.User !== "enoki-probe" ||
+        service.Group !== "enoki-probe" ||
+        service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
+      ) {
+        throw new Error(
+          `Legacy Probe service does not satisfy the v0.1.74 non-root installation contract: ${JSON.stringify(service)}`,
+        );
+      }
+      if (
+        sudoersResult.code !== 0 ||
+        !sudoersResult.stdout.includes("enoki-probe-uninstaller") ||
+        !sudoersResult.stdout.includes("internal-uninstaller")
+      ) {
+        throw new Error(
+          "Legacy Probe v0.1.74 operation sudoers boundary is missing or invalid",
+        );
+      }
+      const probeVersion =
+        binaryVersionResult.code === 0
+          ? binaryVersionResult.stdout
+              .trim()
+              .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
+          : null;
+      if (probeVersion !== expectedProbeVersion) {
+        throw new Error(
+          `Installed legacy Probe binary version ${probeVersion ?? "unknown"} does not match Release Baseline ${expectedProbeVersion}`,
+        );
+      }
+      return {
+        identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        inventory: inspected,
+        probeVersion,
+        service,
+        sudoers: sudoersResult.stdout,
+      };
+    },
+
     async captureInstallationState(runId) {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
       const result = await execute(installedStateScript(), { root: true });
@@ -3889,6 +3998,54 @@ done
 `;
 }
 
+function legacySudoersBoundaryScript() {
+  return String.raw`# enoki-release-e2e:legacy-sudoers-boundary
+set -eu
+cat /etc/sudoers.d/enoki-probe-operations
+if [ -e /etc/sudoers.d/enoki-probe-collector-helpers ]; then
+  cat /etc/sudoers.d/enoki-probe-collector-helpers
+fi
+`;
+}
+
+function legacyInstallMetadataBoundaryScript() {
+  return String.raw`# enoki-release-e2e:legacy-install-metadata
+set -eu
+metadata=/etc/enoki/probe-install.toml
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+[ -f "$metadata" ] && [ ! -L "$metadata" ]
+[ "$(stat -c %u "$metadata")" = 0 ]
+[ "$(stat -c %a "$metadata")" = 600 ]
+[ -f "$identity" ] && [ ! -L "$identity" ]
+require_metadata_key() { [ "$(grep -Ec "^$1 = " "$metadata")" -eq 1 ]; }
+require_metadata_line() {
+  expected=$1
+  key=$(printf '%s\n' "$expected" | sed 's/ = .*//')
+  require_metadata_key "$key" && [ "$(grep -Fxc "$expected" "$metadata")" -eq 1 ]
+}
+awk '
+  /^[[:space:]]*$/ { next }
+  $0 !~ /^(schema_version|hub_url|install_path|identity_path|state_dir|operation_status_path|service_name|service_user|service_group|service_unit_path|operation_sudoers_path|collector_helper_sudoers_path|probe_asset_public_key_sha256) = / { exit 1 }
+' "$metadata"
+require_metadata_line 'schema_version = 1'
+require_metadata_key hub_url
+grep -Eq '^hub_url = "https?://[^"[:space:]]+"$' "$metadata"
+require_metadata_line 'install_path = "/usr/local/bin/enoki-probe"'
+require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
+require_metadata_line 'state_dir = "/var/lib/enoki-probe"'
+require_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"'
+require_metadata_line 'service_name = "enoki-probe"'
+require_metadata_line 'service_user = "enoki-probe"'
+require_metadata_line 'service_group = "enoki-probe"'
+require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
+require_metadata_line 'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"'
+require_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"'
+require_metadata_key probe_asset_public_key_sha256
+grep -Eq '^probe_asset_public_key_sha256 = "[0-9A-Fa-f]{64}"$' "$metadata"
+printf 'verified\n'
+`;
+}
+
 function binaryVersionScript() {
   return String.raw`# enoki-release-e2e:binary-version
 set -eu
@@ -4576,6 +4733,17 @@ function assertInstallCommand(command) {
     assertInstallHubOrigin(recipe[2]);
     return { hubUrl: recipe[2], kind: "bootstrap-recipe", token: recipe[1] };
   }
+  const production = command.match(
+    /^ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='([^'\s]+)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/,
+  );
+  if (production) {
+    assertInstallHubOrigin(production[1]);
+    return {
+      hubUrl: production[1],
+      kind: "production-bootstrap",
+      token: productionBootstrapEnrollmentToken(production[2]),
+    };
+  }
   const legacy = command.match(
     /^curl -fsSL '(https?:\/\/[^'\s]+\/api\/probe\/install\.sh)' \| sudo env ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='(enk_enroll_[A-Za-z0-9_-]+)' bash$/,
   );
@@ -4587,6 +4755,28 @@ function assertInstallCommand(command) {
     return { hubUrl: legacy[2], kind: "legacy-v0.1.74", token: legacy[3] };
   }
   throw new Error("Hub returned an invalid Probe install command");
+}
+
+function productionBootstrapEnrollmentToken(authority) {
+  if (/^enk_enroll_[A-Za-z0-9_-]+$/.test(authority)) return authority;
+  let replacement;
+  try {
+    replacement = JSON.parse(authority);
+  } catch {
+    throw new Error("Hub returned an invalid Probe install command");
+  }
+  if (
+    JSON.stringify(Object.keys(replacement).sort()) !==
+      JSON.stringify(["enrollmentToken", "hostId", "migration"].sort()) ||
+    !/^enk_enroll_[A-Za-z0-9_-]+$/.test(replacement.enrollmentToken ?? "") ||
+    !Number.isSafeInteger(replacement.hostId) ||
+    replacement.hostId < 1 ||
+    replacement.migration !== "trust_epoch_replacement" ||
+    JSON.stringify(replacement) !== authority
+  ) {
+    throw new Error("Hub returned an invalid Probe install command");
+  }
+  return replacement.enrollmentToken;
 }
 
 function assertInstallHubOrigin(value) {
@@ -4611,7 +4801,10 @@ function assertEnrollmentInstallContract(enrollment) {
       "Hub Enrollment install command is not bound to its token and origin",
     );
   }
-  if (contract.kind === "bootstrap-recipe") {
+  if (
+    contract.kind === "bootstrap-recipe" ||
+    contract.kind === "production-bootstrap"
+  ) {
     assertBootstrapRecipeRecord(enrollment.bootstrapRecipe);
   } else if (enrollment.bootstrapRecipe !== undefined) {
     throw new Error(
@@ -5519,7 +5712,7 @@ function assertBaselineScenarioParticipants(
   const hostMethods = ["readProbeIdentity"];
   const hubMethods = ["switchToCandidate"];
   if (transitionClassification === "replacement-required") {
-    hostMethods.push("manualReinstall");
+    hostMethods.push("assertLegacyReleaseBaselineInstalled", "manualReinstall");
     hubMethods.push(
       "createManualReinstallEnrollment",
       "getAuditLog",
