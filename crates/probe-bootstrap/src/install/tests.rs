@@ -1787,6 +1787,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_source_pair_rejects_unexpected_registry_residue_before_custody_or_effects() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "4d".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        prepare_legacy_partial_upgrade_with_unreceipted_next_target(&fixture, 1);
+        let destination = &upgrade_destinations(paths)[0];
+        let name = destination.file_name().unwrap().to_str().unwrap();
+        let unexpected = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+        fs::write(&unexpected, b"unexpected stale target").unwrap();
+        fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o755)).unwrap();
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal_before = fs::read(&journal_path).unwrap();
+        let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
+        let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            recover_incomplete_probe_upgrade(paths, &mut systemd),
+            Err(InstallError::ExistingResidue),
+        );
+
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
+        assert_eq!(fs::read(&unexpected).unwrap(), b"unexpected stale target");
+    }
+
+    #[test]
     fn legacy_pair_binding_failure_precedes_stop_and_any_further_target_mutation() {
         let fixture = installed_bundle_fixture();
         let paths = &fixture.paths;
@@ -3055,40 +3085,29 @@ mod tests {
     }
 
     #[test]
-    fn finalizing_recovery_never_reactivates_and_preserves_progress_on_a_second_failure() {
-        let temporary = tempdir().unwrap();
-        let paths = FixedInstallPaths::under(temporary.path());
-        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
-        fs::write(
-            paths.metadata(),
-            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
-        )
-        .unwrap();
-        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
-        write_authority_upgrade_journal(&paths, 3, "finalizing", Some(true), 21, 7);
-        let destinations = upgrade_destinations(&paths);
-        for destination in &destinations {
-            fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        }
+    fn finalizing_recovery_rejects_invalid_topology_without_reactivation_or_progress() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 7);
+        let destinations = upgrade_destinations(paths);
         let blocked_backup = destinations[7].with_file_name(format!(
             ".{}.enoki-upgrade-old",
             destinations[7].file_name().unwrap().to_str().unwrap(),
         ));
+        fs::remove_file(&blocked_backup).unwrap();
         fs::create_dir(&blocked_backup).unwrap();
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal_before = fs::read(&journal_path).unwrap();
 
         let mut systemd = Systemd::default();
         assert_eq!(
-            recover_incomplete_probe_upgrade(&paths, &mut systemd),
-            Err(InstallError::Io),
+            recover_incomplete_probe_upgrade(paths, &mut systemd),
+            Err(InstallError::ExistingResidue),
         );
         assert!(systemd.calls.is_empty());
-        let failed =
-            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
-        assert!(failed.contains("phase = \"repair-required\""));
-        assert!(failed.contains("activated_targets = 21"));
-        assert!(failed.contains("finalized_targets = 7"));
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
         assert_eq!(
-            issue_probe_repair_eligibility(&paths)
+            issue_probe_repair_eligibility(paths)
                 .unwrap()
                 .evidence
                 .finalized_targets,
@@ -3096,15 +3115,11 @@ mod tests {
         );
 
         assert_eq!(
-            recover_incomplete_probe_upgrade(&paths, &mut systemd),
-            Err(InstallError::Io),
+            recover_incomplete_probe_upgrade(paths, &mut systemd),
+            Err(InstallError::ExistingResidue),
         );
         assert!(systemd.calls.is_empty());
-        let failed_again =
-            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
-        assert!(failed_again.contains("phase = \"repair-required\""));
-        assert!(failed_again.contains("activated_targets = 21"));
-        assert!(failed_again.contains("finalized_targets = 7"));
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
     }
 
     #[test]
@@ -3126,15 +3141,25 @@ mod tests {
 
     #[test]
     fn repair_authority_is_offline_verified_and_consumed_once_in_an_independent_journal() {
-        let temporary = tempdir().unwrap();
-        let paths = FixedInstallPaths::under(temporary.path());
-        fs::create_dir_all(paths.bootstrap_state()).unwrap();
-        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
-        fs::create_dir_all(paths.state()).unwrap();
+        let fixture = installed_bundle_fixture();
+        let paths = fixture.paths.clone();
         let key = [0x11_u8; 32];
+        let metadata = fs::read_to_string(paths.metadata()).unwrap();
+        let metadata = metadata
+            .lines()
+            .map(|line| {
+                if line.starts_with("lifecycle_authority_install_key = ") {
+                    format!("lifecycle_authority_install_key = {:?}", "11".repeat(32))
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
         fs::write(
             paths.metadata(),
-            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+            metadata,
         )
         .unwrap();
         fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
@@ -3332,6 +3357,7 @@ mod tests {
             )
             .replace("activated_targets = 3", "activated_targets = 21")
             .replace("finalized_targets = 0", "finalized_targets = 21");
+        prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
         fs::write(&journal_path, cleanup_required).unwrap();
 
         let repair_write = paths

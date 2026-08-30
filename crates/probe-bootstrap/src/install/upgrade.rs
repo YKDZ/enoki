@@ -1687,6 +1687,7 @@ fn complete_runtime_failure_custody_before_recovery_effects(
     {
         return Ok(());
     }
+    validate_legacy_upgrade_progress_topology(paths, state)?;
     let current = load_validated_upgrade_attempt(paths)?;
     if current.schema_version == 3 {
         bind_runtime_failure_pair_to_upgrade(paths)?;
@@ -2091,12 +2092,12 @@ fn legacy_upgrade_runtime_failure_epoch_binding(
     {
         return Err(InstallError::ExistingResidue);
     }
+    validate_legacy_upgrade_progress_topology(paths, state)?;
     match legacy_upgrade_runtime_failure_epoch_proof_mode(paths, state)? {
         LegacyUpgradeRuntimeFailureEpochProofMode::RetainedSource => {
             legacy_upgrade_source_runtime_failure_epoch_binding(paths, state)
         }
         LegacyUpgradeRuntimeFailureEpochProofMode::CurrentTarget => {
-            validate_legacy_upgrade_target_proof_residue(paths, state)?;
             legacy_upgrade_target_runtime_failure_epoch_binding(paths, state)
         }
     }
@@ -2140,13 +2141,17 @@ fn legacy_upgrade_runtime_failure_epoch_proof_mode(
     Err(InstallError::ExistingResidue)
 }
 
-fn validate_legacy_upgrade_target_proof_residue(
+fn validate_legacy_upgrade_progress_topology(
     paths: &FixedInstallPaths,
     state: &ValidatedUpgradeAttemptJournal,
 ) -> Result<(), InstallError> {
     use std::os::unix::fs::MetadataExt as _;
 
-    for (index, target) in super::installed_layout::registry(paths).iter().enumerate() {
+    let registry = super::installed_layout::registry(paths);
+    if state.activated_targets < registry.len() && state.finalized_targets != 0 {
+        return Err(InstallError::ExistingResidue);
+    }
+    for (index, target) in registry.iter().enumerate() {
         let name = target
             .destination
             .file_name()
@@ -2155,38 +2160,166 @@ fn validate_legacy_upgrade_target_proof_residue(
         let staged = target
             .destination
             .with_file_name(format!(".{name}.enoki-upgrade-new"));
-        require_legacy_upgrade_residue_absent(&staged)?;
         let backup = target
             .destination
             .with_file_name(format!(".{name}.enoki-upgrade-old"));
-        if index < state.finalized_targets {
-            require_legacy_upgrade_residue_absent(&backup)?;
-            continue;
+        let current = inspect_optional_legacy_upgrade_target(&target.destination)?;
+        let staged = inspect_optional_legacy_upgrade_target(&staged)?;
+        let retained = inspect_optional_legacy_upgrade_target(&backup)?;
+        validate_legacy_upgrade_target_descriptors(
+            paths,
+            target,
+            current.as_ref(),
+            staged.as_ref(),
+            retained.as_ref(),
+        )?;
+
+        if state.activated_targets < registry.len() {
+            match index.cmp(&state.activated_targets) {
+                std::cmp::Ordering::Less => require_legacy_upgrade_renamed_target(
+                    current.as_ref(),
+                    staged.as_ref(),
+                    retained.as_ref(),
+                )?,
+                std::cmp::Ordering::Equal => {
+                    let renamed = require_legacy_upgrade_renamed_target(
+                        current.as_ref(),
+                        staged.as_ref(),
+                        retained.as_ref(),
+                    );
+                    let pending = require_legacy_upgrade_pending_target(
+                        target,
+                        current.as_ref(),
+                        staged.as_ref(),
+                        retained.as_ref(),
+                    );
+                    if renamed.is_err() && pending.is_err() {
+                        return Err(InstallError::ExistingResidue);
+                    }
+                }
+                std::cmp::Ordering::Greater => require_legacy_upgrade_pending_target(
+                    target,
+                    current.as_ref(),
+                    staged.as_ref(),
+                    retained.as_ref(),
+                )?,
+            }
+        } else {
+            let current = current.as_ref().ok_or(InstallError::ExistingResidue)?;
+            if staged.is_some() || current.nlink() != 1 {
+                return Err(InstallError::ExistingResidue);
+            }
+            if index < state.finalized_targets && retained.is_some()
+                || index > state.finalized_targets && retained.is_none()
+                || index == state.finalized_targets
+                    && retained.is_none()
+                    && !matches!(state.phase.as_str(), "finalizing" | "repair-required")
+            {
+                return Err(InstallError::ExistingResidue);
+            }
+            if let Some(retained) = retained.as_ref()
+                && (retained.nlink() != 1 || same_legacy_upgrade_inode(current, retained))
+            {
+                return Err(InstallError::ExistingResidue);
+            }
         }
-        if index == state.finalized_targets
-            && matches!(
-                fs::symlink_metadata(&backup),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            )
+    }
+    Ok(())
+}
+
+fn validate_legacy_upgrade_target_descriptors(
+    paths: &FixedInstallPaths,
+    target: &super::installed_layout::Target,
+    current: Option<&fs::Metadata>,
+    staged: Option<&fs::Metadata>,
+    retained: Option<&fs::Metadata>,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let placeholder = retained.is_some_and(|metadata| {
+        target.id == "runtime-failure-recorder-unit"
+            && metadata.len() == 0
+            && metadata.mode() & 0o7777 == 0o600
+            && metadata.uid() == paths.expected_root_uid()
+            && metadata.gid() == paths.expected_root_uid()
+            && metadata.nlink() == 1
+    });
+    for metadata in current
+        .into_iter()
+        .chain(staged)
+        .chain(retained.filter(|_| !placeholder))
+    {
+        if metadata.mode() & 0o7777 != target.mode {
+            return Err(InstallError::ExistingResidue);
+        }
+        if target.id != "identity"
+            && (metadata.uid() != paths.expected_root_uid()
+                || metadata.gid() != paths.expected_root_uid())
         {
-            // The unlink effect for the next target may be durable before its
-            // finalized_targets receipt.  Only that single boundary can be absent.
-            continue;
+            return Err(InstallError::ExistingResidue);
         }
-        let (_, current) = open_legacy_upgrade_target(&target.destination)?;
-        let (_, retained) = open_legacy_upgrade_target(&backup)?;
-        let empty_recorder_placeholder = target.id == "runtime-failure-recorder-unit"
-            && retained.len() == 0
-            && retained.mode() & 0o7777 == 0o600;
-        if current.dev() == retained.dev() && current.ino() == retained.ino()
-            || current.nlink() != 1
-            || retained.nlink() != 1
-            || current.mode() & 0o7777 != target.mode
-            || (!empty_recorder_placeholder && retained.mode() & 0o7777 != target.mode)
-            || current.uid() != paths.expected_root_uid()
-            || current.gid() != paths.expected_root_uid()
-            || retained.uid() != paths.expected_root_uid()
-            || retained.gid() != paths.expected_root_uid()
+    }
+    if target.id == "identity" {
+        let mut owners = current
+            .into_iter()
+            .chain(staged)
+            .chain(retained)
+            .map(|metadata| (metadata.uid(), metadata.gid()));
+        if let Some(owner) = owners.next()
+            && owners.any(|candidate| candidate != owner)
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+    }
+    if target.id == "runtime-failure-recorder-unit"
+        && retained.is_some()
+        && !placeholder
+        && retained.is_some_and(|metadata| metadata.len() == 0)
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(())
+}
+
+fn require_legacy_upgrade_renamed_target(
+    current: Option<&fs::Metadata>,
+    staged: Option<&fs::Metadata>,
+    retained: Option<&fs::Metadata>,
+) -> Result<(), InstallError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let current = current.ok_or(InstallError::ExistingResidue)?;
+    let retained = retained.ok_or(InstallError::ExistingResidue)?;
+    if staged.is_some()
+        || current.nlink() != 1
+        || retained.nlink() != 1
+        || same_legacy_upgrade_inode(current, retained)
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(())
+}
+
+fn require_legacy_upgrade_pending_target(
+    target: &super::installed_layout::Target,
+    current: Option<&fs::Metadata>,
+    staged: Option<&fs::Metadata>,
+    retained: Option<&fs::Metadata>,
+) -> Result<(), InstallError> {
+    let staged = staged.ok_or(InstallError::ExistingResidue)?;
+    let retained = retained.ok_or(InstallError::ExistingResidue)?;
+    if staged.nlink() != 1 {
+        return Err(InstallError::ExistingResidue);
+    }
+    if target.id == "runtime-failure-recorder-unit" && retained.len() == 0 {
+        if current.is_some() || retained.nlink() != 1 {
+            return Err(InstallError::ExistingResidue);
+        }
+    } else {
+        let current = current.ok_or(InstallError::ExistingResidue)?;
+        if current.nlink() != 2
+            || retained.nlink() != 2
+            || !same_legacy_upgrade_inode(current, retained)
         {
             return Err(InstallError::ExistingResidue);
         }
@@ -2194,10 +2327,18 @@ fn validate_legacy_upgrade_target_proof_residue(
     Ok(())
 }
 
-fn require_legacy_upgrade_residue_absent(path: &Path) -> Result<(), InstallError> {
+fn same_legacy_upgrade_inode(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+fn inspect_optional_legacy_upgrade_target(
+    path: &Path,
+) -> Result<Option<fs::Metadata>, InstallError> {
     match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        _ => Err(InstallError::ExistingResidue),
+        Ok(_) => open_legacy_upgrade_target(path).map(|(_, metadata)| Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(InstallError::ExistingResidue),
     }
 }
 
@@ -2379,7 +2520,6 @@ fn open_legacy_upgrade_target(path: &Path) -> Result<(File, fs::Metadata), Insta
         || !opened.is_file()
         || path_metadata.dev() != opened.dev()
         || path_metadata.ino() != opened.ino()
-        || opened.len() > 256 * 1024
     {
         return Err(InstallError::ExistingResidue);
     }
