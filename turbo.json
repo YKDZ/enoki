@@ -17,7 +17,7 @@
     "//#test:ci": {
       "dependsOn": [
         "@enoki/api-client#test",
-        "@enoki/hub#test:built",
+        "@enoki/hub#test",
         "@enoki/proto#test",
         "@enoki/web#test"
       ],

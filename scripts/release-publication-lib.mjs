@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { chmod, mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 export async function reconcilePublication({
@@ -17,6 +18,9 @@ export async function reconcilePublication({
   await verifyCandidatePublicationBytes(candidateDir, candidateManifest);
 
   const { commit, version } = candidateManifest.candidate;
+  const releaseBody = renderBootstrapRecipeRecord(
+    candidateManifest.bootstrapRecipe,
+  );
   const actions = [];
   let [tag, release, versionedImage] = await Promise.all([
     remote.getTag({ version }),
@@ -49,7 +53,11 @@ export async function reconcilePublication({
   }
 
   if (!release) {
-    release = await remote.createDraftRelease({ commit, version });
+    release = await remote.createDraftRelease({
+      body: releaseBody,
+      commit,
+      version,
+    });
     actions.push({ action: "created", stage: "private-release-draft" });
     release ??= await remote.getRelease({ version });
   } else {
@@ -66,6 +74,24 @@ export async function reconcilePublication({
       `Release ${version} targets ${release.targetCommit}, expected ${commit}`,
     );
   }
+  if (release.body !== releaseBody) {
+    if (!release.draft) {
+      throw new Error(
+        `public Release body does not match the Bootstrap recipe record for ${version}`,
+      );
+    }
+    release = await remote.updateDraftReleaseBody({
+      body: releaseBody,
+      version,
+    });
+    actions.push({ action: "updated", stage: "private-release-draft-body" });
+    release ??= await remote.getRelease({ version });
+    if (release?.body !== releaseBody) {
+      throw new Error(
+        `draft Release body does not match the Bootstrap recipe record for ${version}`,
+      );
+    }
+  }
 
   assertNoUnexpectedAssets(release, candidateManifest);
 
@@ -77,9 +103,11 @@ export async function reconcilePublication({
           `public Release ${version} is missing immutable asset ${expected.file}`,
         );
       }
-      await remote.uploadAsset({
-        ...expected,
-        filePath: path.join(candidateDir, expected.directory, expected.file),
+      await uploadReleaseAsset({
+        candidateDir,
+        candidateManifest,
+        expected,
+        remote,
         version,
       });
       actions.push({
@@ -177,6 +205,7 @@ export async function reconcilePublication({
       versionedImage: { digest: versionedImage.digest, reference: version },
     },
     probeAssetSet: candidateManifest.probeAssetSet,
+    bootstrapRecipe: candidateManifest.bootstrapRecipe,
     releaseBaseline: verificationSummary.releaseBaseline ?? null,
     schemaVersion: 1,
     smoke,
@@ -184,6 +213,81 @@ export async function reconcilePublication({
     verificationRun: verificationSummary.run,
     workflowRun,
   };
+}
+
+async function uploadReleaseAsset({
+  candidateDir,
+  candidateManifest,
+  expected,
+  remote,
+  version,
+}) {
+  const sourcePath = path.join(candidateDir, expected.directory, expected.file);
+  if (!expected.file.endsWith(".tar.gz")) {
+    await remote.uploadAsset({ ...expected, filePath: sourcePath, version });
+    return;
+  }
+  await withExactArchiveSnapshot(sourcePath, expected, (filePath) =>
+    remote.uploadAsset({ ...expected, filePath, version }),
+  );
+}
+
+async function withExactArchiveSnapshot(sourcePath, expected, callback) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(tmpdir(), "enoki-release-asset-"),
+  );
+  const snapshotPath = path.join(temporaryDirectory, expected.file);
+  let source;
+  let snapshot;
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    source = await open(sourcePath, "r");
+    const details = await source.stat();
+    if (!details.isFile() || details.size !== expected.size) {
+      throw new Error(`candidate Probe asset does not match ${expected.file}`);
+    }
+    snapshot = await open(snapshotPath, "wx", 0o600);
+    const digest = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    while (total < expected.size) {
+      const { bytesRead } = await source.read(
+        buffer,
+        0,
+        Math.min(buffer.length, expected.size - total),
+        total,
+      );
+      if (bytesRead === 0) break;
+      digest.update(buffer.subarray(0, bytesRead));
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await snapshot.write(
+          buffer,
+          written,
+          bytesRead - written,
+          total + written,
+        );
+        if (result.bytesWritten === 0) {
+          throw new Error(
+            `candidate Probe asset does not match ${expected.file}`,
+          );
+        }
+        written += result.bytesWritten;
+      }
+      total += bytesRead;
+    }
+    if (total !== expected.size || digest.digest("hex") !== expected.sha256) {
+      throw new Error(`candidate Probe asset does not match ${expected.file}`);
+    }
+    await snapshot.sync();
+    await snapshot.close();
+    snapshot = undefined;
+    return await callback(snapshotPath);
+  } finally {
+    await snapshot?.close().catch(() => undefined);
+    await source?.close().catch(() => undefined);
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
 }
 
 function assertExistingPublicationState({
@@ -225,6 +329,14 @@ function assertExistingPublicationState({
   }
 
   if (release && !release.draft) {
+    if (
+      release.body !==
+      renderBootstrapRecipeRecord(candidateManifest.bootstrapRecipe)
+    ) {
+      throw new Error(
+        `public Release body does not match the Bootstrap recipe record for ${version}`,
+      );
+    }
     if (!tag) {
       throw new Error(
         `public Release ${version} is terminally inconsistent: immutable version tag is missing`,
@@ -277,7 +389,7 @@ function assertPublishAuthorization({
   const candidate = candidateManifest?.candidate;
   if (
     candidateManifest?.kind !== "enoki-release-candidate" ||
-    candidateManifest?.schemaVersion !== 3 ||
+    candidateManifest?.schemaVersion !== 4 ||
     verificationSummary?.kind !== "enoki-release-verification-evidence" ||
     verificationSummary?.schemaVersion !== 3 ||
     verificationSummary.verified !== true ||
@@ -288,6 +400,10 @@ function assertPublishAuthorization({
     !sameJson(
       verificationSummary.probeAssetSet,
       candidateManifest.probeAssetSet,
+    ) ||
+    !sameJson(
+      verificationSummary.bootstrapRecipe,
+      candidateManifest.bootstrapRecipe,
     ) ||
     !sameJson(
       verificationSummary.releaseBaseline,
@@ -326,20 +442,54 @@ async function verifyCandidatePublicationBytes(candidateDir, manifest) {
 }
 
 function publicReleaseAssets(manifest) {
-  const groups = [manifest.bootstrap, manifest.probeAssetSet];
-  const files = groups.flatMap((group) =>
-    (group?.files ?? []).map((file) => ({
-      ...file,
-      directory: group.directory,
-    })),
-  );
-  if (
-    !manifest.bootstrap ||
-    new Set(files.map(({ file }) => file)).size !== files.length
-  ) {
+  const group = manifest.probeAssetSet;
+  const files = (group?.files ?? []).map((file) => ({
+    ...file,
+    directory: group.directory,
+  }));
+  if (!group || new Set(files.map(({ file }) => file)).size !== files.length) {
     throw new Error("Candidate public Release assets are malformed");
   }
-  return files;
+  const recipe = manifest.bootstrapRecipe;
+  if (
+    recipe?.file !== "enoki-probe-bootstrap.py" ||
+    recipe?.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    recipe?.recordFile !== "enoki-probe-bootstrap-recipe.json" ||
+    !/^[0-9a-f]{64}$/.test(recipe.recordSha256 ?? "") ||
+    !Number.isSafeInteger(recipe.recordSize) ||
+    recipe.recordSize < 1 ||
+    recipe.schemaVersion !== 1 ||
+    !Array.isArray(recipe.targets) ||
+    recipe.targets.length < 1 ||
+    !/^[0-9a-f]{64}$/.test(recipe.rootFingerprint ?? "") ||
+    !/^[0-9a-f]{64}$/.test(recipe.sha256 ?? "") ||
+    !Number.isSafeInteger(recipe.size) ||
+    recipe.size < 1
+  ) {
+    throw new Error("Candidate public Bootstrap recipe is malformed");
+  }
+  const record = {
+    file: recipe.recordFile,
+    sha256: recipe.recordSha256,
+    size: recipe.recordSize,
+    directory: "recipe",
+  };
+  return [...files, { ...recipe, directory: "recipe" }, record];
+}
+
+export function renderBootstrapRecipeRecord(recipe) {
+  return [
+    `Enoki ${recipe.bundleVersion}`,
+    "",
+    "Probe Bootstrap recipe record:",
+    `- Recipe: ${recipe.file}`,
+    `- Recipe version: ${recipe.version}`,
+    `- Size: ${recipe.size}`,
+    `- SHA-256: ${recipe.sha256}`,
+    `- Distribution root fingerprint: ${recipe.rootFingerprint}`,
+    `- Bundle version: ${recipe.bundleVersion}`,
+    `- Targets: ${recipe.targets.join(", ")}`,
+  ].join("\n");
 }
 
 async function fileSha256(file) {

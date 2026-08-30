@@ -14,7 +14,10 @@ import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { reconcilePublication } from "./release-publication-lib.mjs";
+import {
+  reconcilePublication,
+  renderBootstrapRecipeRecord,
+} from "./release-publication-lib.mjs";
 import {
   createGitHubGhcrPublicationRemote,
   createPublicationSmokeService,
@@ -156,6 +159,42 @@ describe("Publication Reconciler", () => {
     }
   });
 
+  it("uploads the exact Probe Bundle snapshot when its source changes after verification", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote();
+      const uploadAsset = remote.uploadAsset.bind(remote);
+      const bootstrap = fixture.candidateManifest.probeAssetSet.files.find(
+        ({ file }) => file.endsWith(".tar.gz"),
+      );
+      const sourcePath = path.join(
+        fixture.candidateDir,
+        fixture.candidateManifest.probeAssetSet.directory,
+        bootstrap.file,
+      );
+      const verifiedBytes = await readFile(sourcePath);
+      remote.uploadAsset = async (input) => {
+        if (input.file === bootstrap.file) {
+          await writeFile(sourcePath, Buffer.from("source changed"));
+          await expect(readFile(input.filePath)).resolves.toEqual(
+            verifiedBytes,
+          );
+        }
+        return uploadAsset(input);
+      };
+
+      await reconcilePublication({
+        candidateDir: fixture.candidateDir,
+        candidateManifest: fixture.candidateManifest,
+        remote,
+        verificationSummary: fixture.verificationSummary,
+        workflowRun: fixture.workflowRun,
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("uses the created draft response while the release list is eventually consistent", async () => {
     const fixture = await createPublicationFixture();
     try {
@@ -220,6 +259,67 @@ describe("Publication Reconciler", () => {
           stage,
         ).toHaveLength(stage === "smoke:verify" ? 2 : 1);
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("repairs a mismatched draft body to the exact Bootstrap recipe record before publishing", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote({
+        failAfter: "release:create-draft",
+      });
+      await expect(
+        reconcilePublication({
+          candidateDir: fixture.candidateDir,
+          candidateManifest: fixture.candidateManifest,
+          remote,
+          verificationSummary: fixture.verificationSummary,
+          workflowRun: fixture.workflowRun,
+        }),
+      ).rejects.toThrow("interrupted after release:create-draft");
+      const expectedBody = remote.release.body;
+      remote.release.body = "stale draft body";
+      remote.failAfter = null;
+
+      await reconcilePublication({
+        candidateDir: fixture.candidateDir,
+        candidateManifest: fixture.candidateManifest,
+        remote,
+        verificationSummary: fixture.verificationSummary,
+        workflowRun: fixture.workflowRun,
+      });
+
+      expect(remote.release.body).toBe(expectedBody);
+      expect(remote.events).toContain("release:update-draft-body");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("fails closed when a public Release body differs from the Bootstrap recipe record", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote();
+      seedMatchingTagAndRelease(remote, fixture, {
+        completeAssets: true,
+        draft: false,
+      });
+      remote.release.body = "wrong public body";
+      remote.images[fixture.candidateManifest.candidate.version] =
+        fixture.candidateManifest.hub.digest;
+
+      await expect(
+        reconcilePublication({
+          candidateDir: fixture.candidateDir,
+          candidateManifest: fixture.candidateManifest,
+          remote,
+          verificationSummary: fixture.verificationSummary,
+          workflowRun: fixture.workflowRun,
+        }),
+      ).rejects.toThrow("public Release body does not match");
+      expect(remote.events).toEqual([]);
     } finally {
       await fixture.cleanup();
     }
@@ -609,6 +709,7 @@ describe("GitHub and GHCR publication adapter", () => {
                     size: 7,
                   },
                 ],
+                body: "exact release body",
                 draft: true,
                 html_url: "https://example/release/v1.2.3",
                 id: 7,
@@ -630,6 +731,23 @@ describe("GitHub and GHCR publication adapter", () => {
             draft: true,
             html_url: "https://example/release/v1.2.3",
             id: 17,
+            tag_name: "v1.2.3",
+            target_commitish: expectedCommit,
+          }),
+        };
+      }
+      if (
+        command === "gh" &&
+        arguments_.includes("PATCH") &&
+        arguments_.includes("repos/acme/enoki/releases/7")
+      ) {
+        return {
+          stdout: JSON.stringify({
+            assets: [],
+            body: "updated release body",
+            draft: true,
+            html_url: "https://example/release/v1.2.3",
+            id: 7,
             tag_name: "v1.2.3",
             target_commitish: expectedCommit,
           }),
@@ -664,6 +782,7 @@ describe("GitHub and GHCR publication adapter", () => {
           size: 42,
         },
       },
+      body: "exact release body",
       draft: true,
       id: 7,
       targetCommit: expectedCommit,
@@ -680,6 +799,16 @@ describe("GitHub and GHCR publication adapter", () => {
       draft: true,
       id: 17,
       targetCommit: expectedCommit,
+    });
+    await expect(
+      remote.updateDraftReleaseBody({
+        body: "updated release body",
+        version: "v1.2.3",
+      }),
+    ).resolves.toMatchObject({
+      body: "updated release body",
+      draft: true,
+      id: 7,
     });
     await remote.uploadAsset({
       filePath: "/candidate/manifest.json",
@@ -734,6 +863,26 @@ describe("GitHub and GHCR publication adapter", () => {
           ),
         );
       }
+      publicFiles.set(
+        `https://downloads.example/${fixture.candidateManifest.bootstrapRecipe.file}`,
+        await readFile(
+          path.join(
+            fixture.candidateDir,
+            "recipe",
+            fixture.candidateManifest.bootstrapRecipe.file,
+          ),
+        ),
+      );
+      publicFiles.set(
+        `https://downloads.example/${fixture.candidateManifest.bootstrapRecipe.recordFile}`,
+        await readFile(
+          path.join(
+            fixture.candidateDir,
+            "recipe",
+            fixture.candidateManifest.bootstrapRecipe.recordFile,
+          ),
+        ),
+      );
       const runCommand = async (command, arguments_, options) => {
         commands.push({ arguments_, command, options });
         if (
@@ -1008,13 +1157,24 @@ function seedMatchingTagAndRelease(
           ]),
         )
       : {},
+    body: renderBootstrapRecipeRecord(
+      fixture.candidateManifest.bootstrapRecipe,
+    ),
     draft,
     targetCommit: fixture.candidateManifest.candidate.commit,
   };
 }
 
 function releaseAssetFiles(manifest) {
-  return [...manifest.bootstrap.files, ...manifest.probeAssetSet.files];
+  return [
+    ...manifest.probeAssetSet.files,
+    manifest.bootstrapRecipe,
+    {
+      file: manifest.bootstrapRecipe.recordFile,
+      sha256: manifest.bootstrapRecipe.recordSha256,
+      size: manifest.bootstrapRecipe.recordSize,
+    },
+  ];
 }
 
 class FakePublicationRemote {
@@ -1049,9 +1209,15 @@ class FakePublicationRemote {
     return this.release;
   }
 
-  async createDraftRelease({ commit }) {
-    this.release = { assets: {}, draft: true, targetCommit: commit };
+  async createDraftRelease({ body, commit }) {
+    this.release = { assets: {}, body, draft: true, targetCommit: commit };
     this.#record("release:create-draft");
+    return this.release;
+  }
+
+  async updateDraftReleaseBody({ body }) {
+    this.release.body = body;
+    this.#record("release:update-draft-body");
     return this.release;
   }
 
@@ -1100,16 +1266,20 @@ class FakePublicationRemote {
 async function createPublicationFixture() {
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-publication-"));
   const candidateDir = path.join(workDir, "candidate");
-  const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
   const probeAssetDir = path.join(candidateDir, "probe-assets");
+  const recipeDir = path.join(candidateDir, "recipe");
   const hubDir = path.join(candidateDir, "hub");
   await Promise.all([
     mkdir(probeAssetDir, { recursive: true }),
-    mkdir(bootstrapDir, { recursive: true }),
+    mkdir(recipeDir, { recursive: true }),
     mkdir(hubDir, { recursive: true }),
   ]);
   const files = [];
   for (const [file, content] of [
+    [
+      "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+      "one signed Probe Bundle with fixed Bootstrap entries",
+    ],
     ["manifest.json", '{"version":"1.2.3"}\n'],
     ["manifest.json.sig", "signature"],
     ["signing-key.pem", "public key"],
@@ -1119,28 +1289,55 @@ async function createPublicationFixture() {
     files.push({ file, sha256: sha256(bytes), size: bytes.length });
   }
   files.sort((left, right) => left.file.localeCompare(right.file));
-  const bootstrapFiles = [];
-  for (const target of ["x86_64-unknown-linux-gnu"]) {
-    const file = `enoki-probe-bootstrap-${target}.tar.gz`;
-    const bytes = Buffer.from(`immutable bootstrap ${target}`);
-    await writeFile(path.join(bootstrapDir, file), bytes);
-    bootstrapFiles.push({
-      file,
-      sha256: sha256(bytes),
-      size: bytes.length,
-      target,
-    });
-  }
   const hubArchive = "hub/enoki-hub-v1.2.3.oci.tar";
   const hubBytes = Buffer.from("immutable OCI archive");
   await writeFile(path.join(candidateDir, hubArchive), hubBytes);
+  const recipeBytes = Buffer.from("immutable bootstrap recipe");
+  const recipeRecord = {
+    bundleVersion: "1.2.3",
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: "enoki-probe-bootstrap.py",
+      sha256: sha256(recipeBytes),
+      size: recipeBytes.length,
+      version: "v1",
+    },
+    rootFingerprint: "e".repeat(64),
+    schemaVersion: 1,
+    targets: [
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+    ],
+  };
+  const recipeRecordBytes = Buffer.from(
+    `${JSON.stringify(recipeRecord, null, 2)}\n`,
+  );
+  await writeFile(
+    path.join(recipeDir, "enoki-probe-bootstrap.py"),
+    recipeBytes,
+  );
+  await writeFile(
+    path.join(recipeDir, "enoki-probe-bootstrap-recipe.json"),
+    recipeRecordBytes,
+  );
   const candidateManifest = {
-    bootstrap: {
-      directory: "probe-bootstrap",
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
       distribution: "enoki",
-      files: bootstrapFiles,
-      rootKeyId: "f".repeat(64),
-      version: "1.2.3",
+      file: "enoki-probe-bootstrap.py",
+      kind: recipeRecord.kind,
+      recordFile: "enoki-probe-bootstrap-recipe.json",
+      recordSha256: sha256(recipeRecordBytes),
+      recordSize: recipeRecordBytes.length,
+      rootFingerprint: "e".repeat(64),
+      schemaVersion: 1,
+      sha256: sha256(recipeBytes),
+      size: recipeBytes.length,
+      targets: recipeRecord.targets,
+      version: "v1",
     },
     candidate: { commit: "a".repeat(40), version: "v1.2.3" },
     hub: {
@@ -1168,10 +1365,11 @@ async function createPublicationFixture() {
       probeAssetSet: { version: "1.2.2" },
       tag: "v1.2.2",
     },
-    schemaVersion: 3,
+    schemaVersion: 4,
   };
   const workflowRun = { attempt: 1, id: "123", url: "https://example/run/123" };
   const verificationSummary = {
+    bootstrapRecipe: candidateManifest.bootstrapRecipe,
     candidate: candidateManifest.candidate,
     freshCandidateRequiredForPublish: true,
     hub: candidateManifest.hub,

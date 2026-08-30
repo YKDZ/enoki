@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  blob,
   check,
   index,
   integer,
@@ -43,6 +44,19 @@ export const enrollmentTokens = sqliteTable(
     usedAtMs: integer(),
     targetKind: text({ enum: enrollmentTargetKindValues }),
     targetHostId: integer("target_host_id"),
+    expectedHubOrigin: text("expected_hub_origin"),
+    expectedProbeId: text("expected_probe_id"),
+    expectedProbeVersion: text("expected_probe_version"),
+    sourceProbeSha256Json: text("source_probe_sha256_json"),
+    targetAssetSetDigest: text("target_asset_set_digest"),
+    targetProbeVersion: text("target_probe_version"),
+    targetBundlesJson: text("target_bundles_json"),
+    replacementPredecessorEnrollmentId: text(
+      "replacement_predecessor_enrollment_id",
+    ),
+    replacementPredecessorAssetSetDigest: text(
+      "replacement_predecessor_asset_set_digest",
+    ),
     status: text({ enum: enrollmentStatusValues }).notNull().default("expired"),
     hostId: integer("managed_host_id"),
     verificationDeadlineAtMs: integer(),
@@ -51,6 +65,8 @@ export const enrollmentTokens = sqliteTable(
     expiredAtMs: integer(),
     rejectionCode: text(),
     rejectionMessage: text(),
+    registrationAttemptSha256: text("registration_attempt_sha256"),
+    registrationOutcome: blob("registration_outcome", { mode: "buffer" }),
   },
   (table) => [
     uniqueIndex("enrollment_tokens_token_hash_idx").on(table.tokenHash),
@@ -58,7 +74,7 @@ export const enrollmentTokens = sqliteTable(
     uniqueIndex("enrollment_tokens_one_active_existing_host_idx")
       .on(table.targetHostId)
       .where(
-        sql`${table.targetKind} = 'existing_host' and ${table.status} in ('pending', 'verifying')`,
+        sql`${table.targetKind} in ('existing_host', 'manual_reinstall') and ${table.status} in ('pending', 'verifying')`,
       ),
     index("enrollment_tokens_status_expiry_idx").on(
       table.status,
@@ -70,7 +86,7 @@ export const enrollmentTokens = sqliteTable(
     ),
     check(
       "enrollment_tokens_target_check",
-      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
+      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.sourceProbeSha256Json} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null and ${table.targetBundlesJson} is null and ${table.replacementPredecessorEnrollmentId} is null and ${table.replacementPredecessorAssetSetDigest} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0 and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.sourceProbeSha256Json} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null and ${table.targetBundlesJson} is null and ${table.replacementPredecessorEnrollmentId} is null and ${table.replacementPredecessorAssetSetDigest} is null) or (${table.targetKind} = 'manual_reinstall' and ${table.targetHostId} > 0 and length(${table.expectedHubOrigin}) > 0 and length(${table.expectedProbeId}) > 0 and length(${table.expectedProbeVersion}) > 0 and length(${table.sourceProbeSha256Json}) > 0 and length(${table.targetAssetSetDigest}) = 71 and length(${table.targetProbeVersion}) > 0 and (${table.targetBundlesJson} is null or length(${table.targetBundlesJson}) > 0) and ((${table.replacementPredecessorEnrollmentId} is null and ${table.replacementPredecessorAssetSetDigest} is null) or (${table.replacementPredecessorEnrollmentId} != ${table.enrollmentId} and length(${table.replacementPredecessorEnrollmentId}) > 0 and length(${table.replacementPredecessorAssetSetDigest}) = 71))) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired' and ${table.targetBundlesJson} is null and ${table.replacementPredecessorEnrollmentId} is null and ${table.replacementPredecessorAssetSetDigest} is null)`,
     ),
     check(
       "enrollment_tokens_rejection_check",
@@ -102,6 +118,9 @@ export const hosts = sqliteTable(
     cpuModel: text(),
     memoryTotalBytes: integer(),
     probeVersion: text(),
+    probeAssetBundleVersion: text(),
+    probeAssetBundleBootId: text(),
+    probeAssetBundleProbeId: text(),
     connectAddress: text().notNull(),
     connectAddressEdited: integer({
       mode: "boolean",
@@ -155,6 +174,10 @@ export const officialHostProfiles = sqliteTable(
     collectorCapabilitiesJson: text(),
     filesystemsJson: text().notNull(),
     networkInterfacesJson: text().notNull(),
+    reportBootId: text(),
+    reportProbeId: text(),
+    reportProfileBundleVersion: text(),
+    forwardOperationId: integer(),
     updatedAtMs: integer().notNull(),
   },
   (table) => [
@@ -239,9 +262,21 @@ export const probeOperations = sqliteTable(
     kind: text().notNull(),
     state: text().notNull(),
     currentProbeVersion: text(),
+    targetAssetSetDigest: text("target_asset_set_digest"),
+    targetManifestSha256: text("target_manifest_sha256"),
     targetProbeVersion: text().notNull(),
     failureCode: text(),
     failureMessage: text(),
+    repairAuthorityExpiresAtMs: integer("repair_authority_expires_at_ms"),
+    repairEligibilityEvidenceJson: text("repair_eligibility_evidence_json"),
+    repairEligibilityEvidenceSha256: text("repair_eligibility_evidence_sha256"),
+    repairEvidenceSha256: text("repair_evidence_sha256"),
+    repairEligibilityKind: text("repair_eligibility_kind"),
+    repairFailureGeneration: text("repair_failure_generation"),
+    repairFailedOperationId: integer("repair_failed_operation_id"),
+    repairNonce: text("repair_nonce"),
+    upgradeAuthoritySha256: text("upgrade_authority_sha256"),
+    verifiedStageSha256: text("verified_stage_sha256"),
     createdAtMs: integer().notNull(),
     updatedAtMs: integer().notNull(),
     acceptedAtMs: integer(),
@@ -262,6 +297,9 @@ export const probeOperations = sqliteTable(
       table.updatedAtMs,
       table.id,
     ),
+    uniqueIndex("probe_operations_repair_evidence_idx")
+      .on(table.repairEvidenceSha256)
+      .where(sql`repair_evidence_sha256 is not null`),
   ],
 );
 
@@ -315,6 +353,12 @@ export const reportObservations = sqliteTable(
     bootId: text().notNull(),
     sequence: integer().notNull(),
     receivedAtMs: integer().notNull(),
+    observationWindowFailureReason: integer(
+      "observation_window_failure_reason",
+    ),
+    cpuResourceCollectionOutcomeReason: integer(
+      "cpu_resource_collection_outcome_reason",
+    ),
   },
   (table) => [
     uniqueIndex("report_observations_probe_boot_sequence_idx").on(
@@ -374,6 +418,26 @@ export const metricSamples = sqliteTable(
 
 export type MetricSampleRow = typeof metricSamples.$inferSelect;
 export type NewMetricSampleRow = typeof metricSamples.$inferInsert;
+
+export const metricCollectorOutcomes = sqliteTable(
+  "metric_collector_outcomes",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer("metric_sample_id")
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
+    collectorId: text("collector_id").notNull(),
+    state: integer().notNull(),
+    failurePhase: integer("failure_phase"),
+    failureCode: text("failure_code"),
+  },
+  (table) => [
+    uniqueIndex("metric_collector_outcomes_sample_collector_idx").on(
+      table.metricSampleId,
+      table.collectorId,
+    ),
+  ],
+);
 
 export const officialMetricCpu = sqliteTable(
   "official_metric_cpu",

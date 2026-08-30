@@ -18,9 +18,7 @@ describe("Probe upgrade failure toast", () => {
           completedAtMs: 1_725_000_900_000,
           createdAtMs: 1_725_000_000_000,
           failure: {
-            code: "running_timeout",
-            message:
-              "Probe started the upgrade but did not report the target version in time.",
+            recoveryDisposition: "probe_repair",
           },
           id: 9,
           runningAtMs: 1_725_000_100_000,
@@ -49,16 +47,14 @@ describe("Probe upgrade failure toast", () => {
       completedAtMs: 1_725_000_900_000,
       createdAtMs: 1_725_000_000_000,
       failure: {
-        code: "running_timeout",
-        message:
-          "Probe started the upgrade but did not report the target version in time.",
+        recoveryDisposition: "probe_repair",
       },
       id: 9,
       runningAtMs: 1_725_000_100_000,
-      state: "failed" as const,
+      state: "failed",
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_900_000,
-    };
+    } satisfies NonNullable<HostDetail["probeUpgradeStatus"]>;
 
     expect(shouldToastProbeUpgradeFailure(failedStatus, failedStatus)).toBe(
       false,
@@ -73,8 +69,7 @@ describe("Probe upgrade failure toast", () => {
           completedAtMs: 1_725_000_900_000,
           createdAtMs: 1_725_000_000_000,
           failure: {
-            code: "running_timeout",
-            message: "升级超时。",
+            recoveryDisposition: "probe_repair",
           },
           id: 9,
           runningAtMs: 1_725_000_100_000,
@@ -206,6 +201,7 @@ function hostDetail(overrides: Partial<HostDetail>) {
       isUpgradeable: false,
       nonUpgradeableReason: "probe_version_current",
     },
+    probeUpgradeProblem: null,
     probeUpgradeStatus: null,
     probeVersion: "0.1.45",
     reportedProbeConfigurationVersion: "default",

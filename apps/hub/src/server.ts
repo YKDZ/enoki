@@ -1,6 +1,7 @@
 import { isHubConfigurationError } from "./config-error.js";
 import { createHubRuntimeConfigFromEnvironment } from "./config.js";
 import { initializeHubDatabase, type HubDatabase } from "./database/index.js";
+import { resolveProbeBootstrapRecipeRecord } from "./enrollment/install-command.js";
 import {
   createDelegatingHubLogger,
   createJsonLineHubLogger,
@@ -17,6 +18,7 @@ import {
   createProbeApiNodeServer,
   type HubNodeServer,
 } from "./node-server.js";
+import { readProbeDistributionRootPublicKeyFromImage } from "./probe/distribution-root.js";
 import {
   createBoundedHubShutdown,
   installHubFatalHandlers,
@@ -65,6 +67,8 @@ try {
     process.env.ENOKI_WEB_DIST ??
     new URL("../../web/dist", import.meta.url).pathname;
   const config = createHubRuntimeConfigFromEnvironment(process.env, { logger });
+  const probeDistributionRootPublicKeyPem =
+    await readProbeDistributionRootPublicKeyFromImage();
   database = initializeHubDatabase(config.database);
   const liveUpdates = createLiveUpdateBroadcaster();
   metricsArchiveScheduler = createMetricsArchiveScheduler({
@@ -86,11 +90,22 @@ try {
       database,
       hostname,
       hostStatus: config.hostStatus,
-      installation: config.installation,
+      installation: {
+        ...config.installation,
+        bootstrapRecipe: resolveProbeBootstrapRecipeRecord({
+          deployment: process.env.ENOKI_DEPLOYMENT,
+          nodeEnvironment: process.env.NODE_ENV,
+        }),
+      },
       logger,
       liveUpdates,
       port,
-      probeAssets: config.probeAssets,
+      probeAssets: {
+        ...config.probeAssets,
+        ...(probeDistributionRootPublicKeyPem
+          ? { trustedRootPublicKeyPem: probeDistributionRootPublicKeyPem }
+          : {}),
+      },
       probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
       probeOperations: config.probeOperations,
       probeApiOrigin: config.network.probeApiOrigin,

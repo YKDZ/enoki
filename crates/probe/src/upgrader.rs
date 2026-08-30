@@ -1,38 +1,114 @@
+mod repair;
+mod replacement;
+mod uninstall;
+use uninstall::resume_lifecycle_companion_at;
+
 use std::{
     error::Error,
     fmt, fs,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
 };
 
-use flate2::read::GzDecoder;
+use enoki_probe_bootstrap::lifecycle::{LifecycleRequest, LifecycleResponse, LifecycleTransition};
 use prost::Message;
-use rsa::{
-    RsaPublicKey,
-    pkcs1v15::{Signature as RsaPkcs1v15Signature, VerifyingKey},
-    pkcs8::DecodePublicKey,
-    signature::Verifier,
-};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-use crate::local_privilege_boundary::{
-    CollectorHelperExposureEnvironment, CollectorHelperSudoersPlanInput,
-    CollectorHelperSudoersPlanner,
-};
 use crate::{
     hub_url,
     probe_auth::{ProbeRequestAuth, signed_probe_request_headers},
     protocol::enoki::v1::ProbeConfigurationRequest,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProbeUpgraderRunInput {
-    pub bootstrap_config_path: PathBuf,
+const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-runtime";
+const PRODUCTION_PROBE_BINARY_PATH: &str = "/usr/local/bin/enoki-probe";
+const CPU_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-cpu-resource-provider";
+const DISK_HEALTH_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
+const LIFECYCLE_COMPANION_BINARY_PATH: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
+const MAX_INSTALLED_PROBE_BYTES: u64 = 256 * 1024 * 1024;
+const OBSERVATION_RUNTIME_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-observation-runtime.service";
+const OBSERVATION_RUNTIME_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-observation-runtime.socket";
+const OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-observation-runtime-failure.service";
+const CPU_PROVIDER_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-cpu-resource-provider@.service";
+const CPU_PROVIDER_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-cpu-resource-provider.socket";
+const DISK_HEALTH_PROVIDER_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-disk-health-resource-provider@.service";
+const DISK_HEALTH_PROVIDER_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-disk-health-resource-provider.socket";
+const LIFECYCLE_COMPANION_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-companion@.service";
+const LIFECYCLE_COMPANION_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-companion.socket";
+const LIFECYCLE_UPGRADE_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-upgrade@.service";
+const LIFECYCLE_UPGRADE_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-upgrade.socket";
+const PROBE_IPC_GROUP: &str = "enoki-probe-ipc";
+const OBSERVATION_SERVICES_SCHEMA_THREE: [&str; 4] = [
+    "enoki-observation-runtime.service",
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
+];
+const OBSERVATION_SERVICES_SCHEMA_FOUR: [&str; 7] = [
+    "enoki-observation-runtime.service",
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
+    "enoki-cpu-resource-provider@*.service",
+    "enoki-disk-health-resource-provider@*.service",
+    "enoki-probe-lifecycle-companion.socket",
+];
+const OBSERVATION_SERVICES_SCHEMA_FIVE: [&str; 9] = [
+    "enoki-observation-runtime.service",
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
+    "enoki-cpu-resource-provider@*.service",
+    "enoki-disk-health-resource-provider@*.service",
+    "enoki-probe-lifecycle-companion.socket",
+    "enoki-probe-lifecycle-upgrade.socket",
+    "enoki-probe-lifecycle-upgrade@*.service",
+];
+
+fn observation_services(schema_version: u32) -> &'static [&'static str] {
+    if schema_version == 5 {
+        &OBSERVATION_SERVICES_SCHEMA_FIVE
+    } else if schema_version == 4 {
+        &OBSERVATION_SERVICES_SCHEMA_FOUR
+    } else {
+        &OBSERVATION_SERVICES_SCHEMA_THREE
+    }
 }
+
+fn is_lifecycle_companion_service(service: &str) -> bool {
+    matches!(
+        service,
+        "enoki-probe-lifecycle-companion.socket" | "enoki-probe-lifecycle-upgrade.socket"
+    )
+}
+
+fn is_lifecycle_companion_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            "enoki-probe-lifecycle-companion"
+                | "enoki-probe-lifecycle-companion@.service"
+                | "enoki-probe-lifecycle-companion.socket"
+                | "enoki-probe-lifecycle-upgrade@.service"
+                | "enoki-probe-lifecycle-upgrade.socket"
+        )
+    )
+}
+const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUninstallerRunInput {
@@ -101,6 +177,9 @@ impl ProbeRepairRunError {
                     "probe_repair_installation_missing"
                 }
                 ProbeUpgraderRunError::InvalidConfig(_) => "probe_repair_installation_invalid",
+                ProbeUpgraderRunError::ManualProbeReinstallRequired => {
+                    "probe_manual_reinstall_required"
+                }
                 _ => "probe_repair_failed",
             },
         }
@@ -188,18 +267,17 @@ impl From<ProbeUpgraderRunError> for ProbeRepairRunError {
 
 const PRODUCTION_INSTALL_METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 const PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-upgrader";
+const PRODUCTION_OPERATION_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-operations";
+const PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH: &str =
+    "/etc/sudoers.d/enoki-probe-collector-helpers";
 const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
+const PRODUCTION_REPLACEMENT_COMMIT_PATH: &str =
+    "/var/lib/enoki-probe-bootstrap/replacement-migration.json";
+const PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH: &str =
+    "/var/lib/enoki-probe-registration/attempt.json";
 const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProbeUpgraderResult {
-    pub error_code: Option<String>,
-    pub message: Option<String>,
-    pub operation_id: String,
-    pub status: String,
-}
-
+const PRODUCTION_INSTALL_STATE_DIR: &str = "/var/lib/enoki-probe";
 #[derive(Debug)]
 pub enum ProbeUpgraderRunError {
     ArchitectureMissing,
@@ -518,6 +596,10 @@ pub trait ProbeUpgraderSystemdRunner {
         Ok(())
     }
 
+    fn verify_service_active(&mut self, _service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        Ok(())
+    }
+
     fn verify_service_absent(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError>;
 
     fn remove_service_identity(
@@ -525,6 +607,15 @@ pub trait ProbeUpgraderSystemdRunner {
         service_user: &str,
         service_group: &str,
     ) -> Result<(), ProbeUpgraderRunError>;
+
+    fn remove_owned_ipc_group(
+        &mut self,
+        group: &str,
+        ownership_marker: &str,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        let _ = ownership_marker;
+        self.remove_service_identity(group, group)
+    }
 }
 
 pub struct SystemProbeUpgraderSystemdRunner;
@@ -649,6 +740,10 @@ impl ProbeUpgraderSystemdRunner for SystemProbeUpgraderSystemdRunner {
         )
     }
 
+    fn verify_service_active(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        run_required_command("systemctl", &["is-active", "--quiet", service_name])
+    }
+
     fn verify_service_absent(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
         verify_systemd_service_absent_with(service_name, &mut run_cleanup_command)
     }
@@ -660,6 +755,14 @@ impl ProbeUpgraderSystemdRunner for SystemProbeUpgraderSystemdRunner {
     ) -> Result<(), ProbeUpgraderRunError> {
         remove_service_identity_with(service_user, service_group, &mut run_cleanup_command)
     }
+
+    fn remove_owned_ipc_group(
+        &mut self,
+        group: &str,
+        ownership_marker: &str,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        remove_owned_ipc_group_with(group, ownership_marker, &mut run_cleanup_command)
+    }
 }
 
 struct CleanupCommandOutput {
@@ -667,27 +770,6 @@ struct CleanupCommandOutput {
     stderr: String,
     stdout: String,
     successful: bool,
-}
-
-#[cfg(test)]
-impl CleanupCommandOutput {
-    fn success(stdout: &str) -> Self {
-        Self {
-            code: Some(0),
-            stderr: String::new(),
-            stdout: stdout.to_string(),
-            successful: true,
-        }
-    }
-
-    fn failure(code: Option<i32>, stdout: &str, stderr: &str) -> Self {
-        Self {
-            code,
-            stderr: stderr.to_string(),
-            stdout: stdout.to_string(),
-            successful: false,
-        }
-    }
 }
 
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
@@ -810,6 +892,51 @@ fn remove_service_identity_with(
         "probe_uninstall_service_group_residue",
         "removing the service group",
         "verifying the service group is absent",
+        run,
+    )
+}
+
+fn remove_owned_ipc_group_with(
+    group: &str,
+    ownership_marker: &str,
+    run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let action = "verifying the lifecycle IPC group ownership";
+    let output = run("getent", &["gshadow", group]).map_err(|error| {
+        uninstall_cleanup_failure(
+            "probe_uninstall_service_group_verification_failed",
+            action,
+            error.to_string(),
+        )
+    })?;
+    match output.code {
+        Some(2) => return Ok(()),
+        Some(0) if output.successful => {}
+        _ => {
+            return Err(uninstall_cleanup_failure(
+                "probe_uninstall_service_group_verification_failed",
+                action,
+                cleanup_command_failure_message(&output, "getent"),
+            ));
+        }
+    }
+    let fields = output.stdout.trim_end().split(':').collect::<Vec<_>>();
+    if fields.len() != 4 || fields[0] != group || fields[1] != ownership_marker {
+        return Err(uninstall_cleanup_failure(
+            "probe_uninstall_service_group_residue",
+            action,
+            "lifecycle IPC group ownership receipt does not match".to_owned(),
+        ));
+    }
+    remove_identity_entry_with(
+        "group",
+        group,
+        "groupdel",
+        "probe_uninstall_service_group_remove_failed",
+        "probe_uninstall_service_group_verification_failed",
+        "probe_uninstall_service_group_residue",
+        "removing the lifecycle IPC group",
+        "verifying the lifecycle IPC group is absent",
         run,
     )
 }
@@ -944,387 +1071,11 @@ fn uninstall_cleanup_failure(
     }
 }
 
-pub fn run_probe_upgrader(
-    input: ProbeUpgraderRunInput,
-    stdin: &str,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    run_probe_upgrader_with_systemd_runner(input, stdin, transport, &mut systemd)
-}
-
-pub fn run_probe_repair(
-    transport: &mut impl ProbeUpgraderValidationTransport,
-) -> Result<ProbeRepairResult, ProbeRepairRunError> {
-    // SAFETY: `geteuid` takes no arguments and only reads the process credentials.
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(ProbeRepairRunError::RootRequired);
-    }
-    let install_metadata =
-        read_trusted_probe_install_metadata(Path::new(PRODUCTION_INSTALL_METADATA_PATH), None)?;
-    if install_metadata.schema_version == 2 {
-        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
-    }
-    let installed_version = read_installed_probe_version(&install_metadata.install_path)?;
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    run_probe_repair_with_current_version_and_systemd_runner(
-        &install_metadata,
-        transport,
-        &mut systemd,
-        0,
-        0,
-        &installed_version,
-    )
-}
-
-fn read_installed_probe_version(install_path: &Path) -> Result<String, ProbeRepairRunError> {
-    const VERSION_MARKER: &[u8] = b"ENOKI_PROBE_VERSION=";
-    let binary =
-        fs::read(install_path).map_err(|_| ProbeRepairRunError::InstalledVersionInvalid)?;
-    let versions = binary
-        .windows(VERSION_MARKER.len())
-        .enumerate()
-        .filter_map(|(marker_index, candidate)| {
-            if candidate != VERSION_MARKER {
-                return None;
-            }
-            let value_start = marker_index + VERSION_MARKER.len();
-            let tail = &binary[value_start..];
-            let value_end = tail.iter().position(|byte| *byte == 0)?;
-            let version = std::str::from_utf8(&tail[..value_end]).ok()?;
-            parse_probe_semver(version)?;
-            Some(normalized_probe_version(version).to_string())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    if versions.len() != 1 {
-        return Err(ProbeRepairRunError::InstalledVersionInvalid);
-    }
-    versions
-        .into_iter()
-        .next()
-        .ok_or(ProbeRepairRunError::InstalledVersionInvalid)
-}
-
-fn run_probe_repair_with_current_version_and_systemd_runner(
-    install_metadata: &TrustedProbeInstallMetadata,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-    effective_uid: u32,
-    trusted_failure_marker_owner_uid: u32,
-    current_probe_version: &str,
-) -> Result<ProbeRepairResult, ProbeRepairRunError> {
-    if effective_uid != 0 {
-        return Err(ProbeRepairRunError::RootRequired);
-    }
-    let failed_upgrade = read_probe_repair_failure_marker_with_owner(
-        install_metadata,
-        trusted_failure_marker_owner_uid,
-    )?;
-    validate_repair_candidate_is_installed(&failed_upgrade, current_probe_version)?;
-    let identity = read_probe_repair_identity(install_metadata)?;
-    let identity_hub_url = identity
-        .hub_url
-        .as_deref()
-        .ok_or(ProbeRepairRunError::IdentityIncomplete)
-        .and_then(|value| {
-            hub_url::normalized_base(value).map_err(|()| ProbeRepairRunError::IdentityIncomplete)
-        })?;
-    if identity_hub_url != install_metadata.hub_url {
-        return Err(ProbeRepairRunError::IdentityHubMismatch);
-    }
-    validate_bootstrap_config_matches_trusted_install_metadata(&identity, install_metadata)
-        .map_err(|_| ProbeRepairRunError::IdentityIncomplete)?;
-    let request_auth = probe_request_auth_from_bootstrap_config(&identity)
-        .map_err(|_| ProbeRepairRunError::IdentityIncomplete)?;
-    transport
-        .validate_probe_identity(
-            &probe_identity_validation_url(&install_metadata.hub_url)?,
-            &request_auth,
-        )
-        .map_err(|error| ProbeRepairRunError::IdentityRejected(error.to_string()))?;
-
-    let manifest_bytes = download_hub_asset(transport, &install_metadata.hub_url, "manifest.json")?;
-    let signature_bytes =
-        download_hub_asset(transport, &install_metadata.hub_url, "manifest.json.sig")?;
-    let public_key_bytes =
-        download_hub_asset(transport, &install_metadata.hub_url, "signing-key.pem")?;
-    verify_public_key_trust(
-        &public_key_bytes,
-        &install_metadata.probe_asset_public_key_sha256,
-    )?;
-    verify_manifest_signature(&manifest_bytes, &signature_bytes, &public_key_bytes)?;
-    let manifest: ProbeAssetManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|_| ProbeUpgraderRunError::InvalidManifest("invalid JSON"))?;
-    if parse_probe_semver(&manifest.version).is_none() {
-        return Err(ProbeUpgraderRunError::InvalidManifest("version is not a valid SemVer").into());
-    }
-    validate_probe_repair_target(
-        &manifest.version,
-        current_probe_version,
-        &failed_upgrade.target_probe_version,
-    )?;
-    if manifest.signature.algorithm != "rsa-sha256"
-        || manifest.signature.file != "manifest.json.sig"
-        || manifest.signature.public_key != "signing-key.pem"
-    {
-        return Err(
-            ProbeUpgraderRunError::InvalidManifest("unsupported signature metadata").into(),
-        );
-    }
-    let target = host_probe_asset_target()?;
-    let asset = manifest
-        .assets
-        .iter()
-        .find(|asset| asset.target == target)
-        .ok_or(ProbeUpgraderRunError::ArchitectureMissing)?;
-    validate_asset_metadata(asset)?;
-    let archive = download_hub_asset(transport, &install_metadata.hub_url, &asset.file)?;
-    verify_archive_sha256(&archive, &asset.sha256)?;
-
-    fs::create_dir_all(&install_metadata.state_dir).map_err(ProbeUpgraderRunError::Io)?;
-    let install_dir = install_metadata.install_path.parent().ok_or(
-        ProbeUpgraderRunError::InvalidInstallMetadata("install path has no parent"),
-    )?;
-    fs::create_dir_all(install_dir).map_err(ProbeUpgraderRunError::Io)?;
-    systemd
-        .ensure_service_group(&install_metadata.service_group)
-        .map_err(|error| {
-            probe_repair_reconstruction_error("probe_repair_service_group_failed", error)
-        })?;
-    systemd
-        .ensure_service_account(
-            &install_metadata.service_user,
-            &install_metadata.service_group,
-            &install_metadata.state_dir,
-            &install_metadata.identity_path,
-        )
-        .map_err(|error| {
-            probe_repair_reconstruction_error("probe_repair_service_account_failed", error)
-        })?;
-    systemd
-        .stop_service(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_repair_reconstruction_error("probe_repair_service_stop_failed", error)
-        })?;
-    replace_installed_probe_binary(&archive, &install_metadata.install_path)?;
-    write_probe_operation_sudoers(install_metadata, &install_metadata.identity_path)
-        .map_err(|error| probe_repair_reconstruction_error("probe_repair_sudoers_failed", error))?;
-    write_collector_helper_sudoers_from_installed_probe(install_metadata)
-        .map_err(|error| probe_repair_reconstruction_error("probe_repair_sudoers_failed", error))?;
-    remove_old_sudoers_paths(install_metadata)
-        .map_err(|error| probe_repair_reconstruction_error("probe_repair_sudoers_failed", error))?;
-    write_probe_systemd_service(install_metadata).map_err(|error| {
-        probe_repair_reconstruction_error("probe_repair_service_unit_failed", error)
-    })?;
-    systemd.daemon_reload().map_err(|error| {
-        probe_repair_reconstruction_error("probe_repair_daemon_reload_failed", error)
-    })?;
-    systemd
-        .enable_service(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_repair_reconstruction_error("probe_repair_service_enable_failed", error)
-        })?;
-    systemd
-        .reset_failed(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_repair_reconstruction_error("probe_repair_service_reset_failed", error)
-        })?;
-    systemd
-        .restart_service(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_repair_reconstruction_error("probe_repair_service_restart_failed", error)
-        })?;
-
-    Ok(ProbeRepairResult {
-        probe_id: request_auth.probe_id.to_string(),
-        repaired_version: normalized_probe_version(&manifest.version).to_string(),
-    })
-}
-
-fn probe_repair_reconstruction_error(
-    code: &'static str,
-    error: ProbeUpgraderRunError,
-) -> ProbeRepairRunError {
-    ProbeRepairRunError::ServiceReconstruction {
-        code,
-        message: error.to_string(),
-    }
-}
-
-fn probe_identity_validation_url(hub_url: &str) -> Result<String, ProbeUpgraderRunError> {
-    hub_url::endpoint(hub_url, "/api/probe/config")
-        .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
-}
-
-fn write_probe_systemd_service(
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<(), ProbeUpgraderRunError> {
-    for path in [
-        &install_metadata.install_path,
-        &install_metadata.identity_path,
-        &install_metadata.state_dir,
-        &install_metadata.service_unit_path,
-    ] {
-        ensure_absolute_path(path)?;
-    }
-    if !is_safe_sudoers_token(&install_metadata.service_user)
-        || !is_safe_sudoers_token(&install_metadata.service_group)
-        || !is_safe_sudoers_token(&install_metadata.service_name)
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "service identity is unsafe",
-        ));
-    }
-    let config_dir = install_metadata.identity_path.parent().ok_or(
-        ProbeUpgraderRunError::InvalidInstallMetadata("identity path has no parent"),
-    )?;
-    let contents = format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=notify\nNotifyAccess=main\nUser={}\nGroup={}\nExecStart={} run --config {}\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nPrivateTmp=true\nProtectHome=true\nProtectSystem=full\nProtectControlGroups=true\nReadWritePaths={} {}\n\n[Install]\nWantedBy=multi-user.target\n",
-        install_metadata.service_user,
-        install_metadata.service_group,
-        install_metadata.install_path.display(),
-        install_metadata.identity_path.display(),
-        install_metadata.state_dir.display(),
-        config_dir.display(),
-    );
-    if let Some(parent) = install_metadata.service_unit_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-    fs::write(&install_metadata.service_unit_path, contents).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(
-        &install_metadata.service_unit_path,
-        fs::Permissions::from_mode(0o644),
-    )
-    .map_err(ProbeUpgraderRunError::Io)
-}
-
-#[derive(Debug)]
-struct FailedProbeUpgradeMarker {
-    target_probe_version: String,
-}
-
-fn read_probe_repair_failure_marker_with_owner(
-    install_metadata: &TrustedProbeInstallMetadata,
-    trusted_owner_uid: u32,
-) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
-    let metadata = match fs::symlink_metadata(&install_metadata.operation_status_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ProbeRepairRunError::FailureMarkerMissing);
-        }
-        Err(_) => return Err(ProbeRepairRunError::FailureMarkerInvalid),
-    };
-    read_probe_repair_failure_marker_with_file_metadata_and_owner(
-        install_metadata,
-        TrustedFileMetadata {
-            is_regular_file: metadata.file_type().is_file(),
-            is_symlink: metadata.file_type().is_symlink(),
-            mode: metadata.mode() & 0o777,
-            owner_uid: metadata.uid(),
-        },
-        trusted_owner_uid,
-    )
-}
-
 #[cfg(test)]
-fn read_probe_repair_failure_marker_with_file_metadata(
-    install_metadata: &TrustedProbeInstallMetadata,
-    file_metadata: TrustedFileMetadata,
-) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
-    read_probe_repair_failure_marker_with_file_metadata_and_owner(
-        install_metadata,
-        file_metadata,
-        0,
-    )
-}
-
-fn read_probe_repair_failure_marker_with_file_metadata_and_owner(
-    install_metadata: &TrustedProbeInstallMetadata,
-    file_metadata: TrustedFileMetadata,
-    trusted_owner_uid: u32,
-) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
-    if file_metadata.is_symlink
-        || !file_metadata.is_regular_file
-        || file_metadata.owner_uid != trusted_owner_uid
-        || file_metadata.mode != 0o644
-    {
-        return Err(ProbeRepairRunError::FailureMarkerInvalid);
-    }
-    let contents = fs::read_to_string(&install_metadata.operation_status_path)
-        .map_err(|_| ProbeRepairRunError::FailureMarkerInvalid)?;
-    parse_probe_repair_failure_marker(&contents)
-}
-
-fn parse_probe_repair_failure_marker(
-    contents: &str,
-) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
-    let value = contents
-        .parse::<toml::Value>()
-        .map_err(|_| ProbeRepairRunError::FailureMarkerInvalid)?;
-    let operation_id = value
-        .get("operation_id")
-        .and_then(toml::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or(ProbeRepairRunError::FailureMarkerInvalid)?;
-    let target_probe_version = value
-        .get("target_probe_version")
-        .and_then(toml::Value::as_str)
-        .filter(|value| parse_probe_semver(value).is_some())
-        .ok_or(ProbeRepairRunError::FailureMarkerInvalid)?;
-    let status = value
-        .get("status")
-        .and_then(toml::Value::as_str)
-        .ok_or(ProbeRepairRunError::FailureMarkerInvalid)?;
-    let error_code = value
-        .get("error_code")
-        .and_then(toml::Value::as_str)
-        .ok_or(ProbeRepairRunError::FailureMarkerInvalid)?;
-    if status != "failed"
-        || !matches!(
-            error_code,
-            "post_replacement_restart_failure" | "post_replacement_status_write_failure"
-        )
-    {
-        return Err(ProbeRepairRunError::FailureMarkerNotPostReplacement);
-    }
-    let _ = operation_id;
-    Ok(FailedProbeUpgradeMarker {
-        target_probe_version: normalized_probe_version(target_probe_version).to_string(),
-    })
-}
-
-fn validate_repair_candidate_is_installed(
-    marker: &FailedProbeUpgradeMarker,
-    current_probe_version: &str,
-) -> Result<(), ProbeRepairRunError> {
-    let current = parse_probe_semver(current_probe_version)
-        .ok_or(ProbeRepairRunError::InstalledVersionInvalid)?;
-    let marked_target = parse_probe_semver(&marker.target_probe_version)
-        .ok_or(ProbeRepairRunError::FailureMarkerInvalid)?;
-    if marked_target != current {
-        return Err(ProbeRepairRunError::CandidateNotInstalled);
-    }
-    Ok(())
-}
-
-fn validate_probe_repair_target(
-    hub_target_version: &str,
-    current_probe_version: &str,
-    failed_target_version: &str,
-) -> Result<(), ProbeRepairRunError> {
-    let target =
-        parse_probe_semver(hub_target_version).ok_or(ProbeRepairRunError::HubTargetMismatch)?;
-    let current = parse_probe_semver(current_probe_version)
-        .ok_or(ProbeRepairRunError::InstalledVersionInvalid)?;
-    if target < current {
-        return Err(ProbeRepairRunError::DowngradeRejected);
-    }
-    let failed_target = parse_probe_semver(failed_target_version)
-        .ok_or(ProbeRepairRunError::FailureMarkerInvalid)?;
-    if target != current || target != failed_target {
-        return Err(ProbeRepairRunError::HubTargetMismatch);
-    }
-    Ok(())
+pub(crate) fn repair_acquirer_exit_lifecycle_response(
+    code: Option<i32>,
+) -> Option<LifecycleResponse> {
+    repair::acquirer_exit_failure(code).map(|error| repair::response(Err(error)))
 }
 
 fn read_probe_repair_identity(
@@ -1364,263 +1115,172 @@ fn read_probe_repair_identity_with_file_metadata(
     Ok(identity)
 }
 
-pub fn run_probe_upgrader_with_systemd_runner(
-    input: ProbeUpgraderRunInput,
-    stdin: &str,
+/// Lifecycle Companion 的唯一生产入口。授权事实在任何系统变更前与
+/// root-owned 安装状态和当前 Probe Identity 精确比对。
+pub fn run_lifecycle_companion(
+    request: &LifecycleRequest,
     transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
-    let operation = read_operation_metadata(stdin)?;
-    if operation.token.is_empty() {
-        return Err(ProbeUpgraderRunError::MissingToken);
-    }
-    let install_metadata = read_trusted_probe_install_metadata(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        Some(&input.bootstrap_config_path),
-    )?;
-    if install_metadata.schema_version == 2 {
-        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired);
-    }
-    run_probe_upgrader_with_systemd_runner_and_install_metadata(
-        input,
-        stdin,
+) -> LifecycleResponse {
+    run_lifecycle_companion_from_peer(request, transport, None)
+}
+
+pub fn run_lifecycle_companion_from_peer(
+    request: &LifecycleRequest,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    peer_uid: Option<u32>,
+) -> LifecycleResponse {
+    run_lifecycle_companion_from_peer_with_effective_uid(
+        request,
         transport,
-        systemd,
-        &install_metadata,
+        peer_uid,
+        EffectiveUid::process(),
     )
 }
 
-fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
-    input: ProbeUpgraderRunInput,
-    stdin: &str,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
-    let operation = read_operation_metadata(stdin)?;
-    if operation.token.is_empty() {
-        return Err(ProbeUpgraderRunError::MissingToken);
+#[derive(Clone, Copy)]
+struct EffectiveUid(u32);
+
+impl EffectiveUid {
+    fn process() -> Self {
+        Self(unsafe { libc::geteuid() })
     }
 
-    validate_identity_path(&input.bootstrap_config_path, install_metadata)?;
-    let bootstrap_config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
-    validate_bootstrap_config_matches_trusted_install_metadata(
-        &bootstrap_config,
-        install_metadata,
-    )?;
-    let hub_url = &install_metadata.hub_url;
-    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
-    let body = format!(
-        "{{\"targetProbeVersion\":\"{}\",\"token\":\"{}\"}}",
-        json_string_fragment(&operation.target_probe_version),
-        json_string_fragment(&operation.token),
-    );
+    #[cfg(test)]
+    const fn test(uid: u32) -> Self {
+        Self(uid)
+    }
 
-    transport.post_token_validation(
-        &operation_token_validation_url(hub_url, &operation.operation_id)?,
-        &request_auth,
-        &body,
-    )?;
+    const fn is_root(self) -> bool {
+        self.0 == 0
+    }
+}
 
-    if let Err(error) = execute_probe_upgrade(
-        &operation,
-        &bootstrap_config,
-        &input.bootstrap_config_path,
-        install_metadata,
-        transport,
-        systemd,
-    ) {
-        let failed = failed_probe_upgrader_result(&operation, &error);
-        let _ = write_failed_local_operation_status(&operation, install_metadata, &failed);
-        if let Ok(status_url) = operation_status_url(hub_url, &operation.operation_id) {
-            let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
-            let _ = transport.post_operation_status(&status_url, &request_auth, &body);
+fn run_lifecycle_companion_from_peer_with_effective_uid(
+    request: &LifecycleRequest,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    peer_uid: Option<u32>,
+    effective_uid: EffectiveUid,
+) -> LifecycleResponse {
+    if !effective_uid.is_root() {
+        return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    match request.transition() {
+        LifecycleTransition::Upgrade => {
+            enoki_probe_bootstrap::install::run_compatible_upgrade(request, peer_uid)
         }
-        return Ok(failed);
+        LifecycleTransition::Repair => repair::coordinate(request, peer_uid),
+        LifecycleTransition::ReplacementMigration => replacement::coordinate(request),
+        LifecycleTransition::Uninstall => uninstall::coordinate(request, transport),
+        LifecycleTransition::FreshInstall => LifecycleResponse::not_enabled(),
     }
-
-    Ok(ProbeUpgraderResult {
-        error_code: None,
-        message: None,
-        operation_id: operation.operation_id,
-        status: "running".to_string(),
-    })
 }
 
-pub fn run_probe_uninstaller(
-    input: ProbeUninstallerRunInput,
-    stdin: &str,
+/// 固定 `--upgrade` CLI Adapter 只接受 Compatible Upgrade，并与 socket
+/// companion 入口进入同一个 Probe Bootstrap coordinator。
+pub fn run_upgrade_lifecycle_companion_from_peer(
+    request: &LifecycleRequest,
+    peer_uid: Option<u32>,
+) -> LifecycleResponse {
+    run_upgrade_lifecycle_companion_from_peer_with_effective_uid(
+        request,
+        peer_uid,
+        EffectiveUid::process(),
+    )
+}
+
+fn run_upgrade_lifecycle_companion_from_peer_with_effective_uid(
+    request: &LifecycleRequest,
+    peer_uid: Option<u32>,
+    effective_uid: EffectiveUid,
+) -> LifecycleResponse {
+    if !effective_uid.is_root() {
+        return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    if request.transition() != LifecycleTransition::Upgrade {
+        return LifecycleResponse::not_enabled();
+    }
+    enoki_probe_bootstrap::install::run_compatible_upgrade(request, peer_uid)
+}
+
+fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty()
+        || !value.len().is_multiple_of(2)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
+}
+
+/// 响应已经完整写出后，Companion binary unlink 是进程最后一个可失败动作。
+pub fn finalize_lifecycle_companion_binary() -> bool {
+    remove_path_if_exists(Path::new(LIFECYCLE_COMPANION_BINARY_PATH)).is_ok()
+}
+
+/// 固定恢复入口不接受运行时参数；它只消费安装目录中的 root-owned
+/// canonical capsule。capsule 已提交删除时，唯一剩余动作是自删除固定
+/// Companion binary。
+pub fn resume_lifecycle_companion(
     transport: &mut impl ProbeUpgraderValidationTransport,
-) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    run_probe_uninstaller_with_systemd_runner(input, stdin, transport, &mut systemd)
-}
-
-/// Removes local Probe resources from trusted install metadata only.  This
-/// public, root-authorized path never creates a Hub request; the Hub Host
-/// record therefore remains unchanged for offline removal or re-enrollment.
-pub fn run_local_probe_uninstall() -> Result<(), ProbeUpgraderRunError> {
+) -> LifecycleResponse {
     if unsafe { libc::geteuid() } != 0 {
-        return Err(ProbeUpgraderRunError::LocalUninstallRootRequired);
+        return LifecycleResponse::failed("lifecycle.root_required");
     }
-
-    let install_metadata =
-        read_trusted_probe_install_metadata(Path::new(PRODUCTION_INSTALL_METADATA_PATH), None)?;
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    execute_probe_uninstall_with_install_metadata_path(
-        &ProbeUninstallerRunInput {
-            bootstrap_config_path: install_metadata.identity_path.clone(),
-        },
-        &install_metadata,
-        &mut systemd,
+    resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-    )
-}
-
-pub fn run_probe_uninstaller_with_systemd_runner(
-    input: ProbeUninstallerRunInput,
-    stdin: &str,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
-    let operation = read_uninstall_operation_metadata(stdin)?;
-    if operation.token.is_empty() {
-        return Err(ProbeUpgraderRunError::MissingToken);
-    }
-    let install_metadata = read_trusted_probe_install_metadata(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        Some(&input.bootstrap_config_path),
-    )?;
-    run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-        input,
-        stdin,
+        Path::new(PRODUCTION_INSTALL_STATE_DIR),
+        Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
         transport,
-        systemd,
-        &install_metadata,
+        &mut SystemProbeUpgraderSystemdRunner,
     )
 }
 
-fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-    input: ProbeUninstallerRunInput,
-    stdin: &str,
+pub fn run_local_lifecycle_companion(
     transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
-    let operation = read_uninstall_operation_metadata(stdin)?;
-    if operation.token.is_empty() {
-        return Err(ProbeUpgraderRunError::MissingToken);
+) -> LifecycleResponse {
+    if unsafe { libc::geteuid() } != 0 {
+        return LifecycleResponse::failed("lifecycle.root_required");
     }
-
-    validate_identity_path(&input.bootstrap_config_path, install_metadata)?;
-    let bootstrap_config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
-    validate_bootstrap_config_matches_trusted_install_metadata(
-        &bootstrap_config,
-        install_metadata,
-    )?;
-    let hub_url = &install_metadata.hub_url;
-    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
-
-    let token_body = format!(
-        "{{\"token\":\"{}\"}}",
-        json_string_fragment(&operation.token)
-    );
-    transport.post_token_validation(
-        &operation_token_validation_url(hub_url, &operation.operation_id)?,
-        &request_auth,
-        &token_body,
-    )?;
-
-    let status_url = operation_status_url(hub_url, &operation.operation_id)?;
-
-    if let Err(error) = execute_probe_uninstall(&input, install_metadata, systemd) {
-        let failed = failed_probe_uninstaller_result(&operation, &error);
-        let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
-        let _ = transport.post_operation_status(&status_url, &request_auth, &body);
-        return Ok(failed);
-    }
-
-    let body = render_operation_status_body(&operation.token, "succeeded", None);
-    transport.post_operation_status(&status_url, &request_auth, &body)?;
-
-    Ok(ProbeUpgraderResult {
-        error_code: None,
-        message: None,
-        operation_id: operation.operation_id,
-        status: "succeeded".to_string(),
-    })
-}
-
-fn execute_probe_uninstall(
-    input: &ProbeUninstallerRunInput,
-    install_metadata: &TrustedProbeInstallMetadata,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    execute_probe_uninstall_with_install_metadata_path(
-        input,
-        install_metadata,
-        systemd,
+    let metadata = match read_trusted_probe_install_metadata(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-    )
-}
-
-fn execute_probe_uninstall_with_install_metadata_path(
-    input: &ProbeUninstallerRunInput,
-    install_metadata: &TrustedProbeInstallMetadata,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-    install_metadata_path: &Path,
-) -> Result<(), ProbeUpgraderRunError> {
-    execute_probe_uninstall_with_install_metadata_path_and_owner(
-        input,
-        install_metadata,
-        systemd,
-        install_metadata_path,
-        0,
-    )
-}
-
-fn execute_probe_uninstall_with_install_metadata_path_and_owner(
-    input: &ProbeUninstallerRunInput,
-    install_metadata: &TrustedProbeInstallMetadata,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-    install_metadata_path: &Path,
-    trusted_owner_uid: u32,
-) -> Result<(), ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_cleanup(
-        input,
-        install_metadata,
-        install_metadata_path,
-        trusted_owner_uid,
-    )?;
-    execute_probe_uninstall_cleanup(&plan, systemd)
-}
-
-/// Runs the same trusted uninstall cleanup core used by both public and
-/// Hub-authorized uninstall paths. The staged local-install candidate uses
-/// this only after it has established that the complete prior installation is
-/// bound to the same Hub.
-pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
-    install_metadata_path: &Path,
-    test_root: Option<&Path>,
-) -> Result<(), ProbeUpgraderRunError> {
-    let install_metadata_path = preflight_rooted_path(test_root, install_metadata_path);
-    let mut install_metadata = read_trusted_probe_install_metadata_read_only_with_expected_owner(
-        &install_metadata_path,
         None,
-        trusted_read_only_metadata_owner_uid(test_root),
-    )?;
-    rebase_trusted_install_metadata_paths(&mut install_metadata, test_root);
-    let input = ProbeUninstallerRunInput {
-        bootstrap_config_path: install_metadata.identity_path.clone(),
+    ) {
+        Ok(metadata) if matches!(metadata.schema_version, 4 | 5) => metadata,
+        Ok(_) => return LifecycleResponse::failed("lifecycle.replacement_required"),
+        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
     };
-    let plan = plan_probe_uninstall_cleanup(
-        &input,
-        &install_metadata,
-        &install_metadata_path,
-        trusted_read_only_metadata_owner_uid(test_root),
-    )?;
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    execute_probe_uninstall_cleanup(&plan, &mut systemd)
+    let identity = match read_trusted_probe_install_preflight(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        None,
+    ) {
+        Ok(identity) => identity,
+        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+    };
+    let Some((install_state, manifest, version)) = metadata
+        .install_state_sha256
+        .as_deref()
+        .zip(metadata.target_manifest_sha256.as_deref())
+        .zip(metadata.bundle_version.as_deref())
+        .map(|((install_state, manifest), version)| (install_state, manifest, version))
+    else {
+        return LifecycleResponse::failed("lifecycle.install_state_invalid");
+    };
+    let Ok(request) =
+        LifecycleRequest::local_uninstall(&identity.probe_id, install_state, manifest, version)
+    else {
+        return LifecycleResponse::failed("lifecycle.install_state_invalid");
+    };
+    run_lifecycle_companion(&request, transport)
 }
 
 fn rebase_trusted_install_metadata_paths(
@@ -1651,420 +1311,20 @@ fn rebase_trusted_install_metadata_paths(
     for path in &mut metadata.old_sudoers_paths {
         *path = preflight_rooted_path(test_root, path);
     }
-}
-
-#[derive(Debug)]
-struct ProbeUninstallCleanupPlan<'a> {
-    input: &'a ProbeUninstallerRunInput,
-    install_metadata: &'a TrustedProbeInstallMetadata,
-    install_metadata_path: &'a Path,
-    trusted_owner_uid: u32,
-}
-
-/// Establishes every local deletion target before systemd or filesystem
-/// mutation. Both the offline public command and Hub-authorized operation
-/// invoke this planner through the same executor below.
-fn plan_probe_uninstall_cleanup<'a>(
-    input: &'a ProbeUninstallerRunInput,
-    install_metadata: &'a TrustedProbeInstallMetadata,
-    install_metadata_path: &'a Path,
-    trusted_owner_uid: u32,
-) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
-    ensure_absolute_path(&input.bootstrap_config_path)?;
     for path in [
-        install_metadata_path,
-        &install_metadata.identity_path,
-        &install_metadata.install_path,
-        &install_metadata.service_unit_path,
-        &install_metadata.state_dir,
-    ] {
-        ensure_absolute_path(path)?;
-    }
-    for path in [
-        install_metadata.operation_sudoers_path.as_deref(),
-        install_metadata.collector_helper_sudoers_path.as_deref(),
-        install_metadata.bootstrap_acquirer_path.as_deref(),
-        install_metadata.bootstrap_activator_path.as_deref(),
-        install_metadata.bootstrap_state_dir.as_deref(),
+        &mut metadata.observation_runtime_path,
+        &mut metadata.cpu_provider_path,
+        &mut metadata.disk_health_provider_path,
+        &mut metadata.lifecycle_companion_path,
     ]
     .into_iter()
     .flatten()
     {
-        ensure_absolute_path(path)?;
+        *path = preflight_rooted_path(test_root, path);
     }
-    for path in &install_metadata.old_sudoers_paths {
-        ensure_absolute_path(path)?;
+    for path in &mut metadata.observation_unit_paths {
+        *path = preflight_rooted_path(test_root, path);
     }
-    if install_metadata.schema_version == 2 {
-        validate_owned_bootstrap_role(
-            install_metadata.bootstrap_acquirer_path.as_deref(),
-            trusted_owner_uid,
-        )?;
-        validate_owned_bootstrap_role(
-            install_metadata.bootstrap_activator_path.as_deref(),
-            trusted_owner_uid,
-        )?;
-        validate_owned_bootstrap_state(
-            install_metadata.bootstrap_state_dir.as_deref(),
-            trusted_owner_uid,
-        )?;
-    }
-    Ok(ProbeUninstallCleanupPlan {
-        input,
-        install_metadata,
-        install_metadata_path,
-        trusted_owner_uid,
-    })
-}
-
-fn execute_probe_uninstall_cleanup(
-    plan: &ProbeUninstallCleanupPlan<'_>,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    let input = plan.input;
-    let install_metadata = plan.install_metadata;
-    let install_metadata_path = plan.install_metadata_path;
-    systemd
-        .stop_service(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_uninstall_cleanup_error(
-                "probe_uninstall_service_stop_failed",
-                "stopping the service",
-                error,
-            )
-        })?;
-    systemd
-        .disable_service(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_uninstall_cleanup_error(
-                "probe_uninstall_service_disable_failed",
-                "disabling the service",
-                error,
-            )
-        })?;
-    remove_path_if_exists(&install_metadata.service_unit_path).map_err(|error| {
-        probe_uninstall_cleanup_error(
-            "probe_uninstall_service_unit_remove_failed",
-            "removing the service unit",
-            error,
-        )
-    })?;
-    verify_path_absent(
-        &install_metadata.service_unit_path,
-        "probe_uninstall_service_unit_residue",
-        "verifying the service unit is absent",
-    )?;
-    systemd.daemon_reload().map_err(|error| {
-        probe_uninstall_cleanup_error(
-            "probe_uninstall_daemon_reload_failed",
-            "reloading systemd",
-            error,
-        )
-    })?;
-    systemd
-        .reset_failed(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_uninstall_cleanup_error(
-                "probe_uninstall_service_reset_failed",
-                "resetting the failed service state",
-                error,
-            )
-        })?;
-    systemd
-        .verify_service_absent(&install_metadata.service_name)
-        .map_err(|error| {
-            probe_uninstall_cleanup_error(
-                "probe_uninstall_service_verification_failed",
-                "verifying the service is absent",
-                error,
-            )
-        })?;
-    remove_path_if_exists(&install_metadata.install_path)?;
-    if let Some(path) = &install_metadata.operation_sudoers_path {
-        remove_path_if_exists(path)?;
-    }
-    if let Some(path) = &install_metadata.collector_helper_sudoers_path {
-        remove_path_if_exists(path)?;
-    }
-    for path in &install_metadata.old_sudoers_paths {
-        remove_path_if_exists(path)?;
-    }
-    for path in [
-        install_metadata.bootstrap_acquirer_path.as_deref(),
-        install_metadata.bootstrap_activator_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        remove_path_if_exists(path)?;
-    }
-    if let Some(path) = install_metadata.bootstrap_state_dir.as_deref() {
-        remove_owned_bootstrap_state(path, plan.trusted_owner_uid)?;
-    }
-    remove_path_if_exists(install_metadata_path)?;
-    remove_path_if_exists(&input.bootstrap_config_path)?;
-    remove_empty_parent_dir(&input.bootstrap_config_path)?;
-    remove_path_if_exists(&install_metadata.state_dir)?;
-    systemd
-        .remove_service_identity(
-            &install_metadata.service_user,
-            &install_metadata.service_group,
-        )
-        .map_err(|error| {
-            probe_uninstall_cleanup_error(
-                "probe_uninstall_service_account_remove_failed",
-                "removing the service account",
-                error,
-            )
-        })?;
-
-    verify_probe_uninstall_cleanup(plan, systemd)
-}
-
-fn verify_probe_uninstall_cleanup(
-    plan: &ProbeUninstallCleanupPlan<'_>,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    let metadata = plan.install_metadata;
-    for (path, code, action) in [
-        (
-            metadata.install_path.as_path(),
-            "probe_uninstall_binary_residue",
-            "verifying the Probe binary is absent",
-        ),
-        (
-            metadata.identity_path.as_path(),
-            "probe_uninstall_identity_residue",
-            "verifying the Probe identity is absent",
-        ),
-        (
-            plan.input.bootstrap_config_path.as_path(),
-            "probe_uninstall_config_residue",
-            "verifying the Probe bootstrap config is absent",
-        ),
-        (
-            plan.install_metadata_path,
-            "probe_uninstall_metadata_residue",
-            "verifying install metadata is absent",
-        ),
-        (
-            metadata.state_dir.as_path(),
-            "probe_uninstall_state_residue",
-            "verifying Probe state is absent",
-        ),
-        (
-            metadata.service_unit_path.as_path(),
-            "probe_uninstall_service_unit_residue",
-            "verifying the service unit is absent",
-        ),
-    ] {
-        verify_path_absent(path, code, action)?;
-    }
-    for (path, code, action) in [
-        (
-            metadata.operation_sudoers_path.as_deref(),
-            "probe_uninstall_operation_sudoers_residue",
-            "verifying operation sudoers is absent",
-        ),
-        (
-            metadata.collector_helper_sudoers_path.as_deref(),
-            "probe_uninstall_collector_sudoers_residue",
-            "verifying collector sudoers is absent",
-        ),
-    ] {
-        if let Some(path) = path {
-            verify_path_absent(path, code, action)?;
-        }
-    }
-    for path in &metadata.old_sudoers_paths {
-        verify_path_absent(
-            path,
-            "probe_uninstall_legacy_sudoers_residue",
-            "verifying legacy sudoers is absent",
-        )?;
-    }
-    for (path, code, action) in [
-        (
-            metadata.bootstrap_acquirer_path.as_deref(),
-            "probe_uninstall_bootstrap_acquirer_residue",
-            "verifying Probe Bootstrap acquirer is absent",
-        ),
-        (
-            metadata.bootstrap_activator_path.as_deref(),
-            "probe_uninstall_bootstrap_activator_residue",
-            "verifying Probe Bootstrap activator is absent",
-        ),
-    ] {
-        if let Some(path) = path {
-            verify_path_absent(path, code, action)?;
-        }
-    }
-    if let Some(path) = metadata.bootstrap_state_dir.as_deref() {
-        verify_path_absent(
-            path,
-            "probe_uninstall_bootstrap_state_residue",
-            "verifying Probe Bootstrap state is absent",
-        )?;
-    }
-    systemd
-        .verify_service_absent(&metadata.service_name)
-        .map_err(|error| {
-            probe_uninstall_cleanup_error(
-                "probe_uninstall_service_verification_failed",
-                "verifying the service is absent",
-                error,
-            )
-        })
-}
-
-fn probe_uninstall_cleanup_error(
-    code: &'static str,
-    action: &'static str,
-    error: ProbeUpgraderRunError,
-) -> ProbeUpgraderRunError {
-    match error {
-        ProbeUpgraderRunError::UninstallCleanupFailure { .. } => error,
-        ProbeUpgraderRunError::RestartFailure(message) => {
-            ProbeUpgraderRunError::UninstallCleanupFailure {
-                action,
-                code,
-                message,
-            }
-        }
-        _ => ProbeUpgraderRunError::UninstallCleanupFailure {
-            action,
-            code,
-            message: error.to_string(),
-        },
-    }
-}
-
-fn validate_owned_bootstrap_role(
-    path: Option<&Path>,
-    trusted_owner_uid: u32,
-) -> Result<(), ProbeUpgraderRunError> {
-    let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
-        "schema v2 metadata is missing Probe Bootstrap ownership",
-    ))?;
-    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.uid() != trusted_owner_uid
-        || metadata.mode() & 0o777 != 0o755
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "Probe Bootstrap role is not a root-owned regular 0755 file",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_owned_bootstrap_state(
-    path: Option<&Path>,
-    trusted_owner_uid: u32,
-) -> Result<(), ProbeUpgraderRunError> {
-    let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
-        "schema v2 metadata is missing Probe Bootstrap ownership",
-    ))?;
-    validate_owned_bootstrap_directory(path, 0o700, trusted_owner_uid)?;
-    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
-        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
-        match entry.file_name().to_str() {
-            Some("trust") => {
-                validate_owned_bootstrap_directory(&entry.path(), 0o700, trusted_owner_uid)?;
-                for trust in fs::read_dir(entry.path()).map_err(ProbeUpgraderRunError::Io)? {
-                    let trust = trust.map_err(ProbeUpgraderRunError::Io)?;
-                    if !matches!(
-                        trust.file_name().to_str(),
-                        Some("delegation-generation" | ".delegation-generation.lock")
-                    ) {
-                        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                            "Probe Bootstrap state contains an unexpected entry",
-                        ));
-                    }
-                    validate_owned_bootstrap_regular(&trust.path(), 0o600, trusted_owner_uid)?;
-                }
-            }
-            Some("inbox") => {
-                validate_owned_bootstrap_directory(&entry.path(), 0o700, trusted_owner_uid)?;
-                if fs::read_dir(entry.path())
-                    .map_err(ProbeUpgraderRunError::Io)?
-                    .next()
-                    .is_some()
-                {
-                    return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                        "Probe Bootstrap inbox is not empty",
-                    ));
-                }
-            }
-            _ => {
-                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "Probe Bootstrap state contains an unexpected entry",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_owned_bootstrap_directory(
-    path: &Path,
-    mode: u32,
-    trusted_owner_uid: u32,
-) -> Result<(), ProbeUpgraderRunError> {
-    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.uid() != trusted_owner_uid
-        || metadata.mode() & 0o777 != mode
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "Probe Bootstrap state is not a root-owned private directory",
-        ));
-    }
-    Ok(())
-}
-fn validate_owned_bootstrap_regular(
-    path: &Path,
-    mode: u32,
-    trusted_owner_uid: u32,
-) -> Result<(), ProbeUpgraderRunError> {
-    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.uid() != trusted_owner_uid
-        || metadata.nlink() != 1
-        || metadata.mode() & 0o777 != mode
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "Probe Bootstrap state contains an unsafe entry",
-        ));
-    }
-    Ok(())
-}
-fn remove_owned_bootstrap_state(
-    path: &Path,
-    trusted_owner_uid: u32,
-) -> Result<(), ProbeUpgraderRunError> {
-    validate_owned_bootstrap_state(Some(path), trusted_owner_uid)?;
-    for entry in [
-        path.join("trust/delegation-generation"),
-        path.join("trust/.delegation-generation.lock"),
-    ] {
-        match fs::remove_file(entry) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
-        }
-    }
-    for directory in [path.join("trust"), path.join("inbox")] {
-        match fs::remove_dir(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
-        }
-    }
-    fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<(), ProbeUpgraderRunError> {
@@ -2135,95 +1395,12 @@ fn ensure_absolute_path(path: &Path) -> Result<(), ProbeUpgraderRunError> {
     ))
 }
 
-fn render_operation_status_body(
-    token: &str,
-    status: &str,
-    failure: Option<&ProbeUpgraderResult>,
-) -> String {
-    if let Some(failure) = failure {
-        return format!(
-            "{{\"errorCode\":\"{}\",\"message\":\"{}\",\"status\":\"{}\",\"token\":\"{}\"}}",
-            json_string_fragment(
-                failure
-                    .error_code
-                    .as_deref()
-                    .unwrap_or("probe_operation_failed")
-            ),
-            json_string_fragment(failure.message.as_deref().unwrap_or("")),
-            json_string_fragment(status),
-            json_string_fragment(token),
-        );
-    }
-
+fn render_operation_status_body(token: &str, status: &str) -> String {
     format!(
         "{{\"status\":\"{}\",\"token\":\"{}\"}}",
         json_string_fragment(status),
         json_string_fragment(token),
     )
-}
-
-struct ProbeUpgraderOperationMetadata {
-    operation_id: String,
-    target_probe_version: String,
-    token: String,
-}
-
-struct ProbeUninstallerOperationMetadata {
-    operation_id: String,
-    token: String,
-}
-
-fn read_operation_metadata(
-    stdin: &str,
-) -> Result<ProbeUpgraderOperationMetadata, ProbeUpgraderRunError> {
-    if stdin.trim().is_empty() {
-        return Err(ProbeUpgraderRunError::MissingToken);
-    }
-
-    let value = stdin
-        .parse::<toml::Value>()
-        .map_err(|_| ProbeUpgraderRunError::InvalidMetadata("invalid TOML"))?;
-    let operation_id = required_metadata_string(&value, "operation_id")?;
-    let target_probe_version = required_metadata_string(&value, "target_probe_version")?;
-    let token = required_metadata_string(&value, "token")?;
-
-    Ok(ProbeUpgraderOperationMetadata {
-        operation_id,
-        target_probe_version,
-        token,
-    })
-}
-
-fn read_uninstall_operation_metadata(
-    stdin: &str,
-) -> Result<ProbeUninstallerOperationMetadata, ProbeUpgraderRunError> {
-    if stdin.trim().is_empty() {
-        return Err(ProbeUpgraderRunError::MissingToken);
-    }
-
-    let value = stdin
-        .parse::<toml::Value>()
-        .map_err(|_| ProbeUpgraderRunError::InvalidMetadata("invalid TOML"))?;
-    let operation_id = required_metadata_string(&value, "operation_id")?;
-    let token = required_metadata_string(&value, "token")?;
-
-    Ok(ProbeUninstallerOperationMetadata {
-        operation_id,
-        token,
-    })
-}
-
-fn required_metadata_string(
-    value: &toml::Value,
-    key: &'static str,
-) -> Result<String, ProbeUpgraderRunError> {
-    match value.get(key) {
-        Some(toml::Value::String(string)) => Ok(string.clone()),
-        Some(_) => Err(ProbeUpgraderRunError::InvalidMetadata(
-            "expected string values",
-        )),
-        None => Err(ProbeUpgraderRunError::InvalidMetadata("missing field")),
-    }
 }
 
 #[derive(Debug)]
@@ -2240,7 +1417,8 @@ struct ProbeUpgraderBootstrapConfig {
     state_dir: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct TrustedProbeInstallMetadata {
     schema_version: u32,
     hub_url: String,
@@ -2260,6 +1438,18 @@ struct TrustedProbeInstallMetadata {
     operation_sudoers_path: Option<PathBuf>,
     collector_helper_sudoers_path: Option<PathBuf>,
     old_sudoers_paths: Vec<PathBuf>,
+    observation_runtime_path: Option<PathBuf>,
+    cpu_provider_path: Option<PathBuf>,
+    disk_health_provider_path: Option<PathBuf>,
+    lifecycle_companion_path: Option<PathBuf>,
+    observation_unit_paths: Vec<PathBuf>,
+    probe_ipc_group: Option<String>,
+    probe_ipc_group_ownership: Option<String>,
+    observation_ipc_group: Option<String>,
+    install_state_sha256: Option<String>,
+    target_manifest_sha256: Option<String>,
+    bundle_version: Option<String>,
+    lifecycle_authority_install_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2272,11 +1462,7 @@ pub fn read_trusted_probe_install_preflight(
     path: &Path,
     test_root: Option<&Path>,
 ) -> Result<TrustedProbeInstallPreflight, ProbeUpgraderRunError> {
-    let metadata = read_trusted_probe_install_metadata_read_only_with_expected_owner(
-        path,
-        None,
-        trusted_read_only_metadata_owner_uid(test_root),
-    )?;
+    let metadata = read_trusted_probe_install_metadata_read_only(path, None)?;
     let mut identity_metadata = metadata.clone();
     identity_metadata.identity_path = preflight_rooted_path(test_root, &metadata.identity_path);
     let identity = read_probe_repair_identity(&identity_metadata).map_err(|_| {
@@ -2324,15 +1510,6 @@ fn preflight_rooted_path(test_root: Option<&Path>, path: &Path) -> PathBuf {
             )
         },
     )
-}
-
-fn trusted_read_only_metadata_owner_uid(test_root: Option<&Path>) -> u32 {
-    if test_root.is_some() {
-        // SAFETY: `geteuid` takes no arguments and only reads the process credentials.
-        unsafe { libc::geteuid() }
-    } else {
-        0
-    }
 }
 
 fn valid_public_probe_id(value: &str) -> bool {
@@ -2405,16 +1582,8 @@ fn read_trusted_probe_install_metadata_read_only(
     path: &Path,
     legacy_identity_path: Option<&Path>,
 ) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
-    read_trusted_probe_install_metadata_read_only_with_expected_owner(path, legacy_identity_path, 0)
-}
-
-fn read_trusted_probe_install_metadata_read_only_with_expected_owner(
-    path: &Path,
-    legacy_identity_path: Option<&Path>,
-    expected_owner_uid: u32,
-) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
     let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
-    read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected_owner(
+    read_trusted_probe_install_metadata_read_only_with_file_metadata(
         path,
         legacy_identity_path,
         TrustedFileMetadata {
@@ -2423,42 +1592,20 @@ fn read_trusted_probe_install_metadata_read_only_with_expected_owner(
             mode: metadata.mode() & 0o777,
             owner_uid: metadata.uid(),
         },
-        expected_owner_uid,
     )
 }
 
-#[cfg(test)]
-fn read_trusted_probe_install_metadata_with_file_metadata(
+fn read_trusted_probe_install_metadata_read_only_with_file_metadata(
     path: &Path,
     legacy_identity_path: Option<&Path>,
     file_metadata: TrustedFileMetadata,
-) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
-    let mut metadata =
-        read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected_owner(
-            path,
-            legacy_identity_path,
-            file_metadata,
-            0,
-        )?;
-    if metadata.schema_version == 0 {
-        write_trusted_probe_install_metadata(path, &metadata)?;
-        metadata.schema_version = 1;
-    }
-    Ok(metadata)
-}
-
-fn read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected_owner(
-    path: &Path,
-    legacy_identity_path: Option<&Path>,
-    file_metadata: TrustedFileMetadata,
-    expected_owner_uid: u32,
 ) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
     if file_metadata.is_symlink || !file_metadata.is_regular_file {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "metadata path must be a regular non-symlink file",
         ));
     }
-    if file_metadata.owner_uid != expected_owner_uid {
+    if file_metadata.owner_uid != 0 {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "metadata file is not owned by root",
         ));
@@ -2473,7 +1620,7 @@ fn read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected
                 "schema v1 metadata mode must be 0600",
             ));
         }
-    } else if metadata.schema_version == 2 {
+    } else if matches!(metadata.schema_version, 2..=5) {
         if file_metadata.mode != 0o600 {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "schema v2 metadata mode must be 0600",
@@ -2489,13 +1636,6 @@ fn read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected
     Ok(metadata)
 }
 
-#[cfg(test)]
-fn parse_trusted_probe_install_metadata(
-    contents: &str,
-) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
-    parse_trusted_probe_install_metadata_with_legacy_identity(contents, None)
-}
-
 fn parse_trusted_probe_install_metadata_with_legacy_identity(
     contents: &str,
     legacy_identity_path: Option<&Path>,
@@ -2507,6 +1647,9 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         None => 0,
         Some(toml::Value::Integer(1)) => 1,
         Some(toml::Value::Integer(2)) => 2,
+        Some(toml::Value::Integer(3)) => 3,
+        Some(toml::Value::Integer(4)) => 4,
+        Some(toml::Value::Integer(5)) => 5,
         Some(toml::Value::Integer(_)) => {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "unsupported schema version",
@@ -2519,6 +1662,11 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         }
     };
     let install_path = required_install_metadata_path(&value, "install_path")?;
+    if matches!(schema_version, 3..=5) && install_path != Path::new(PRODUCTION_PROBE_BINARY_PATH) {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "install_path does not match the fixed production path",
+        ));
+    }
     let hub_url = required_install_metadata_string(&value, "hub_url")?;
     let operation_status_path = required_install_metadata_path(&value, "operation_status_path")?;
     let state_dir = required_install_metadata_path(&value, "state_dir")?;
@@ -2537,6 +1685,19 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             ));
         }
         (None, None)
+    } else if matches!(schema_version, 3..=5) {
+        (
+            optional_fixed_install_metadata_path(
+                &value,
+                "operation_sudoers_path",
+                PRODUCTION_OPERATION_SUDOERS_PATH,
+            )?,
+            required_fixed_install_metadata_path(
+                &value,
+                "collector_helper_sudoers_path",
+                PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH,
+            )?,
+        )
     } else {
         (
             Some(required_install_metadata_path(
@@ -2552,41 +1713,42 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
     let service_name = required_install_metadata_string(&value, "service_name")?;
     let service_user = optional_install_metadata_string(&value, "service_user")?
         .unwrap_or_else(|| "enoki-probe".to_string());
-    let identity_path = if matches!(schema_version, 1 | 2) {
+    let identity_path = if matches!(schema_version, 1..=5) {
         required_install_metadata_path(&value, "identity_path")?
     } else {
         legacy_identity_path
             .unwrap_or_else(|| Path::new("/etc/enoki/probe-bootstrap.toml"))
             .to_path_buf()
     };
-    let service_group = if matches!(schema_version, 1 | 2) {
+    let service_group = if matches!(schema_version, 1..=5) {
         required_install_metadata_string(&value, "service_group")?
     } else {
         service_user.clone()
     };
-    let service_unit_path = if matches!(schema_version, 1 | 2) {
+    let service_unit_path = if matches!(schema_version, 1..=5) {
         required_install_metadata_path(&value, "service_unit_path")?
     } else {
         PathBuf::from("/etc/systemd/system/enoki-probe.service")
     };
-    let (probe_asset_public_key_sha256, probe_distribution_root_sha256) = if schema_version == 2 {
-        let root = required_install_metadata_string(&value, "probe_distribution_root_sha256")?;
-        if !is_sha256_hex(&root) {
-            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe distribution root fingerprint is not a valid sha256 value",
-            ));
-        }
-        // Legacy helpers retain a private field so their cleanup plan keeps
-        // fixed paths. It is never serialized or used as daily signing trust.
-        (root.clone(), Some(root))
-    } else {
-        (
-            required_install_metadata_string(&value, "probe_asset_public_key_sha256")?,
-            None,
-        )
-    };
+    let (probe_asset_public_key_sha256, probe_distribution_root_sha256) =
+        if matches!(schema_version, 2..=5) {
+            let root = required_install_metadata_string(&value, "probe_distribution_root_sha256")?;
+            if !is_sha256_hex(&root) {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe distribution root fingerprint is not a valid sha256 value",
+                ));
+            }
+            // Legacy helpers retain a private field so their cleanup plan keeps
+            // fixed paths. It is never serialized or used as daily signing trust.
+            (root.clone(), Some(root))
+        } else {
+            (
+                required_install_metadata_string(&value, "probe_asset_public_key_sha256")?,
+                None,
+            )
+        };
     let (bootstrap_acquirer_path, bootstrap_activator_path, bootstrap_state_dir) =
-        if schema_version == 2 {
+        if matches!(schema_version, 2..=5) {
             (
                 required_fixed_install_metadata_path(
                     &value,
@@ -2616,6 +1778,187 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             (None, None, None)
         };
 
+    let (
+        observation_runtime_path,
+        cpu_provider_path,
+        disk_health_provider_path,
+        observation_unit_paths,
+        observation_ipc_group,
+        lifecycle_companion_path,
+    ) = if matches!(schema_version, 3..=5) {
+        let runtime = required_fixed_install_metadata_path(
+            &value,
+            "observation_runtime_path",
+            OBSERVATION_RUNTIME_BINARY_PATH,
+        )?;
+        let provider = required_fixed_install_metadata_path(
+            &value,
+            "cpu_provider_path",
+            CPU_PROVIDER_BINARY_PATH,
+        )?;
+        let has_disk_health_provider = value.get("disk_health_provider_path").is_some();
+        let has_disk_health_units = value
+            .get("disk_health_provider_service_unit_path")
+            .is_some()
+            && value.get("disk_health_provider_socket_unit_path").is_some();
+        if has_disk_health_provider != has_disk_health_units {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "schema 3 Disk Health Provider inventory is partial",
+            ));
+        }
+        let lifecycle_companion = if schema_version >= 4 {
+            required_fixed_install_metadata_path(
+                &value,
+                "lifecycle_companion_path",
+                LIFECYCLE_COMPANION_BINARY_PATH,
+            )?
+        } else {
+            None
+        };
+        let disk_health_provider = if has_disk_health_provider {
+            required_fixed_install_metadata_path(
+                &value,
+                "disk_health_provider_path",
+                DISK_HEALTH_PROVIDER_BINARY_PATH,
+            )?
+        } else {
+            None
+        };
+        let mut unit_specs = vec![
+            (
+                "observation_runtime_service_unit_path",
+                OBSERVATION_RUNTIME_SERVICE_UNIT_PATH,
+            ),
+            (
+                "observation_runtime_socket_unit_path",
+                OBSERVATION_RUNTIME_SOCKET_UNIT_PATH,
+            ),
+            (
+                "cpu_provider_service_unit_path",
+                CPU_PROVIDER_SERVICE_UNIT_PATH,
+            ),
+            (
+                "cpu_provider_socket_unit_path",
+                CPU_PROVIDER_SOCKET_UNIT_PATH,
+            ),
+        ];
+        if has_disk_health_provider {
+            unit_specs.extend([
+                (
+                    "disk_health_provider_service_unit_path",
+                    DISK_HEALTH_PROVIDER_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "disk_health_provider_socket_unit_path",
+                    DISK_HEALTH_PROVIDER_SOCKET_UNIT_PATH,
+                ),
+            ]);
+        }
+        if schema_version >= 4 {
+            unit_specs.extend([
+                (
+                    "lifecycle_companion_service_unit_path",
+                    LIFECYCLE_COMPANION_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "lifecycle_companion_socket_unit_path",
+                    LIFECYCLE_COMPANION_SOCKET_UNIT_PATH,
+                ),
+            ]);
+        }
+        if schema_version == 5 {
+            unit_specs.extend([
+                (
+                    "lifecycle_upgrade_service_unit_path",
+                    LIFECYCLE_UPGRADE_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "lifecycle_upgrade_socket_unit_path",
+                    LIFECYCLE_UPGRADE_SOCKET_UNIT_PATH,
+                ),
+            ]);
+            if value
+                .get("observation_runtime_failure_recorder_unit_path")
+                .is_some()
+            {
+                unit_specs.push((
+                    "observation_runtime_failure_recorder_unit_path",
+                    OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT_PATH,
+                ));
+            }
+        }
+        let units = unit_specs
+            .into_iter()
+            .map(|(key, expected)| required_fixed_install_metadata_path(&value, key, expected))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        let ipc_group = required_install_metadata_string(&value, "observation_ipc_group")?;
+        if ipc_group != OBSERVATION_IPC_GROUP {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "observation IPC group must use the fixed installation identity",
+            ));
+        }
+        (
+            runtime,
+            provider,
+            disk_health_provider,
+            units,
+            Some(ipc_group),
+            lifecycle_companion,
+        )
+    } else {
+        (None, None, None, Vec::new(), None, None)
+    };
+
+    let (
+        install_state_sha256,
+        target_manifest_sha256,
+        bundle_version,
+        probe_ipc_group,
+        probe_ipc_group_ownership,
+    ) = if matches!(schema_version, 4 | 5) {
+        let install_state = required_install_metadata_string(&value, "install_state_sha256")?;
+        let manifest = required_install_metadata_string(&value, "target_manifest_sha256")?;
+        let version = required_install_metadata_string(&value, "bundle_version")?;
+        let ipc_group = required_install_metadata_string(&value, "probe_ipc_group")?;
+        let ipc_group_ownership =
+            required_install_metadata_string(&value, "probe_ipc_group_ownership")?;
+        if !is_sha256_hex(&install_state)
+            || !is_sha256_hex(&manifest)
+            || version.is_empty()
+            || version.len() > 64
+            || ipc_group != PROBE_IPC_GROUP
+            || !valid_probe_ipc_group_ownership(&ipc_group_ownership)
+        {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "lifecycle receipt is invalid",
+            ));
+        }
+        (
+            Some(install_state),
+            Some(manifest),
+            Some(version),
+            Some(ipc_group),
+            Some(ipc_group_ownership),
+        )
+    } else {
+        (None, None, None, None, None)
+    };
+    let lifecycle_authority_install_key =
+        optional_install_metadata_string(&value, "lifecycle_authority_install_key")?;
+    if (schema_version == 5 && lifecycle_authority_install_key.is_none())
+        || (schema_version < 5 && lifecycle_authority_install_key.is_some())
+        || lifecycle_authority_install_key
+            .as_deref()
+            .is_some_and(|key| decode_lower_hex(key).is_none_or(|bytes| bytes.len() != 32))
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "lifecycle authority install key is invalid",
+        ));
+    }
+
     if service_name != "enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "service name must be enoki-probe",
@@ -2631,7 +1974,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "service group is not safe",
         ));
     }
-    if schema_version != 2 && !is_sha256_hex(&probe_asset_public_key_sha256) {
+    if !matches!(schema_version, 2..=5) && !is_sha256_hex(&probe_asset_public_key_sha256) {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "trusted Probe asset signing key fingerprint is not a valid sha256 value",
         ));
@@ -2658,12 +2001,35 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         state_dir,
         operation_sudoers_path,
         collector_helper_sudoers_path,
-        old_sudoers_paths: if schema_version == 2 {
+        old_sudoers_paths: if matches!(schema_version, 2..=5) {
             Vec::new()
         } else {
             vec![PathBuf::from(PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH)]
         },
+        observation_runtime_path,
+        cpu_provider_path,
+        disk_health_provider_path,
+        lifecycle_companion_path,
+        observation_unit_paths,
+        probe_ipc_group,
+        probe_ipc_group_ownership,
+        observation_ipc_group,
+        install_state_sha256,
+        target_manifest_sha256,
+        bundle_version,
+        lifecycle_authority_install_key,
     })
+}
+
+fn valid_probe_ipc_group_ownership(value: &str) -> bool {
+    value
+        .strip_prefix("!enoki-bootstrap-")
+        .is_some_and(|transaction| {
+            transaction.len() == 32
+                && transaction
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn required_fixed_install_metadata_path(
@@ -2678,6 +2044,17 @@ fn required_fixed_install_metadata_path(
         ));
     }
     Ok(Some(path))
+}
+
+fn optional_fixed_install_metadata_path(
+    value: &toml::Value,
+    key: &'static str,
+    expected: &'static str,
+) -> Result<Option<PathBuf>, ProbeUpgraderRunError> {
+    if value.get(key).is_none() {
+        return Ok(None);
+    }
+    required_fixed_install_metadata_path(value, key, expected)
 }
 
 fn validate_identity_path(
@@ -2867,299 +2244,26 @@ fn json_string_fragment(value: &str) -> String {
         .replace('\t', "\\t")
 }
 
-#[derive(Deserialize)]
-struct ProbeAssetManifest {
-    assets: Vec<ProbeAssetManifestAsset>,
-    signature: ProbeAssetManifestSignature,
-    version: String,
-}
-
-#[derive(Deserialize)]
-struct ProbeAssetManifestAsset {
-    file: String,
-    sha256: String,
-    target: String,
-}
-
-#[derive(Deserialize)]
-struct ProbeAssetManifestSignature {
-    algorithm: String,
-    file: String,
-    #[serde(rename = "publicKey")]
-    public_key: String,
-}
-
-fn execute_probe_upgrade(
-    operation: &ProbeUpgraderOperationMetadata,
-    bootstrap_config: &ProbeUpgraderBootstrapConfig,
-    bootstrap_config_path: &Path,
-    install_metadata: &TrustedProbeInstallMetadata,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
+fn write_new_synced_file(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
 ) -> Result<(), ProbeUpgraderRunError> {
-    execute_probe_upgrade_with_current_version(
-        operation,
-        bootstrap_config,
-        bootstrap_config_path,
-        install_metadata,
-        transport,
-        systemd,
-        crate::version::probe_version(),
-    )
-}
-
-fn execute_probe_upgrade_with_current_version(
-    operation: &ProbeUpgraderOperationMetadata,
-    bootstrap_config: &ProbeUpgraderBootstrapConfig,
-    bootstrap_config_path: &Path,
-    install_metadata: &TrustedProbeInstallMetadata,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-    current_probe_version: &str,
-) -> Result<(), ProbeUpgraderRunError> {
-    validate_bootstrap_config_matches_trusted_install_metadata(bootstrap_config, install_metadata)?;
-    let hub_url = &install_metadata.hub_url;
-
-    let manifest_bytes = download_hub_asset(transport, hub_url, "manifest.json")?;
-    let signature_bytes = download_hub_asset(transport, hub_url, "manifest.json.sig")?;
-    let public_key_bytes = download_hub_asset(transport, hub_url, "signing-key.pem")?;
-
-    verify_public_key_trust(
-        &public_key_bytes,
-        &install_metadata.probe_asset_public_key_sha256,
-    )?;
-    verify_manifest_signature(&manifest_bytes, &signature_bytes, &public_key_bytes)?;
-
-    let manifest: ProbeAssetManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|_| ProbeUpgraderRunError::InvalidManifest("invalid JSON"))?;
-    if normalized_probe_version(&manifest.version)
-        != normalized_probe_version(&operation.target_probe_version)
-    {
-        return Err(ProbeUpgraderRunError::TargetMismatch);
-    }
-    validate_probe_upgrade_target_is_newer(&manifest.version, current_probe_version)?;
-    if manifest.signature.algorithm != "rsa-sha256"
-        || manifest.signature.file != "manifest.json.sig"
-        || manifest.signature.public_key != "signing-key.pem"
-    {
-        return Err(ProbeUpgraderRunError::InvalidManifest(
-            "unsupported signature metadata",
-        ));
-    }
-
-    let target = host_probe_asset_target()?;
-    let asset = manifest
-        .assets
-        .iter()
-        .find(|asset| asset.target == target)
-        .ok_or(ProbeUpgraderRunError::ArchitectureMissing)?;
-    validate_asset_metadata(asset)?;
-
-    let archive = download_hub_asset(transport, hub_url, &asset.file)?;
-    verify_archive_sha256(&archive, &asset.sha256)?;
-    preflight_local_operation_status_writable(install_metadata)?;
-    replace_installed_probe_binary(&archive, &install_metadata.install_path)?;
-    write_probe_operation_sudoers(install_metadata, bootstrap_config_path)?;
-    write_collector_helper_sudoers_from_installed_probe(install_metadata)?;
-    remove_old_sudoers_paths(install_metadata)?;
-    write_local_operation_status(operation, install_metadata).map_err(|error| {
-        ProbeUpgraderRunError::PostReplacementStatusWriteFailure(error.to_string())
-    })?;
-    systemd
-        .restart_service(&install_metadata.service_name)
-        .map_err(|error| ProbeUpgraderRunError::PostReplacementRestartFailure(error.to_string()))?;
-
-    Ok(())
-}
-
-fn write_probe_operation_sudoers(
-    install_metadata: &TrustedProbeInstallMetadata,
-    bootstrap_config_path: &Path,
-) -> Result<(), ProbeUpgraderRunError> {
-    let Some(sudoers_path) = &install_metadata.operation_sudoers_path else {
-        return Ok(());
-    };
-    ensure_absolute_path(bootstrap_config_path)?;
-    let lines = render_probe_operation_sudoers_lines(install_metadata, bootstrap_config_path)?;
-
-    if let Some(parent) = sudoers_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-
-    fs::write(sudoers_path, lines.join("\n")).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
-#[cfg(test)]
-fn write_collector_helper_sudoers(
-    install_metadata: &TrustedProbeInstallMetadata,
-    collector_helper_environment: &dyn CollectorHelperExposureEnvironment,
-) -> Result<(), ProbeUpgraderRunError> {
-    let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {
-        return Ok(());
-    };
-    let plan = CollectorHelperSudoersPlanner::new(collector_helper_environment).plan(
-        CollectorHelperSudoersPlanInput {
-            service_user: install_metadata.service_user.clone(),
-            probe_binary: install_metadata.install_path.clone(),
-        },
-    );
-    if let Some(parent) = sudoers_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-
-    let Some(content) = plan.content else {
-        return remove_path_if_exists(sudoers_path);
-    };
-
-    fs::write(sudoers_path, content).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
-fn write_collector_helper_sudoers_from_installed_probe(
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<(), ProbeUpgraderRunError> {
-    let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {
-        return Ok(());
-    };
-    let output = Command::new(&install_metadata.install_path)
-        .arg("internal-render-collector-helper-sudoers")
-        .arg("--service-user")
-        .arg(&install_metadata.service_user)
-        .arg("--probe-binary")
-        .arg(&install_metadata.install_path)
-        .output()
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)
         .map_err(ProbeUpgraderRunError::Io)?;
+    file.write_all(bytes).map_err(ProbeUpgraderRunError::Io)?;
+    file.sync_all().map_err(ProbeUpgraderRunError::Io)
+}
 
-    if !output.status.success() {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "collector-helper sudoers planner failed",
-        ));
-    }
-
-    let content = String::from_utf8(output.stdout).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata(
-            "collector-helper sudoers planner output is not UTF-8",
-        )
-    })?;
-    if content.is_empty() {
-        return remove_path_if_exists(sudoers_path);
-    }
-
-    if let Some(parent) = sudoers_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-
-    fs::write(sudoers_path, content).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
+fn sync_directory(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
         .map_err(ProbeUpgraderRunError::Io)
-}
-
-fn remove_old_sudoers_paths(
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<(), ProbeUpgraderRunError> {
-    for path in &install_metadata.old_sudoers_paths {
-        if Some(path) != install_metadata.operation_sudoers_path.as_ref()
-            && Some(path) != install_metadata.collector_helper_sudoers_path.as_ref()
-        {
-            remove_path_if_exists(path)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn render_probe_operation_sudoers_lines(
-    install_metadata: &TrustedProbeInstallMetadata,
-    bootstrap_config_path: &Path,
-) -> Result<Vec<String>, ProbeUpgraderRunError> {
-    if !is_safe_sudoers_path(&install_metadata.install_path)
-        || !is_safe_sudoers_path(bootstrap_config_path)
-        || !is_safe_sudoers_token(&install_metadata.service_user)
-        || !is_safe_sudoers_token(&install_metadata.service_name)
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "sudoers command contains unsafe values",
-        ));
-    }
-
-    let mut lines = vec![
-        "# Managed by Enoki Probe installer.".to_string(),
-        format!(
-            "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-upgrader --property=Type=exec -- {} internal-upgrader --config {}",
-            install_metadata.service_user,
-            install_metadata.service_name,
-            install_metadata.install_path.display(),
-            bootstrap_config_path.display(),
-        ),
-        format!(
-            "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-uninstaller --property=Type=exec -- {} internal-uninstaller --config {}",
-            install_metadata.service_user,
-            install_metadata.service_name,
-            install_metadata.install_path.display(),
-            bootstrap_config_path.display(),
-        ),
-    ];
-    lines.push(String::new());
-
-    Ok(lines)
-}
-
-fn normalized_probe_version(value: &str) -> &str {
-    value.strip_prefix('v').unwrap_or(value)
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ProbeSemVer {
-    major: u64,
-    minor: u64,
-    patch: u64,
-}
-
-fn validate_probe_upgrade_target_is_newer(
-    target_version: &str,
-    current_probe_version: &str,
-) -> Result<(), ProbeUpgraderRunError> {
-    if current_probe_version == "dev" {
-        return Ok(());
-    }
-
-    let target = parse_probe_semver(target_version).ok_or(
-        ProbeUpgraderRunError::InvalidManifest("target version is not a valid SemVer"),
-    )?;
-    let current = parse_probe_semver(current_probe_version).ok_or(
-        ProbeUpgraderRunError::InvalidConfig("current Probe version is not a valid SemVer"),
-    )?;
-    if target <= current {
-        return Err(ProbeUpgraderRunError::DowngradeRejected);
-    }
-
-    Ok(())
-}
-
-fn parse_probe_semver(value: &str) -> Option<ProbeSemVer> {
-    let mut parts = normalized_probe_version(value).split('.');
-    let major = parse_semver_number(parts.next()?)?;
-    let minor = parse_semver_number(parts.next()?)?;
-    let patch = parse_semver_number(parts.next()?)?;
-    if parts.next().is_some() {
-        return None;
-    }
-
-    Some(ProbeSemVer {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn parse_semver_number(value: &str) -> Option<u64> {
-    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
-        return None;
-    }
-    value.parse().ok()
 }
 
 fn validate_bootstrap_config_matches_trusted_install_metadata(
@@ -3232,18 +2336,6 @@ fn validate_optional_bootstrap_path(
     Ok(())
 }
 
-fn download_hub_asset(
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    hub_url: &str,
-    file_name: &str,
-) -> Result<Vec<u8>, ProbeUpgraderRunError> {
-    if !is_safe_asset_file_name(file_name) {
-        return Err(ProbeUpgraderRunError::AssetMissing);
-    }
-
-    transport.get_asset(&hub_asset_url(hub_url, file_name)?)
-}
-
 fn operation_token_validation_url(
     hub_url: &str,
     operation_id: &str,
@@ -3266,452 +2358,6 @@ fn operation_status_url(
     .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
 }
 
-fn hub_asset_url(hub_url: &str, file_name: &str) -> Result<String, ProbeUpgraderRunError> {
-    hub_url::endpoint(hub_url, &format!("/api/probe/assets/{file_name}"))
-        .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
-}
-
-fn verify_public_key_trust(public_key: &[u8], expected: &str) -> Result<(), ProbeUpgraderRunError> {
-    if !is_sha256_hex(expected) {
-        return Err(ProbeUpgraderRunError::InvalidConfig(
-            "trusted Probe asset signing key fingerprint is not a valid sha256 value",
-        ));
-    }
-    let actual = hex_sha256(public_key);
-    if !actual.eq_ignore_ascii_case(expected) {
-        return Err(ProbeUpgraderRunError::SigningKeyUntrusted);
-    }
-
-    Ok(())
-}
-
-fn verify_manifest_signature(
-    manifest: &[u8],
-    signature: &[u8],
-    public_key_pem: &[u8],
-) -> Result<(), ProbeUpgraderRunError> {
-    let public_key_pem =
-        std::str::from_utf8(public_key_pem).map_err(|_| ProbeUpgraderRunError::SignatureFailure)?;
-    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem)
-        .map_err(|_| ProbeUpgraderRunError::SignatureFailure)?;
-    let signature = RsaPkcs1v15Signature::try_from(signature)
-        .map_err(|_| ProbeUpgraderRunError::SignatureFailure)?;
-    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
-
-    verifying_key
-        .verify(manifest, &signature)
-        .map_err(|_| ProbeUpgraderRunError::SignatureFailure)
-}
-
-fn validate_asset_metadata(asset: &ProbeAssetManifestAsset) -> Result<(), ProbeUpgraderRunError> {
-    if !is_safe_asset_file_name(&asset.file) {
-        return Err(ProbeUpgraderRunError::AssetMissing);
-    }
-    if !is_sha256_hex(&asset.sha256) {
-        return Err(ProbeUpgraderRunError::InvalidManifest(
-            "asset sha256 is not valid",
-        ));
-    }
-
-    Ok(())
-}
-
-fn verify_archive_sha256(archive: &[u8], expected: &str) -> Result<(), ProbeUpgraderRunError> {
-    if hex_sha256(archive).eq_ignore_ascii_case(expected) {
-        return Ok(());
-    }
-
-    Err(ProbeUpgraderRunError::ChecksumFailure)
-}
-
-fn replace_installed_probe_binary(
-    archive: &[u8],
-    install_path: &Path,
-) -> Result<(), ProbeUpgraderRunError> {
-    let install_dir = install_path
-        .parent()
-        .ok_or(ProbeUpgraderRunError::InvalidConfig("invalid install path"))?;
-    let work_dir = install_dir.join(".enoki-probe-upgrade");
-    if work_dir.exists() {
-        fs::remove_dir_all(&work_dir).map_err(ProbeUpgraderRunError::Io)?;
-    }
-    fs::create_dir_all(&work_dir).map_err(ProbeUpgraderRunError::Io)?;
-
-    let decoder = GzDecoder::new(archive);
-    let mut archive = tar::Archive::new(decoder);
-    let staged_binary = work_dir.join("enoki-probe.new");
-    extract_probe_binary_to_staged_path(&mut archive, &staged_binary)?;
-    fs::set_permissions(&staged_binary, fs::Permissions::from_mode(0o755))
-        .map_err(ProbeUpgraderRunError::Io)?;
-    fs::rename(&staged_binary, install_path).map_err(ProbeUpgraderRunError::Io)?;
-    fs::remove_dir_all(&work_dir).map_err(ProbeUpgraderRunError::Io)?;
-
-    Ok(())
-}
-
-fn extract_probe_binary_to_staged_path(
-    archive: &mut tar::Archive<GzDecoder<&[u8]>>,
-    staged_binary: &Path,
-) -> Result<(), ProbeUpgraderRunError> {
-    let mut found = false;
-    let entries = archive
-        .entries()
-        .map_err(|_| ProbeUpgraderRunError::AssetMissing)?;
-
-    for entry in entries {
-        let mut entry = entry.map_err(|_| ProbeUpgraderRunError::UnsafeArchive("invalid entry"))?;
-        let entry_type = entry.header().entry_type();
-        if !entry_type.is_file() {
-            return Err(ProbeUpgraderRunError::UnsafeArchive(
-                "archive entries must be regular files",
-            ));
-        }
-        let path = entry
-            .path()
-            .map_err(|_| ProbeUpgraderRunError::UnsafeArchive("invalid entry path"))?;
-        if !is_expected_probe_archive_path(&path) {
-            return Err(ProbeUpgraderRunError::UnsafeArchive(
-                "archive may only contain enoki-probe at the archive root",
-            ));
-        }
-        if found {
-            return Err(ProbeUpgraderRunError::UnsafeArchive(
-                "archive contains duplicate enoki-probe entries",
-            ));
-        }
-
-        let mut output = fs::File::create(staged_binary).map_err(ProbeUpgraderRunError::Io)?;
-        std::io::copy(&mut entry, &mut output).map_err(ProbeUpgraderRunError::Io)?;
-        found = true;
-    }
-
-    if found {
-        Ok(())
-    } else {
-        Err(ProbeUpgraderRunError::AssetMissing)
-    }
-}
-
-fn is_expected_probe_archive_path(path: &Path) -> bool {
-    let mut normal_components = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(value) => normal_components.push(value),
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
-        }
-    }
-
-    normal_components.as_slice() == [std::ffi::OsStr::new("enoki-probe")]
-}
-
-fn preflight_local_operation_status_writable(
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<(), ProbeUpgraderRunError> {
-    let status_path = operation_status_path(install_metadata);
-    prepare_local_operation_status_path(&status_path)?;
-    open_local_operation_status_for_append(&status_path)?;
-    set_operation_status_permissions(&status_path)?;
-
-    Ok(())
-}
-
-fn write_local_operation_status(
-    operation: &ProbeUpgraderOperationMetadata,
-    install_metadata: &TrustedProbeInstallMetadata,
-) -> Result<(), ProbeUpgraderRunError> {
-    let status_path = operation_status_path(install_metadata);
-    write_local_operation_status_contents(
-        &status_path,
-        &[
-            format!("operation_id = {}", toml_string(&operation.operation_id)),
-            format!(
-                "target_probe_version = {}",
-                toml_string(&operation.target_probe_version),
-            ),
-            "status = \"running\"".to_string(),
-            String::new(),
-        ]
-        .join("\n"),
-    )?;
-    set_operation_status_permissions(&status_path)
-}
-
-fn write_failed_local_operation_status(
-    operation: &ProbeUpgraderOperationMetadata,
-    install_metadata: &TrustedProbeInstallMetadata,
-    result: &ProbeUpgraderResult,
-) -> Result<(), ProbeUpgraderRunError> {
-    let status_path = operation_status_path(install_metadata);
-    write_local_operation_status_contents(
-        &status_path,
-        &[
-            format!("operation_id = {}", toml_string(&operation.operation_id)),
-            format!(
-                "target_probe_version = {}",
-                toml_string(&operation.target_probe_version),
-            ),
-            "status = \"failed\"".to_string(),
-            format!(
-                "error_code = {}",
-                toml_string(
-                    result
-                        .error_code
-                        .as_deref()
-                        .unwrap_or("probe_upgrader_failed")
-                ),
-            ),
-            format!(
-                "message = {}",
-                toml_string(result.message.as_deref().unwrap_or(""))
-            ),
-            String::new(),
-        ]
-        .join("\n"),
-    )?;
-    set_operation_status_permissions(&status_path)
-}
-
-fn prepare_local_operation_status_path(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    if let Some(parent) = status_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-        validate_local_operation_status_parent(parent)?;
-    }
-    reject_local_operation_status_symlink(status_path)?;
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn validate_local_operation_status_parent(parent: &Path) -> Result<(), ProbeUpgraderRunError> {
-    let metadata = fs::symlink_metadata(parent).map_err(ProbeUpgraderRunError::Io)?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "operation status parent must be a directory",
-        ));
-    }
-    if metadata.mode() & 0o022 != 0 {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "operation status parent must not be writable by group or other",
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn validate_local_operation_status_parent(_parent: &Path) -> Result<(), ProbeUpgraderRunError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn reject_local_operation_status_symlink(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    match fs::symlink_metadata(status_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "operation status path must not be a symlink",
-            ))
-        }
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
-    }
-}
-
-#[cfg(not(unix))]
-fn reject_local_operation_status_symlink(_status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn open_local_operation_status_for_append(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(status_path)
-        .map(|_| ())
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
-#[cfg(not(unix))]
-fn open_local_operation_status_for_append(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(status_path)
-        .map(|_| ())
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
-#[cfg(unix)]
-fn write_local_operation_status_contents(
-    status_path: &Path,
-    contents: &str,
-) -> Result<(), ProbeUpgraderRunError> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    prepare_local_operation_status_path(status_path)?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(status_path)
-        .map_err(ProbeUpgraderRunError::Io)?;
-    file.write_all(contents.as_bytes())
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
-#[cfg(not(unix))]
-fn write_local_operation_status_contents(
-    status_path: &Path,
-    contents: &str,
-) -> Result<(), ProbeUpgraderRunError> {
-    prepare_local_operation_status_path(status_path)?;
-    fs::write(status_path, contents).map_err(ProbeUpgraderRunError::Io)
-}
-
-fn set_operation_status_permissions(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    fs::set_permissions(status_path, fs::Permissions::from_mode(0o644))
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
-fn failed_probe_upgrader_result(
-    operation: &ProbeUpgraderOperationMetadata,
-    error: &ProbeUpgraderRunError,
-) -> ProbeUpgraderResult {
-    ProbeUpgraderResult {
-        error_code: Some(probe_upgrader_error_code(error).to_string()),
-        message: Some(error.to_string()),
-        operation_id: operation.operation_id.clone(),
-        status: "failed".to_string(),
-    }
-}
-
-fn failed_probe_uninstaller_result(
-    operation: &ProbeUninstallerOperationMetadata,
-    error: &ProbeUpgraderRunError,
-) -> ProbeUpgraderResult {
-    ProbeUpgraderResult {
-        error_code: Some(probe_upgrader_error_code(error).to_string()),
-        message: Some(error.to_string()),
-        operation_id: operation.operation_id.clone(),
-        status: "failed".to_string(),
-    }
-}
-
-fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
-    match error {
-        ProbeUpgraderRunError::ArchitectureMissing => "architecture_missing",
-        ProbeUpgraderRunError::AssetMissing => "asset_missing",
-        ProbeUpgraderRunError::ChecksumFailure => "checksum_failure",
-        ProbeUpgraderRunError::PostReplacementRestartFailure(_) => {
-            "post_replacement_restart_failure"
-        }
-        ProbeUpgraderRunError::PostReplacementStatusWriteFailure(_) => {
-            "post_replacement_status_write_failure"
-        }
-        ProbeUpgraderRunError::RestartFailure(_) => "restart_failure",
-        ProbeUpgraderRunError::SignatureFailure => "signature_failure",
-        ProbeUpgraderRunError::SigningKeyUntrusted => "signing_key_untrusted",
-        ProbeUpgraderRunError::DowngradeRejected => "downgrade_rejected",
-        ProbeUpgraderRunError::TargetMismatch => "target_mismatch",
-        ProbeUpgraderRunError::UninstallCleanupFailure { code, .. } => code,
-        ProbeUpgraderRunError::UninstallStatusReportFailure(_) => "uninstall_status_report_failure",
-        ProbeUpgraderRunError::UnsafeArchive(_) => "unsafe_archive",
-        ProbeUpgraderRunError::UnsupportedArchitecture(_) => "unsupported_architecture",
-        ProbeUpgraderRunError::ManualProbeReinstallRequired => "manual_probe_reinstall_required",
-        ProbeUpgraderRunError::InvalidConfig(_)
-        | ProbeUpgraderRunError::InvalidInstallMetadata(_)
-        | ProbeUpgraderRunError::InvalidManifest(_)
-        | ProbeUpgraderRunError::InvalidMetadata(_)
-        | ProbeUpgraderRunError::InvalidSigningKey(_)
-        | ProbeUpgraderRunError::IdentityValidation(_)
-        | ProbeUpgraderRunError::Io(_)
-        | ProbeUpgraderRunError::LocalUninstallRootRequired
-        | ProbeUpgraderRunError::MissingToken
-        | ProbeUpgraderRunError::TokenValidation(_) => "probe_upgrader_failed",
-    }
-}
-
-fn operation_status_path(install_metadata: &TrustedProbeInstallMetadata) -> PathBuf {
-    install_metadata.operation_status_path.clone()
-}
-
-fn host_probe_asset_target() -> Result<&'static str, ProbeUpgraderRunError> {
-    probe_asset_target_for_arch_and_abi(std::env::consts::ARCH, detect_linux_abi())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LinuxAbi {
-    Gnu,
-    Musl,
-}
-
-fn detect_linux_abi() -> LinuxAbi {
-    if command_output_contains_success("getconf", &["GNU_LIBC_VERSION"], "") {
-        return LinuxAbi::Gnu;
-    }
-
-    if command_output_contains_success("ldd", &["--version"], "musl") {
-        return LinuxAbi::Musl;
-    }
-
-    if has_musl_loader("/lib") || has_musl_loader("/usr/lib") {
-        return LinuxAbi::Musl;
-    }
-
-    LinuxAbi::Gnu
-}
-
-fn command_output_contains_success(command: &str, args: &[&str], needle: &str) -> bool {
-    let Ok(output) = Command::new(command).args(args).output() else {
-        return false;
-    };
-
-    if !output.status.success() {
-        return false;
-    }
-
-    needle.is_empty()
-        || String::from_utf8_lossy(&output.stdout)
-            .to_ascii_lowercase()
-            .contains(needle)
-        || String::from_utf8_lossy(&output.stderr)
-            .to_ascii_lowercase()
-            .contains(needle)
-}
-
-fn has_musl_loader(directory: &str) -> bool {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return false;
-    };
-
-    entries.flatten().any(|entry| {
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        file_name.starts_with("ld-musl-") && file_name.ends_with(".so.1")
-    })
-}
-
-fn probe_asset_target_for_arch_and_abi(
-    architecture: &str,
-    abi: LinuxAbi,
-) -> Result<&'static str, ProbeUpgraderRunError> {
-    match (architecture, abi) {
-        ("x86_64", LinuxAbi::Gnu) => Ok("x86_64-unknown-linux-gnu"),
-        ("x86_64", LinuxAbi::Musl) => Ok("x86_64-unknown-linux-musl"),
-        ("aarch64", LinuxAbi::Gnu) => Ok("aarch64-unknown-linux-gnu"),
-        ("aarch64", LinuxAbi::Musl) => Ok("aarch64-unknown-linux-musl"),
-        other => Err(ProbeUpgraderRunError::UnsupportedArchitecture(
-            other.0.to_string(),
-        )),
-    }
-}
-
 fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -3720,233 +2366,11 @@ fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
 }
 
-fn is_safe_asset_file_name(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with('-')
-        && !value.contains('/')
-        && !value.contains("..")
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
-}
-
 fn is_safe_sudoers_token(value: &str) -> bool {
     !value.is_empty()
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
-}
-
-fn is_safe_sudoers_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path != Path::new("/")
-        && !path
-            .display()
-            .to_string()
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProbeUpgraderLaunch {
-    pub bootstrap_config_path: PathBuf,
-    pub install_path: PathBuf,
-    pub operation_id: String,
-    pub target_probe_version: String,
-    pub token: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProbeUninstallerLaunch {
-    pub bootstrap_config_path: PathBuf,
-    pub install_path: PathBuf,
-    pub operation_id: String,
-    pub token: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ProbeUpgraderCommandOutput {
-    pub stdout: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ProbeUpgraderLaunchError {
-    InsufficientPrivilege(String),
-    UnsupportedInstallation(String),
-}
-
-pub trait ProbeUpgraderCommandRunner {
-    fn run(
-        &mut self,
-        program: &str,
-        args: &[String],
-        stdin: &str,
-    ) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError>;
-}
-
-pub struct SystemProbeUpgraderCommandRunner;
-
-impl ProbeUpgraderCommandRunner for SystemProbeUpgraderCommandRunner {
-    fn run(
-        &mut self,
-        program: &str,
-        args: &[String],
-        stdin: &str,
-    ) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
-        let mut child = Command::new(program)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    ProbeUpgraderLaunchError::UnsupportedInstallation(
-                        "sudo is not available for Probe Upgrader launch".to_string(),
-                    )
-                } else {
-                    ProbeUpgraderLaunchError::InsufficientPrivilege(error.to_string())
-                }
-            })?;
-
-        let mut child_stdin = child.stdin.take().ok_or_else(|| {
-            ProbeUpgraderLaunchError::UnsupportedInstallation(
-                "Probe Upgrader stdin pipe is unavailable".to_string(),
-            )
-        })?;
-        child_stdin
-            .write_all(stdin.as_bytes())
-            .map_err(|error| ProbeUpgraderLaunchError::InsufficientPrivilege(error.to_string()))?;
-        drop(child_stdin);
-
-        let output = child
-            .wait_with_output()
-            .map_err(|error| ProbeUpgraderLaunchError::InsufficientPrivilege(error.to_string()))?;
-
-        if output.status.success() {
-            return Ok(ProbeUpgraderCommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            });
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(ProbeUpgraderLaunchError::InsufficientPrivilege(
-            if stderr.is_empty() {
-                format!("Probe Upgrader launch exited with {}", output.status)
-            } else {
-                stderr
-            },
-        ))
-    }
-}
-
-pub fn launch_systemd_probe_upgrader(
-    input: ProbeUpgraderLaunch,
-    runner: &mut impl ProbeUpgraderCommandRunner,
-) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
-    let args = vec![
-        "/usr/bin/systemd-run".to_string(),
-        "--collect".to_string(),
-        "--pipe".to_string(),
-        "--wait".to_string(),
-        "--unit=enoki-probe-upgrader".to_string(),
-        "--property=Type=exec".to_string(),
-        "--".to_string(),
-        input.install_path.display().to_string(),
-        "internal-upgrader".to_string(),
-        "--config".to_string(),
-        input.bootstrap_config_path.display().to_string(),
-    ];
-    let stdin = render_probe_upgrader_stdin(&input);
-
-    runner.run("sudo", &args, &stdin)
-}
-
-pub fn launch_systemd_probe_uninstaller(
-    input: ProbeUninstallerLaunch,
-    runner: &mut impl ProbeUpgraderCommandRunner,
-) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
-    let args = vec![
-        "/usr/bin/systemd-run".to_string(),
-        "--collect".to_string(),
-        "--pipe".to_string(),
-        "--wait".to_string(),
-        "--unit=enoki-probe-uninstaller".to_string(),
-        "--property=Type=exec".to_string(),
-        "--".to_string(),
-        input.install_path.display().to_string(),
-        "internal-uninstaller".to_string(),
-        "--config".to_string(),
-        input.bootstrap_config_path.display().to_string(),
-    ];
-    let stdin = render_probe_uninstaller_stdin(&input);
-
-    runner.run("sudo", &args, &stdin)
-}
-
-pub fn render_probe_upgrader_stdin(input: &ProbeUpgraderLaunch) -> String {
-    [
-        format!("operation_id = {}", toml_string(&input.operation_id)),
-        format!(
-            "target_probe_version = {}",
-            toml_string(&input.target_probe_version),
-        ),
-        format!("token = {}", toml_string(&input.token)),
-        String::new(),
-    ]
-    .join("\n")
-}
-
-pub fn render_probe_uninstaller_stdin(input: &ProbeUninstallerLaunch) -> String {
-    [
-        format!("operation_id = {}", toml_string(&input.operation_id)),
-        format!("token = {}", toml_string(&input.token)),
-        String::new(),
-    ]
-    .join("\n")
-}
-
-pub fn format_probe_upgrader_result(result: &ProbeUpgraderResult) -> String {
-    let mut output = format!(
-        "Probe Upgrader result: operation={} status={}",
-        result.operation_id, result.status,
-    );
-    if let Some(error_code) = result.error_code.as_ref() {
-        output.push_str(&format!(" error_code={}", output_token(error_code)));
-    }
-    if let Some(message) = result.message.as_ref() {
-        output.push_str(&format!(" message={}", output_token(message)));
-    }
-    output
-}
-
-pub fn parse_probe_upgrader_result(output: &str) -> Option<ProbeUpgraderResult> {
-    output.lines().find_map(|line| {
-        let rest = line.strip_prefix("Probe Upgrader result: ")?;
-        let mut error_code = None;
-        let mut message = None;
-        let mut operation_id = None;
-        let mut status = None;
-
-        for field in rest.split_whitespace() {
-            if let Some(value) = field.strip_prefix("operation=") {
-                operation_id = Some(value.to_string());
-            } else if let Some(value) = field.strip_prefix("status=") {
-                status = Some(value.to_string());
-            } else if let Some(value) = field.strip_prefix("error_code=") {
-                error_code = Some(input_token(value));
-            } else if let Some(value) = field.strip_prefix("message=") {
-                message = Some(input_token(value));
-            }
-        }
-
-        Some(ProbeUpgraderResult {
-            error_code,
-            message,
-            operation_id: operation_id?,
-            status: status?,
-        })
-    })
 }
 
 fn toml_string(value: &str) -> String {
@@ -3958,4152 +2382,7 @@ fn toml_string(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn output_token(value: &str) -> String {
-    value.replace('\\', "\\\\").replace(' ', "\\s")
-}
-
-fn input_token(value: &str) -> String {
-    let mut output = String::new();
-    let mut escaped = false;
-    for character in value.chars() {
-        if escaped {
-            output.push(match character {
-                's' => ' ',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else {
-            output.push(character);
-        }
-    }
-    if escaped {
-        output.push('\\');
-    }
-
-    output
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use flate2::{Compression, write::GzEncoder};
-    use rsa::{
-        RsaPrivateKey,
-        pkcs1v15::SigningKey,
-        pkcs8::EncodePublicKey,
-        rand_core::OsRng,
-        signature::{RandomizedSigner, SignatureEncoding},
-    };
-    use std::{collections::HashMap, fs};
-
-    #[derive(Default)]
-    struct RecordingCommandRunner {
-        args: Vec<String>,
-        program: String,
-        stdin: String,
-    }
-
-    #[derive(Default)]
-    struct RecordingValidationTransport {
-        assets: HashMap<String, Vec<u8>>,
-        body: String,
-        downloads: Vec<String>,
-        probe_id: String,
-        status_body: String,
-        status_url: String,
-        url: String,
-        validated_identity_url: String,
-        identity_failure: Option<String>,
-    }
-
-    #[derive(Default)]
-    struct RecordingSystemdRunner {
-        calls: Vec<String>,
-        failure: Option<String>,
-        failure_step: Option<&'static str>,
-        restarted: Vec<String>,
-    }
-
-    impl RecordingSystemdRunner {
-        fn record_step(&mut self, step: &'static str) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(step.to_string());
-            if self.failure_step == Some(step) {
-                return Err(ProbeUpgraderRunError::RestartFailure(format!(
-                    "{step} failed"
-                )));
-            }
-            Ok(())
-        }
-    }
-
-    impl ProbeUpgraderValidationTransport for RecordingValidationTransport {
-        fn get_asset(&mut self, url: &str) -> Result<Vec<u8>, ProbeUpgraderRunError> {
-            self.downloads.push(url.to_string());
-            self.assets
-                .get(url)
-                .cloned()
-                .ok_or(ProbeUpgraderRunError::AssetMissing)
-        }
-
-        fn post_token_validation(
-            &mut self,
-            url: &str,
-            auth: &ProbeRequestAuth<'_>,
-            body: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.url = url.to_string();
-            self.probe_id = auth.probe_id.to_string();
-            self.body = body.to_string();
-
-            Ok(())
-        }
-
-        fn post_operation_status(
-            &mut self,
-            url: &str,
-            auth: &ProbeRequestAuth<'_>,
-            body: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.status_url = url.to_string();
-            self.probe_id = auth.probe_id.to_string();
-            self.status_body = body.to_string();
-
-            Ok(())
-        }
-
-        fn validate_probe_identity(
-            &mut self,
-            url: &str,
-            auth: &ProbeRequestAuth<'_>,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.validated_identity_url = url.to_string();
-            self.probe_id = auth.probe_id.to_string();
-            if let Some(message) = self.identity_failure.take() {
-                return Err(ProbeUpgraderRunError::IdentityValidation(message));
-            }
-            Ok(())
-        }
-    }
-
-    impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
-        fn ensure_service_group(
-            &mut self,
-            _service_group: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.record_step("ensure-group")
-        }
-
-        fn ensure_service_account(
-            &mut self,
-            _service_user: &str,
-            _service_group: &str,
-            _state_dir: &Path,
-            _identity_path: &Path,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.record_step("ensure-account")
-        }
-
-        fn enable_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(format!("enable {service_name}"));
-            if self.failure_step == Some("enable") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "enable failed".to_string(),
-                ));
-            }
-            Ok(())
-        }
-
-        fn restart_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(format!("restart {service_name}"));
-            if self.failure_step == Some("restart") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "restart failed".to_string(),
-                ));
-            }
-            if let Some(failure) = self.failure.take() {
-                return Err(ProbeUpgraderRunError::RestartFailure(failure));
-            }
-            self.restarted.push(service_name.to_string());
-            Ok(())
-        }
-
-        fn stop_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(format!("stop {service_name}"));
-            if self.failure_step == Some("stop") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "stop failed".to_string(),
-                ));
-            }
-            Ok(())
-        }
-
-        fn disable_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(format!("disable {service_name}"));
-            if self.failure_step == Some("disable") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "disable failed".to_string(),
-                ));
-            }
-            Ok(())
-        }
-
-        fn daemon_reload(&mut self) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push("daemon-reload".to_string());
-            if self.failure_step == Some("daemon-reload") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "daemon-reload failed".to_string(),
-                ));
-            }
-            Ok(())
-        }
-
-        fn reset_failed(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(format!("reset-failed {service_name}"));
-            if self.failure_step == Some("reset-failed") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "reset-failed failed".to_string(),
-                ));
-            }
-            Ok(())
-        }
-
-        fn verify_service_absent(
-            &mut self,
-            service_name: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.calls
-                .push(format!("verify-service-absent {service_name}"));
-            if self.failure_step == Some("verify-service") {
-                return Err(uninstall_cleanup_failure(
-                    "probe_uninstall_service_residue",
-                    "verifying the service is absent",
-                    "systemd LoadState is loaded".to_string(),
-                ));
-            }
-            Ok(())
-        }
-
-        fn remove_service_identity(
-            &mut self,
-            service_user: &str,
-            service_group: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.calls.push(format!(
-                "remove-service-identity {service_user}:{service_group}"
-            ));
-            if self.failure_step == Some("remove-account") {
-                return Err(ProbeUpgraderRunError::RestartFailure(
-                    "service account removal failed".to_string(),
-                ));
-            }
-            Ok(())
-        }
-    }
-
-    impl ProbeUpgraderCommandRunner for RecordingCommandRunner {
-        fn run(
-            &mut self,
-            program: &str,
-            args: &[String],
-            stdin: &str,
-        ) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
-            self.program = program.to_string();
-            self.args = args.to_vec();
-            self.stdin = stdin.to_string();
-
-            Ok(ProbeUpgraderCommandOutput {
-                stdout: String::new(),
-            })
-        }
-    }
-
-    #[test]
-    fn systemd_probe_upgrader_launch_uses_typed_entrypoint_and_stdin_token() {
-        let mut runner = RecordingCommandRunner::default();
-
-        launch_systemd_probe_upgrader(
-            ProbeUpgraderLaunch {
-                bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
-                install_path: PathBuf::from("/usr/local/bin/enoki-probe"),
-                operation_id: "42".to_string(),
-                target_probe_version: "0.2.0".to_string(),
-                token: "probe-operation-token".to_string(),
-            },
-            &mut runner,
-        )
-        .expect("launch succeeds");
-
-        assert_eq!(runner.program, "sudo");
-        assert_eq!(
-            runner.args,
-            vec![
-                "/usr/bin/systemd-run",
-                "--collect",
-                "--pipe",
-                "--wait",
-                "--unit=enoki-probe-upgrader",
-                "--property=Type=exec",
-                "--",
-                "/usr/local/bin/enoki-probe",
-                "internal-upgrader",
-                "--config",
-                "/etc/enoki/probe-bootstrap.toml",
-            ],
-        );
-        assert_eq!(
-            runner.stdin,
-            [
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-        );
-        assert!(!runner.args.iter().any(|arg| arg == "probe-operation-token"));
-        assert!(!runner.args.iter().any(|arg| arg == "42"));
-        assert!(!runner.args.iter().any(|arg| arg == "0.2.0"));
-    }
-
-    #[test]
-    fn systemd_probe_uninstaller_launch_uses_typed_entrypoint_and_stdin_token() {
-        let mut runner = RecordingCommandRunner::default();
-
-        launch_systemd_probe_uninstaller(
-            ProbeUninstallerLaunch {
-                bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
-                install_path: PathBuf::from("/usr/local/bin/enoki-probe"),
-                operation_id: "42".to_string(),
-                token: "probe-operation-token".to_string(),
-            },
-            &mut runner,
-        )
-        .expect("launch succeeds");
-
-        assert_eq!(runner.program, "sudo");
-        assert_eq!(
-            runner.args,
-            vec![
-                "/usr/bin/systemd-run",
-                "--collect",
-                "--pipe",
-                "--wait",
-                "--unit=enoki-probe-uninstaller",
-                "--property=Type=exec",
-                "--",
-                "/usr/local/bin/enoki-probe",
-                "internal-uninstaller",
-                "--config",
-                "/etc/enoki/probe-bootstrap.toml",
-            ],
-        );
-        assert_eq!(
-            runner.stdin,
-            [
-                "operation_id = \"42\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-        );
-        assert!(!runner.args.iter().any(|arg| arg == "probe-operation-token"));
-        assert!(!runner.args.iter().any(|arg| arg == "42"));
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_missing_stdin_token() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"test-private-key\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-
-        let error = run_probe_upgrader(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            "",
-            &mut transport,
-        )
-        .expect_err("missing token fails");
-
-        assert!(matches!(error, ProbeUpgraderRunError::MissingToken));
-        assert_eq!(transport.url, "");
-    }
-
-    #[test]
-    fn probe_repair_rejects_non_root_before_identity_or_network_access() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_repair_with_current_version_and_systemd_runner(
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            1000,
-            test_process_uid(),
-            "0.2.0",
-        )
-        .expect_err("non-root Repair fails closed");
-
-        assert_eq!(error.code(), "probe_repair_root_required");
-        assert!(transport.downloads.is_empty());
-        assert!(systemd.calls.is_empty());
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn probe_repair_requires_a_local_post_replacement_failed_upgrade_marker() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_repair_with_current_version_and_systemd_runner(
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            0,
-            test_process_uid(),
-            "0.2.0",
-        )
-        .expect_err("Repair without a failed Upgrade marker fails closed");
-
-        assert_eq!(error.code(), "probe_repair_failure_marker_missing");
-        assert!(transport.downloads.is_empty());
-        assert!(systemd.calls.is_empty());
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn probe_repair_failure_marker_must_be_a_trusted_root_written_file() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata = trusted_install_metadata(
-            &temp.path().join("bin/enoki-probe"),
-            &status_path,
-            assets_public_key_sha256(),
-        );
-        write_failed_upgrade_marker(&status_path, "0.2.0");
-
-        for file_metadata in [
-            TrustedFileMetadata {
-                is_regular_file: true,
-                is_symlink: true,
-                mode: 0o644,
-                owner_uid: 0,
-            },
-            TrustedFileMetadata {
-                is_regular_file: true,
-                is_symlink: false,
-                mode: 0o640,
-                owner_uid: 0,
-            },
-            TrustedFileMetadata {
-                is_regular_file: true,
-                is_symlink: false,
-                mode: 0o644,
-                owner_uid: 1000,
-            },
-        ] {
-            let error = read_probe_repair_failure_marker_with_file_metadata(
-                &install_metadata,
-                file_metadata,
-            )
-            .expect_err("untrusted failed Upgrade marker is rejected");
-
-            assert_eq!(error.code(), "probe_repair_failure_marker_invalid");
-        }
-    }
-
-    #[test]
-    fn probe_repair_failure_marker_requires_complete_post_replacement_evidence() {
-        for contents in [
-            "not TOML",
-            "operation_id = \"operation_41\"\nstatus = \"failed\"\n",
-            "operation_id = \"\"\ntarget_probe_version = \"0.2.0\"\nstatus = \"failed\"\nerror_code = \"post_replacement_restart_failure\"\n",
-        ] {
-            assert_eq!(
-                parse_probe_repair_failure_marker(contents)
-                    .expect_err("incomplete failed Upgrade marker is rejected")
-                    .code(),
-                "probe_repair_failure_marker_invalid",
-            );
-        }
-
-        for (status, error_code) in [
-            ("running", "post_replacement_restart_failure"),
-            ("failed", "checksum_failure"),
-        ] {
-            let contents = format!(
-                "operation_id = \"operation_41\"\ntarget_probe_version = \"0.2.0\"\nstatus = \"{status}\"\nerror_code = \"{error_code}\"\n"
-            );
-            assert_eq!(
-                parse_probe_repair_failure_marker(&contents)
-                    .expect_err("non-post-replacement failure cannot authorize Repair")
-                    .code(),
-                "probe_repair_failure_marker_not_post_replacement",
-            );
-        }
-    }
-
-    #[test]
-    fn probe_repair_rejects_complete_identity_bound_to_another_hub() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let mut install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        install_metadata.identity_path = temp.path().join("probe-bootstrap.toml");
-        fs::write(
-            &install_metadata.identity_path,
-            [
-                "hub_url = \"https://other-hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"complete-private-key\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("identity config");
-        fs::set_permissions(
-            &install_metadata.identity_path,
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("identity permissions");
-        write_failed_upgrade_marker(&status_path, "0.2.0");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_repair_with_current_version_and_systemd_runner(
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            0,
-            test_process_uid(),
-            "0.2.0",
-        )
-        .expect_err("cross-Hub identity fails closed");
-
-        assert_eq!(error.code(), "probe_repair_identity_hub_mismatch");
-        assert!(transport.downloads.is_empty());
-        assert!(systemd.calls.is_empty());
-    }
-
-    #[test]
-    fn probe_repair_identity_requires_exact_mode_0600() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let identity_path = temp.path().join("probe-bootstrap.toml");
-        fs::write(
-            &identity_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"complete-private-key\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("identity");
-        let mut install_metadata = trusted_install_metadata(
-            &temp.path().join("bin/enoki-probe"),
-            &temp.path().join("state/probe-operation-status.toml"),
-            assets_public_key_sha256(),
-        );
-        install_metadata.identity_path = identity_path;
-
-        for mode in [0o400, 0o640, 0o644] {
-            let error = read_probe_repair_identity_with_file_metadata(
-                &install_metadata,
-                TrustedFileMetadata {
-                    is_regular_file: true,
-                    is_symlink: false,
-                    mode,
-                    owner_uid: 1000,
-                },
-            )
-            .expect_err("non-0600 Probe Identity is rejected");
-
-            assert_eq!(error.code(), "probe_repair_identity_incomplete");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn probe_repair_rejects_absent_incomplete_and_symlink_identities() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("temp dir");
-        let identity_path = temp.path().join("probe-bootstrap.toml");
-        let mut install_metadata = trusted_install_metadata(
-            &temp.path().join("bin/enoki-probe"),
-            &temp.path().join("state/probe-operation-status.toml"),
-            assets_public_key_sha256(),
-        );
-        install_metadata.identity_path = identity_path.clone();
-
-        assert_eq!(
-            read_probe_repair_identity(&install_metadata)
-                .expect_err("absent identity is rejected")
-                .code(),
-            "probe_repair_identity_incomplete",
-        );
-
-        fs::write(
-            &identity_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("incomplete identity");
-        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
-            .expect("identity mode");
-        assert_eq!(
-            read_probe_repair_identity(&install_metadata)
-                .expect_err("identity without signing key is rejected")
-                .code(),
-            "probe_repair_identity_incomplete",
-        );
-
-        let target = temp.path().join("identity-target.toml");
-        fs::rename(&identity_path, &target).expect("move identity target");
-        symlink(&target, &identity_path).expect("identity symlink");
-        assert_eq!(
-            read_probe_repair_identity(&install_metadata)
-                .expect_err("identity symlink is rejected")
-                .code(),
-            "probe_repair_identity_incomplete",
-        );
-    }
-
-    #[test]
-    fn probe_repair_reinstalls_hub_supplied_probe_and_preserves_identity() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let status_path = temp
-            .path()
-            .join("var/lib/enoki-probe/probe-operation-status.toml");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "broken candidate").expect("broken candidate");
-        let assets = signed_assets(
-            "0.2.0",
-            &replacement_probe_binary("repaired candidate"),
-            None,
-        );
-        let mut install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        install_metadata.identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        install_metadata.service_unit_path =
-            temp.path().join("etc/systemd/system/enoki-probe.service");
-        fs::create_dir_all(
-            install_metadata
-                .identity_path
-                .parent()
-                .expect("identity dir"),
-        )
-        .expect("identity dir");
-        let identity_contents = [
-            "hub_url = \"https://hub.example\"",
-            "probe_id = \"probe_01\"",
-            "probe_private_key_pem = \"complete-private-key\"",
-            "",
-        ]
-        .join("\n");
-        fs::write(&install_metadata.identity_path, &identity_contents).expect("identity config");
-        fs::set_permissions(
-            &install_metadata.identity_path,
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("identity permissions");
-        write_failed_upgrade_marker(&status_path, "0.2.0");
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = run_probe_repair_with_current_version_and_systemd_runner(
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            0,
-            test_process_uid(),
-            "0.2.0",
-        )
-        .expect("Repair succeeds");
-
-        assert_eq!(result.probe_id, "probe_01");
-        assert_eq!(result.repaired_version, "0.2.0");
-        assert_eq!(
-            fs::read_to_string(&install_metadata.identity_path).expect("identity remains"),
-            identity_contents,
-        );
-        assert!(
-            fs::read_to_string(&install_path)
-                .expect("repaired binary")
-                .contains("repaired candidate")
-        );
-        assert!(
-            fs::read_to_string(&install_metadata.service_unit_path)
-                .expect("service unit")
-                .contains("ExecStart=")
-        );
-        assert_eq!(
-            transport.validated_identity_url,
-            "https://hub.example/api/probe/config",
-        );
-        assert_eq!(transport.probe_id, "probe_01");
-        assert_eq!(systemd.restarted, vec!["enoki-probe"]);
-        assert_eq!(
-            systemd.calls,
-            [
-                "ensure-group",
-                "ensure-account",
-                "stop enoki-probe",
-                "daemon-reload",
-                "enable enoki-probe",
-                "reset-failed enoki-probe",
-                "restart enoki-probe",
-            ],
-        );
-    }
-
-    #[test]
-    fn reconstructed_probe_service_waits_for_hub_acknowledged_readiness_without_a_global_timeout() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let status_path = temp
-            .path()
-            .join("var/lib/enoki-probe/probe-operation-status.toml");
-        let mut metadata = trusted_install_metadata(&install_path, &status_path, "a".repeat(64));
-        metadata.identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        metadata.service_unit_path = temp.path().join("etc/systemd/system/enoki-probe.service");
-
-        write_probe_systemd_service(&metadata).expect("service unit renders");
-
-        let unit = fs::read_to_string(&metadata.service_unit_path).expect("service unit exists");
-        assert!(unit.contains("Type=notify"));
-        assert!(unit.contains("NotifyAccess=main"));
-        assert!(unit.contains("Restart=on-failure"));
-        assert!(unit.contains("RestartPreventExitStatus=78"));
-        assert!(!unit.contains("TimeoutStartSec="));
-    }
-
-    #[test]
-    fn probe_repair_rejects_archive_checksum_failure_before_replacement() {
-        let assets = signed_assets(
-            "0.2.0",
-            &replacement_probe_binary("tampered candidate"),
-            Some("0".repeat(64)),
-        );
-        let pinned_key = assets.public_key_sha256.clone();
-        let (result, install_path, _temp) = run_repair_with_assets(assets, pinned_key, None);
-
-        let error = result.expect_err("checksum mismatch fails Repair");
-        assert_eq!(error.code(), "probe_repair_checksum_failure");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("old binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[test]
-    fn probe_repair_rejects_untrusted_signing_key_before_replacement() {
-        let assets = signed_assets(
-            "0.2.0",
-            &replacement_probe_binary("attacker candidate"),
-            None,
-        );
-        let (result, install_path, _temp) = run_repair_with_assets(assets, "0".repeat(64), None);
-
-        let error = result.expect_err("untrusted signing key fails Repair");
-        assert_eq!(error.code(), "probe_repair_signing_key_untrusted");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("old binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[test]
-    fn probe_repair_rejects_manifest_signature_failure_before_replacement() {
-        let mut assets = signed_assets(
-            "0.2.0",
-            &replacement_probe_binary("tampered candidate"),
-            None,
-        );
-        assets.signature[0] ^= 0xff;
-        let pinned_key = assets.public_key_sha256.clone();
-        let (result, install_path, _temp) = run_repair_with_assets(assets, pinned_key, None);
-
-        let error = result.expect_err("invalid signature fails Repair");
-        assert_eq!(error.code(), "probe_repair_signature_failure");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("old binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[test]
-    fn probe_repair_requires_bound_hub_to_accept_existing_identity() {
-        let assets = signed_assets("0.2.0", &replacement_probe_binary("candidate"), None);
-        let pinned_key = assets.public_key_sha256.clone();
-        let (result, install_path, _temp) = run_repair_with_assets(
-            assets,
-            pinned_key,
-            Some("HTTP 401 probe_identity_required".to_string()),
-        );
-
-        let error = result.expect_err("Hub-rejected identity fails Repair");
-        assert_eq!(error.code(), "probe_repair_identity_rejected");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("old binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[test]
-    fn probe_repair_rejects_release_baseline_hub_downgrade() {
-        let assets = signed_assets(
-            "0.1.0",
-            &replacement_probe_binary("Release Baseline Probe"),
-            None,
-        );
-        let pinned_key = assets.public_key_sha256.clone();
-        let (result, install_path, _temp) =
-            run_repair_with_assets_for_versions(assets, pinned_key, None, "0.2.0", "0.2.0");
-
-        let error = result.expect_err("Hub Restore baseline cannot downgrade Probe Repair");
-        assert_eq!(error.code(), "probe_repair_downgrade_rejected");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("candidate binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn probe_repair_reads_and_validates_the_installed_probe_version() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let binary = temp.path().join("enoki-probe");
-        fs::write(&binary, b"ELF\0ENOKI_PROBE_VERSION=0.2.0\0payload").expect("Probe binary");
-
-        assert_eq!(
-            read_installed_probe_version(&binary).expect("installed version"),
-            "0.2.0",
-        );
-
-        fs::write(&binary, b"ELF\0no version marker\0").expect("invalid Probe binary");
-        let error = read_installed_probe_version(&binary)
-            .expect_err("unverifiable installed version is rejected");
-        assert_eq!(error.code(), "probe_repair_installed_version_invalid");
-    }
-
-    #[test]
-    fn probe_repair_rejects_a_newer_hub_target_as_a_general_reinstall() {
-        let assets = signed_assets(
-            "0.3.0",
-            &replacement_probe_binary("unrelated newer Probe"),
-            None,
-        );
-        let pinned_key = assets.public_key_sha256.clone();
-        let (result, install_path, _temp) =
-            run_repair_with_assets_for_versions(assets, pinned_key, None, "0.2.0", "0.2.0");
-
-        let error = result.expect_err("Repair cannot become a forward Upgrade path");
-        assert_eq!(error.code(), "probe_repair_hub_target_mismatch");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("candidate binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[test]
-    fn probe_repair_rejects_a_marker_for_a_candidate_not_currently_installed() {
-        let assets = signed_assets("0.3.0", &replacement_probe_binary("marked Probe"), None);
-        let pinned_key = assets.public_key_sha256.clone();
-        let (result, install_path, _temp) =
-            run_repair_with_assets_for_versions(assets, pinned_key, None, "0.2.0", "0.3.0");
-
-        let error = result.expect_err("Repair requires the replaced candidate to be installed");
-        assert_eq!(error.code(), "probe_repair_candidate_not_installed");
-        assert_eq!(
-            fs::read_to_string(install_path).expect("current binary remains"),
-            "broken candidate",
-        );
-    }
-
-    #[test]
-    fn probe_repair_reports_stable_service_reconstruction_step_codes() {
-        let assets = signed_assets(
-            "0.2.0",
-            &replacement_probe_binary("repaired candidate"),
-            None,
-        );
-
-        for (failure_step, expected_code) in [
-            ("ensure-group", "probe_repair_service_group_failed"),
-            ("ensure-account", "probe_repair_service_account_failed"),
-            ("daemon-reload", "probe_repair_daemon_reload_failed"),
-            ("enable", "probe_repair_service_enable_failed"),
-            ("restart", "probe_repair_service_restart_failed"),
-        ] {
-            let (result, calls, _temp) =
-                run_repair_reconstruction_case(&assets, Some(failure_step), None);
-            let error = result.expect_err("injected service reconstruction step fails");
-            assert_eq!(error.code(), expected_code, "failure step {failure_step}");
-            assert!(
-                calls.iter().any(|call| call.contains(failure_step)),
-                "runner must record the failing {failure_step} step",
-            );
-        }
-
-        for (blocked_write, expected_code) in [
-            ("sudoers", "probe_repair_sudoers_failed"),
-            ("service-unit", "probe_repair_service_unit_failed"),
-        ] {
-            let (result, _calls, _temp) =
-                run_repair_reconstruction_case(&assets, None, Some(blocked_write));
-            let error = result.expect_err("blocked reconstruction write fails");
-            assert_eq!(error.code(), expected_code, "blocked {blocked_write}");
-        }
-    }
-
-    #[test]
-    fn internal_probe_uninstaller_removes_owned_files_and_reports_success() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let state_dir = temp.path().join("var/lib/enoki-probe");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        fs::create_dir_all(bootstrap_config_path.parent().expect("config dir"))
-            .expect("config dir");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::create_dir_all(&state_dir).expect("state dir");
-        let sudoers_dir = temp.path().join("etc/sudoers.d");
-        fs::create_dir_all(&sudoers_dir).expect("sudoers dir");
-        let operation_sudoers_path = sudoers_dir.join("enoki-probe-operations");
-        let collector_helper_sudoers_path = sudoers_dir.join("enoki-probe-collector-helpers");
-        let legacy_sudoers_path = sudoers_dir.join("enoki-probe-upgrader");
-        fs::write(&install_path, "probe binary").expect("install binary");
-        fs::write(state_dir.join("state"), "state").expect("state");
-        fs::write(&operation_sudoers_path, "operation sudoers").expect("operation sudoers");
-        fs::write(&collector_helper_sudoers_path, "collector helper sudoers")
-            .expect("collector helper sudoers");
-        fs::write(&legacy_sudoers_path, "legacy sudoers").expect("legacy sudoers");
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"test-private-key\"",
-                &format!(
-                    "install_path = {}",
-                    toml_string(install_path.to_str().expect("install path")),
-                ),
-                &format!(
-                    "operation_status_path = {}",
-                    toml_string(status_path.to_str().expect("status path")),
-                ),
-                &format!(
-                    "state_dir = {}",
-                    toml_string(state_dir.to_str().expect("state dir")),
-                ),
-                "service_name = \"enoki-probe\"",
-                &format!(
-                    "probe_asset_public_key_sha256 = {}",
-                    toml_string(&"a".repeat(64))
-                ),
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("bootstrap config");
-        let mut install_metadata =
-            trusted_install_metadata(&install_path, &status_path, "a".repeat(64));
-        install_metadata.operation_sudoers_path = Some(operation_sudoers_path.clone());
-        install_metadata.collector_helper_sudoers_path =
-            Some(collector_helper_sudoers_path.clone());
-        install_metadata.old_sudoers_paths = vec![legacy_sudoers_path.clone()];
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-            ProbeUninstallerRunInput {
-                bootstrap_config_path: bootstrap_config_path.clone(),
-            },
-            &[
-                "operation_id = \"42\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("uninstall succeeds");
-
-        assert_eq!(result.status, "succeeded");
-        assert_eq!(
-            systemd.calls,
-            vec![
-                "stop enoki-probe",
-                "disable enoki-probe",
-                "daemon-reload",
-                "reset-failed enoki-probe",
-                "verify-service-absent enoki-probe",
-                "remove-service-identity enoki-probe:enoki-probe",
-                "verify-service-absent enoki-probe",
-            ],
-        );
-        assert!(!install_path.exists());
-        assert!(!bootstrap_config_path.exists());
-        assert!(!state_dir.exists());
-        assert!(!operation_sudoers_path.exists());
-        assert!(!collector_helper_sudoers_path.exists());
-        assert!(!legacy_sudoers_path.exists());
-        assert_eq!(
-            transport.url,
-            "https://hub.example/api/probe/operations/42/token/validate",
-        );
-        assert_eq!(
-            transport.status_url,
-            "https://hub.example/api/probe/operations/42/status",
-        );
-        assert_eq!(
-            transport.status_body,
-            "{\"status\":\"succeeded\",\"token\":\"probe-operation-token\"}"
-        );
-    }
-
-    #[test]
-    fn schema_two_uninstall_keeps_preexisting_legacy_sudoers_untouched() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        let install_metadata_path = temp.path().join("etc/enoki/probe-install.toml");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let state_dir = temp.path().join("var/lib/enoki-probe");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        let service_unit_path = temp.path().join("etc/systemd/system/enoki-probe.service");
-        let bootstrap_acquirer_path = temp
-            .path()
-            .join("usr/local/bin/enoki-probe-bootstrap-acquire");
-        let bootstrap_activator_path = temp
-            .path()
-            .join("usr/local/bin/enoki-probe-bootstrap-activate");
-        let bootstrap_state_dir = temp.path().join("var/lib/enoki-probe-bootstrap");
-        let legacy_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-upgrader");
-        for path in [
-            bootstrap_config_path.parent().expect("config parent"),
-            install_metadata_path.parent().expect("metadata parent"),
-            install_path.parent().expect("binary parent"),
-            service_unit_path.parent().expect("unit parent"),
-            legacy_sudoers_path.parent().expect("sudoers parent"),
-            &state_dir,
-            &bootstrap_state_dir,
-        ] {
-            fs::create_dir_all(path).expect("owned parent");
-        }
-        fs::write(&bootstrap_config_path, "owned bootstrap config").expect("config");
-        fs::write(&install_metadata_path, "owned metadata").expect("metadata");
-        fs::write(&install_path, "owned probe binary").expect("binary");
-        fs::write(&service_unit_path, "owned service unit").expect("unit");
-        fs::write(&bootstrap_acquirer_path, "owned Bootstrap acquirer").expect("acquirer");
-        fs::write(&bootstrap_activator_path, "owned Bootstrap activator").expect("activator");
-        fs::set_permissions(&bootstrap_acquirer_path, fs::Permissions::from_mode(0o755))
-            .expect("acquirer mode");
-        fs::set_permissions(&bootstrap_activator_path, fs::Permissions::from_mode(0o755))
-            .expect("activator mode");
-        fs::set_permissions(&bootstrap_state_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap state mode");
-        let bootstrap_trust_dir = bootstrap_state_dir.join("trust");
-        let bootstrap_inbox_dir = bootstrap_state_dir.join("inbox");
-        fs::create_dir(&bootstrap_trust_dir).expect("Bootstrap trust directory");
-        fs::create_dir(&bootstrap_inbox_dir).expect("Bootstrap inbox directory");
-        fs::set_permissions(&bootstrap_trust_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap trust mode");
-        fs::set_permissions(&bootstrap_inbox_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap inbox mode");
-        for name in ["delegation-generation", ".delegation-generation.lock"] {
-            let entry = bootstrap_trust_dir.join(name);
-            fs::write(&entry, "owned Bootstrap state").expect("Bootstrap state entry");
-            fs::set_permissions(&entry, fs::Permissions::from_mode(0o600))
-                .expect("Bootstrap state entry mode");
-        }
-        fs::write(state_dir.join("state"), "owned state").expect("state");
-        fs::write(&legacy_sudoers_path, "preexisting legacy sudoers").expect("legacy sudoers");
-        fs::set_permissions(&legacy_sudoers_path, fs::Permissions::from_mode(0o440))
-            .expect("legacy mode");
-        let before_bytes = fs::read(&legacy_sudoers_path).expect("legacy bytes");
-        let before_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy metadata");
-
-        let install_metadata = TrustedProbeInstallMetadata {
-            schema_version: 2,
-            hub_url: "https://hub.example".to_string(),
-            identity_path: bootstrap_config_path.clone(),
-            install_path: install_path.clone(),
-            operation_status_path: status_path,
-            probe_asset_public_key_sha256: "a".repeat(64),
-            probe_distribution_root_sha256: Some("a".repeat(64)),
-            bootstrap_acquirer_path: Some(bootstrap_acquirer_path.clone()),
-            bootstrap_activator_path: Some(bootstrap_activator_path.clone()),
-            bootstrap_state_dir: Some(bootstrap_state_dir.clone()),
-            service_name: "enoki-probe".to_string(),
-            service_group: "enoki-probe".to_string(),
-            service_unit_path: service_unit_path.clone(),
-            service_user: "enoki-probe".to_string(),
-            state_dir: state_dir.clone(),
-            operation_sudoers_path: None,
-            collector_helper_sudoers_path: None,
-            old_sudoers_paths: Vec::new(),
-        };
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: bootstrap_config_path.clone(),
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        execute_probe_uninstall_with_install_metadata_path_and_owner(
-            &input,
-            &install_metadata,
-            &mut systemd,
-            &install_metadata_path,
-            trusted_read_only_metadata_owner_uid(Some(temp.path())),
-        )
-        .expect("schema two uninstall succeeds");
-
-        let after_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy remains");
-        assert_eq!(
-            fs::read(&legacy_sudoers_path).expect("legacy bytes"),
-            before_bytes
-        );
-        assert_eq!(
-            after_metadata.mode() & 0o777,
-            before_metadata.mode() & 0o777
-        );
-        assert_eq!(after_metadata.ino(), before_metadata.ino());
-        assert!(!install_path.exists());
-        assert!(!bootstrap_config_path.exists());
-        assert!(!install_metadata_path.exists());
-        assert!(!service_unit_path.exists());
-        assert!(!state_dir.exists());
-        assert!(!bootstrap_acquirer_path.exists());
-        assert!(!bootstrap_activator_path.exists());
-        assert!(!bootstrap_state_dir.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn schema_two_bootstrap_role_rejects_an_unexpected_owner() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let role = temp.path().join("enoki-probe-bootstrap-acquire");
-        fs::write(&role, "Bootstrap role").expect("role");
-        fs::set_permissions(&role, fs::Permissions::from_mode(0o755)).expect("role mode");
-        let actual_owner = fs::symlink_metadata(&role).expect("role metadata").uid();
-        let unexpected_owner = if actual_owner == u32::MAX {
-            actual_owner - 1
-        } else {
-            actual_owner + 1
-        };
-
-        assert!(matches!(
-            validate_owned_bootstrap_role(Some(&role), unexpected_owner),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe Bootstrap role is not a root-owned regular 0755 file"
-            ))
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn schema_two_uninstall_rejects_a_bootstrap_symlink_without_touching_its_target() {
-        use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().expect("temp dir");
-        let target = temp.path().join("outside-bootstrap");
-        let acquirer = temp.path().join("bootstrap-acquire");
-        let activator = temp.path().join("bootstrap-activate");
-        fs::write(&target, "outside").expect("target");
-        symlink(&target, &acquirer).expect("symlink");
-        fs::write(&activator, "owned activator").expect("activator");
-        fs::set_permissions(&activator, fs::Permissions::from_mode(0o755)).expect("activator mode");
-        let state_dir = temp.path().join("state");
-        fs::create_dir_all(&state_dir).expect("state");
-        let bootstrap_state_dir = temp.path().join("bootstrap-state");
-        fs::create_dir(&bootstrap_state_dir).expect("Bootstrap state");
-        fs::set_permissions(&bootstrap_state_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap state mode");
-        let metadata = TrustedProbeInstallMetadata {
-            schema_version: 2,
-            hub_url: "https://hub.example".to_string(),
-            identity_path: temp.path().join("identity"),
-            install_path: temp.path().join("probe"),
-            operation_status_path: state_dir.join("status"),
-            probe_asset_public_key_sha256: "a".repeat(64),
-            probe_distribution_root_sha256: Some("a".repeat(64)),
-            bootstrap_acquirer_path: Some(acquirer.clone()),
-            bootstrap_activator_path: Some(activator.clone()),
-            bootstrap_state_dir: Some(bootstrap_state_dir),
-            service_name: "enoki-probe".to_string(),
-            service_group: "enoki-probe".to_string(),
-            service_unit_path: temp.path().join("unit"),
-            service_user: "enoki-probe".to_string(),
-            state_dir,
-            operation_sudoers_path: None,
-            collector_helper_sudoers_path: None,
-            old_sudoers_paths: Vec::new(),
-        };
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: metadata.identity_path.clone(),
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-        let error = execute_probe_uninstall_with_install_metadata_path(
-            &input,
-            &metadata,
-            &mut systemd,
-            &temp.path().join("metadata"),
-        )
-        .expect_err("symlinked Bootstrap role fails closed");
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe Bootstrap role is not a root-owned regular 0755 file"
-            )
-        ));
-        assert_eq!(fs::read(&target).expect("outside target"), b"outside");
-        assert!(systemd.calls.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bootstrap_state_validation_rejects_symlinks_hardlinks_and_extra_entries() {
-        use std::os::unix::fs::symlink;
-
-        fn private_directory(path: &Path) {
-            fs::create_dir(path).expect("private directory");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .expect("private directory mode");
-        }
-        fn owned_state(root: &Path) -> PathBuf {
-            let state = root.join("bootstrap-state");
-            private_directory(&state);
-            private_directory(&state.join("trust"));
-            private_directory(&state.join("inbox"));
-            state
-        }
-
-        let symlink_temp = tempfile::tempdir().expect("symlink temp");
-        let symlink_state = owned_state(symlink_temp.path());
-        fs::remove_dir(symlink_state.join("inbox")).expect("remove inbox");
-        let outside = symlink_temp.path().join("outside");
-        private_directory(&outside);
-        symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
-        assert!(matches!(
-            remove_owned_bootstrap_state(
-                &symlink_state,
-                trusted_read_only_metadata_owner_uid(Some(symlink_temp.path())),
-            ),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert!(outside.exists());
-
-        let hardlink_temp = tempfile::tempdir().expect("hardlink temp");
-        let hardlink_state = owned_state(hardlink_temp.path());
-        let outside = hardlink_temp.path().join("outside-generation");
-        fs::write(&outside, "outside").expect("outside state");
-        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).expect("outside mode");
-        fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
-            .expect("unsafe hardlink");
-        assert!(matches!(
-            remove_owned_bootstrap_state(
-                &hardlink_state,
-                trusted_read_only_metadata_owner_uid(Some(hardlink_temp.path())),
-            ),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
-
-        let extra_temp = tempfile::tempdir().expect("extra entry temp");
-        let extra_state = owned_state(extra_temp.path());
-        fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
-        assert!(matches!(
-            remove_owned_bootstrap_state(
-                &extra_state,
-                trusted_read_only_metadata_owner_uid(Some(extra_temp.path())),
-            ),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert!(extra_state.join("unrecognised").exists());
-
-        let owner_temp = tempfile::tempdir().expect("owner temp");
-        let owner_state = owned_state(owner_temp.path());
-        let actual_owner = fs::symlink_metadata(&owner_state)
-            .expect("Bootstrap state metadata")
-            .uid();
-        let unexpected_owner = actual_owner.wrapping_add(1);
-        assert!(matches!(
-            remove_owned_bootstrap_state(&owner_state, unexpected_owner),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert!(owner_state.exists());
-    }
-
-    #[test]
-    fn internal_probe_uninstaller_reports_required_service_cleanup_failure() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(&install_metadata.state_dir).expect("state dir");
-        write_test_bootstrap_config(&install_metadata.identity_path, &install_metadata)
-            .expect("bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner {
-            failure_step: Some("disable"),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let result = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-            ProbeUninstallerRunInput {
-                bootstrap_config_path: install_metadata.identity_path.clone(),
-            },
-            &[
-                "operation_id = \"42\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("cleanup failure is reported to Hub");
-
-        assert_eq!(result.status, "failed");
-        assert_eq!(
-            result.error_code.as_deref(),
-            Some("probe_uninstall_service_disable_failed")
-        );
-        assert_eq!(
-            transport.status_body,
-            "{\"errorCode\":\"probe_uninstall_service_disable_failed\",\"message\":\"Probe uninstall cleanup failed while disabling the service: disable failed\",\"status\":\"failed\",\"token\":\"probe-operation-token\"}"
-        );
-        assert_eq!(systemd.calls, ["stop enoki-probe", "disable enoki-probe"]);
-    }
-
-    #[test]
-    fn required_systemd_cleanup_rejects_failure_for_a_loaded_service() {
-        let mut calls = Vec::new();
-        let mut run = |program: &str, args: &[&str]| {
-            calls.push(format!("{program} {}", args.join(" ")));
-            Ok(match args.first().copied() {
-                Some("disable") => CleanupCommandOutput::failure(
-                    Some(1),
-                    "",
-                    "Failed to disable unit: access denied",
-                ),
-                Some("show") => CleanupCommandOutput::success("loaded\n"),
-                _ => panic!("unexpected command: {program} {args:?}"),
-            })
-        };
-
-        let error = run_required_systemctl_cleanup_with(
-            &["disable", "enoki-probe"],
-            "enoki-probe",
-            "probe_uninstall_service_disable_failed",
-            "disabling the service",
-            &mut run,
-        )
-        .expect_err("a loaded unit cannot turn disable failure into success");
-
-        assert_eq!(
-            probe_upgrader_error_code(&error),
-            "probe_uninstall_service_disable_failed"
-        );
-        assert!(error.to_string().contains("access denied"));
-        assert_eq!(
-            calls,
-            [
-                "systemctl disable enoki-probe",
-                "systemctl show --property=LoadState --value enoki-probe",
-            ]
-        );
-    }
-
-    #[test]
-    fn required_systemd_cleanup_allows_only_an_explicitly_missing_service() {
-        let mut calls = Vec::new();
-        let mut run = |program: &str, args: &[&str]| {
-            calls.push(format!("{program} {}", args.join(" ")));
-            Ok(match args.first().copied() {
-                Some("disable") => {
-                    CleanupCommandOutput::failure(Some(1), "", "unit does not exist")
-                }
-                Some("show") => CleanupCommandOutput::success("not-found\n"),
-                _ => panic!("unexpected command: {program} {args:?}"),
-            })
-        };
-
-        run_required_systemctl_cleanup_with(
-            &["disable", "enoki-probe"],
-            "enoki-probe",
-            "probe_uninstall_service_disable_failed",
-            "disabling the service",
-            &mut run,
-        )
-        .expect("an explicit systemd not-found state is idempotent success");
-
-        assert_eq!(
-            calls,
-            [
-                "systemctl disable enoki-probe",
-                "systemctl show --property=LoadState --value enoki-probe",
-            ]
-        );
-    }
-
-    #[test]
-    fn systemd_service_absence_check_rejects_loaded_state_and_accepts_not_found() {
-        let mut loaded =
-            |_program: &str, _args: &[&str]| Ok(CleanupCommandOutput::success("loaded\n"));
-        let error = verify_systemd_service_absent_with("enoki-probe", &mut loaded)
-            .expect_err("a loaded service is uninstall residue");
-        assert_eq!(
-            probe_upgrader_error_code(&error),
-            "probe_uninstall_service_residue"
-        );
-
-        let mut missing =
-            |_program: &str, _args: &[&str]| Ok(CleanupCommandOutput::success("not-found\n"));
-        verify_systemd_service_absent_with("enoki-probe", &mut missing)
-            .expect("an explicit not-found LoadState is absent");
-    }
-
-    #[test]
-    fn service_identity_cleanup_fails_closed_when_userdel_fails() {
-        let mut calls = Vec::new();
-        let mut run = |program: &str, args: &[&str]| {
-            calls.push(format!("{program} {}", args.join(" ")));
-            Ok(match program {
-                "getent" => CleanupCommandOutput::success("enoki-probe:x:999:999"),
-                "userdel" => CleanupCommandOutput::failure(Some(1), "", "account is in use"),
-                _ => panic!("unexpected command: {program} {args:?}"),
-            })
-        };
-
-        let error = remove_service_identity_with("enoki-probe", "enoki-probe", &mut run)
-            .expect_err("an unexplained userdel failure is fatal");
-
-        assert_eq!(
-            probe_upgrader_error_code(&error),
-            "probe_uninstall_service_account_remove_failed"
-        );
-        assert!(error.to_string().contains("account is in use"));
-        assert_eq!(calls, ["getent passwd enoki-probe", "userdel enoki-probe"]);
-    }
-
-    #[test]
-    fn service_identity_cleanup_verifies_account_and_group_are_absent() {
-        let mut calls = Vec::new();
-        let mut passwd_queries = 0;
-        let mut group_queries = 0;
-        let mut run = |program: &str, args: &[&str]| {
-            calls.push(format!("{program} {}", args.join(" ")));
-            Ok(match (program, args.first().copied()) {
-                ("getent", Some("passwd")) => {
-                    passwd_queries += 1;
-                    if passwd_queries == 1 {
-                        CleanupCommandOutput::success("enoki-probe:x:999:999")
-                    } else {
-                        CleanupCommandOutput::failure(Some(2), "", "")
-                    }
-                }
-                ("getent", Some("group")) => {
-                    group_queries += 1;
-                    if group_queries == 1 {
-                        CleanupCommandOutput::success("enoki-probe:x:999:")
-                    } else {
-                        CleanupCommandOutput::failure(Some(2), "", "")
-                    }
-                }
-                ("userdel" | "groupdel", _) => CleanupCommandOutput::success(""),
-                _ => panic!("unexpected command: {program} {args:?}"),
-            })
-        };
-
-        remove_service_identity_with("enoki-probe", "enoki-probe", &mut run)
-            .expect("both identity entries are deleted and verified absent");
-
-        assert_eq!(
-            calls,
-            [
-                "getent passwd enoki-probe",
-                "userdel enoki-probe",
-                "getent passwd enoki-probe",
-                "getent group enoki-probe",
-                "groupdel enoki-probe",
-                "getent group enoki-probe",
-            ]
-        );
-    }
-
-    #[test]
-    fn service_identity_cleanup_is_idempotent_only_for_explicitly_missing_entries() {
-        let mut calls = Vec::new();
-        let mut run = |program: &str, args: &[&str]| {
-            calls.push(format!("{program} {}", args.join(" ")));
-            Ok(CleanupCommandOutput::failure(Some(2), "", ""))
-        };
-
-        remove_service_identity_with("enoki-probe", "enoki-probe", &mut run)
-            .expect("getent exit code 2 explicitly means the entries are absent");
-
-        assert_eq!(
-            calls,
-            ["getent passwd enoki-probe", "getent group enoki-probe"]
-        );
-    }
-
-    #[test]
-    fn service_identity_cleanup_rejects_account_residue_after_userdel() {
-        let mut run = |program: &str, _args: &[&str]| {
-            Ok(match program {
-                "getent" => CleanupCommandOutput::success("enoki-probe:x:999:999"),
-                "userdel" => CleanupCommandOutput::success(""),
-                _ => panic!("unexpected command: {program}"),
-            })
-        };
-
-        let error = remove_service_identity_with("enoki-probe", "enoki-probe", &mut run)
-            .expect_err("an account that remains after userdel is fatal");
-
-        assert_eq!(
-            probe_upgrader_error_code(&error),
-            "probe_uninstall_service_account_residue"
-        );
-    }
-
-    #[test]
-    fn service_unit_absence_check_rejects_residue_and_accepts_not_found() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let service_unit_path = temp.path().join("enoki-probe.service");
-        fs::write(&service_unit_path, "unit").expect("service unit");
-
-        let error = verify_path_absent(
-            &service_unit_path,
-            "probe_uninstall_service_unit_residue",
-            "verifying the service unit is absent",
-        )
-        .expect_err("a remaining unit file is fatal");
-        assert_eq!(
-            probe_upgrader_error_code(&error),
-            "probe_uninstall_service_unit_residue"
-        );
-
-        fs::remove_file(&service_unit_path).expect("remove service unit");
-        verify_path_absent(
-            &service_unit_path,
-            "probe_uninstall_service_unit_residue",
-            "verifying the service unit is absent",
-        )
-        .expect("not-found is idempotent success");
-    }
-
-    #[test]
-    fn internal_probe_uninstaller_reports_loaded_service_residue() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(&install_metadata.state_dir).expect("state dir");
-        write_test_bootstrap_config(&install_metadata.identity_path, &install_metadata)
-            .expect("bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner {
-            failure_step: Some("verify-service"),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let result = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-            ProbeUninstallerRunInput {
-                bootstrap_config_path: install_metadata.identity_path.clone(),
-            },
-            &[
-                "operation_id = \"42\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("service residue is reported to Hub");
-
-        assert_eq!(result.status, "failed");
-        assert_eq!(
-            result.error_code.as_deref(),
-            Some("probe_uninstall_service_residue")
-        );
-        assert!(transport.status_body.contains("\"status\":\"failed\""));
-        assert!(!transport.status_body.contains("\"status\":\"succeeded\""));
-    }
-
-    #[test]
-    fn internal_probe_uninstaller_reports_service_account_cleanup_failure() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(&install_metadata.state_dir).expect("state dir");
-        write_test_bootstrap_config(&install_metadata.identity_path, &install_metadata)
-            .expect("bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner {
-            failure_step: Some("remove-account"),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let result = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-            ProbeUninstallerRunInput {
-                bootstrap_config_path: install_metadata.identity_path.clone(),
-            },
-            &[
-                "operation_id = \"42\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("account cleanup failure is reported to Hub");
-
-        assert_eq!(result.status, "failed");
-        assert_eq!(
-            result.error_code.as_deref(),
-            Some("probe_uninstall_service_account_remove_failed")
-        );
-        assert!(transport.status_body.contains("\"status\":\"failed\""));
-        assert!(!transport.status_body.contains("\"status\":\"succeeded\""));
-    }
-
-    #[test]
-    fn probe_uninstaller_removes_install_metadata_and_local_installation_assets() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        let install_metadata_path = temp.path().join("etc/enoki/probe-install.toml");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let state_dir = temp.path().join("var/lib/enoki-probe");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        let operation_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-operations");
-        let collector_helper_sudoers_path = temp
-            .path()
-            .join("etc/sudoers.d/enoki-probe-collector-helpers");
-        let old_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-upgrader");
-        for path in [
-            &bootstrap_config_path,
-            &install_metadata_path,
-            &install_path,
-            &operation_sudoers_path,
-            &collector_helper_sudoers_path,
-            &old_sudoers_path,
-        ] {
-            fs::create_dir_all(path.parent().expect("parent")).expect("parent");
-            fs::write(path, "owned file").expect("owned file");
-        }
-        fs::create_dir_all(&state_dir).expect("state dir");
-        fs::write(state_dir.join("state"), "state").expect("state");
-        let mut install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        install_metadata.operation_sudoers_path = Some(operation_sudoers_path.clone());
-        install_metadata.collector_helper_sudoers_path =
-            Some(collector_helper_sudoers_path.clone());
-        install_metadata.old_sudoers_paths = vec![old_sudoers_path.clone()];
-        let mut systemd = RecordingSystemdRunner::default();
-
-        execute_probe_uninstall_with_install_metadata_path(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: bootstrap_config_path.clone(),
-            },
-            &install_metadata,
-            &mut systemd,
-            &install_metadata_path,
-        )
-        .expect("uninstall cleanup succeeds");
-
-        for path in [
-            &bootstrap_config_path,
-            &install_metadata_path,
-            &install_path,
-            &operation_sudoers_path,
-            &collector_helper_sudoers_path,
-            &old_sudoers_path,
-        ] {
-            assert!(!path.exists(), "{} should be removed", path.display());
-        }
-        assert!(!state_dir.exists());
-        assert_eq!(
-            systemd.calls,
-            vec![
-                "stop enoki-probe",
-                "disable enoki-probe",
-                "daemon-reload",
-                "reset-failed enoki-probe",
-                "verify-service-absent enoki-probe",
-                "remove-service-identity enoki-probe:enoki-probe",
-                "verify-service-absent enoki-probe",
-            ],
-        );
-    }
-
-    #[test]
-    fn uninstall_cleanup_planner_rejects_unsafe_targets_before_any_systemd_or_file_mutation() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let mut install_metadata = trusted_install_metadata(
-            &temp.path().join("bin/enoki-probe"),
-            &status_path,
-            assets_public_key_sha256(),
-        );
-        install_metadata.install_path = PathBuf::from("relative-probe-binary");
-
-        let error = plan_probe_uninstall_cleanup(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: temp.path().join("state/probe-bootstrap.toml"),
-            },
-            &install_metadata,
-            &temp.path().join("etc/enoki/probe-install.toml"),
-            0,
-        )
-        .expect_err("unsafe cleanup targets are rejected before execution");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("paths must be absolute")
-        ));
-    }
-
-    #[test]
-    fn internal_probe_uninstaller_rejects_bootstrap_hub_url_mismatch_before_token_validation() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://attacker.example\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
-            ProbeUninstallerRunInput {
-                bootstrap_config_path,
-            },
-            &[
-                "operation_id = \"42\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect_err("Hub URL mismatch is rejected before network calls");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidConfig("Hub URL does not match trusted install metadata")
-        ));
-        assert_eq!(transport.url, "");
-        assert_eq!(transport.status_url, "");
-        assert!(transport.downloads.is_empty());
-    }
-
-    #[test]
-    fn trusted_install_metadata_rejects_unsafe_service_user_for_sudoers() {
-        let contents = [
-            "hub_url = \"https://hub.example\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\"",
-            "collector_helper_sudoers_path = \"/etc/sudoers.d/enoki-probe-collector-helpers\"",
-            "service_name = \"enoki-probe\"",
-            "service_user = \"enoki-probe\\nALL=(root) NOPASSWD: ALL\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "",
-        ]
-        .join("\n");
-
-        let error = parse_trusted_probe_install_metadata(&contents)
-            .expect_err("unsafe service user is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("service user is not safe for sudoers")
-        ));
-    }
-
-    #[test]
-    fn trusted_install_metadata_rejects_root_paths() {
-        let contents = [
-            "hub_url = \"https://hub.example\"",
-            "install_path = \"/\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "service_name = \"enoki-probe\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "",
-        ]
-        .join("\n");
-
-        let error =
-            parse_trusted_probe_install_metadata(&contents).expect_err("root path is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("paths must not be filesystem root")
-        ));
-    }
-
-    #[test]
-    fn trusted_install_metadata_rejects_parent_components_before_cleanup_can_start() {
-        let value = "path = \"/var/lib/enoki-probe/../outside\""
-            .parse::<toml::Value>()
-            .expect("metadata value");
-
-        let error = required_install_metadata_path(&value, "path")
-            .expect_err("parent traversal cannot become a cleanup target");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("paths contain unsafe components")
-        ));
-    }
-
-    #[test]
-    fn trusted_install_metadata_uses_fresh_split_sudoers_paths() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let (contents, operation_sudoers_path, collector_helper_sudoers_path, legacy_sudoers_path) =
-            fresh_split_install_metadata_contents(temp.path());
-
-        let install_metadata =
-            parse_trusted_probe_install_metadata(&contents).expect("fresh metadata parses");
-
-        assert_eq!(
-            install_metadata.operation_sudoers_path,
-            Some(operation_sudoers_path)
-        );
-        assert_eq!(
-            install_metadata.collector_helper_sudoers_path,
-            Some(collector_helper_sudoers_path)
-        );
-        assert_ne!(
-            install_metadata.operation_sudoers_path,
-            Some(legacy_sudoers_path)
-        );
-    }
-
-    #[test]
-    fn supported_legacy_install_metadata_migrates_to_version_one_deterministically() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let (contents, _, _, _) = fresh_split_install_metadata_contents(temp.path());
-        let metadata_path = temp.path().join("etc/enoki/probe-install.toml");
-        let legacy_identity_path = temp.path().join("etc/enoki/custom-identity.toml");
-        fs::create_dir_all(metadata_path.parent().expect("metadata dir")).expect("metadata dir");
-        fs::write(&metadata_path, contents).expect("legacy metadata");
-        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644))
-            .expect("legacy permissions");
-
-        let metadata = read_trusted_probe_install_metadata_with_file_metadata(
-            &metadata_path,
-            Some(&legacy_identity_path),
-            TrustedFileMetadata {
-                is_regular_file: true,
-                is_symlink: false,
-                mode: 0o644,
-                owner_uid: 0,
-            },
-        )
-        .expect("supported legacy metadata migrates");
-
-        assert_eq!(metadata.schema_version, 1);
-        assert_eq!(metadata.identity_path, legacy_identity_path);
-        let migrated = fs::read_to_string(&metadata_path).expect("migrated metadata");
-        assert!(migrated.starts_with("schema_version = 1\n"));
-        assert!(migrated.contains(&format!(
-            "identity_path = {}",
-            toml_string(&legacy_identity_path.display().to_string()),
-        )));
-        assert!(migrated.contains("service_group = \"enoki-probe\""));
-        assert!(
-            migrated.contains("service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",)
-        );
-        assert_eq!(
-            fs::metadata(&metadata_path)
-                .expect("metadata stat")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600,
-        );
-    }
-
-    #[test]
-    fn legacy_install_metadata_preflight_keeps_bytes_mode_and_mtime_unchanged() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let (contents, _, _, _) = fresh_split_install_metadata_contents(temp.path());
-        let metadata_path = temp.path().join("etc/enoki/probe-install.toml");
-        let identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        fs::create_dir_all(metadata_path.parent().expect("metadata dir")).expect("metadata dir");
-        fs::write(&metadata_path, &contents).expect("legacy metadata");
-        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644))
-            .expect("legacy permissions");
-
-        let mut metadata =
-            parse_trusted_probe_install_metadata(&contents).expect("legacy metadata");
-        metadata.identity_path = identity_path.clone();
-        write_test_bootstrap_config(&identity_path, &metadata).expect("identity");
-        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
-            .expect("identity permissions");
-
-        let before_bytes = fs::read(&metadata_path).expect("metadata bytes");
-        let before_metadata = fs::metadata(&metadata_path).expect("metadata stat");
-        let before_mode = before_metadata.permissions().mode() & 0o777;
-        let before_mtime = (before_metadata.mtime(), before_metadata.mtime_nsec());
-
-        let preflight = read_trusted_probe_install_preflight(&metadata_path, Some(temp.path()))
-            .expect("legacy preflight");
-
-        assert_eq!(preflight.hub_url, "https://hub.example");
-        assert_eq!(preflight.probe_id, "probe_01");
-        let after_metadata = fs::metadata(&metadata_path).expect("metadata stat");
-        assert_eq!(
-            fs::read(&metadata_path).expect("metadata bytes"),
-            before_bytes
-        );
-        assert_eq!(after_metadata.permissions().mode() & 0o777, before_mode);
-        assert_eq!(
-            (after_metadata.mtime(), after_metadata.mtime_nsec()),
-            before_mtime
-        );
-    }
-
-    #[test]
-    fn version_one_install_metadata_requires_exact_mode_0600() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let metadata_path = temp.path().join("probe-install.toml");
-        fs::write(
-            &metadata_path,
-            version_one_install_metadata_contents(temp.path()),
-        )
-        .expect("metadata");
-
-        for mode in [0o644, 0o640] {
-            let error = read_trusted_probe_install_metadata_with_file_metadata(
-                &metadata_path,
-                None,
-                TrustedFileMetadata {
-                    is_regular_file: true,
-                    is_symlink: false,
-                    mode,
-                    owner_uid: 0,
-                },
-            )
-            .expect_err("non-0600 v1 metadata is rejected");
-
-            assert!(matches!(
-                error,
-                ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "schema v1 metadata mode must be 0600"
-                )
-            ));
-        }
-    }
-
-    #[test]
-    fn install_metadata_rejects_symlink_non_regular_and_non_root_files() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let metadata_path = temp.path().join("probe-install.toml");
-        fs::write(
-            &metadata_path,
-            version_one_install_metadata_contents(temp.path()),
-        )
-        .expect("metadata");
-
-        for (file_metadata, expected_message) in [
-            (
-                TrustedFileMetadata {
-                    is_regular_file: true,
-                    is_symlink: true,
-                    mode: 0o600,
-                    owner_uid: 0,
-                },
-                "metadata path must be a regular non-symlink file",
-            ),
-            (
-                TrustedFileMetadata {
-                    is_regular_file: false,
-                    is_symlink: false,
-                    mode: 0o600,
-                    owner_uid: 0,
-                },
-                "metadata path must be a regular non-symlink file",
-            ),
-            (
-                TrustedFileMetadata {
-                    is_regular_file: true,
-                    is_symlink: false,
-                    mode: 0o600,
-                    owner_uid: 1000,
-                },
-                "metadata file is not owned by root",
-            ),
-        ] {
-            let error = read_trusted_probe_install_metadata_with_file_metadata(
-                &metadata_path,
-                None,
-                file_metadata,
-            )
-            .expect_err("untrusted metadata file is rejected");
-
-            assert!(matches!(
-                &error,
-                ProbeUpgraderRunError::InvalidInstallMetadata(message)
-                    if *message == expected_message
-            ));
-            assert_eq!(
-                ProbeRepairRunError::from(error).code(),
-                "probe_repair_metadata_invalid",
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_install_metadata_rejects_modes_outside_the_compatibility_allowlist() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let metadata_path = temp.path().join("probe-install.toml");
-        let (contents, _, _, _) = fresh_split_install_metadata_contents(temp.path());
-        fs::write(&metadata_path, contents).expect("legacy metadata");
-
-        let error = read_trusted_probe_install_metadata_with_file_metadata(
-            &metadata_path,
-            Some(&temp.path().join("probe-bootstrap.toml")),
-            TrustedFileMetadata {
-                is_regular_file: true,
-                is_symlink: false,
-                mode: 0o640,
-                owner_uid: 0,
-            },
-        )
-        .expect_err("unrecognized legacy metadata mode is rejected");
-
-        assert!(matches!(
-            &error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("legacy metadata mode is not supported")
-        ));
-        assert_eq!(
-            ProbeRepairRunError::from(error).code(),
-            "probe_repair_metadata_invalid",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn trusted_install_metadata_uses_lstat_and_rejects_a_symlink_path() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("temp dir");
-        let target = temp.path().join("target.toml");
-        let link = temp.path().join("probe-install.toml");
-        fs::write(&target, version_one_install_metadata_contents(temp.path()))
-            .expect("metadata target");
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("metadata mode");
-        symlink(&target, &link).expect("metadata symlink");
-
-        let error = read_trusted_probe_install_metadata(&link, None)
-            .expect_err("metadata symlink is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "metadata path must be a regular non-symlink file"
-            )
-        ));
-    }
-
-    #[test]
-    fn install_metadata_rejects_unsupported_schema_version_with_stable_repair_code() {
-        let contents = [
-            "schema_version = 3",
-            "hub_url = \"https://hub.example\"",
-            "",
-        ]
-        .join("\n");
-
-        let error = parse_trusted_probe_install_metadata(&contents)
-            .expect_err("future metadata fails closed");
-        let repair_error = ProbeRepairRunError::from(error);
-
-        assert_eq!(repair_error.code(), "probe_repair_metadata_unsupported");
-    }
-
-    #[test]
-    fn signed_package_metadata_uses_root_trust_without_legacy_sudoers_or_daily_key() {
-        let root = "a".repeat(64);
-        let contents = [
-            "schema_version = 2".to_string(),
-            "hub_url = \"https://hub.example\"".to_string(),
-            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"".to_string(),
-            "install_path = \"/usr/local/bin/enoki-probe\"".to_string(),
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\""
-                .to_string(),
-            "state_dir = \"/var/lib/enoki-probe\"".to_string(),
-            format!("probe_distribution_root_sha256 = \"{root}\""),
-            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\""
-                .to_string(),
-            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\""
-                .to_string(),
-            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"".to_string(),
-            "service_name = \"enoki-probe\"".to_string(),
-            "service_user = \"enoki-probe\"".to_string(),
-            "service_group = \"enoki-probe\"".to_string(),
-            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"".to_string(),
-            String::new(),
-        ]
-        .join("\n");
-        let metadata = parse_trusted_probe_install_metadata(&contents).expect("schema v2 parses");
-        assert_eq!(metadata.schema_version, 2);
-        assert_eq!(
-            metadata.probe_distribution_root_sha256.as_deref(),
-            Some(root.as_str())
-        );
-        assert_eq!(metadata.operation_sudoers_path, None);
-        assert_eq!(metadata.collector_helper_sudoers_path, None);
-        assert_eq!(
-            metadata.bootstrap_acquirer_path.as_deref(),
-            Some(Path::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH))
-        );
-        assert_eq!(
-            metadata.bootstrap_activator_path.as_deref(),
-            Some(Path::new(PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH))
-        );
-        assert_eq!(
-            metadata.bootstrap_state_dir.as_deref(),
-            Some(Path::new(PRODUCTION_BOOTSTRAP_STATE_DIR))
-        );
-        assert!(metadata.old_sudoers_paths.is_empty());
-        assert!(!contents.contains("sudoers_path"));
-        assert!(!contents.contains("probe_asset_public_key_sha256"));
-    }
-
-    #[test]
-    fn signed_package_metadata_requires_all_fixed_bootstrap_owned_paths() {
-        let contents = [
-            "schema_version = 2",
-            "hub_url = \"https://hub.example\"",
-            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
-            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
-            "service_name = \"enoki-probe\"",
-            "service_user = \"enoki-probe\"",
-            "service_group = \"enoki-probe\"",
-            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
-            "",
-        ]
-        .join("\n");
-        assert!(matches!(
-            parse_trusted_probe_install_metadata(&contents),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "missing required field"
-            ))
-        ));
-    }
-
-    #[test]
-    fn signed_package_metadata_rejects_legacy_authority_fields() {
-        let contents = [
-            "schema_version = 2",
-            "hub_url = \"https://hub.example\"",
-            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "service_name = \"enoki-probe\"",
-            "service_group = \"enoki-probe\"",
-            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
-            "",
-        ].join("\n");
-        assert!(matches!(
-            parse_trusted_probe_install_metadata(&contents),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "signed package metadata must not carry legacy sudoers or daily signing trust"
-            ))
-        ));
-    }
-
-    #[test]
-    fn signed_package_metadata_rejects_a_nonfixed_bootstrap_role_path() {
-        let contents = [
-            "schema_version = 2",
-            "hub_url = \"https://hub.example\"",
-            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "bootstrap_acquirer_path = \"/tmp/attacker-bootstrap\"",
-            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
-            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
-            "service_name = \"enoki-probe\"",
-            "service_group = \"enoki-probe\"",
-            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
-            "",
-        ]
-        .join("\n");
-        assert!(matches!(
-            parse_trusted_probe_install_metadata(&contents),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe Bootstrap role path is not the fixed production path"
-            ))
-        ));
-    }
-
-    #[test]
-    fn legacy_schema_cannot_claim_bootstrap_role_ownership() {
-        let mut contents = version_one_install_metadata_contents(Path::new("/"));
-        contents.push_str(
-            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"\n",
-        );
-        assert!(matches!(
-            parse_trusted_probe_install_metadata(&contents),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "legacy metadata must not carry Probe Bootstrap ownership"
-            ))
-        ));
-    }
-
-    #[test]
-    fn signed_package_metadata_rejects_a_nonfixed_bootstrap_state_path() {
-        let contents = [
-            "schema_version = 2",
-            "hub_url = \"https://hub.example\"",
-            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
-            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
-            "bootstrap_state_dir = \"/tmp/attacker-bootstrap-state\"",
-            "service_name = \"enoki-probe\"",
-            "service_group = \"enoki-probe\"",
-            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
-            "",
-        ]
-        .join("\n");
-        assert!(matches!(
-            parse_trusted_probe_install_metadata(&contents),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe Bootstrap role path is not the fixed production path"
-            ))
-        ));
-    }
-
-    #[test]
-    fn trusted_install_metadata_rejects_old_single_sudoers_path_metadata() {
-        let contents = [
-            "hub_url = \"https://hub.example\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "sudoers_path = \"/etc/sudoers.d/enoki-probe-upgrader\"",
-            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "service_name = \"enoki-probe\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "",
-        ]
-        .join("\n");
-
-        let error =
-            parse_trusted_probe_install_metadata(&contents).expect_err("old metadata is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "old sudoers_path metadata is not supported"
-            )
-        ));
-    }
-
-    #[test]
-    fn trusted_install_metadata_requires_explicit_split_sudoers_paths() {
-        let contents = [
-            "hub_url = \"https://hub.example\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "service_name = \"enoki-probe\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "",
-        ]
-        .join("\n");
-
-        let error = parse_trusted_probe_install_metadata(&contents)
-            .expect_err("split sudoers paths are required");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("missing required field")
-        ));
-    }
-
-    #[test]
-    fn probe_operation_sudoers_uses_fresh_operation_path_without_legacy_mixed_layout() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let (contents, operation_sudoers_path, collector_helper_sudoers_path, legacy_sudoers_path) =
-            fresh_split_install_metadata_contents(temp.path());
-        let install_metadata =
-            parse_trusted_probe_install_metadata(&contents).expect("fresh metadata parses");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-
-        write_probe_operation_sudoers(&install_metadata, &bootstrap_config_path)
-            .expect("operation sudoers are written");
-
-        let sudoers = fs::read_to_string(&operation_sudoers_path).expect("operation sudoers");
-        assert!(sudoers.contains("internal-upgrader --config"));
-        assert!(sudoers.contains("internal-uninstaller --config"));
-        assert!(!sudoers.contains("internal-privileged-collector-helper"));
-        assert!(!sudoers.contains("disk-health.smartctl"));
-        assert!(!legacy_sudoers_path.exists());
-        assert!(!collector_helper_sudoers_path.exists());
-    }
-
-    #[test]
-    fn probe_operation_sudoers_rejects_paths_unsafe_for_sudoers() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let unsafe_install_path = temp.path().join("bin/enoki probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata = trusted_install_metadata(
-            &unsafe_install_path,
-            &status_path,
-            assets_public_key_sha256(),
-        );
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-
-        let error = write_probe_operation_sudoers(&install_metadata, &bootstrap_config_path)
-            .expect_err("unsafe install path is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("sudoers command contains unsafe values")
-        ));
-    }
-
-    #[test]
-    fn probe_operation_sudoers_rejects_bootstrap_path_unsafe_for_sudoers() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        let unsafe_bootstrap_config_path = temp.path().join("probe bootstrap.toml");
-
-        let error = write_probe_operation_sudoers(&install_metadata, &unsafe_bootstrap_config_path)
-            .expect_err("unsafe bootstrap path is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("sudoers command contains unsafe values")
-        ));
-    }
-
-    #[test]
-    fn collector_helper_sudoers_includes_exposed_compiled_privileged_collector_helpers() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-
-        write_collector_helper_sudoers(&install_metadata, &SmartctlCollectorHelperExposure)
-            .expect("collector-helper sudoers render");
-
-        let sudoers = fs::read_to_string(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-        )
-        .expect("collector-helper sudoers");
-        assert!(
-            sudoers.contains("internal-privileged-collector-helper --helper disk-health.smartctl")
-        );
-        assert!(!sudoers.contains("internal-upgrader --config"));
-        assert!(!sudoers.contains("internal-uninstaller --config"));
-        assert!(!sudoers.contains("internal-privileged-collector --collector"));
-        assert!(!sudoers.contains("--collector disk-health.smartctl"));
-        assert!(sudoers.contains("--property=RuntimeMaxSec=10"));
-        assert!(sudoers.contains("--property=PrivateNetwork=yes"));
-        assert!(!sudoers.contains('*'));
-        assert!(!sudoers.contains("--operation-id"));
-        assert!(!sudoers.contains("--target-probe-version"));
-    }
-
-    #[test]
-    fn collector_helper_sudoers_is_absent_when_no_helper_is_exposed() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .parent()
-                .expect("sudoers parent"),
-        )
-        .expect("sudoers parent");
-        fs::write(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-            "stale collector helper sudoers",
-        )
-        .expect("stale helper sudoers");
-
-        write_collector_helper_sudoers(&install_metadata, &NoCollectorHelperExposure)
-            .expect("collector-helper sudoers omitted");
-
-        assert!(
-            !install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .exists()
-        );
-    }
-
-    struct NoCollectorHelperExposure;
-
-    impl CollectorHelperExposureEnvironment for NoCollectorHelperExposure {
-        fn tool_exists(&self, _path: &Path) -> bool {
-            false
-        }
-    }
-
-    struct SmartctlCollectorHelperExposure;
-
-    impl CollectorHelperExposureEnvironment for SmartctlCollectorHelperExposure {
-        fn tool_exists(&self, path: &Path) -> bool {
-            path == Path::new("/usr/sbin/smartctl")
-        }
-    }
-
-    #[test]
-    fn internal_probe_upgrader_validates_stdin_token_with_hub_before_noop_result() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"test-private-key\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-
-        let mut systemd = RecordingSystemdRunner::default();
-        let install_metadata = trusted_install_metadata(
-            &temp.path().join("bin/enoki-probe"),
-            &temp.path().join("state/probe-operation-status.toml"),
-            assets_public_key_sha256(),
-        );
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path: bootstrap_config_path.clone(),
-            },
-            &[
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("missing assets are reported as operation failure");
-
-        assert_eq!(
-            transport.url,
-            "https://hub.example/api/probe/operations/42/token/validate",
-        );
-        assert_eq!(transport.probe_id, "probe_01");
-        assert_eq!(
-            transport.body,
-            "{\"targetProbeVersion\":\"0.2.0\",\"token\":\"probe-operation-token\"}",
-        );
-        assert_eq!(
-            result,
-            ProbeUpgraderResult {
-                error_code: Some("asset_missing".to_string()),
-                message: Some("Probe Asset Set archive is missing".to_string()),
-                operation_id: "42".to_string(),
-                status: "failed".to_string(),
-            },
-        );
-        assert_eq!(
-            transport.downloads,
-            vec!["https://hub.example/api/probe/assets/manifest.json"],
-        );
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_unsafe_hub_url_before_token_validation() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example/base\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &operation_stdin(),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect_err("unsafe Hub URL is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidConfig("invalid Hub URL")
-        ));
-        assert_eq!(transport.url, "");
-        assert!(transport.downloads.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_bootstrap_hub_url_mismatch_before_token_validation() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://attacker.example\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &operation_stdin(),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect_err("Hub URL mismatch is rejected before network calls");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidConfig("Hub URL does not match trusted install metadata")
-        ));
-        assert_eq!(transport.url, "");
-        assert_eq!(transport.status_url, "");
-        assert!(transport.downloads.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_allows_explicit_non_loopback_http_hub() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata = trusted_install_metadata_for_hub(
-            "http://192.0.2.20:8787",
-            &install_path,
-            &status_path,
-            assets_public_key_sha256(),
-        );
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"http://192.0.2.20:8787\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &operation_stdin(),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("missing assets are reported as operation failure");
-
-        assert_eq!(
-            transport.url,
-            "http://192.0.2.20:8787/api/probe/operations/42/token/validate",
-        );
-        assert_eq!(
-            transport.downloads,
-            vec!["http://192.0.2.20:8787/api/probe/assets/manifest.json"],
-        );
-        assert_eq!(result.error_code.as_deref(), Some("asset_missing"));
-    }
-
-    #[test]
-    fn formats_probe_upgrader_running_result_for_probe_runtime() {
-        let result = ProbeUpgraderResult {
-            error_code: None,
-            message: None,
-            operation_id: "42".to_string(),
-            status: "running".to_string(),
-        };
-
-        assert_eq!(
-            parse_probe_upgrader_result(&format_probe_upgrader_result(&result)),
-            Some(result),
-        );
-    }
-
-    #[test]
-    fn internal_probe_upgrader_verifies_assets_replaces_binary_writes_status_and_restarts() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let state_dir = temp.path().join("state");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
-        let install_metadata = trusted_install_metadata_for_hub(
-            "https://hub.example",
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                format!(
-                    "state_dir = {}",
-                    toml_string(state_dir.to_str().expect("state dir"))
-                ),
-                format!(
-                    "operation_status_path = {}",
-                    toml_string(status_path.to_str().expect("status path")),
-                ),
-                format!(
-                    "install_path = {}",
-                    toml_string(install_path.to_str().expect("install path")),
-                ),
-                "service_name = \"enoki-probe\"".to_string(),
-                format!(
-                    "probe_asset_public_key_sha256 = \"{}\"",
-                    assets.public_key_sha256,
-                ),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path: bootstrap_config_path.clone(),
-            },
-            &[
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("upgrade succeeds");
-
-        assert_eq!(
-            result,
-            ProbeUpgraderResult {
-                error_code: None,
-                message: None,
-                operation_id: "42".to_string(),
-                status: "running".to_string(),
-            },
-        );
-        assert!(
-            fs::read_to_string(&install_path)
-                .expect("binary")
-                .contains("new probe")
-        );
-        assert_eq!(systemd.restarted, vec!["enoki-probe"]);
-        assert_eq!(
-            fs::read_to_string(&status_path).expect("status"),
-            [
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "status = \"running\"",
-                "",
-            ]
-            .join("\n"),
-        );
-        assert_eq!(
-            transport.downloads,
-            vec![
-                "https://hub.example/api/probe/assets/manifest.json",
-                "https://hub.example/api/probe/assets/manifest.json.sig",
-                "https://hub.example/api/probe/assets/signing-key.pem",
-                &format!(
-                    "https://hub.example/api/probe/assets/enoki-probe-{}.tar.gz",
-                    host_probe_asset_target().expect("supported test architecture"),
-                ),
-            ],
-        );
-        let bootstrap_config =
-            fs::read_to_string(bootstrap_config_path).expect("bootstrap config remains");
-        assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
-    }
-
-    #[test]
-    fn internal_probe_upgrader_renders_collector_helper_sudoers_with_newly_installed_probe_binary()
-    {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let planner_log_path = temp.path().join("planner.log");
-        let replacement_probe = format!(
-            r#"#!/bin/sh
-if [ "${{1:-}}" = "internal-render-collector-helper-sudoers" ]; then
-  printf '%s\n' "$*" > '{}'
-  cat <<'EOF'
-# Managed by replacement Probe.
-enoki-probe ALL=(root) NOPASSWD: replacement-helper-from-new-binary
-EOF
-  exit 0
-fi
-echo replacement probe
-"#,
-            planner_log_path.display(),
-        );
-        let assets = signed_assets("0.2.0", &replacement_probe, None);
-        let mut install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        let old_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-upgrader");
-        fs::create_dir_all(old_sudoers_path.parent().expect("old sudoers parent"))
-            .expect("old sudoers parent");
-        fs::write(&old_sudoers_path, "old mixed sudoers").expect("old sudoers");
-        fs::create_dir_all(
-            install_metadata
-                .operation_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .parent()
-                .expect("operation sudoers parent"),
-        )
-        .expect("operation sudoers parent");
-        fs::write(
-            install_metadata
-                .operation_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-            "stale operation sudoers",
-        )
-        .expect("stale operation sudoers");
-        install_metadata.old_sudoers_paths = vec![old_sudoers_path.clone()];
-        write_test_bootstrap_config(&bootstrap_config_path, &install_metadata)
-            .expect("write bootstrap config");
-        let bootstrap_config =
-            read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
-        let operation = ProbeUpgraderOperationMetadata {
-            operation_id: "42".to_string(),
-            target_probe_version: "0.2.0".to_string(),
-            token: "probe-operation-token".to_string(),
-        };
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        execute_probe_upgrade_with_current_version(
-            &operation,
-            &bootstrap_config,
-            &bootstrap_config_path,
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            "0.1.9",
-        )
-        .expect("upgrade succeeds");
-
-        let operation_sudoers = fs::read_to_string(
-            install_metadata
-                .operation_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-        )
-        .expect("operation sudoers");
-        let collector_helper_sudoers = fs::read_to_string(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-        )
-        .expect("collector-helper sudoers");
-        assert!(operation_sudoers.contains("internal-upgrader --config"));
-        assert!(operation_sudoers.contains("internal-uninstaller --config"));
-        assert!(!operation_sudoers.contains("internal-privileged-collector-helper"));
-        assert!(collector_helper_sudoers.contains("replacement-helper-from-new-binary"));
-        assert!(!collector_helper_sudoers.contains("disk-health.smartctl"));
-        assert!(!collector_helper_sudoers.contains("internal-upgrader --config"));
-        assert_eq!(
-            fs::read_to_string(planner_log_path).expect("planner invocation log"),
-            "internal-render-collector-helper-sudoers --service-user enoki-probe --probe-binary "
-                .to_string()
-                + install_path.to_str().expect("install path")
-                + "\n",
-        );
-        assert!(!old_sudoers_path.exists());
-        assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
-    }
-
-    #[test]
-    fn internal_probe_upgrader_deletes_collector_helper_sudoers_when_no_helper_is_exposed() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let assets = signed_assets(
-            "0.2.0",
-            r#"#!/bin/sh
-if [ "${1:-}" = "internal-render-collector-helper-sudoers" ]; then
-  exit 0
-fi
-echo replacement probe
-"#,
-            None,
-        );
-        let install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        fs::create_dir_all(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .parent()
-                .expect("collector-helper sudoers parent"),
-        )
-        .expect("collector-helper sudoers parent");
-        fs::write(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-            "stale collector helper sudoers",
-        )
-        .expect("stale collector-helper sudoers");
-        write_test_bootstrap_config(&bootstrap_config_path, &install_metadata)
-            .expect("write bootstrap config");
-        let bootstrap_config =
-            read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
-        let operation = ProbeUpgraderOperationMetadata {
-            operation_id: "42".to_string(),
-            target_probe_version: "0.2.0".to_string(),
-            token: "probe-operation-token".to_string(),
-        };
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        execute_probe_upgrade_with_current_version(
-            &operation,
-            &bootstrap_config,
-            &bootstrap_config_path,
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            "0.1.9",
-        )
-        .expect("upgrade succeeds");
-
-        let operation_sudoers = fs::read_to_string(
-            install_metadata
-                .operation_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-        )
-        .expect("operation sudoers");
-        assert!(operation_sudoers.contains("internal-upgrader --config"));
-        assert!(operation_sudoers.contains("internal-uninstaller --config"));
-        assert!(!operation_sudoers.contains("internal-privileged-collector-helper"));
-        assert!(
-            !install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .exists()
-        );
-        assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_checksum_mismatch_before_replacement() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let assets = signed_assets("0.2.0", "new probe", Some("0".repeat(64)));
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                format!(
-                    "state_dir = {}",
-                    toml_string(temp.path().join("state").to_str().expect("state dir")),
-                ),
-                format!(
-                    "install_path = {}",
-                    toml_string(install_path.to_str().expect("install path")),
-                ),
-                format!(
-                    "probe_asset_public_key_sha256 = \"{}\"",
-                    assets.public_key_sha256,
-                ),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &[
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("checksum mismatch is reported as operation failure");
-
-        assert_eq!(
-            result,
-            ProbeUpgraderResult {
-                error_code: Some("checksum_failure".to_string()),
-                message: Some("Probe archive sha256 verification failed".to_string()),
-                operation_id: "42".to_string(),
-                status: "failed".to_string(),
-            },
-        );
-        assert_eq!(
-            fs::read_to_string(&install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_untrusted_signing_key() {
-        let (result, install_path, systemd) =
-            run_upgrade_with_assets(signed_assets("0.2.0", "new probe", None), "0".repeat(64));
-
-        assert_eq!(result.error_code.as_deref(), Some("signing_key_untrusted"));
-        assert_eq!(
-            result.message.as_deref(),
-            Some("Probe asset signing key fingerprint verification failed"),
-        );
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_manifest_signature_failure() {
-        let mut assets = signed_assets("0.2.0", "new probe", None);
-        assets.signature[0] ^= 0xff;
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets(assets, public_key_sha256);
-
-        assert_eq!(result.error_code.as_deref(), Some("signature_failure"));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_target_version_mismatch() {
-        let assets = signed_assets("0.3.0", "new probe", None);
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets(assets, public_key_sha256);
-
-        assert_eq!(result.error_code.as_deref(), Some("target_mismatch"));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_signed_downgrade_asset_before_replacement() {
-        let assets = signed_assets("0.1.9", "downgraded probe", None);
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
-            assets,
-            public_key_sha256,
-            "0.2.0",
-            "0.1.9",
-        );
-
-        assert!(matches!(
-            result,
-            Err(ProbeUpgraderRunError::DowngradeRejected)
-        ));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_signed_same_version_replay_before_replacement() {
-        let assets = signed_assets("0.2.0", "replayed probe", None);
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
-            assets,
-            public_key_sha256,
-            "0.2.0",
-            "0.2.0",
-        );
-
-        assert!(matches!(
-            result,
-            Err(ProbeUpgraderRunError::DowngradeRejected)
-        ));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_accepts_signed_newer_asset_with_local_version_guard() {
-        let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
-            assets,
-            public_key_sha256,
-            "0.1.9",
-            "0.2.0",
-        );
-
-        assert!(result.is_ok());
-        assert!(
-            fs::read_to_string(install_path)
-                .expect("binary")
-                .contains("new probe")
-        );
-        assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
-    }
-
-    #[test]
-    fn internal_probe_upgrader_accepts_tag_prefixed_manifest_version() {
-        let assets = signed_assets("v0.2.0", &replacement_probe_binary("new probe"), None);
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets(assets, public_key_sha256);
-
-        assert_eq!(result.error_code, None);
-        assert!(
-            fs::read_to_string(install_path)
-                .expect("binary")
-                .contains("new probe")
-        );
-        assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_missing_architecture_asset() {
-        let assets = signed_assets_for_target(
-            "0.2.0",
-            "new probe",
-            None,
-            "i686-unknown-linux-gnu",
-            "enoki-probe-i686-unknown-linux-gnu.tar.gz",
-        );
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets(assets, public_key_sha256);
-
-        assert_eq!(result.error_code.as_deref(), Some("architecture_missing"));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_missing_asset_download() {
-        let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let archive_file = assets.archive_file.clone();
-        let (result, install_path, systemd) =
-            run_upgrade_with_assets_filtering(assets, public_key_sha256, |url| {
-                !url.ends_with(&archive_file)
-            });
-
-        assert_eq!(result.error_code.as_deref(), Some("asset_missing"));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_unsafe_asset_filename() {
-        let assets = signed_assets_for_target(
-            "0.2.0",
-            "new probe",
-            None,
-            host_probe_asset_target().expect("supported test architecture"),
-            "../enoki-probe.tar.gz",
-        );
-        let public_key_sha256 = assets.public_key_sha256.clone();
-        let (result, install_path, systemd) = run_upgrade_with_assets(assets, public_key_sha256);
-
-        assert_eq!(result.error_code.as_deref(), Some("asset_missing"));
-        assert_eq!(
-            fs::read_to_string(install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_reports_post_replacement_restart_failure() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
-        let install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        write_test_bootstrap_config(&bootstrap_config_path, &install_metadata)
-            .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner {
-            failure: Some("systemd refused restart".to_string()),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &operation_stdin(),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("restart failure is reported as operation failure");
-
-        assert!(
-            fs::read_to_string(&install_path)
-                .expect("binary")
-                .contains("new probe")
-        );
-        assert_eq!(
-            result.error_code.as_deref(),
-            Some("post_replacement_restart_failure"),
-        );
-        assert!(
-            result
-                .message
-                .as_deref()
-                .expect("message")
-                .contains("Probe binary was replaced")
-        );
-        assert_eq!(
-            transport.status_url,
-            "https://hub.example/api/probe/operations/42/status",
-        );
-        assert!(
-            transport
-                .status_body
-                .contains("\"errorCode\":\"post_replacement_restart_failure\"")
-        );
-        assert!(transport.status_body.contains("\"status\":\"failed\""));
-        assert_eq!(
-            fs::read_to_string(status_path).expect("status"),
-            [
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "status = \"failed\"",
-                "error_code = \"post_replacement_restart_failure\"",
-                "message = \"Probe binary was replaced, but restarting the Probe service failed: failed to restart Probe service: systemd refused restart\"",
-                "",
-            ]
-            .join("\n"),
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn local_operation_status_preflight_rejects_existing_status_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        fs::create_dir_all(status_path.parent().expect("status dir")).expect("status dir");
-        let target_path = temp.path().join("attacker-target.toml");
-        fs::write(&target_path, "target").expect("target");
-        symlink(&target_path, &status_path).expect("status symlink");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-
-        let error = preflight_local_operation_status_writable(&install_metadata)
-            .expect_err("status symlink is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "operation status path must not be a symlink"
-            )
-        ));
-        assert_eq!(fs::read_to_string(target_path).expect("target"), "target");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn local_operation_status_preflight_rejects_group_writable_status_parent() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_dir = temp.path().join("state");
-        let status_path = status_dir.join("probe-operation-status.toml");
-        fs::create_dir_all(&status_dir).expect("status dir");
-        fs::set_permissions(&status_dir, fs::Permissions::from_mode(0o775))
-            .expect("status dir perms");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-
-        let error = preflight_local_operation_status_writable(&install_metadata)
-            .expect_err("writable status parent is rejected");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "operation status parent must not be writable by group or other"
-            )
-        ));
-        assert!(!status_path.exists());
-    }
-
-    #[test]
-    fn internal_probe_upgrader_rejects_bootstrap_privileged_field_mismatch() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let assets = signed_assets("0.2.0", "new probe", None);
-        let install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                "install_path = \"/tmp/attacker-controlled-probe\"".to_string(),
-                format!(
-                    "probe_asset_public_key_sha256 = \"{}\"",
-                    assets.public_key_sha256,
-                ),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("write bootstrap config");
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &operation_stdin(),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect_err("mismatch is rejected before network calls");
-
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidConfig(
-                "install path does not match trusted install metadata"
-            )
-        ));
-        assert_eq!(transport.url, "");
-        assert!(transport.downloads.is_empty());
-        assert_eq!(
-            fs::read_to_string(&install_path).expect("binary"),
-            "old probe"
-        );
-        assert!(systemd.restarted.is_empty());
-    }
-
-    #[test]
-    fn probe_asset_target_supports_only_x86_64_and_aarch64() {
-        assert_eq!(
-            probe_asset_target_for_arch_and_abi("x86_64", LinuxAbi::Musl).expect("x86 target"),
-            "x86_64-unknown-linux-musl",
-        );
-        assert_eq!(
-            probe_asset_target_for_arch_and_abi("aarch64", LinuxAbi::Musl).expect("aarch64 target"),
-            "aarch64-unknown-linux-musl",
-        );
-        assert_eq!(
-            probe_asset_target_for_arch_and_abi("x86_64", LinuxAbi::Gnu).expect("x86 target"),
-            "x86_64-unknown-linux-gnu",
-        );
-        assert_eq!(
-            probe_asset_target_for_arch_and_abi("aarch64", LinuxAbi::Gnu).expect("aarch64 target"),
-            "aarch64-unknown-linux-gnu",
-        );
-        assert!(matches!(
-            probe_asset_target_for_arch_and_abi("riscv64", LinuxAbi::Gnu),
-            Err(ProbeUpgraderRunError::UnsupportedArchitecture(architecture))
-                if architecture == "riscv64"
-        ));
-    }
-
-    #[test]
-    fn probe_archive_rejects_path_traversal_entry() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let archive = archive_with_entry("../enoki-probe", tar::EntryType::Regular);
-
-        let error = replace_installed_probe_binary(&archive, &install_path)
-            .expect_err("path traversal is rejected");
-
-        assert!(matches!(error, ProbeUpgraderRunError::UnsafeArchive(_)));
-        assert_eq!(
-            fs::read_to_string(&install_path).expect("binary"),
-            "old probe"
-        );
-    }
-
-    #[test]
-    fn probe_archive_rejects_symlink_entry() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let archive = archive_with_entry("enoki-probe", tar::EntryType::Symlink);
-
-        let error = replace_installed_probe_binary(&archive, &install_path)
-            .expect_err("symlink is rejected");
-
-        assert!(matches!(error, ProbeUpgraderRunError::UnsafeArchive(_)));
-        assert_eq!(
-            fs::read_to_string(&install_path).expect("binary"),
-            "old probe"
-        );
-    }
-
-    #[test]
-    fn probe_archive_rejects_hardlink_entry() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let archive = archive_with_entry("enoki-probe", tar::EntryType::Link);
-
-        let error = replace_installed_probe_binary(&archive, &install_path)
-            .expect_err("hardlink is rejected");
-
-        assert!(matches!(error, ProbeUpgraderRunError::UnsafeArchive(_)));
-        assert_eq!(
-            fs::read_to_string(&install_path).expect("binary"),
-            "old probe"
-        );
-    }
-
-    struct SignedAssets {
-        archive_file: String,
-        archive: Vec<u8>,
-        manifest: Vec<u8>,
-        public_key: Vec<u8>,
-        public_key_sha256: String,
-        signature: Vec<u8>,
-    }
-
-    impl SignedAssets {
-        fn for_hub(&self, hub_url: &str) -> HashMap<String, Vec<u8>> {
-            HashMap::from([
-                (
-                    format!("{hub_url}/api/probe/assets/manifest.json"),
-                    self.manifest.clone(),
-                ),
-                (
-                    format!("{hub_url}/api/probe/assets/manifest.json.sig"),
-                    self.signature.clone(),
-                ),
-                (
-                    format!("{hub_url}/api/probe/assets/signing-key.pem"),
-                    self.public_key.clone(),
-                ),
-                (
-                    format!("{hub_url}/api/probe/assets/{}", self.archive_file),
-                    self.archive.clone(),
-                ),
-            ])
-        }
-    }
-
-    fn signed_assets(
-        version: &str,
-        binary_contents: &str,
-        sha256_override: Option<String>,
-    ) -> SignedAssets {
-        let target = host_probe_asset_target().expect("supported test architecture");
-        signed_assets_for_target(
-            version,
-            binary_contents,
-            sha256_override,
-            target,
-            &format!("enoki-probe-{target}.tar.gz"),
-        )
-    }
-
-    fn replacement_probe_binary(label: &str) -> String {
-        format!(
-            r#"#!/bin/sh
-if [ "${{1:-}}" = "internal-render-collector-helper-sudoers" ]; then
-  exit 0
-fi
-printf '%s\n' '{}'
-"#,
-            label,
-        )
-    }
-
-    fn signed_assets_for_target(
-        version: &str,
-        binary_contents: &str,
-        sha256_override: Option<String>,
-        target: &str,
-        archive_file: &str,
-    ) -> SignedAssets {
-        let archive = archive_with_probe_binary(binary_contents);
-        let sha256 = sha256_override.unwrap_or_else(|| hex_sha256(&archive));
-        let manifest = format!(
-            "{{\"assets\":[{{\"file\":\"{}\",\"sha256\":\"{}\",\"size\":{},\"target\":\"{}\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"{}\"}}\n",
-            archive_file,
-            sha256,
-            archive.len(),
-            target,
-            version,
-        )
-        .into_bytes();
-        let mut rng = OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("private key");
-        let public_key = private_key
-            .to_public_key()
-            .to_public_key_pem(Default::default())
-            .expect("public key")
-            .into_bytes();
-        let signature = SigningKey::<Sha256>::new(private_key)
-            .sign_with_rng(&mut rng, &manifest)
-            .to_vec();
-        let public_key_sha256 = hex_sha256(&public_key);
-
-        SignedAssets {
-            archive_file: archive_file.to_string(),
-            archive,
-            manifest,
-            public_key,
-            public_key_sha256,
-            signature,
-        }
-    }
-
-    fn trusted_install_metadata(
-        install_path: &Path,
-        operation_status_path: &Path,
-        probe_asset_public_key_sha256: String,
-    ) -> TrustedProbeInstallMetadata {
-        trusted_install_metadata_for_hub(
-            "https://hub.example",
-            install_path,
-            operation_status_path,
-            probe_asset_public_key_sha256,
-        )
-    }
-
-    fn run_repair_with_assets(
-        assets: SignedAssets,
-        pinned_key_sha256: String,
-        identity_failure: Option<String>,
-    ) -> (
-        Result<ProbeRepairResult, ProbeRepairRunError>,
-        PathBuf,
-        tempfile::TempDir,
-    ) {
-        run_repair_with_assets_for_versions(
-            assets,
-            pinned_key_sha256,
-            identity_failure,
-            "0.2.0",
-            "0.2.0",
-        )
-    }
-
-    fn run_repair_with_assets_for_versions(
-        assets: SignedAssets,
-        pinned_key_sha256: String,
-        identity_failure: Option<String>,
-        current_probe_version: &str,
-        failed_target_version: &str,
-    ) -> (
-        Result<ProbeRepairResult, ProbeRepairRunError>,
-        PathBuf,
-        tempfile::TempDir,
-    ) {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let status_path = temp
-            .path()
-            .join("var/lib/enoki-probe/probe-operation-status.toml");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "broken candidate").expect("broken candidate");
-        let mut install_metadata =
-            trusted_install_metadata(&install_path, &status_path, pinned_key_sha256);
-        install_metadata.identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        install_metadata.service_unit_path =
-            temp.path().join("etc/systemd/system/enoki-probe.service");
-        fs::create_dir_all(
-            install_metadata
-                .identity_path
-                .parent()
-                .expect("identity dir"),
-        )
-        .expect("identity dir");
-        fs::write(
-            &install_metadata.identity_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"complete-private-key\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("identity config");
-        fs::set_permissions(
-            &install_metadata.identity_path,
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("identity permissions");
-        write_failed_upgrade_marker(&status_path, failed_target_version);
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            identity_failure,
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-        let result = run_probe_repair_with_current_version_and_systemd_runner(
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            0,
-            test_process_uid(),
-            current_probe_version,
-        );
-        (result, install_path, temp)
-    }
-
-    fn write_failed_upgrade_marker(path: &Path, target_probe_version: &str) {
-        fs::create_dir_all(path.parent().expect("marker parent")).expect("marker parent");
-        fs::write(
-            path,
-            [
-                "operation_id = \"operation_41\"".to_string(),
-                format!(
-                    "target_probe_version = {}",
-                    toml_string(target_probe_version)
-                ),
-                "status = \"failed\"".to_string(),
-                "error_code = \"post_replacement_restart_failure\"".to_string(),
-                "message = \"systemd refused restart\"".to_string(),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-        .expect("failed Upgrade marker");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o644))
-            .expect("failed Upgrade marker permissions");
-    }
-
-    fn test_process_uid() -> u32 {
-        // SAFETY: `geteuid` takes no arguments and only reads the process credentials.
-        unsafe { libc::geteuid() }
-    }
-
-    fn run_repair_reconstruction_case(
-        assets: &SignedAssets,
-        failure_step: Option<&'static str>,
-        blocked_write: Option<&str>,
-    ) -> (
-        Result<ProbeRepairResult, ProbeRepairRunError>,
-        Vec<String>,
-        tempfile::TempDir,
-    ) {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let status_path = temp
-            .path()
-            .join("var/lib/enoki-probe/probe-operation-status.toml");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "broken candidate").expect("candidate binary");
-        let mut install_metadata = trusted_install_metadata(
-            &install_path,
-            &status_path,
-            assets.public_key_sha256.clone(),
-        );
-        install_metadata.identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        install_metadata.service_unit_path =
-            temp.path().join("etc/systemd/system/enoki-probe.service");
-        fs::create_dir_all(
-            install_metadata
-                .identity_path
-                .parent()
-                .expect("identity dir"),
-        )
-        .expect("identity dir");
-        fs::write(
-            &install_metadata.identity_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"complete-private-key\"",
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("identity config");
-        fs::set_permissions(
-            &install_metadata.identity_path,
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("identity mode");
-        write_failed_upgrade_marker(&status_path, "0.2.0");
-
-        if let Some(blocked_write) = blocked_write {
-            let blocker = temp.path().join(format!("blocked-{blocked_write}"));
-            fs::write(&blocker, "not a directory").expect("write blocker");
-            match blocked_write {
-                "sudoers" => {
-                    install_metadata.operation_sudoers_path = Some(blocker.join("sudoers"))
-                }
-                "service-unit" => {
-                    install_metadata.service_unit_path = blocker.join("enoki-probe.service")
-                }
-                _ => panic!("unsupported blocked write"),
-            }
-        }
-
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner {
-            failure_step,
-            ..RecordingSystemdRunner::default()
-        };
-        let result = run_probe_repair_with_current_version_and_systemd_runner(
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            0,
-            test_process_uid(),
-            "0.2.0",
-        );
-        (result, systemd.calls, temp)
-    }
-
-    fn trusted_install_metadata_for_hub(
-        hub_url: &str,
-        install_path: &Path,
-        operation_status_path: &Path,
-        probe_asset_public_key_sha256: String,
-    ) -> TrustedProbeInstallMetadata {
-        TrustedProbeInstallMetadata {
-            schema_version: 0,
-            hub_url: hub_url::normalized_base(hub_url).expect("valid test Hub URL"),
-            identity_path: operation_status_path
-                .parent()
-                .expect("status parent")
-                .join("probe-bootstrap.toml"),
-            install_path: install_path.to_path_buf(),
-            operation_status_path: operation_status_path.to_path_buf(),
-            probe_asset_public_key_sha256,
-            probe_distribution_root_sha256: None,
-            bootstrap_acquirer_path: None,
-            bootstrap_activator_path: None,
-            bootstrap_state_dir: None,
-            service_name: "enoki-probe".to_string(),
-            service_group: "enoki-probe".to_string(),
-            service_unit_path: operation_status_path
-                .parent()
-                .expect("status parent")
-                .join("enoki-probe.service"),
-            service_user: "enoki-probe".to_string(),
-            state_dir: operation_status_path
-                .parent()
-                .expect("status parent")
-                .to_path_buf(),
-            operation_sudoers_path: Some(
-                operation_status_path
-                    .parent()
-                    .expect("status parent")
-                    .join("enoki-probe-operations.sudoers"),
-            ),
-            collector_helper_sudoers_path: Some(
-                operation_status_path
-                    .parent()
-                    .expect("status parent")
-                    .join("enoki-probe-collector-helpers.sudoers"),
-            ),
-            old_sudoers_paths: Vec::new(),
-        }
-    }
-
-    fn fresh_split_install_metadata_contents(root: &Path) -> (String, PathBuf, PathBuf, PathBuf) {
-        let operation_sudoers_path = root.join("etc/sudoers.d/enoki-probe-operations");
-        let collector_helper_sudoers_path =
-            root.join("etc/sudoers.d/enoki-probe-collector-helpers");
-        let legacy_sudoers_path = root.join("etc/sudoers.d/enoki-probe-upgrader");
-        let contents = [
-            "hub_url = \"https://hub.example\"".to_string(),
-            format!(
-                "install_path = \"{}\"",
-                root.join("usr/local/bin/enoki-probe").display()
-            ),
-            format!(
-                "operation_status_path = \"{}\"",
-                root.join("var/lib/enoki-probe/probe-operation-status.toml")
-                    .display()
-            ),
-            format!(
-                "operation_sudoers_path = \"{}\"",
-                operation_sudoers_path.display()
-            ),
-            format!(
-                "collector_helper_sudoers_path = \"{}\"",
-                collector_helper_sudoers_path.display()
-            ),
-            format!(
-                "probe_asset_public_key_sha256 = \"{}\"",
-                assets_public_key_sha256()
-            ),
-            "service_name = \"enoki-probe\"".to_string(),
-            "service_user = \"enoki-probe\"".to_string(),
-            format!(
-                "state_dir = \"{}\"",
-                root.join("var/lib/enoki-probe").display()
-            ),
-            "".to_string(),
-        ]
-        .join("\n");
-
-        (
-            contents,
-            operation_sudoers_path,
-            collector_helper_sudoers_path,
-            legacy_sudoers_path,
-        )
-    }
-
-    fn version_one_install_metadata_contents(root: &Path) -> String {
-        let (legacy, _, _, _) = fresh_split_install_metadata_contents(root);
-        [
-            "schema_version = 1".to_string(),
-            format!(
-                "identity_path = \"{}\"",
-                root.join("etc/enoki/probe-bootstrap.toml").display()
-            ),
-            "service_group = \"enoki-probe\"".to_string(),
-            format!(
-                "service_unit_path = \"{}\"",
-                root.join("etc/systemd/system/enoki-probe.service")
-                    .display()
-            ),
-            legacy,
-        ]
-        .join("\n")
-    }
-
-    fn assets_public_key_sha256() -> String {
-        "a".repeat(64)
-    }
-
-    fn run_upgrade_with_assets(
-        assets: SignedAssets,
-        public_key_sha256: String,
-    ) -> (ProbeUpgraderResult, PathBuf, RecordingSystemdRunner) {
-        run_upgrade_with_assets_filtering(assets, public_key_sha256, |_| true)
-    }
-
-    fn run_upgrade_with_assets_filtering(
-        assets: SignedAssets,
-        public_key_sha256: String,
-        keep_asset: impl Fn(&str) -> bool,
-    ) -> (ProbeUpgraderResult, PathBuf, RecordingSystemdRunner) {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, public_key_sha256);
-        write_test_bootstrap_config(&bootstrap_config_path, &install_metadata)
-            .expect("write bootstrap config");
-        let mut hub_assets = assets.for_hub("https://hub.example");
-        hub_assets.retain(|url, _| keep_asset(url));
-        let mut transport = RecordingValidationTransport {
-            assets: hub_assets,
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
-            ProbeUpgraderRunInput {
-                bootstrap_config_path,
-            },
-            &operation_stdin(),
-            &mut transport,
-            &mut systemd,
-            &install_metadata,
-        )
-        .expect("operation failure is returned");
-        let persisted_install_path = temp.keep().join("bin/enoki-probe");
-
-        (result, persisted_install_path, systemd)
-    }
-
-    fn run_upgrade_with_assets_and_current_version(
-        assets: SignedAssets,
-        public_key_sha256: String,
-        current_probe_version: &str,
-        target_probe_version: &str,
-    ) -> (
-        Result<(), ProbeUpgraderRunError>,
-        PathBuf,
-        RecordingSystemdRunner,
-    ) {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::write(&install_path, "old probe").expect("old probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, public_key_sha256);
-        write_test_bootstrap_config(&bootstrap_config_path, &install_metadata)
-            .expect("write bootstrap config");
-        let bootstrap_config =
-            read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
-        let operation = ProbeUpgraderOperationMetadata {
-            operation_id: "42".to_string(),
-            target_probe_version: target_probe_version.to_string(),
-            token: "probe-operation-token".to_string(),
-        };
-        let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example"),
-            ..RecordingValidationTransport::default()
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let result = execute_probe_upgrade_with_current_version(
-            &operation,
-            &bootstrap_config,
-            &bootstrap_config_path,
-            &install_metadata,
-            &mut transport,
-            &mut systemd,
-            current_probe_version,
-        );
-        let persisted_install_path = temp.keep().join("bin/enoki-probe");
-
-        (result, persisted_install_path, systemd)
-    }
-
-    fn write_test_bootstrap_config(
-        bootstrap_config_path: &Path,
-        install_metadata: &TrustedProbeInstallMetadata,
-    ) -> Result<(), std::io::Error> {
-        fs::write(
-            bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"".to_string(),
-                "probe_id = \"probe_01\"".to_string(),
-                "probe_private_key_pem = \"test-private-key\"".to_string(),
-                format!(
-                    "state_dir = {}",
-                    toml_string(install_metadata.state_dir.to_str().expect("state dir")),
-                ),
-                format!(
-                    "operation_status_path = {}",
-                    toml_string(
-                        install_metadata
-                            .operation_status_path
-                            .to_str()
-                            .expect("status path"),
-                    ),
-                ),
-                format!(
-                    "install_path = {}",
-                    toml_string(
-                        install_metadata
-                            .install_path
-                            .to_str()
-                            .expect("install path")
-                    ),
-                ),
-                "service_name = \"enoki-probe\"".to_string(),
-                format!(
-                    "probe_asset_public_key_sha256 = \"{}\"",
-                    install_metadata.probe_asset_public_key_sha256,
-                ),
-                String::new(),
-            ]
-            .join("\n"),
-        )
-    }
-
-    fn operation_stdin() -> String {
-        [
-            "operation_id = \"42\"",
-            "target_probe_version = \"0.2.0\"",
-            "token = \"probe-operation-token\"",
-            "",
-        ]
-        .join("\n")
-    }
-
-    fn archive_with_probe_binary(contents: &str) -> Vec<u8> {
-        let mut archive_bytes = Vec::new();
-        {
-            let encoder = GzEncoder::new(&mut archive_bytes, Compression::default());
-            let mut archive = tar::Builder::new(encoder);
-            let mut header = tar::Header::new_gnu();
-            header.set_size(contents.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, "enoki-probe", contents.as_bytes())
-                .expect("append probe binary");
-            archive.finish().expect("finish archive");
-        }
-
-        archive_bytes
-    }
-
-    fn archive_with_entry(path: &str, entry_type: tar::EntryType) -> Vec<u8> {
-        let mut archive_bytes = Vec::new();
-        {
-            let encoder = GzEncoder::new(&mut archive_bytes, Compression::default());
-            let mut archive = tar::Builder::new(encoder);
-            let mut header = tar::Header::new_gnu();
-            header.set_entry_type(entry_type);
-            header.set_size(if entry_type == tar::EntryType::Regular {
-                "new probe".len() as u64
-            } else {
-                0
-            });
-            header.set_mode(0o755);
-            if entry_type == tar::EntryType::Symlink || entry_type == tar::EntryType::Link {
-                header.set_link_name("target").expect("link name");
-            }
-            if path.contains("..") {
-                let bytes = header.as_mut_bytes();
-                bytes[..path.len()].copy_from_slice(path.as_bytes());
-                bytes[path.len()] = 0;
-                header.set_cksum();
-                archive
-                    .append(&header, "new probe".as_bytes())
-                    .expect("append entry");
-            } else {
-                header.set_cksum();
-                archive
-                    .append_data(&mut header, path, "new probe".as_bytes())
-                    .expect("append entry");
-            }
-            archive.finish().expect("finish archive");
-        }
-
-        archive_bytes
-    }
-}
+mod install_metadata_tests;
+#[cfg(test)]
+mod lifecycle_entry_tests;

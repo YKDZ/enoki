@@ -85,6 +85,30 @@ pub fn acquire_delegation_generation(
     acquire_delegation_generation_from_directory(state_directory, 0, candidate)
 }
 
+/// 为已由上层可信元数据闭合到固定目录的生命周期调用者取得同一 generation lease。
+pub fn acquire_delegation_generation_at_owned_root(
+    state_root: &std::path::Path,
+    expected_uid: u32,
+    candidate: u64,
+) -> Result<DelegationGenerationLease, GenerationStateError> {
+    if unsafe { libc::geteuid() } != expected_uid || candidate == 0 {
+        return Err(GenerationStateError::NotRoot);
+    }
+    let state_directory = ensure_state_root_owned(state_root, expected_uid)?;
+    acquire_delegation_generation_from_directory(state_directory, expected_uid, candidate)
+}
+
+fn ensure_state_root_owned(
+    state_root: &std::path::Path,
+    expected_uid: u32,
+) -> Result<File, GenerationStateError> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = c_string(state_root.as_os_str().as_bytes())?;
+    let file = open_directory(path.as_ptr())?;
+    validate_file(&file, expected_uid, libc::S_IFDIR, 0o700)?;
+    Ok(file)
+}
+
 #[cfg(test)]
 fn acquire_delegation_generation_in(
     state_root: &Path,

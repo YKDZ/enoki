@@ -14,10 +14,18 @@ describe("Probe upgrade monitor", () => {
     const onHostDetail = vi.fn();
     const onTransition = vi.fn();
     const monitor = useProbeUpgradeMonitor({
-      async fetchJson<T>() {
-        return {
-          host: hostWithUpgradeState("succeeded"),
-        } as T;
+      async fetchJson<T>(path: string) {
+        return (
+          path === "/api/web/hosts/1"
+            ? { host: hostWithUpgradeState(null) }
+            : {
+                probeOperation: {
+                  ...terminalStatus("succeeded"),
+                  hostId: 1,
+                  kind: "probe_upgrade",
+                },
+              }
+        ) as T;
       },
       onHostDetail,
       onTransition,
@@ -41,9 +49,7 @@ describe("Probe upgrade monitor", () => {
     expect(onHostDetail).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 1,
-        probeUpgradeStatus: expect.objectContaining({
-          state: "succeeded",
-        }),
+        probeUpgradeStatus: null,
       }),
     );
     expect(onTransition).toHaveBeenCalledWith(
@@ -58,10 +64,18 @@ describe("Probe upgrade monitor", () => {
     vi.useFakeTimers();
     const onTransition = vi.fn();
     const monitor = useProbeUpgradeMonitor({
-      async fetchJson<T>() {
-        return {
-          host: hostWithUpgradeState("succeeded"),
-        } as T;
+      async fetchJson<T>(path: string) {
+        return (
+          path === "/api/web/hosts/1"
+            ? { host: hostWithUpgradeState(null) }
+            : {
+                probeOperation: {
+                  ...terminalStatus("succeeded"),
+                  hostId: 1,
+                  kind: "probe_upgrade",
+                },
+              }
+        ) as T;
       },
       onTransition,
       pollIntervalMs: 1_000,
@@ -88,23 +102,18 @@ describe("Probe upgrade monitor", () => {
     vi.useFakeTimers();
     const onTransition = vi.fn();
     const monitor = useProbeUpgradeMonitor({
-      async fetchJson<T>() {
-        return {
-          host: {
-            ...hostWithUpgradeState("canceled"),
-            probeUpgradeStatus: {
-              acceptedAtMs: 1,
-              completedAtMs: 3,
-              createdAtMs: 1,
-              failure: null,
-              id: 9,
-              runningAtMs: 2,
-              state: "canceled",
-              targetProbeVersion: "0.1.25",
-              updatedAtMs: 3,
-            },
-          },
-        } as T;
+      async fetchJson<T>(path: string) {
+        return (
+          path === "/api/web/hosts/1"
+            ? { host: hostWithUpgradeState(null) }
+            : {
+                probeOperation: {
+                  ...terminalStatus("canceled"),
+                  hostId: 1,
+                  kind: "probe_upgrade",
+                },
+              }
+        ) as T;
       },
       onTransition,
       pollIntervalMs: 1_000,
@@ -360,24 +369,36 @@ describe("Probe upgrade monitor", () => {
 });
 
 function activeStatus(id: number) {
-  return { ...hostWithUpgradeState("running").probeUpgradeStatus, id };
+  return { ...hostWithUpgradeState("running").probeUpgradeStatus!, id };
 }
 
 function hostWithUpgradeState(
-  state: "canceled" | "failed" | "running" | "succeeded" | "superseded",
+  state: "canceled" | "failed" | "running" | "succeeded" | "superseded" | null,
 ) {
   return {
     id: 1,
-    probeUpgradeStatus: {
-      acceptedAtMs: 1,
-      completedAtMs: state === "running" ? null : 3,
-      createdAtMs: 1,
-      failure: null,
-      id: 9,
-      runningAtMs: 2,
-      state,
-      targetProbeVersion: "0.1.25",
-      updatedAtMs: 3,
-    },
+    probeUpgradeStatus:
+      state === null
+        ? null
+        : {
+            ...terminalStatus(state),
+            completedAtMs: state === "running" ? null : 3,
+          },
+  };
+}
+
+function terminalStatus(
+  state: "canceled" | "failed" | "running" | "succeeded" | "superseded",
+) {
+  return {
+    acceptedAtMs: 1,
+    completedAtMs: 3,
+    createdAtMs: 1,
+    failure: null,
+    id: 9,
+    runningAtMs: 2,
+    state,
+    targetProbeVersion: "0.1.25",
+    updatedAtMs: 3,
   };
 }

@@ -8,7 +8,6 @@ const hubRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-
 describe("Hub server startup", () => {
   it("prints the fixed legacy-variable migration from the actual server process", async () => {
     const secret = "legacy-value-must-not-be-logged";

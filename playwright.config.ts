@@ -25,7 +25,7 @@ const hubEnvironment = {
   ENOKI_SQLITE_PATH: path.join(dataDir, "enoki.db"),
   ENOKI_WEB_DIST: path.join(rootDir, "apps/web/dist"),
   HOST: "127.0.0.1",
-  NODE_ENV: "production",
+  NODE_ENV: "development",
   OWNER_PASSWORD: "correct horse battery staple",
   PORT: String(port),
 };

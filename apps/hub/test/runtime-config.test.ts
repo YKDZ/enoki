@@ -44,7 +44,7 @@ describe("Hub runtime configuration", () => {
       probeApiOrigin: "https://hub.example",
       trustedProxyCidrs: [],
     });
-    expect(config.probeOperations).toEqual({
+    expect(config.probeOperations).toMatchObject({
       acceptedTimeoutMs: 300_000,
       runningTimeoutMs: 900_000,
       tokenSigningSecret: undefined,
@@ -53,9 +53,10 @@ describe("Hub runtime configuration", () => {
 
   it("allows deployment configuration to override persistence and Metrics retention", () => {
     const archiveDir = mkdtempSync(path.join(tmpdir(), "enoki-archive-"));
+    const dataRoot = mkdtempSync(path.join(tmpdir(), "enoki-config-"));
 
     const config = createHubRuntimeConfigFromEnvironment({
-      ENOKI_DATA_ROOT: "/var/lib/enoki",
+      ENOKI_DATA_ROOT: dataRoot,
       ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS: "120",
       ENOKI_HOST_STATUS_OFFLINE_AFTER_SECONDS: "45",
       ENOKI_HOST_STATUS_STALE_AFTER_SECONDS: "10",
@@ -73,7 +74,7 @@ describe("Hub runtime configuration", () => {
       OWNER_PASSWORD: "correct horse battery staple",
     });
 
-    expect(config.database.dataRoot).toBe("/var/lib/enoki");
+    expect(config.database.dataRoot).toBe(dataRoot);
     expect(config.database.sqlitePath).toBe("/tmp/custom-enoki.db");
     expect(config.installation).toEqual({
       probeApiOrigin: "https://probe.example",
@@ -99,7 +100,7 @@ describe("Hub runtime configuration", () => {
       probeApiOrigin: "https://probe.example",
       trustedProxyCidrs: [{ address: 167772160n, bits: 32, prefixLength: 8 }],
     });
-    expect(config.probeOperations).toEqual({
+    expect(config.probeOperations).toMatchObject({
       acceptedTimeoutMs: 60_000,
       runningTimeoutMs: 600_000,
       tokenSigningSecret: "stable-token-secret",

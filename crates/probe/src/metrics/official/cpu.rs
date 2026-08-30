@@ -1,42 +1,6 @@
-use std::{collections::BTreeMap, fs};
+use std::collections::BTreeMap;
 
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
-};
-use crate::protocol::enoki::v1::{CpuCoreMetric, MetricSample};
-
-pub const DEFINITION: CollectorDefinition =
-    CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::EveryTick);
-
-#[derive(Default)]
-pub struct CpuMetricCollector {
-    previous: Option<CpuCounterSnapshot>,
-}
-
-impl MetricCollector for CpuMetricCollector {
-    fn definition(&self) -> CollectorDefinition {
-        DEFINITION
-    }
-
-    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let Some(metrics) = fs::read_to_string("/proc/stat").ok().and_then(|contents| {
-            collect_cpu_metrics_from_proc_stat(&contents, self.previous.as_ref())
-        }) else {
-            return Ok(false);
-        };
-
-        self.previous = Some(metrics.snapshot.clone());
-        sample.cpu_cores = metrics.cores;
-        sample.cpu_percent = Some(metrics.aggregate_percent);
-        sample.cpu_idle_percent = Some(metrics.breakdown.idle_percent);
-        sample.cpu_iowait_percent = Some(metrics.breakdown.iowait_percent);
-        sample.cpu_steal_percent = Some(metrics.breakdown.steal_percent);
-        sample.cpu_system_percent = Some(metrics.breakdown.system_percent);
-        sample.cpu_user_percent = Some(metrics.breakdown.user_percent);
-
-        Ok(true)
-    }
-}
+use crate::protocol::enoki::v1::CpuCoreMetric;
 
 #[derive(Debug)]
 pub struct CpuMetrics {
@@ -44,6 +8,42 @@ pub struct CpuMetrics {
     pub breakdown: CpuBreakdownMetrics,
     pub cores: Vec<CpuCoreMetric>,
     pub snapshot: CpuCounterSnapshot,
+}
+
+/// CPU Provider 返回的有界类型化事实；Linux 文本解析不进入 Runtime。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CpuCounterRecord {
+    pub name: String,
+    pub user: u64,
+    pub nice: u64,
+    pub system: u64,
+    pub idle: u64,
+    pub iowait: u64,
+    pub irq: u64,
+    pub softirq: u64,
+    pub steal: u64,
+}
+
+pub fn parse_linux_proc_stat_cpu_counters(contents: &str) -> Option<Vec<CpuCounterRecord>> {
+    let records = contents
+        .lines()
+        .filter_map(parse_cpu_line)
+        .map(CpuCounters::into_record)
+        .collect::<Vec<_>>();
+    (!records.is_empty()).then_some(records)
+}
+
+pub fn collect_cpu_metrics_from_counter_records(
+    records: &[CpuCounterRecord],
+    previous: Option<&CpuCounterSnapshot>,
+) -> Option<CpuMetrics> {
+    let counters_by_name = records
+        .iter()
+        .cloned()
+        .map(CpuCounters::from_record)
+        .map(|counters| (counters.name.clone(), counters))
+        .collect();
+    collect_cpu_metrics_from_counters(counters_by_name, previous)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -64,16 +64,18 @@ pub fn collect_cpu_metrics_from_proc_stat(
     contents: &str,
     previous: Option<&CpuCounterSnapshot>,
 ) -> Option<CpuMetrics> {
-    let mut counters_by_name = BTreeMap::new();
+    let counters_by_name = parse_linux_proc_stat_cpu_counters(contents)?
+        .into_iter()
+        .map(CpuCounters::from_record)
+        .map(|counters| (counters.name.clone(), counters))
+        .collect();
+    collect_cpu_metrics_from_counters(counters_by_name, previous)
+}
 
-    for line in contents.lines() {
-        let Some(counters) = parse_cpu_line(line) else {
-            continue;
-        };
-
-        counters_by_name.insert(counters.name.clone(), counters);
-    }
-
+fn collect_cpu_metrics_from_counters(
+    counters_by_name: BTreeMap<String, CpuCounters>,
+    previous: Option<&CpuCounterSnapshot>,
+) -> Option<CpuMetrics> {
     let aggregate = counters_by_name.get("cpu")?;
     let aggregate_previous =
         previous.and_then(|snapshot| snapshot.counters_by_name.get(aggregate.name.as_str()));
@@ -135,6 +137,34 @@ struct CpuCounters {
 }
 
 impl CpuCounters {
+    fn into_record(self) -> CpuCounterRecord {
+        CpuCounterRecord {
+            name: self.name,
+            user: self.user,
+            nice: self.nice,
+            system: self.system,
+            idle: self.idle,
+            iowait: self.iowait,
+            irq: self.irq,
+            softirq: self.softirq,
+            steal: self.steal,
+        }
+    }
+
+    fn from_record(record: CpuCounterRecord) -> Self {
+        Self {
+            name: record.name,
+            user: record.user,
+            nice: record.nice,
+            system: record.system,
+            idle: record.idle,
+            iowait: record.iowait,
+            irq: record.irq,
+            softirq: record.softirq,
+            steal: record.steal,
+        }
+    }
+
     fn into_metric(self, previous: Option<&CpuCounters>) -> CpuCoreMetric {
         let usage_percent = self.usage_percent_since(previous);
 
@@ -244,5 +274,52 @@ impl CpuCounterDelta {
         } else {
             (value as f64 / total as f64) * 100.0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_stat_counters_establish_baseline_and_compute_deltas() {
+        let previous = collect_cpu_metrics_from_proc_stat(
+            "cpu 100 10 40 850 0 0 0 0\ncpu0 60 5 20 400 0 0 0 0\ncpu1 40 5 20 450 0 0 0 0\n",
+            None,
+        )
+        .expect("CPU baseline");
+        assert_close(previous.aggregate_percent, 0.0);
+        assert!(previous.cores.iter().all(|core| core.usage_percent == 0.0));
+
+        let current = collect_cpu_metrics_from_proc_stat(
+            "cpu 110 15 45 930 0 0 0 0\ncpu0 70 5 25 450 0 0 0 0\ncpu1 40 10 20 480 0 0 0 0\n",
+            Some(&previous.snapshot),
+        )
+        .expect("CPU delta");
+
+        assert_close(current.aggregate_percent, 20.0);
+        assert_close(current.breakdown.user_percent, 15.0);
+        assert_close(current.breakdown.system_percent, 5.0);
+        assert_close(current.breakdown.idle_percent, 80.0);
+        assert_eq!(
+            current
+                .cores
+                .iter()
+                .map(|core| (
+                    core.name.as_str(),
+                    core.user,
+                    core.nice,
+                    core.system,
+                    core.idle
+                ))
+                .collect::<Vec<_>>(),
+            vec![("cpu0", 70, 5, 25, 450), ("cpu1", 40, 10, 20, 480)],
+        );
+        assert_close(current.cores[0].usage_percent, 23.076_923_076_923_077);
+        assert_close(current.cores[1].usage_percent, 14.285_714_285_714_285);
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.000_000_1);
     }
 }

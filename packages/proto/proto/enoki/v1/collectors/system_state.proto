@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package enoki.v1;
+
+import "enoki/v1/collectors/host_profile.proto";
+
+// Provider 读取的一组不可变 CPU counter 事实。
+message CpuCounterResourceFact {
+  string name = 1;
+  uint64 user = 2;
+  uint64 nice = 3;
+  uint64 system = 4;
+  uint64 idle = 5;
+  uint64 iowait = 6;
+  uint64 irq = 7;
+  uint64 softirq = 8;
+  uint64 steal = 9;
+}
+
+// Provider 对一个固定挂载点执行 statvfs 后返回的不可变容量事实。
+message FilesystemCapacityResourceFact {
+  string mount_point = 1;
+  uint64 total_bytes = 2;
+  uint64 free_bytes = 3;
+  uint64 available_bytes = 4;
+}
+
+// Provider 从一个固定电源设备目录读取的原始事实。
+message BatterySupplyResourceFact {
+  string supply_type = 1;
+  string capacity = 2;
+  string status = 3;
+}
+
+// Provider 从固定 mount table 与 block sysfs 派生的设备拓扑事实。
+message BlockDeviceTopologyResourceFact {
+  string source = 1;
+  string physical_device = 2;
+}
+
+// 一次固定 pull 的完整 typed Resource Result。
+// procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
+message SystemStateResourceResult {
+  repeated CpuCounterResourceFact cpu_counters = 1;
+  string proc_loadavg = 2;
+  string proc_meminfo = 3;
+  string proc_uptime = 4;
+  HostProfileResourceFacts host_profile = 5;
+  string proc_net_dev = 6;
+  string proc_net_route = 7;
+  string proc_net_ipv6_route = 8;
+  string proc_mounts = 9;
+  string proc_diskstats = 10;
+  int64 disk_counters_collected_at_ms = 11;
+  repeated FilesystemCapacityResourceFact filesystem_capacities = 12;
+  repeated string temperature_inputs = 13;
+  repeated BatterySupplyResourceFact battery_supplies = 14;
+  string network_failure_code = 15;
+  string disk_failure_code = 16;
+  string temperature_failure_code = 17;
+  string battery_failure_code = 18;
+  repeated BlockDeviceTopologyResourceFact block_device_topology = 19;
+}

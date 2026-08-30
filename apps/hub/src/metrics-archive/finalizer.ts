@@ -23,6 +23,7 @@ const archiveTables = [
   "archive_metadata",
   "archive_host_snapshots",
   "metric_samples",
+  "metric_collector_outcomes",
   "official_metric_cpu",
   "official_metric_memory",
   "official_metric_load",
@@ -77,9 +78,12 @@ function validateMetricsArchiveFile(
     const metadata = validateArchiveMetadata(input, archive, rowCounts);
 
     const sampleCount = countRows(archive, "metric_samples");
-    if (sampleCount !== input.plan.samples.length) {
+    const plannedMetricSampleCount = input.plan.samples.filter(
+      (sample) => sample.hasMetricSample !== false,
+    ).length;
+    if (sampleCount !== plannedMetricSampleCount) {
       throw new Error(
-        `Metrics Archive validation failed: expected ${input.plan.samples.length} metric_samples rows, found ${sampleCount}.`,
+        `Metrics Archive validation failed: expected ${plannedMetricSampleCount} metric_samples rows, found ${sampleCount}.`,
       );
     }
 
@@ -90,7 +94,19 @@ function validateMetricsArchiveFile(
       );
     }
 
-    validatePlannedIdentities(input, archive, "metric_samples");
+    validatePlannedIdentities(
+      {
+        ...input,
+        plan: {
+          ...input.plan,
+          samples: input.plan.samples.filter(
+            (sample) => sample.hasMetricSample !== false,
+          ),
+        },
+      },
+      archive,
+      "metric_samples",
+    );
     validatePlannedIdentities(input, archive, "report_observations");
 
     const range = archive

@@ -4,7 +4,7 @@ import type {
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, lt } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
@@ -20,6 +20,16 @@ type ProtoHostProfileSnapshot = enoki.v1.IHostProfileSnapshot;
 
 const hostProfileCollectorId = "official.host-profile";
 
+export type HostProfileForwardEvidenceBinding = {
+  operationId: number;
+  reportBootId: string;
+  reportProbeId: string;
+};
+
+export type HostProfileForwardEvidence = HostProfileForwardEvidenceBinding & {
+  profileProbeAssetBundleVersion: string;
+};
+
 export type SnapshotCollectorStorageAdapter<Payload, View> = {
   collectorId: string;
   hasSnapshot: (
@@ -27,10 +37,23 @@ export type SnapshotCollectorStorageAdapter<Payload, View> = {
     snapshotHash: string | null | undefined,
   ) => boolean;
   read: (hostId: number) => View | null;
+  readObservation: (hostId: number) => {
+    forwardEvidence: HostProfileForwardEvidence | null;
+    observedAtMs: number;
+    view: View;
+  } | null;
+  observe: (input: {
+    forwardEvidence?: HostProfileForwardEvidenceBinding | null;
+    hostId: number;
+    observedAtMs: number;
+    snapshotHash: string;
+  }) => boolean;
   write: (input: {
+    forwardEvidence?: HostProfileForwardEvidenceBinding | null;
     hostId: number;
     observedIp?: string | null;
     payload: Payload;
+    profileProbeAssetBundleVersion?: string | null;
     snapshotHash: string;
     updatedAtMs: number;
   }) => { changed: boolean; view: View };
@@ -38,9 +61,11 @@ export type SnapshotCollectorStorageAdapter<Payload, View> = {
 
 export type HostProfileSnapshotWrite = {
   collectorId: typeof hostProfileCollectorId;
+  forwardEvidence?: HostProfileForwardEvidenceBinding | null;
   hostId: number;
   observedIp?: string | null;
   payload: ProtoHostProfileSnapshot;
+  profileProbeAssetBundleVersion?: string | null;
   snapshotHash: string;
   updatedAtMs: number;
 };
@@ -49,7 +74,11 @@ export type SnapshotCollectorSnapshotWrite = HostProfileSnapshotWrite;
 
 export type HostProfilePersistenceValues = Omit<
   NewOfficialHostProfileRow,
-  "hostId"
+  | "forwardOperationId"
+  | "hostId"
+  | "reportBootId"
+  | "reportProbeId"
+  | "reportProfileBundleVersion"
 >;
 
 type RegisteredSnapshotCollectorStorageAdapter = Pick<
@@ -180,9 +209,7 @@ export function createSnapshotCollectorStorageRegistry(
       );
     },
     pendingLegacySnapshotReplayRequest(input) {
-      if (input.sequence < 2) {
-        return null;
-      }
+      if (input.sequence < 2) return null;
 
       const predecessor = database
         .select({
@@ -201,15 +228,13 @@ export function createSnapshotCollectorStorageRegistry(
         )
         .get();
 
-      if (!predecessor) {
-        return null;
-      }
-
-      return {
-        ...input,
-        sequence: predecessor.sequence,
-        snapshotHash: predecessor.snapshotHash,
-      };
+      return predecessor
+        ? {
+            ...input,
+            sequence: predecessor.sequence,
+            snapshotHash: predecessor.snapshotHash,
+          }
+        : null;
     },
     snapshotReplayReceipt(input) {
       const receipt = database
@@ -240,9 +265,6 @@ export function createSnapshotCollectorStorageRegistry(
       }
 
       return {
-        // Receipts written before fulfilled_snapshot_hash was introduced can
-        // only have been fulfilled when the accepted and requested hashes
-        // were equal.
         acceptedSnapshotHash:
           receipt.fulfilledSnapshotHash ?? receipt.snapshotHash,
         key: {
@@ -325,6 +347,60 @@ export function createHostProfileStorageAdapter(
 
       return row ? viewFromRow(row) : null;
     },
+    readObservation(hostId) {
+      const row =
+        database
+          .select()
+          .from(officialHostProfiles)
+          .where(eq(officialHostProfiles.hostId, hostId))
+          .get() ?? null;
+
+      return row
+        ? {
+            forwardEvidence: hostProfileForwardEvidenceMapper.fromRow(row),
+            observedAtMs: row.updatedAtMs,
+            view: viewFromRow(row),
+          }
+        : null;
+    },
+    observe(input) {
+      const current = database
+        .select({
+          reportProfileBundleVersion:
+            officialHostProfiles.reportProfileBundleVersion,
+        })
+        .from(officialHostProfiles)
+        .where(
+          and(
+            eq(officialHostProfiles.hostId, input.hostId),
+            eq(officialHostProfiles.snapshotHash, input.snapshotHash),
+            lt(officialHostProfiles.updatedAtMs, input.observedAtMs),
+          ),
+        )
+        .get();
+      if (!current) return false;
+
+      return Boolean(
+        database
+          .update(officialHostProfiles)
+          .set({
+            ...hostProfileForwardEvidenceMapper.toPersistenceValues(
+              input.forwardEvidence,
+              current.reportProfileBundleVersion,
+            ),
+            updatedAtMs: input.observedAtMs,
+          })
+          .where(
+            and(
+              eq(officialHostProfiles.hostId, input.hostId),
+              eq(officialHostProfiles.snapshotHash, input.snapshotHash),
+              lt(officialHostProfiles.updatedAtMs, input.observedAtMs),
+            ),
+          )
+          .returning({ hostId: officialHostProfiles.hostId })
+          .get(),
+      );
+    },
     write(input) {
       const view = normalizeHostProfile(input.payload);
       return database.transaction((transaction) => {
@@ -336,6 +412,20 @@ export function createHostProfileStorageAdapter(
             .get() ?? null;
 
         if (existing?.snapshotHash === input.snapshotHash) {
+          if (existing.updatedAtMs < input.updatedAtMs) {
+            transaction
+              .update(officialHostProfiles)
+              .set({
+                ...hostProfileForwardEvidenceMapper.toPersistenceValues(
+                  input.forwardEvidence,
+                  input.profileProbeAssetBundleVersion ??
+                    existing.reportProfileBundleVersion,
+                ),
+                updatedAtMs: input.updatedAtMs,
+              })
+              .where(eq(officialHostProfiles.hostId, input.hostId))
+              .run();
+          }
           return { changed: false, view: viewFromRow(existing) };
         }
 
@@ -358,6 +448,10 @@ export function createHostProfileStorageAdapter(
             snapshotHash: input.snapshotHash,
             updatedAtMs: input.updatedAtMs,
           }),
+          ...hostProfileForwardEvidenceMapper.toPersistenceValues(
+            input.forwardEvidence,
+            input.profileProbeAssetBundleVersion,
+          ),
           hostId: input.hostId,
         };
 
@@ -391,6 +485,50 @@ export function createHostProfileStorageAdapter(
     },
   };
 }
+
+type HostProfileForwardEvidenceRow = Pick<
+  typeof officialHostProfiles.$inferSelect,
+  | "forwardOperationId"
+  | "reportBootId"
+  | "reportProbeId"
+  | "reportProfileBundleVersion"
+>;
+
+const hostProfileForwardEvidenceMapper = {
+  fromRow(
+    row: HostProfileForwardEvidenceRow,
+  ): HostProfileForwardEvidence | null {
+    if (
+      row.forwardOperationId === null ||
+      !row.reportBootId ||
+      !row.reportProbeId ||
+      !row.reportProfileBundleVersion
+    ) {
+      return null;
+    }
+    return {
+      operationId: row.forwardOperationId,
+      profileProbeAssetBundleVersion: row.reportProfileBundleVersion,
+      reportBootId: row.reportBootId,
+      reportProbeId: row.reportProbeId,
+    };
+  },
+  toPersistenceValues(
+    binding: HostProfileForwardEvidenceBinding | null | undefined,
+    profileProbeAssetBundleVersion: string | null | undefined,
+  ) {
+    const evidence =
+      binding && profileProbeAssetBundleVersion
+        ? { ...binding, profileProbeAssetBundleVersion }
+        : null;
+    return {
+      forwardOperationId: evidence?.operationId ?? null,
+      reportBootId: evidence?.reportBootId ?? null,
+      reportProbeId: evidence?.reportProbeId ?? null,
+      reportProfileBundleVersion: profileProbeAssetBundleVersion ?? null,
+    };
+  },
+};
 
 export function hostProfilePersistenceValues(input: {
   payload: ProtoHostProfileSnapshot;

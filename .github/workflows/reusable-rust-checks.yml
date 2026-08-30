@@ -14,6 +14,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Node.js for Bootstrap verifier
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install Node workspace dependencies for Bootstrap verifier
+        run: pnpm install --frozen-lockfile
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -29,4 +41,15 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: |
+          cleanup() {
+            local status=$?
+            if [[ -d target ]] && ! sudo chown -R "$(id -u):$(id -g)" target; then
+              exit 1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          export RUSTUP_HOME="${RUSTUP_HOME:-"$HOME/.rustup"}"
+          cargo="$(command -v cargo)"
+          sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME "$cargo" test --workspace

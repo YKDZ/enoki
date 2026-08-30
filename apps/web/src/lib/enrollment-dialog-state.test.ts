@@ -9,6 +9,20 @@ import {
 } from "./enrollment-dialog-state";
 
 const existingEnrollment: EnrollmentResponse = {
+  bootstrapRecipe: {
+    bundleVersion: "1.2.3",
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: "enoki-probe-bootstrap.py",
+      sha256: "a".repeat(64),
+      size: 1,
+      version: "v1",
+    },
+    rootFingerprint: "b".repeat(64),
+    schemaVersion: 1,
+    targets: [],
+  },
   createdAtMs: 1_724_999_100_000,
   enrollmentId: "enr_existing",
   enrollmentToken: "enk_enroll_old",

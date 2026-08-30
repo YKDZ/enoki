@@ -1,15 +1,16 @@
-import { type Page, type Route } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Page,
+  type Route,
+  type WebSocketRoute,
+} from "@playwright/test";
 
 import type { HostDetail } from "../../apps/web/src/types";
-import {
-  releaseUiBrowserRuntime,
-  releaseUiLifecycleVersions,
-} from "./release-ui-contract-fixture";
-import { expect, test } from "./security-console";
+import { releaseUiLifecycleVersions } from "./release-ui-contract-fixture";
 
 type ProbeUpgradeStatus = NonNullable<HostDetail["probeUpgradeStatus"]>;
 
-const { ownerPassword } = releaseUiBrowserRuntime();
 const isCandidateImageGate = Boolean(process.env.ENOKI_RELEASE_UI_BASE_URL);
 const { candidateVersion, currentProbeVersion, targetProbeVersion } =
   releaseUiLifecycleVersions();
@@ -44,27 +45,67 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     );
   });
 
-  test("显示已完成的探针升级", async ({ page }) => {
-    await openHostDetail(page, probeUpgrade("succeeded"));
+  test("显示已接收的探针升级", async ({ page }) => {
+    await openHostDetail(page, probeUpgrade("accepted"));
 
     await expect(page.getByTestId("probe-upgrade-status")).toContainText(
-      "探针升级完成",
+      "探针已接收升级请求",
     );
   });
 
-  test("失败的探针升级只提供探针修复恢复方向", async ({ page }) => {
+  test("刷新后不显示已完成的探针升级", async ({ page }) => {
+    await openHostDetail(page, probeUpgrade("succeeded"));
+
+    await expect(page.getByTestId("probe-upgrade-status")).toHaveCount(0);
+  });
+
+  for (const terminalState of ["canceled", "superseded"] as const) {
+    test(`刷新后不显示 ${terminalState} 的探针升级`, async ({ page }) => {
+      await openHostDetail(page, probeUpgrade(terminalState));
+
+      await expect(page.getByTestId("probe-upgrade-status")).toHaveCount(0);
+    });
+  }
+
+  test("未知失败只显示通用无动作状态", async ({ page }) => {
+    await openHostDetail(
+      page,
+      probeUpgrade("failed", { recoveryDisposition: null }),
+    );
+
+    const status = page.getByTestId("probe-upgrade-status");
+    await expect(status).toContainText("探针升级失败：未知问题");
+    await expect(status).toContainText("Hub 无法安全判断恢复方式");
+    await expect(status.getByRole("button")).toHaveCount(0);
+    await expect(status).not.toContainText("sudo enoki-probe repair");
+    await expect(status).not.toContainText("生成手动重装命令");
+  });
+
+  test("可重试失败只通过既有升级确认流程恢复", async ({ page }) => {
     await openHostDetail(
       page,
       probeUpgrade("failed", {
-        code: "probe_upgrade_running_timeout",
-        message: "探针升级后未恢复上报。",
+        recoveryDisposition: "retry_probe_upgrade",
+      }),
+    );
+
+    await page.getByRole("button", { name: "再次确认升级" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "确认升级探针" }),
+    ).toBeVisible();
+  });
+
+  test("失败的探针升级只使用 Hub 提供的探针修复方向", async ({ page }) => {
+    await openHostDetail(
+      page,
+      probeUpgrade("failed", {
+        recoveryDisposition: "probe_repair",
       }),
     );
 
     const status = page.getByTestId("probe-upgrade-status");
     await expect(status).toContainText("探针升级失败");
-    await expect(status).toContainText("probe_upgrade_running_timeout");
-    await expect(status).toContainText("以 root 权限运行探针修复");
+    await expect(status).toContainText("sudo enoki-probe repair");
     await expect(status).not.toContainText("降级");
     await expect(status).not.toContainText("重新安装");
     await expect(status).not.toContainText("重新注册");
@@ -75,19 +116,133 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     ).toHaveCount(0);
   });
 
-  test("权限不足的探针升级指向一次性的安装恢复", async ({ page }) => {
+  test("手动重装 disposition 进入既有一次性安装流程", async ({ page }) => {
+    let ordinaryEnrollmentPostCount = 0;
+    await page.route("**/api/web/enrollments", async (route) => {
+      if (route.request().method() === "POST") {
+        ordinaryEnrollmentPostCount += 1;
+      }
+      await route.abort("blockedbyclient");
+    });
+    let manualReinstallRequest: {
+      method: string;
+      pathname: string;
+      postData: string | null;
+    } | null = null;
+    let manualReinstallRequestCount = 0;
+    await page.route(
+      `**/api/web/enrollments/manual-reinstall/${hostId}`,
+      async (route) => {
+        const request = route.request();
+        manualReinstallRequestCount += 1;
+        manualReinstallRequest = {
+          method: request.method(),
+          pathname: new URL(request.url()).pathname,
+          postData: request.postData(),
+        };
+        await route.fulfill({
+          contentType: "application/json",
+          json: {
+            bootstrapRecipe: {
+              bundleVersion: targetProbeVersion,
+              distribution: "enoki",
+              kind: "enoki-probe-bootstrap-recipe-record",
+              recipe: {
+                file: "enoki-probe-bootstrap.py",
+                sha256: "a".repeat(64),
+                size: 123,
+                version: "v1",
+              },
+              rootFingerprint: "b".repeat(64),
+              schemaVersion: 1,
+              targets: ["x86_64-unknown-linux-musl"],
+            },
+            createdAtMs: 1_725_000_000_000,
+            enrollmentId: "enr_manual_reinstall",
+            enrollmentToken: "enrollment-token",
+            expiresAtMs: 1_725_000_900_000,
+            expiredAtMs: null,
+            hostId: null,
+            hubUrl: "http://127.0.0.1:38200",
+            installCommand: "sudo enoki-probe-bootstrap manual-reinstall",
+            readyAtMs: null,
+            rejectedAtMs: null,
+            rejection: null,
+            status: "pending",
+            target: { hostId, kind: "manual_reinstall" },
+            verificationDeadlineAtMs: null,
+          },
+          status: 201,
+        });
+      },
+    );
     await openHostDetail(
       page,
       probeUpgrade("failed", {
-        code: "insufficient_privilege",
-        message: "sudo denied",
+        recoveryDisposition: "manual_reinstall_required",
       }),
+      {
+        hostStatus: "offline",
+        manualReinstall: {
+          sourceProbeVersion: currentProbeVersion,
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion,
+        },
+      },
     );
 
     const status = page.getByTestId("probe-upgrade-status");
-    await expect(status).toContainText("生成新的一次性安装命令");
-    await expect(status).toContainText("root 权限运行");
+    await expect(status).toContainText("需要手动重新安装探针");
+    expect(manualReinstallRequestCount).toBe(0);
+    expect(ordinaryEnrollmentPostCount).toBe(0);
+    await page.getByRole("button", { name: "生成手动重装命令" }).click();
+    await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
+      "sudo enoki-probe-bootstrap manual-reinstall",
+    );
+    expect(manualReinstallRequest).toEqual({
+      method: "POST",
+      pathname: `/api/web/enrollments/manual-reinstall/${hostId}`,
+      postData: null,
+    });
+    expect(manualReinstallRequestCount).toBe(1);
+    expect(ordinaryEnrollmentPostCount).toBe(0);
     await expect(status).not.toContainText("探针修复");
+  });
+
+  test("当前升级问题在常用视口中稳定位于系统信息与详情内容之间", async ({
+    page,
+  }) => {
+    for (const viewport of [
+      { height: 844, width: 390 },
+      { height: 900, width: 1440 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await openHostDetail(page, probeUpgrade("running"));
+
+      const heading = page.getByTestId("host-detail-heading");
+      const systemInformation = page.getByTestId("host-system-information");
+      const status = page.getByTestId("probe-upgrade-status");
+      const detailContent = page.getByTestId("host-detail-content");
+      const [headingBox, systemBox, statusBox, detailBox] = await Promise.all([
+        heading.boundingBox(),
+        systemInformation.boundingBox(),
+        status.boundingBox(),
+        detailContent.boundingBox(),
+      ]);
+
+      expect(headingBox).not.toBeNull();
+      expect(systemBox).not.toBeNull();
+      expect(statusBox).not.toBeNull();
+      expect(detailBox).not.toBeNull();
+      expect(statusBox?.y).toBeGreaterThan(
+        (systemBox?.y ?? 0) + (systemBox?.height ?? 0),
+      );
+      expect((statusBox?.y ?? 0) + (statusBox?.height ?? 0)).toBeLessThan(
+        detailBox?.y ?? 0,
+      );
+      expect(statusBox?.width).toBeCloseTo(headingBox?.width ?? 0, 0);
+      await page.unrouteAll({ behavior: "wait" });
+    }
   });
 
   test("管理员确认后发送一次带会话认证的探针升级请求", async ({ page }) => {
@@ -127,6 +282,121 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     );
     expect(requestCount).toBe(1);
     expect(ownerCookie).toContain("enoki_owner_session=");
+  });
+
+  for (const [terminalState, feedbackTitle] of [
+    ["succeeded", "探针升级完成"],
+    ["canceled", "探针升级已取消"],
+    ["superseded", "探针升级请求已被替代"],
+  ] as const) {
+    test(`${terminalState} 只显示一次实时反馈，不保留 inline 终态`, async ({
+      page,
+    }) => {
+      let requested = false;
+      await openHostDetail(page, null, {
+        async onHostRequest(route) {
+          if (route.request().method() === "POST") {
+            requested = true;
+            await route.fulfill({
+              contentType: "application/json",
+              json: { probeUpgradeRequest: probeUpgrade("pending") },
+              status: 201,
+            });
+            return true;
+          }
+          if (requested) {
+            await route.fulfill({
+              contentType: "application/json",
+              json: { host: hostDetail(null) },
+            });
+            return true;
+          }
+          return false;
+        },
+        async onProbeOperationRequest(route) {
+          await route.fulfill({
+            contentType: "application/json",
+            json: {
+              probeOperation: {
+                ...probeUpgrade(terminalState),
+                hostId,
+                kind: "probe_upgrade",
+              },
+            },
+          });
+          return true;
+        },
+      });
+
+      await page
+        .getByRole("button", { name: `探针可升级到 ${targetProbeVersion}` })
+        .click();
+      await page.getByRole("button", { name: "确认升级" }).click();
+
+      await expect(page.getByText(feedbackTitle, { exact: true })).toHaveCount(
+        1,
+        { timeout: 5_000 },
+      );
+      await expect(page.getByTestId("probe-upgrade-status")).toHaveCount(0);
+    });
+  }
+
+  test("live summary 恢复信号会重取并清除已打开详情的当前失败", async ({
+    page,
+  }) => {
+    let recovered = false;
+    let detailRequestCount = 0;
+    const liveSocket: { route?: WebSocketRoute } = {};
+    const detailSubscribed = deferred<void>();
+    await page.routeWebSocket("**/api/web/ws", (socket) => {
+      liveSocket.route = socket;
+      socket.onMessage((message) => {
+        if (
+          typeof message === "string" &&
+          message.includes('"type":"subscribe_host_detail"') &&
+          message.includes(`"hostId":${hostId}`)
+        ) {
+          detailSubscribed.resolve();
+        }
+      });
+    });
+    const failed = probeUpgrade("failed", {
+      recoveryDisposition: "probe_repair",
+    });
+    await openHostDetail(page, failed, {
+      async onHostRequest(route) {
+        if (route.request().method() !== "GET") return false;
+        detailRequestCount += 1;
+        await route.fulfill({
+          contentType: "application/json",
+          json: { host: hostDetail(recovered ? null : failed) },
+        });
+        return true;
+      },
+    });
+    await expect(page.getByTestId("probe-upgrade-status")).toBeVisible();
+    await detailSubscribed.promise;
+
+    recovered = true;
+    liveSocket.route?.send(
+      JSON.stringify({
+        host: {
+          id: hostId,
+          lastSeenAtMs: 1_725_000_001_600,
+          latestMetrics: null,
+          probeUpgradeProblem: null,
+          status: "online",
+          warningFlags: {
+            clockSkew: false,
+            probeConfigurationError: false,
+          },
+        },
+        type: "host_summary",
+      }),
+    );
+
+    await expect(page.getByTestId("probe-upgrade-status")).toHaveCount(0);
+    expect(detailRequestCount).toBe(2);
   });
 
   test("管理员确认后发送一次带会话认证的卸载探针并删除主机请求", async ({
@@ -241,11 +511,20 @@ async function openHostDetail(
   page: Page,
   probeUpgradeStatus: ProbeUpgradeStatus | null,
   options: {
+    hostStatus?: HostDetail["status"];
+    manualReinstall?: NonNullable<
+      HostDetail["probeUpgradeEligibility"]
+    >["manualReinstall"];
     onHostRequest?: (route: Route) => Promise<boolean>;
     onMetricsRequest?: (route: Route) => Promise<boolean>;
+    onProbeOperationRequest?: (route: Route) => Promise<boolean>;
   } = {},
 ) {
-  const host = hostDetail(probeUpgradeStatus);
+  const host = hostDetail(
+    probeUpgradeStatus,
+    options.hostStatus,
+    options.manualReinstall,
+  );
   await page.route("**/api/web/hosts", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -270,6 +549,12 @@ async function openHostDetail(
       await route.abort("blockedbyclient");
     },
   );
+  await page.route("**/api/web/probe-operations/*", async (route) => {
+    if (await options.onProbeOperationRequest?.(route)) {
+      return;
+    }
+    await route.abort("blockedbyclient");
+  });
   await page.route(
     `**/api/web/hosts/${hostId}/metrics?window=*`,
     async (route) => {
@@ -297,11 +582,18 @@ function probeUpgrade(
   state: ProbeUpgradeStatus["state"],
   failure: ProbeUpgradeStatus["failure"] = null,
 ): ProbeUpgradeStatus {
-  const accepted = ["accepted", "running", "succeeded", "failed"].includes(
+  const accepted = [
+    "accepted",
+    "running",
+    "succeeded",
+    "failed",
+    "canceled",
+    "superseded",
+  ].includes(state);
+  const running = ["running", "succeeded"].includes(state);
+  const completed = ["succeeded", "failed", "canceled", "superseded"].includes(
     state,
   );
-  const running = ["running", "succeeded"].includes(state);
-  const completed = ["succeeded", "failed"].includes(state);
   return {
     acceptedAtMs: accepted ? 1_725_000_000_250 : null,
     completedAtMs: completed ? 1_725_000_001_000 : null,
@@ -315,7 +607,13 @@ function probeUpgrade(
   };
 }
 
-function hostDetail(probeUpgradeStatus: ProbeUpgradeStatus | null): HostDetail {
+function hostDetail(
+  probeUpgradeStatus: ProbeUpgradeStatus | null,
+  status: HostDetail["status"] = "online",
+  manualReinstall?: NonNullable<
+    HostDetail["probeUpgradeEligibility"]
+  >["manualReinstall"],
+): HostDetail {
   return {
     clockSkew: { detected: false, lastDeltaMs: null },
     collectorCapabilities: null,
@@ -353,11 +651,21 @@ function hostDetail(probeUpgradeStatus: ProbeUpgradeStatus | null): HostDetail {
       },
       mode: "inherit",
     },
+    probeUpgradeProblem:
+      probeUpgradeStatus?.state === "failed"
+        ? { status: "failed" }
+        : probeUpgradeStatus &&
+            ["pending", "accepted", "running"].includes(
+              probeUpgradeStatus.state,
+            )
+          ? { status: "in_progress" }
+          : null,
     probeUpgradeEligibility: {
       currentProbeAssetSetVersion: candidateVersion,
       currentProbeVersion,
       isUpgradeable:
         probeUpgradeStatus === null || probeUpgradeStatus.state === "failed",
+      ...(manualReinstall ? { manualReinstall } : {}),
       nonUpgradeableReason:
         probeUpgradeStatus === null || probeUpgradeStatus.state === "failed"
           ? null
@@ -366,7 +674,7 @@ function hostDetail(probeUpgradeStatus: ProbeUpgradeStatus | null): HostDetail {
     probeUpgradeStatus,
     probeVersion: currentProbeVersion,
     reportedProbeConfigurationVersion: "default",
-    status: "online",
+    status,
     system: "Ubuntu 24.04",
     warnings: [],
   };

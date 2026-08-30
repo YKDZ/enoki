@@ -1,14 +1,16 @@
+import { generateKeyPairSync } from "node:crypto";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { issueProbeOperationToken } from "../src/probe/operation-token";
 
 const tempRoots: string[] = [];
-const snapshotReplayReceiptMigration = "20260810161024_misty_paper_doll";
 
 describe("Hub database", () => {
   afterEach(async () => {
@@ -44,6 +46,616 @@ describe("Hub database", () => {
     ]);
 
     database.close();
+  });
+
+  it("adds nullable Runtime failure repair bindings without reclassifying a legacy failed-Upgrade Repair", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const currentMigration = "20260824132103_messy_madame_hydra";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    const legacyOptions = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      legacyOptions,
+    );
+    createHost(legacy, { id: 73, probeId: "probe-legacy-repair" });
+    legacy.sqlite
+      .prepare(
+        `insert into probe_operations (
+        id, managed_host_id, kind, state, target_probe_version,
+        repair_failed_operation_id, repair_evidence_sha256,
+        created_at_ms, updated_at_ms, accepted_at_ms
+      ) values (42, 73, 'probe_repair', 'accepted', '1.2.3', 41, ?, 1, 1, 1)`,
+      )
+      .run("a".repeat(64));
+    legacy.close();
+
+    await cp(
+      path.resolve("drizzle", currentMigration),
+      path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      legacyOptions,
+    );
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select repair_eligibility_kind as kind, repair_failure_generation as generation from probe_operations where id = 42",
+        )
+        .get(),
+    ).toEqual({ kind: null, generation: null });
+    expect(migrated.probeOperations.findById(42)).toEqual(
+      expect.objectContaining({
+        repairEligibilityKind: "failed_upgrade",
+        repairFailedOperationId: 41,
+        repairFailureGeneration: null,
+      }),
+    );
+    migrated.close();
+  });
+
+  it("adds nullable Forward evidence bindings without reclassifying an existing Host Profile", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const currentMigration = "20260824121043_minor_payback";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    const options = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    createHost(legacy, { id: 72, probeId: "probe-legacy-profile" });
+    legacy.sqlite
+      .prepare(
+        `insert into official_host_profiles (
+           managed_host_id, snapshot_hash, payload_json, hostname, os,
+           kernel, architecture, cpu_count, memory_total_bytes, probe_version,
+           filesystems_json, network_interfaces_json, updated_at_ms
+         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        72,
+        "legacy-profile-hash",
+        JSON.stringify({
+          architecture: "x86_64",
+          collectorCapabilities: null,
+          cpuCount: 2,
+          cpuModel: null,
+          filesystems: [],
+          hostname: "legacy-profile",
+          kernel: "6.8.0",
+          memoryTotalBytes: 2_147_483_648,
+          networkInterfaces: [],
+          os: "linux",
+          probeVersion: "0.1.0",
+        }),
+        "legacy-profile",
+        "linux",
+        "6.8.0",
+        "x86_64",
+        2,
+        2_147_483_648,
+        "0.1.0",
+        "[]",
+        "[]",
+        1_725_000_000_000,
+      );
+    legacy.close();
+    await cp(
+      path.resolve("drizzle", currentMigration),
+      path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    expect(migrated.snapshotCollectors.hostProfile.readObservation(72)).toEqual(
+      expect.objectContaining({
+        forwardEvidence: null,
+        observedAtMs: 1_725_000_000_000,
+        view: expect.objectContaining({ probeVersion: "0.1.0" }),
+      }),
+    );
+    migrated.close();
+  });
+
+  it("closes an active legacy manual reinstall authority when its signed source receipt is absent", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const currentMigration = "20260823112609_silent_serpent_society";
+    const successorMigration = "20260830034007_volatile_joshua_kane";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    await rm(path.join(stagedMigrations, successorMigration), {
+      force: true,
+      recursive: true,
+    });
+    const options = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    createHost(legacy, { id: 71, probeId: "probe-legacy-manual" });
+    legacy.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+           enrollment_id, token_hash, created_at_ms, expires_at_ms,
+           target_kind, target_host_id, expected_hub_origin,
+           expected_probe_id, expected_probe_version,
+           target_asset_set_digest, target_probe_version, status
+         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `enr_${"l".repeat(24)}`,
+        "legacy-manual-token-hash",
+        1_725_000_000_000,
+        1_725_003_600_000,
+        "manual_reinstall",
+        71,
+        "https://hub.example",
+        "probe-legacy-manual",
+        "0.1.74",
+        `sha256:${"a".repeat(64)}`,
+        "1.2.3",
+        "pending",
+      );
+    legacy.close();
+    await cp(
+      path.resolve("drizzle", currentMigration),
+      path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+    await cp(
+      path.resolve("drizzle", successorMigration),
+      path.join(stagedMigrations, successorMigration),
+      { recursive: true },
+    );
+
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select status, rejection_code as rejectionCode, source_probe_sha256_json as sourceProbeSha256Json from enrollment_tokens where target_host_id = 71",
+        )
+        .get(),
+    ).toEqual({
+      rejectionCode: "manual_reinstall_authority_invalid",
+      sourceProbeSha256Json: "[]",
+      status: "rejected",
+    });
+    migrated.close();
+  });
+
+  it("migrates a valid ordinary manual authority, freezes its verified closure, and retains its Host-version check", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const closureMigration = "20260830050322_hot_zuras";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, closureMigration), {
+      force: true,
+      recursive: true,
+    });
+    const options = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const tokenHash = "legacy-ordinary-token-hash";
+    const enrollmentId = "enr_legacy_ordinary_0001";
+    const sourceProbeSha256 = ["a", "b", "c", "d"].map((value) =>
+      value.repeat(64),
+    );
+    const targetAssetSetDigest = `sha256:${"e".repeat(64)}`;
+    const frozenBundles = targetBundles();
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    createHost(legacy, { id: 74, probeId: "probe-legacy-ordinary" });
+    legacy.sqlite
+      .prepare("update managed_hosts set probe_version = ? where id = ?")
+      .run("1.2.3", 74);
+    legacy.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms,
+          target_kind, target_host_id, expected_hub_origin,
+          expected_probe_id, expected_probe_version, source_probe_sha256_json,
+          target_asset_set_digest, target_probe_version, status
+        ) values (?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      )
+      .run(
+        enrollmentId,
+        tokenHash,
+        1_725_000_000_000,
+        1_725_003_600_000,
+        74,
+        "https://hub.example.test",
+        "probe-legacy-ordinary",
+        "1.2.3",
+        JSON.stringify(sourceProbeSha256),
+        targetAssetSetDigest,
+        "1.2.4",
+      );
+    createHost(legacy, { id: 75, probeId: "probe-invalid-correlation" });
+    legacy.sqlite
+      .prepare("update managed_hosts set probe_version = ? where id = ?")
+      .run("1.2.3", 75);
+    legacy.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms,
+          target_kind, target_host_id, expected_hub_origin,
+          expected_probe_id, expected_probe_version, source_probe_sha256_json,
+          target_asset_set_digest, target_probe_version, status,
+          replacement_predecessor_enrollment_id,
+          replacement_predecessor_asset_set_digest
+        ) values (?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      )
+      .run(
+        "enr_legacy_invalid_correlation_0002",
+        "legacy-invalid-correlation-token",
+        1_725_000_000_000,
+        1_725_003_600_000,
+        75,
+        "https://hub.example.test",
+        "probe-invalid-correlation",
+        "1.2.3",
+        JSON.stringify(sourceProbeSha256),
+        targetAssetSetDigest,
+        "1.2.4",
+        "",
+        null,
+      );
+    legacy.close();
+
+    await cp(
+      path.resolve("drizzle", closureMigration),
+      path.join(stagedMigrations, closureMigration),
+      { recursive: true },
+    );
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select target_bundles_json as targetBundlesJson from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ targetBundlesJson: null });
+    expect(
+      migrated.enrollments.inspectPending({
+        nowMs: 1_725_000_001_000,
+        tokenHash,
+      }),
+    ).toBeNull();
+
+    migrated.enrollments.hydrateLegacyOrdinaryPendingClosure({
+      closure: {
+        sourceProbeSha256,
+        targetAssetSetDigest,
+        targetBundles: frozenBundles,
+        targetProbeVersion: "1.2.4",
+      },
+      nowMs: 1_725_000_001_000,
+      tokenHash,
+    });
+    expect(
+      migrated.enrollments.inspectPending({
+        nowMs: 1_725_000_001_000,
+        tokenHash,
+      }),
+    ).toMatchObject({ enrollmentId, targetKind: "manual_reinstall" });
+
+    const candidate = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const candidatePublicKeyPem = String(
+      candidate.publicKey.export({ format: "pem", type: "spki" }),
+    );
+    const registrationInput = (sourceProbeVersion: string) => ({
+      candidatePublicKeyPem,
+      committedSourceProbeSha256: sourceProbeSha256[0]!,
+      enrollmentId,
+      hostId: 74,
+      hubOrigin: "https://hub.example.test",
+      oldProbeId: "probe-legacy-ordinary",
+      outcome: (host: { id: number; probeId: string }) =>
+        Buffer.from(
+          (enoki.v1.ProbeRegistrationResponse as any)
+            .encode(
+              (enoki.v1.ProbeRegistrationResponse as any).create({
+                hostId: String(host.id),
+                probeId: host.probeId,
+              }),
+            )
+            .finish(),
+        ),
+      signedAttemptSha256: "f".repeat(64),
+      sourceProbeVersion,
+      targetAssetSetDigest,
+      targetBundleTarget: frozenBundles[0]!.target,
+      targetManifestSha256: frozenBundles[0]!.bundleManifestSha256,
+      targetProbeVersion: "1.2.4",
+    });
+    const host = {
+      architecture: null,
+      clockSkewDetected: false,
+      connectAddress: "10.0.0.74",
+      createdAtMs: 1_725_000_002_000,
+      displayName: "Recovered legacy Host",
+      displayNameEdited: false,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-legacy-ordinary-successor",
+      probePublicKeyPem: candidatePublicKeyPem,
+      probeSecretHash: "legacy-ordinary-successor-secret",
+    };
+    expect(
+      migrated.enrollments.registerNewHost({
+        host,
+        hostProfile: null,
+        registeredAtMs: 1_725_000_002_000,
+        registrationAttempt: registrationInput("1.2.5"),
+        tokenHash,
+        verificationDeadlineAtMs: 1_725_000_062_000,
+      }),
+    ).toBeNull();
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ status: "pending", usedAtMs: null });
+    for (const invalidClosure of [
+      { source: sourceProbeSha256.slice(0, 1), targets: frozenBundles },
+      { source: sourceProbeSha256.slice(0, 3), targets: frozenBundles },
+      {
+        source: [...sourceProbeSha256, "e".repeat(64)],
+        targets: frozenBundles,
+      },
+      {
+        source: [
+          sourceProbeSha256[0]!,
+          sourceProbeSha256[0]!,
+          ...sourceProbeSha256.slice(2),
+        ],
+        targets: frozenBundles,
+      },
+      { source: sourceProbeSha256, targets: [...frozenBundles].reverse() },
+    ]) {
+      migrated.sqlite
+        .prepare(
+          `update enrollment_tokens
+           set source_probe_sha256_json = ?, target_bundles_json = ?
+           where enrollment_id = ?`,
+        )
+        .run(
+          JSON.stringify(invalidClosure.source),
+          JSON.stringify(invalidClosure.targets),
+          enrollmentId,
+        );
+      expect(
+        migrated.enrollments.installationInspectionDecision({
+          nowMs: 1_725_000_002_000,
+          tokenHash,
+        }),
+      ).toEqual({ kind: "invalid" });
+      expect(
+        migrated.enrollments.registerNewHost({
+          host,
+          hostProfile: null,
+          registeredAtMs: 1_725_000_002_000,
+          registrationAttempt: registrationInput("1.2.3"),
+          tokenHash,
+          verificationDeadlineAtMs: 1_725_000_062_000,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ status: "pending", usedAtMs: null });
+    expect(
+      migrated.sqlite
+        .prepare("select probe_id as probeId from managed_hosts where id = 74")
+        .get(),
+    ).toEqual({ probeId: "probe-legacy-ordinary" });
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select count(*) as count from audit_log where action = 'probe.manual_reinstall_identity_replaced'",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
+    migrated.sqlite
+      .prepare(
+        `update enrollment_tokens
+         set source_probe_sha256_json = ?, target_bundles_json = ?
+         where enrollment_id = ?`,
+      )
+      .run(
+        JSON.stringify(sourceProbeSha256),
+        JSON.stringify(frozenBundles),
+        enrollmentId,
+      );
+    expect(
+      migrated.enrollments.registerNewHost({
+        host,
+        hostProfile: null,
+        registeredAtMs: 1_725_000_002_000,
+        registrationAttempt: registrationInput("1.2.3"),
+        tokenHash,
+        verificationDeadlineAtMs: 1_725_000_062_000,
+      }),
+    ).toMatchObject({ enrollment: { status: "verifying" }, replayed: false });
+    migrated.sqlite
+      .prepare(
+        "update enrollment_tokens set source_probe_sha256_json = ? where enrollment_id = ?",
+      )
+      .run(JSON.stringify([sourceProbeSha256[0]]), enrollmentId);
+    expect(
+      migrated.enrollments.replayRegistrationOutcome({
+        signedAttemptSha256: "f".repeat(64),
+        tokenHash,
+      }),
+    ).toBeNull();
+
+    const invalidTokenHash = "legacy-invalid-correlation-token";
+    const invalidEnrollmentId = "enr_legacy_invalid_correlation_0002";
+    migrated.sqlite
+      .prepare(
+        "update enrollment_tokens set target_bundles_json = ? where enrollment_id = ?",
+      )
+      .run(JSON.stringify(frozenBundles), invalidEnrollmentId);
+    for (const [predecessorId, predecessorDigest] of [
+      ["enr_terminal_predecessor_0001", null],
+      ["", ""],
+      ["not-an-enrollment", "sha256:not-a-digest"],
+    ] as const) {
+      migrated.sqlite
+        .prepare(
+          `update enrollment_tokens
+           set replacement_predecessor_enrollment_id = ?,
+               replacement_predecessor_asset_set_digest = ?
+           where enrollment_id = ?`,
+        )
+        .run(predecessorId, predecessorDigest, invalidEnrollmentId);
+      expect(
+        migrated.enrollments.installationInspectionDecision({
+          nowMs: 1_725_000_002_000,
+          tokenHash: invalidTokenHash,
+        }),
+      ).toEqual({ kind: "invalid" });
+      expect(
+        migrated.enrollments.inspectPending({
+          nowMs: 1_725_000_002_000,
+          tokenHash: invalidTokenHash,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      migrated.enrollments.registerNewHost({
+        host: { ...host, probeId: "probe-invalid-successor" },
+        hostProfile: null,
+        registeredAtMs: 1_725_000_002_000,
+        registrationAttempt: {
+          ...registrationInput("1.2.3"),
+          enrollmentId: invalidEnrollmentId,
+          hostId: 75,
+          oldProbeId: "probe-invalid-correlation",
+          signedAttemptSha256: "9".repeat(64),
+        },
+        tokenHash: invalidTokenHash,
+        verificationDeadlineAtMs: 1_725_000_062_000,
+      }),
+    ).toBeNull();
+    expect(
+      migrated.sqlite
+        .prepare(
+          `select status, used_at_ms as usedAtMs
+           from enrollment_tokens where enrollment_id = ?`,
+        )
+        .get(invalidEnrollmentId),
+    ).toEqual({ status: "pending", usedAtMs: null });
+    expect(
+      migrated.sqlite
+        .prepare("select probe_id as probeId from managed_hosts where id = 75")
+        .get(),
+    ).toEqual({ probeId: "probe-invalid-correlation" });
+    migrated.sqlite
+      .prepare(
+        `update enrollment_tokens
+         set registration_attempt_sha256 = ?, registration_outcome = ?,
+             used_at_ms = ?, status = 'verifying'
+         where enrollment_id = ?`,
+      )
+      .run(
+        "9".repeat(64),
+        Buffer.from("untrusted legacy replay"),
+        1_725_000_002_000,
+        invalidEnrollmentId,
+      );
+    expect(
+      migrated.enrollments.replayRegistrationOutcome({
+        signedAttemptSha256: "9".repeat(64),
+        tokenHash: invalidTokenHash,
+      }),
+    ).toBeNull();
+    migrated.close();
   });
 
   it("applies ordered Migration Layers with independent history tables", async () => {
@@ -92,7 +704,7 @@ describe("Hub database", () => {
     database.close();
   });
 
-  it("migrates legacy Enrollment Tokens to terminal expired records without changing Hub data", async () => {
+  it("migrates legacy data and closes Probe Upgrade Requests without Asset Set targets", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
     const preFeatureMigrations = path.join(dataRoot, "pre-feature-migrations");
@@ -123,6 +735,8 @@ describe("Hub database", () => {
       },
     );
     createHost(legacy, { id: 41, probeId: "probe-preserved" });
+    createHost(legacy, { id: 42, probeId: "probe-accepted" });
+    createHost(legacy, { id: 43, probeId: "probe-running" });
     legacy.audit.record({
       action: "host.metadata.update",
       actor: "owner",
@@ -131,23 +745,70 @@ describe("Hub database", () => {
       subjectId: "41",
       subjectType: "host",
     });
-    legacy.probeOperations.createProbeUpgradeRequest({
-      acceptedAtMs: null,
-      canceledAtMs: null,
-      completedAtMs: null,
-      createdAtMs: 1_725_000_002_000,
-      currentProbeVersion: "0.1.0",
-      failureCode: null,
-      failureMessage: null,
-      hostId: 41,
-      id: null,
-      kind: "probe_upgrade",
-      runningAtMs: null,
-      state: "pending",
-      supersededAtMs: null,
-      targetProbeVersion: "0.2.0",
-      updatedAtMs: 1_725_000_002_000,
-    });
+    const insertLegacyOperation = legacy.sqlite.prepare(
+      `insert into probe_operations (
+          managed_host_id, kind, state, current_probe_version,
+          target_probe_version, failure_code, failure_message,
+          created_at_ms, updated_at_ms, accepted_at_ms, running_at_ms,
+          completed_at_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertLegacyOperation.run(
+      41,
+      "probe_upgrade",
+      "pending",
+      "0.1.0",
+      "0.2.0",
+      null,
+      null,
+      1_725_000_002_000,
+      1_725_000_002_000,
+      null,
+      null,
+      null,
+    );
+    insertLegacyOperation.run(
+      42,
+      "probe_upgrade",
+      "accepted",
+      "0.1.0",
+      "0.2.0",
+      null,
+      null,
+      1_725_000_002_000,
+      1_725_000_003_000,
+      1_725_000_003_000,
+      null,
+      null,
+    );
+    insertLegacyOperation.run(
+      43,
+      "probe_upgrade",
+      "running",
+      "0.1.0",
+      "0.2.0",
+      null,
+      null,
+      1_725_000_002_000,
+      1_725_000_004_000,
+      1_725_000_003_000,
+      1_725_000_004_000,
+      null,
+    );
+    insertLegacyOperation.run(
+      41,
+      "probe_upgrade",
+      "failed",
+      "0.1.0",
+      "0.1.5",
+      "accepted_timeout",
+      "Historical failure.",
+      1_724_000_000_000,
+      1_724_000_010_000,
+      1_724_000_001_000,
+      null,
+      1_724_000_010_000,
+    );
     legacy.metrics.recordSample({
       bootId: "boot-preserved",
       collectedAtMs: 1_725_000_003_000,
@@ -253,14 +914,64 @@ describe("Hub database", () => {
         .get(),
     ).toEqual({
       auditEvents: 1,
-      hosts: 1,
+      hosts: 3,
       metrics: 1,
       officialMetricCpu: 1,
-      operations: 1,
+      operations: 4,
       profiles: 1,
     });
     expect(migrated.sqlite.prepare("pragma foreign_key_check").all()).toEqual(
       [],
+    );
+    const migratedOperations = migrated.sqlite
+      .prepare(
+        `select managed_host_id as hostId, state, failure_code as failureCode,
+          failure_message as failureMessage, completed_at_ms as completedAtMs,
+          updated_at_ms as updatedAtMs,
+          target_asset_set_digest as targetAssetSetDigest
+        from probe_operations order by id`,
+      )
+      .all();
+    expect(migratedOperations.slice(0, 3)).toEqual(
+      [41, 42, 43].map((hostId) => ({
+        completedAtMs: expect.any(Number),
+        failureCode: "probe_upgrade_target_unavailable",
+        failureMessage:
+          "Probe Upgrade Request predates its required Probe Asset Set target.",
+        hostId,
+        state: "failed",
+        targetAssetSetDigest: null,
+        updatedAtMs: expect.any(Number),
+      })),
+    );
+    for (const operation of migratedOperations.slice(0, 3) as Array<{
+      completedAtMs: number;
+      updatedAtMs: number;
+    }>) {
+      expect(operation.completedAtMs).toBe(operation.updatedAtMs);
+    }
+    expect(migratedOperations[3]).toEqual({
+      completedAtMs: 1_724_000_010_000,
+      failureCode: "accepted_timeout",
+      failureMessage: "Historical failure.",
+      hostId: 41,
+      state: "failed",
+      targetAssetSetDigest: null,
+      updatedAtMs: 1_724_000_010_000,
+    });
+    for (const hostId of [41, 42, 43]) {
+      expect(migrated.probeOperations.findActiveForHost(hostId)).toBeNull();
+    }
+    const legacyOperation = migrated.probeOperations.findLatestForHost(41);
+    expect(() =>
+      issueProbeOperationToken({
+        expiresAtMs: 1_725_000_020_000,
+        operation: legacyOperation!,
+        probeId: "probe-preserved",
+        secret: "test-secret",
+      }),
+    ).toThrow(
+      "Cannot issue Probe Operation Token without a Probe Asset Set digest.",
     );
 
     const app = createHubApp({
@@ -347,17 +1058,6 @@ describe("Hub database", () => {
     expect(
       database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
     ).toBe("pending");
-    database.sqlite
-      .prepare(
-        "update snapshot_replay_requests set fulfilled_sequence = ?, fulfilled_wire_shape = ? where managed_host_id = ?",
-      )
-      .run(3, "legacy_successor", originalRequest.hostId);
-    expect(
-      database.snapshotCollectors.snapshotReplayReceipt({
-        ...originalRequest,
-        sequence: 3,
-      }),
-    ).toBeNull();
     expect(
       database.snapshotCollectors.fulfillSnapshotReplay({
         ...originalRequest,
@@ -370,13 +1070,6 @@ describe("Hub database", () => {
     expect(
       database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
     ).toBe("fulfilled");
-    expect(
-      database.snapshotCollectors.snapshotReplayReceipt(originalRequest),
-    ).toEqual({
-      acceptedSnapshotHash: originalRequest.snapshotHash,
-      key: originalRequest,
-      wireShape: "current_sequence",
-    });
 
     const replacementRequest = {
       bootId: "boot-after-replacement",
@@ -399,20 +1092,14 @@ describe("Hub database", () => {
       ),
     ).toBe("pending");
     expect(
-      database.snapshotCollectors.snapshotReplayReceipt(replacementRequest),
-    ).toBeNull();
-    expect(
       database.sqlite
         .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_snapshot_hash, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
         )
         .get(),
     ).toEqual({
       boot_id: "boot-after-replacement",
       fulfilled_at_ms: null,
-      fulfilled_snapshot_hash: null,
-      fulfilled_sequence: null,
-      fulfilled_wire_shape: null,
       sequence: 4,
       snapshot_hash: "snapshot-after-replacement",
     });
@@ -420,15 +1107,15 @@ describe("Hub database", () => {
     database.close();
   });
 
-  it("preserves pending and fulfilled legacy Snapshot Replay requests without inventing receipts", async () => {
+  it("migrates unbound legacy Snapshot Replay requests into non-matchable receipts", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
     const legacyMigrations = path.join(dataRoot, "legacy-replay-migrations");
     await cp(path.resolve("drizzle"), legacyMigrations, { recursive: true });
-    await rm(path.join(legacyMigrations, snapshotReplayReceiptMigration), {
-      force: true,
-      recursive: true,
-    });
+    await rm(
+      path.join(legacyMigrations, "20260810083603_glorious_adam_warlock"),
+      { force: true, recursive: true },
+    );
 
     const legacy = initializeHubDatabase(
       {
@@ -450,46 +1137,12 @@ describe("Hub database", () => {
         ],
       },
     );
-    expect(
-      legacy.sqlite
-        .prepare(
-          "select name from pragma_table_info('snapshot_replay_requests')",
-        )
-        .all(),
-    ).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "fulfilled_sequence" }),
-        expect.objectContaining({ name: "fulfilled_wire_shape" }),
-      ]),
-    );
     createHost(legacy, { id: 89, probeId: "probe-legacy-snapshot-replay" });
-    createHost(legacy, { id: 90, probeId: "probe-legacy-replay-receipt" });
     legacy.sqlite
       .prepare(
-        "insert into snapshot_replay_requests (managed_host_id, collector_id, boot_id, sequence, snapshot_hash, requested_at_ms, fulfilled_at_ms) values (?, ?, ?, ?, ?, ?, ?)",
+        "insert into snapshot_replay_requests (managed_host_id, collector_id, requested_at_ms) values (?, ?, ?)",
       )
-      .run(
-        89,
-        "official.host-profile",
-        "boot-pending",
-        3,
-        "snapshot-pending",
-        1_725_000_000_000,
-        null,
-      );
-    legacy.sqlite
-      .prepare(
-        "insert into snapshot_replay_requests (managed_host_id, collector_id, boot_id, sequence, snapshot_hash, requested_at_ms, fulfilled_at_ms) values (?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(
-        90,
-        "official.host-profile",
-        "boot-fulfilled",
-        4,
-        "snapshot-fulfilled",
-        1_725_000_000_001,
-        1_725_000_000_002,
-      );
+      .run(89, "official.host-profile", 1_725_000_000_000);
     legacy.close();
 
     const migrated = initializeHubDatabase({
@@ -499,54 +1152,23 @@ describe("Hub database", () => {
     expect(
       migrated.sqlite
         .prepare(
-          "select managed_host_id, boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_snapshot_hash, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests order by managed_host_id",
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
         )
-        .all(),
-    ).toEqual([
-      {
-        boot_id: "boot-pending",
-        fulfilled_at_ms: null,
-        fulfilled_snapshot_hash: null,
-        fulfilled_sequence: null,
-        fulfilled_wire_shape: null,
-        managed_host_id: 89,
-        sequence: 3,
-        snapshot_hash: "snapshot-pending",
-      },
-      {
-        boot_id: "boot-fulfilled",
-        fulfilled_at_ms: 1_725_000_000_002,
-        fulfilled_snapshot_hash: null,
-        fulfilled_sequence: null,
-        fulfilled_wire_shape: null,
-        managed_host_id: 90,
-        sequence: 4,
-        snapshot_hash: "snapshot-fulfilled",
-      },
-    ]);
+        .get(),
+    ).toEqual({
+      boot_id: "",
+      fulfilled_at_ms: null,
+      sequence: 0,
+      snapshot_hash: "",
+    });
     expect(
       migrated.snapshotCollectors.snapshotReplayRequestStatus({
-        bootId: "boot-pending",
+        bootId: "boot-after-migration",
         collectorId: "official.host-profile",
         hostId: 89,
-        sequence: 3,
-        snapshotHash: "snapshot-pending",
+        sequence: 1,
+        snapshotHash: "snapshot-after-migration",
       }),
-    ).toBe("pending");
-    const legacyFulfilledRequest = {
-      bootId: "boot-fulfilled",
-      collectorId: "official.host-profile",
-      hostId: 90,
-      sequence: 4,
-      snapshotHash: "snapshot-fulfilled",
-    };
-    expect(
-      migrated.snapshotCollectors.snapshotReplayRequestStatus(
-        legacyFulfilledRequest,
-      ),
-    ).toBe("fulfilled");
-    expect(
-      migrated.snapshotCollectors.snapshotReplayReceipt(legacyFulfilledRequest),
     ).toBeNull();
 
     migrated.close();
@@ -1013,6 +1635,7 @@ describe("Hub database", () => {
       runningAtMs: null,
       state: "pending",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_000_000,
     });
@@ -1032,6 +1655,7 @@ describe("Hub database", () => {
         runningAtMs: null,
         state: "pending",
         supersededAtMs: null,
+        targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
         targetProbeVersion: "0.3.0",
         updatedAtMs: 1_725_000_001_000,
       }),
@@ -1051,6 +1675,7 @@ describe("Hub database", () => {
       runningAtMs: null,
       state: "failed",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
       targetProbeVersion: "0.3.0",
       updatedAtMs: 1_725_000_002_000,
     });
@@ -1138,6 +1763,230 @@ describe("Hub database", () => {
 
     database.close();
   });
+
+  it("creates and inspects an independent terminal replacement recovery without Host version truth", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 7, probeId: "probe-current" });
+    const outcome = Buffer.from(
+      (enoki.v1.ProbeRegistrationResponse as any)
+        .encode(
+          (enoki.v1.ProbeRegistrationResponse as any).create({
+            hostId: "7",
+            probeId: "probe-current",
+          }),
+        )
+        .finish(),
+    );
+    database.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+          target_kind, target_host_id, expected_hub_origin, expected_probe_id,
+          expected_probe_version, source_probe_sha256_json, target_asset_set_digest,
+          target_probe_version, status, managed_host_id, rejected_at_ms,
+          rejection_code, registration_outcome
+        ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, 'rejected', ?, ?, 'probe_startup_timeout', ?)`,
+      )
+      .run(
+        "enr_terminal_predecessor_0001",
+        "terminal-token",
+        1_725_000_000_000,
+        1_725_000_060_000,
+        1_725_000_001_000,
+        7,
+        "https://hub.example.test",
+        "probe-before-replacement",
+        "1.2.3",
+        JSON.stringify(sourceProbeReceipts()),
+        `sha256:${"b".repeat(64)}`,
+        "1.2.3",
+        7,
+        1_725_000_062_000,
+        outcome,
+      );
+    const predecessor =
+      database.enrollments.terminalReplacementPredecessorForHost({
+        currentProbeId: "probe-current",
+        hostId: 7,
+      });
+    expect(predecessor).toEqual({
+      enrollmentId: "enr_terminal_predecessor_0001",
+      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+      targetProbeVersion: "1.2.3",
+    });
+    expect(
+      database.enrollments.terminalReplacementPredecessorForHost({
+        currentProbeId: "probe-wrong-current",
+        hostId: 7,
+      }),
+    ).toBeNull();
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_063_000,
+        enrollmentId: "enr_terminal_wrong_predecessor_0002",
+        expiresAtMs: 1_725_000_123_000,
+        target: {
+          expectedHubOrigin: "https://hub.example.test",
+          expectedProbeId: "probe-current",
+          expectedProbeVersion: "1.2.3",
+          hostId: 7,
+          kind: "manual_reinstall",
+          replacementPredecessorEnrollmentId: "enr_missing_predecessor_0000",
+          sourceProbeSha256: sourceProbeReceipts(),
+          targetBundles: targetBundles(),
+          targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+          targetProbeVersion: "1.2.4",
+        },
+        tokenHash: "wrong-predecessor-token",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_063_000,
+        enrollmentId: "enr_terminal_wrong_asset_set_0002",
+        expiresAtMs: 1_725_000_123_000,
+        target: {
+          expectedHubOrigin: "https://hub.example.test",
+          expectedProbeId: "probe-current",
+          expectedProbeVersion: "1.2.3",
+          hostId: 7,
+          kind: "manual_reinstall",
+          replacementPredecessorAssetSetDigest: `sha256:${"f".repeat(64)}`,
+          replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
+          sourceProbeSha256: sourceProbeReceipts(),
+          targetBundles: targetBundles(),
+          targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+          targetProbeVersion: "1.2.4",
+        },
+        tokenHash: "wrong-asset-set-token",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_063_000,
+        enrollmentId: "enr_terminal_ordinary_null_version_0002",
+        expiresAtMs: 1_725_000_123_000,
+        target: {
+          expectedHubOrigin: "https://hub.example.test",
+          expectedProbeId: "probe-current",
+          expectedProbeVersion: "1.2.3",
+          hostId: 7,
+          kind: "manual_reinstall",
+          sourceProbeSha256: sourceProbeReceipts(),
+          targetBundles: targetBundles(),
+          targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+          targetProbeVersion: "1.2.4",
+        },
+        tokenHash: "ordinary-null-version-token",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    const created = database.enrollments.createPending({
+      createdAtMs: 1_725_000_063_000,
+      enrollmentId: "enr_terminal_successor_0002",
+      expiresAtMs: 1_725_000_123_000,
+      target: {
+        expectedHubOrigin: "https://hub.example.test",
+        expectedProbeId: "probe-current",
+        expectedProbeVersion: "1.2.3",
+        hostId: 7,
+        kind: "manual_reinstall",
+        replacementPredecessorAssetSetDigest: `sha256:${"b".repeat(64)}`,
+        replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
+        sourceProbeSha256: sourceProbeReceipts(),
+        targetBundles: targetBundles(),
+        targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetProbeVersion: "1.2.4",
+      },
+      tokenHash: "successor-token",
+    });
+    expect(created.kind).toBe("created");
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set target_bundles_json = null where token_hash = ?",
+      )
+      .run("successor-token");
+    expect(
+      database.enrollments.installationInspectionDecision({
+        nowMs: 1_725_000_064_000,
+        tokenHash: "successor-token",
+      }),
+    ).toEqual({ kind: "invalid" });
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set target_bundles_json = ? where token_hash = ?",
+      )
+      .run(JSON.stringify(targetBundles()), "successor-token");
+    expect(
+      database.enrollments.inspectPending({
+        nowMs: 1_725_000_064_000,
+        tokenHash: "successor-token",
+      }),
+    ).toMatchObject({
+      sourceProbeVersion: "1.2.3",
+      targetKind: "manual_reinstall",
+    });
+    const candidate = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const candidatePublicKeyPem = String(
+      candidate.publicKey.export({
+        format: "pem",
+        type: "spki",
+      }),
+    );
+    const registration = database.enrollments.registerNewHost({
+      host: {
+        architecture: null,
+        clockSkewDetected: false,
+        connectAddress: "10.0.0.20",
+        createdAtMs: 1_725_000_065_000,
+        displayName: "Recovered Host",
+        displayNameEdited: false,
+        probeConfigurationVersion: "default-v1",
+        probeId: "probe-terminal-successor",
+        probePublicKeyPem: candidatePublicKeyPem,
+        probeSecretHash: "successor-secret",
+      },
+      hostProfile: null,
+      registeredAtMs: 1_725_000_065_000,
+      registrationAttempt: {
+        candidatePublicKeyPem,
+        committedSourceProbeSha256: sourceProbeReceipts()[0]!,
+        enrollmentId: "enr_terminal_successor_0002",
+        hostId: 7,
+        hubOrigin: "https://hub.example.test",
+        oldProbeId: "probe-current",
+        outcome: (host) =>
+          Buffer.from(
+            (enoki.v1.ProbeRegistrationResponse as any)
+              .encode(
+                (enoki.v1.ProbeRegistrationResponse as any).create({
+                  hostId: String(host.id),
+                  probeId: host.probeId,
+                }),
+              )
+              .finish(),
+          ),
+        signedAttemptSha256: "e".repeat(64),
+        sourceProbeVersion: "1.2.3",
+        targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetBundleTarget: "aarch64-unknown-linux-gnu",
+        targetManifestSha256: "1".repeat(64),
+        targetProbeVersion: "1.2.4",
+      },
+      tokenHash: "successor-token",
+      verificationDeadlineAtMs: 1_725_000_125_000,
+    });
+    expect(registration).toMatchObject({
+      enrollment: { status: "verifying" },
+      host: { id: 7, probeId: "probe-terminal-successor" },
+      replayed: false,
+    });
+    database.close();
+  });
 });
 
 async function writeMigration(
@@ -1157,18 +2006,37 @@ function createHost(
   database: ReturnType<typeof initializeHubDatabase>,
   input: { id: number; probeId: string },
 ) {
-  return database.hosts.create({
-    clockSkewDetected: false,
-    connectAddress: "10.0.0.20",
-    createdAtMs: 1_725_000_000_000,
-    displayName: `Host ${input.id}`,
-    displayNameEdited: false,
-    id: input.id,
-    lastClockSkewMs: null,
-    probeConfigurationVersion: "default-v1",
-    probeId: input.probeId,
-    probeSecretHash: `secret-hash-${input.id}`,
-  });
+  database.sqlite
+    .prepare(`insert into managed_hosts (
+    id, probe_id, probe_secret_hash, display_name, display_name_edited,
+    connect_address, created_at_ms, clock_skew_detected, last_clock_skew_ms,
+    probe_configuration_version
+  ) values (?, ?, ?, ?, 0, ?, ?, 0, null, ?)`)
+    .run(
+      input.id,
+      input.probeId,
+      `secret-hash-${input.id}`,
+      `Host ${input.id}`,
+      "10.0.0.20",
+      1_725_000_000_000,
+      "default-v1",
+    );
+}
+
+function targetBundles() {
+  return [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+  ].map((target, index) => ({
+    bundleManifestSha256: String(index + 1).repeat(64),
+    target,
+  }));
+}
+
+function sourceProbeReceipts() {
+  return ["a", "b", "c", "d"].map((value) => value.repeat(64));
 }
 
 function migrationHistoryTables(sqlite: {

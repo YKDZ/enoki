@@ -6,7 +6,6 @@ import {
   mkdtemp,
   readFile,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -14,13 +13,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import { renderInstallCommand } from "../apps/hub/src/enrollment/install-command.ts";
+import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
+import { createReleaseCandidateManifest } from "./release-candidate-lib.mjs";
 import {
   createCiHostExecutor,
   createCiReleaseInfrastructureAdapter,
   createDockerHubController,
   createFileEvidenceSink,
+  createReleaseEnvironment,
   createSshReleaseInfrastructureAdapter,
   parseReleaseE2ECommandLine,
   writeRunManifest,
@@ -30,29 +33,561 @@ import {
   createProbeHostHarness,
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
+  redactReleaseE2EEvidence,
   renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
-  waitForReportingAdvance,
 } from "./release-e2e-lib.mjs";
+import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.mjs";
+import { createMatrixGateResult } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 
 describe("Release E2E business assertions", () => {
-  it("never runs an in-place scenario for a Trust Epoch Migration baseline", async () => {
+  it("transfers cleanup ownership when the existing runner enters environment start", async () => {
+    const calls = [];
+    const environment = createReleaseEnvironment({
+      candidateDir: "/tmp/release-candidate",
+      docker: {
+        async start() {
+          calls.push("docker.start");
+          throw new Error("Hub initialization failed");
+        },
+      },
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      hubOwnerUrl: "http://hub-owner.test",
+      hubPublicUrl: "http://hub-public.test",
+      onCleanupManaged() {
+        calls.push("cleanup.owned");
+      },
+      ownerPassword: "owner-password",
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(
+      environment.start({
+        candidateManifest: candidateManifest(),
+        runId: "run-cleanup-ownership",
+      }),
+    ).rejects.toThrow("Hub initialization failed");
+    expect(calls).toEqual(["cleanup.owned", "docker.start"]);
+  });
+
+  it("binds and cleans the canonical report transport around the direct Hub owner origin", async () => {
+    const calls = [];
+    const environment = createReleaseEnvironment({
+      candidateDir: "/tmp/release-candidate",
+      canonicalReportTransportFactory(options) {
+        calls.push(["transport.create", options]);
+        return {
+          async close() {
+            calls.push("transport.close");
+            return { clean: true };
+          },
+          async start() {
+            calls.push("transport.start");
+            return { origin: "http://127.0.0.1:33000" };
+          },
+        };
+      },
+      docker: {
+        async cleanup() {
+          calls.push("docker.cleanup");
+          return { clean: true };
+        },
+        async start() {
+          calls.push("docker.start");
+          return { activeHub: "candidate" };
+        },
+      },
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      hubOwnerUrl: "http://127.0.0.1:33001",
+      hubPublicUrl: "http://127.0.0.1:33000",
+      ownerPassword: "owner-password",
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    const resources = await environment.start({
+      candidateManifest: candidateManifest(),
+      runId: "run-report-transport",
+    });
+    expect(resources.canonicalReports).toBeDefined();
+    await environment.cleanup({ resources, runId: "run-report-transport" });
+    expect(calls).toEqual([
+      "docker.start",
+      [
+        "transport.create",
+        {
+          listenUrl: "http://127.0.0.1:33000",
+          upstreamUrl: "http://127.0.0.1:33001",
+        },
+      ],
+      "transport.start",
+      "transport.close",
+      "docker.cleanup",
+    ]);
+  });
+
+  it("retains transport cleanup ownership when its public-origin bind fails", async () => {
+    const calls = [];
+    const environment = createReleaseEnvironment({
+      candidateDir: "/tmp/release-candidate",
+      canonicalReportTransportFactory() {
+        return {
+          async close() {
+            calls.push("transport.close");
+            return { clean: true };
+          },
+          async start() {
+            throw new Error("public origin unavailable");
+          },
+        };
+      },
+      docker: {
+        async cleanup() {
+          calls.push("docker.cleanup");
+          return { clean: true };
+        },
+        async start() {
+          return { activeHub: "candidate" };
+        },
+      },
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      hubOwnerUrl: "http://127.0.0.1:33001",
+      hubPublicUrl: "http://127.0.0.1:33000",
+      ownerPassword: "owner-password",
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(
+      environment.start({
+        candidateManifest: candidateManifest(),
+        runId: "run-report-transport-failure",
+      }),
+    ).rejects.toThrow("public origin unavailable");
+    await environment.cleanup({
+      resources: null,
+      runId: "run-report-transport-failure",
+    });
+    expect(calls).toEqual(["transport.close", "docker.cleanup"]);
+  });
+
+  it("keeps ForwardTransitions authority behind the typed Hub adapter and out of the Host Harness", async () => {
+    const host = createProbeHostHarness({
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    const hostMethods = Object.keys(host);
+    const hubRoutes = await readFile(
+      new URL("../apps/hub/src/hosts/routes.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(hostMethods).not.toEqual(
+      expect.arrayContaining([
+        "authorize",
+        "createEnrollment",
+        "createOperation",
+        "readJournalPhase",
+        "requestProbeUpgrade",
+        "view",
+      ]),
+    );
+    expect(hubRoutes).toContain("createForwardTransitions({");
+    expect(hubRoutes).toContain("}).authorize({");
+    expect(hubRoutes).not.toMatch(/release[-_ ]e2e/i);
+  });
+
+  it("accepts the production Bootstrap recipe command and rejects unsafe variants", async () => {
+    const enrollment = officialEnrollment();
+    const rendered = renderInstallCommand(
+      {
+        bootstrapRecipe: enrollment.bootstrapRecipe,
+        probeApiOrigin: enrollment.hubUrl,
+      },
+      { enrollmentToken: enrollment.enrollmentToken },
+    );
+    expect(rendered.installCommand).toBe(officialInstallCommand);
+
+    for (const installCommand of [
+      `${rendered.installCommand}; sh`,
+      rendered.installCommand.replace("python3 --", "sudo python3 --"),
+      rendered.installCommand.replace(
+        "./enoki-probe-bootstrap.py",
+        "https://attacker.example/bootstrap.py",
+      ),
+    ]) {
+      const client = createHubLifecycleClient({
+        baseUrl: "https://hub.example",
+        fetch: async () => jsonResponse({ ...enrollment, installCommand }, 201),
+      });
+      await expect(client.createEnrollment()).rejects.toThrow(
+        /invalid Probe install command/,
+      );
+    }
+  });
+
+  it("accepts only the verified Trust Epoch migration baseline union member", async () => {
+    const manifest = candidateManifestWithMigrationBaseline();
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: manifest,
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => {
+            throw new Error("typed migration baseline accepted");
+          },
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-migration-contract",
+        scenario: "replacement-migration-uninstall",
+      }),
+    ).rejects.toThrow(/typed migration baseline accepted/);
+
     await expect(
       runReleaseE2EScenario({
         candidateManifest: {
-          releaseBaseline: {
-            kind: "enoki-trust-epoch-migration-baseline",
-            transition: "manual-reinstall-required",
+          ...manifest,
+          releaseBaseline: { ...manifest.releaseBaseline, kind: "legacy" },
+        },
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host: {}, hub: {} }),
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-generic-legacy-contract",
+        scenario: "replacement-migration-uninstall",
+      }),
+    ).rejects.toThrow(/manifest fields must be exactly/i);
+  });
+
+  it("dispatches Replacement participants from the planned scenario instead of the baseline name", async () => {
+    let hostStarted = false;
+    const methodObject = (names) =>
+      Object.fromEntries(names.map((name) => [name, async () => {}]));
+    const host = {
+      ...methodObject([
+        "assertDisposable",
+        "assertInstalled",
+        "beginUpgradeOwnershipTransition",
+        "bindUpgradeOwnershipTransition",
+        "cleanup",
+        "collectEvidence",
+        "completeUpgradeOwnershipTransition",
+        "install",
+        "readProbeIdentity",
+        "verifyUninstallCompletion",
+      ]),
+      async assertDisposable() {
+        hostStarted = true;
+      },
+    };
+    const hub = methodObject([
+      "authenticate",
+      "createEnrollment",
+      "getHost",
+      "getHostMetrics",
+      "isHostSoftDeleted",
+      "listHosts",
+      "requestProbeUninstall",
+      "requestProbeUpgrade",
+      "switchToCandidate",
+      "waitForProbeOperation",
+    ]);
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host, hub }),
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-explicit-replacement-dispatch",
+        scenario: "replacement-migration-uninstall",
+      }),
+    ).rejects.toThrow(/invalid baseline-upgrade participants/);
+    expect(hostStarted).toBe(false);
+  });
+
+  it("executes Trust Epoch baseline migration through production manual reinstall with replacement evidence", async () => {
+    const calls = [];
+    const written = [];
+    const candidateManifest = candidateManifestWithMigrationBaseline();
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest,
+        environment: migrationBaselineEnvironment(calls, candidateManifest),
+        evidenceSink: {
+          write: async (evidence) => written.push(evidence),
+        },
+        ownerPassword: "owner-password",
+        runId: "run-migration-baseline-behavior",
+        scenario: "replacement-migration-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).resolves.toEqual({ status: "succeeded" });
+    expect(calls).toContain("host.manualReinstall:manual_reinstall");
+    expect(calls).not.toContain("hub.requestProbeUpgrade");
+    expect(
+      calls
+        .filter((call) => call.startsWith("hub.getHost:candidate:"))
+        .slice(0, 3),
+    ).toEqual([
+      "hub.getHost:candidate:default-v1:clean",
+      "hub.getHost:candidate:host-7-1:configuration-error",
+      "hub.getHost:candidate:host-7-1:clean",
+    ]);
+    expect(written.at(-1)).toMatchObject({
+      identityContinuity: {
+        after: { probeId: "probe_release_replacement" },
+        before: { probeId: "probe_release_legacy" },
+        hostId: 7,
+      },
+      migrationRetention: {
+        hostAfter: { id: 7 },
+        hostBefore: { id: 7 },
+      },
+      result: { status: "succeeded" },
+      uninstall: { hubSoftDeleted: true, status: "succeeded" },
+    });
+    const evidence = written.at(-1);
+    expect(evidence.releaseBaseline.authority.authorizationSha256).toBe(
+      candidateManifest.releaseBaseline.authorization.sha256,
+    );
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--replacement-migration-uninstall-1",
+      candidateManifest,
+      cellId: "ubuntu-22.04-x86_64--replacement-migration-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+    expect(evidence.migrationRetention.postMetricHistory.anchors).toEqual(
+      expect.arrayContaining(evidence.migrationRetention.metricHistory.anchors),
+    );
+    expect(
+      evidence.migrationRetention.metricHistory.anchors.length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(
+      evidence.migrationRetention.postMetricHistory.anchors.length,
+    ).toBeLessThanOrEqual(
+      evidence.migrationRetention.metricHistory.anchors.length + 3,
+    );
+    expect(
+      evidence.migrationRetention.postMetricHistory.anchors.some(
+        (anchor) =>
+          anchor.sequence >
+            evidence.migrationRetention.metricHistory.anchors.at(-1).sequence &&
+          anchor.collectedAtMs >
+            evidence.migrationRetention.metricHistory.anchors.at(-1)
+              .collectedAtMs,
+      ),
+    ).toBe(true);
+    expect(evidence.migrationRetention.configuration).toEqual({
+      configuration: evidence.probeConfiguration.beforeUpgrade.configuration,
+      mode: evidence.probeConfiguration.beforeUpgrade.mode,
+    });
+    expect(
+      evidence.migrationRetention.hostBefore.reportedProbeConfigurationVersion,
+    ).toBe(evidence.probeConfiguration.beforeUpgrade.reportedVersion);
+    expect(
+      evidence.migrationRetention.hostAfter.reportedProbeConfigurationVersion,
+    ).toBe(evidence.probeConfiguration.beforeUpgrade.version);
+    expect(gate.evidenceValidationErrors).toEqual([]);
+    expect(gate.outcome).toBe("succeeded");
+  });
+
+  it("keeps the explicit Compatible Repair path independent of baseline descriptor kind", async () => {
+    const methodObject = (names) =>
+      Object.fromEntries(names.map((name) => [name, async () => {}]));
+    const host = methodObject([
+      "armPostReplacementRestartFault",
+      "assertInstalled",
+      "assertPostReplacementUpgradeFailure",
+      "beginUpgradeOwnershipTransition",
+      "bindUpgradeOwnershipTransition",
+      "cleanup",
+      "collectEvidence",
+      "completeRepairOwnershipTransition",
+      "completeUpgradeOwnershipTransition",
+      "install",
+      "readProbeIdentity",
+      "removePostReplacementRestartFault",
+      "repair",
+      "verifyUninstallCompletion",
+    ]);
+    host.assertDisposable = async () => {
+      throw new Error("compatible-repair-entered");
+    };
+    const hub = methodObject([
+      "authenticate",
+      "createEnrollment",
+      "getAuditLog",
+      "getHost",
+      "getHostMetrics",
+      "getHostProbeConfiguration",
+      "getProbeOperation",
+      "isHostSoftDeleted",
+      "listHosts",
+      "requestProbeUninstall",
+      "requestProbeUpgrade",
+      "switchToCandidate",
+      "updateHostProbeConfiguration",
+      "waitForProbeOperation",
+    ]);
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithMigrationBaseline(),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host, hub }),
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-explicit-compatible-repair",
+        scenario: "post-replacement-repair-uninstall",
+      }),
+    ).rejects.toThrow("compatible-repair-entered");
+  });
+
+  it("reports the dedicated migration Configuration retention timeout", async () => {
+    const candidateManifest = candidateManifestWithMigrationBaseline();
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest,
+        environment: migrationBaselineEnvironment([], candidateManifest, {
+          candidateConfigurationNeverRetained: true,
+        }),
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-migration-configuration-timeout",
+        scenario: "replacement-migration-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
+      }),
+    ).rejects.toMatchObject({
+      code: "candidate_probe_configuration_retention_timeout",
+    });
+  });
+
+  it("preserves only the validated public authorization summary in redacted evidence", async () => {
+    const written = [];
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          cleanup: async () => ({
+            clean: true,
+            summaries: {
+              authorization: "Bearer release-credential",
+              authorizationDigest: "a".repeat(64),
+              authorizationPayload: "release-authorization-payload",
+              authorizationToken: "release-authorization-token",
+              enrollmentToken: "enk_enroll_release_credential",
+              headersSha256: "Bearer release-credential",
+              invalid: { authorizationSha256: "not-a-sha256-summary" },
+              ownerPassword: "owner-password",
+              privateKeyFingerprint: "raw-private-key-material",
+              privateKeyPem:
+                "-----BEGIN PRIVATE KEY-----\nraw-private-key-material\n-----END PRIVATE KEY-----",
+              valid: { authorizationSha256: "b".repeat(64) },
+            },
+          }),
+          start: async () => {
+            throw new Error("planned scenario failed before Host mutation");
           },
         },
-        scenario: "baseline-upgrade-uninstall",
+        evidenceSink: {
+          write: async (evidence) => written.push(evidence),
+        },
+        ownerPassword: "owner-password",
+        runId: "run-redacted-public-summary",
+        scenario: "compatible-upgrade-uninstall",
       }),
-    ).rejects.toThrow("requires a manual reinstall");
+    ).rejects.toMatchObject({
+      code: "release_e2e_failed",
+    });
+
+    expect(written.at(-1).cleanup.environment.summaries).toEqual({
+      authorization: "[REDACTED]",
+      authorizationDigest: "[REDACTED]",
+      authorizationPayload: "[REDACTED]",
+      authorizationToken: "[REDACTED]",
+      enrollmentToken: "[REDACTED]",
+      headersSha256: "[REDACTED]",
+      invalid: { authorizationSha256: "[REDACTED]" },
+      ownerPassword: "[REDACTED]",
+      privateKeyFingerprint: "[REDACTED]",
+      privateKeyPem: "[REDACTED]",
+      valid: { authorizationSha256: "[REDACTED]" },
+    });
+  });
+
+  it("binds the public authorization summary to its exact authority path and expected value", () => {
+    const candidateManifest = candidateManifestWithMigrationBaseline();
+    const expected = candidateManifest.releaseBaseline.authorization.sha256;
+    const other = "c".repeat(64);
+    expect(
+      redactReleaseE2EEvidence(
+        {
+          cleanup: {
+            authorizationSha256: expected,
+          },
+          releaseBaseline: {
+            authority: { authorizationSha256: expected },
+          },
+        },
+        {
+          candidateManifest,
+        },
+      ),
+    ).toEqual({
+      cleanup: { authorizationSha256: "[REDACTED]" },
+      releaseBaseline: {
+        authority: { authorizationSha256: expected },
+      },
+    });
+    expect(
+      redactReleaseE2EEvidence(
+        {
+          releaseBaseline: {
+            authority: { authorizationSha256: other },
+          },
+        },
+        {
+          candidateManifest,
+        },
+      ),
+    ).toEqual({
+      releaseBaseline: {
+        authority: { authorizationSha256: "[REDACTED]" },
+      },
+    });
+  });
+
+  it("derives baseline kind from the validated Candidate Manifest in workflow", async () => {
+    const workflow = await readFile(
+      fileURLToPath(
+        new URL(
+          "../.github/workflows/reusable-build-release-candidate.yml",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    expect(workflow).toContain(
+      "--candidate-manifest candidate/candidate-manifest.json",
+    );
+    expect(workflow).not.toMatch(/--baseline-kind|baseline_kind:/);
+    expect(workflow).toContain("--hub-owner-url http://127.0.0.1:33001");
+    expect(workflow).toContain("--hub-public-url http://127.0.0.1:33000");
   });
 
   it("constructs the real Docker Hub controller with default options", () => {
@@ -111,86 +646,6 @@ describe("Release E2E business assertions", () => {
         { ...samples[1], memoryUsedBytes: samples[1].memoryTotalBytes + 1 },
       ]),
     ).toBe(false);
-  });
-
-  it("waits for Candidate core readiness, a newer report, and newer portable Metrics together", async () => {
-    const checkpoint = {
-      lastReportAtMs: 10,
-      metric: portableMetric({
-        collectedAtMs: 20,
-        sequence: 2,
-        uptimeSeconds: 110,
-      }),
-    };
-    const hub = {
-      getHost: vi
-        .fn()
-        .mockResolvedValueOnce(
-          readyHost({ lastReportAtMs: checkpoint.lastReportAtMs }),
-        )
-        .mockResolvedValueOnce(
-          readyHost({
-            hostProfile: {
-              ...readyHost().hostProfile,
-              cpuCount: 0,
-            },
-            lastReportAtMs: checkpoint.lastReportAtMs + 1,
-          }),
-        )
-        .mockResolvedValue(
-          readyHost({ lastReportAtMs: checkpoint.lastReportAtMs + 1 }),
-        ),
-      getHostMetrics: vi
-        .fn()
-        .mockResolvedValueOnce([
-          portableMetric({
-            collectedAtMs: 10,
-            sequence: 1,
-            uptimeSeconds: 100,
-          }),
-          checkpoint.metric,
-        ])
-        .mockResolvedValue([
-          checkpoint.metric,
-          portableMetric({
-            collectedAtMs: 30,
-            sequence: 3,
-            uptimeSeconds: 120,
-          }),
-          portableMetric({
-            collectedAtMs: 40,
-            sequence: 4,
-            uptimeSeconds: 130,
-          }),
-        ]),
-    };
-
-    const reporting = await waitForReportingAdvance({
-      checkpoint,
-      expectedProbeVersion: "1.2.3",
-      hostId: 7,
-      hostObservation: {
-        code: "candidate_host_timeout",
-        label: "Candidate Host reporting",
-      },
-      hub,
-      metricsObservation: {
-        code: "candidate_metrics_timeout",
-        label: "Candidate portable Metrics",
-      },
-      poll: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
-    });
-    expect(reporting.host).toMatchObject({ id: 7, lastReportAtMs: 11 });
-    expect(isCandidateHostReady(reporting.host, "1.2.3")).toBe(true);
-    expect(reporting.host.lastReportAtMs).toBeGreaterThan(
-      checkpoint.lastReportAtMs,
-    );
-    expect(reporting.metrics.at(-1)).toMatchObject({
-      collectedAtMs: 40,
-      sequence: 4,
-    });
-    expect(hub.getHost).toHaveBeenCalledTimes(3);
-    expect(hub.getHostMetrics).toHaveBeenCalledTimes(2);
   });
 
   it("proves accepted and running transitions from formal timestamps without requiring an independently-polled accepted state", () => {
@@ -301,76 +756,36 @@ describe("successful Probe Repair boundary evidence", () => {
     ).toBe(evidence);
   });
 
-  it("accepts Repair filesystem evidence with the declared v0.1.72 legacy identity path", () => {
+  it("keeps Compatible failed-Upgrade Repair evidence independent of baseline descriptor kind", () => {
     const evidence = successfulRepairBoundaryEvidence();
-    evidence.repairHostBoundary.identityPath =
-      "/etc/enoki/probe-bootstrap.toml";
-    evidence.repairHostBoundary.inventory.files =
-      evidence.repairHostBoundary.inventory.files.map((file) =>
-        file === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
-          ? "/etc/enoki/probe-bootstrap.toml"
-          : file,
-      );
+    const manifest = candidateManifestWithMigrationBaseline();
+    bindRepairEvidenceToBaseline(evidence, manifest.releaseBaseline);
 
-    expect(
-      validateSuccessfulRepairBoundaryEvidence(
-        evidence,
-        candidateManifestWithBaseline(),
-      ),
-    ).toBe(evidence);
+    expect(validateSuccessfulRepairBoundaryEvidence(evidence, manifest)).toBe(
+      evidence,
+    );
   });
 
-  it.each([
-    [
-      "a missing declared identity path",
-      (boundary) => {
-        delete boundary.identityPath;
-      },
-    ],
-    [
-      "the declared identity file missing from inventory",
-      (boundary) => {
-        boundary.inventory.files = boundary.inventory.files.filter(
-          (file) =>
-            file !== "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        );
-      },
-    ],
-    [
-      "both supported identity paths in inventory",
-      (boundary) => {
-        boundary.inventory.files.push("/etc/enoki/probe-bootstrap.toml");
-      },
-    ],
-    [
-      "an identity path that disagrees with inventory",
-      (boundary) => {
-        boundary.identityPath = "/etc/enoki/probe-bootstrap.toml";
-      },
-    ],
-    [
-      "an unknown identity path",
-      (boundary) => {
-        boundary.identityPath = "/opt/enoki/probe-bootstrap.toml";
-        boundary.inventory.files = boundary.inventory.files.map((file) =>
-          file === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
-            ? "/opt/enoki/probe-bootstrap.toml"
-            : file,
-        );
-      },
-    ],
-  ])("rejects Repair filesystem evidence with %s", (_case, mutate) => {
+  it("rejects manual-reinstall evidence for an explicit Compatible Repair scenario", () => {
     const evidence = successfulRepairBoundaryEvidence();
-    mutate(evidence.repairHostBoundary);
+    const manifest = candidateManifestWithMigrationBaseline();
+    bindRepairEvidenceToBaseline(evidence, manifest.releaseBaseline);
+    evidence.auditLog = lifecycleAuditLog();
+    evidence.failureBoundary = {
+      enrollmentId: "enr_manual_reinstall_0001",
+      hostId: 7,
+      kind: "trust_epoch_manual_reinstall",
+    };
+    evidence.hubEvidence.apiTimeline.find((entry) =>
+      entry.pathname.endsWith("/probe-upgrade-requests"),
+    ).pathname = "/api/web/enrollments/manual-reinstall/7";
+    evidence.operationTimeline = [];
 
     expect(() =>
-      validateSuccessfulRepairBoundaryEvidence(
-        evidence,
-        candidateManifestWithBaseline(),
-      ),
+      validateSuccessfulRepairBoundaryEvidence(evidence, manifest),
     ).toThrow(
       expect.objectContaining({
-        boundary: "filesystem",
+        boundary: "hub-api",
         code: "repair_boundary_evidence_invalid",
       }),
     );
@@ -475,6 +890,87 @@ describe("successful Probe Repair boundary evidence", () => {
 });
 
 describe("Probe Host Harness", () => {
+  it("restarts the canonical Probe READY with Runtime masked and no registration one-shot material", async () => {
+    const commands = [];
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:canonical-runtime-unavailable")
+        ) {
+          return successfulCommand({
+            identity: {
+              probeId: "probe_release_02",
+              registrationAttemptCredential: false,
+              registrationAttemptSource: false,
+              registrationDropIn: false,
+              transitionalRegistrationKeys: false,
+            },
+            probe: {
+              ActiveState: "active",
+              LoadState: "loaded",
+              Result: "success",
+              SubState: "running",
+              Type: "notify",
+            },
+            runtime: {
+              serviceLoadState: "masked",
+              socketLoadState: "masked",
+            },
+          });
+        }
+        if (
+          command.includes("# enoki-release-e2e:restore-observation-runtime")
+        ) {
+          return successfulCommandText("restored\n");
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+    await harness.assertDisposable("run-canonical-reporting");
+    await harness.install(officialEnrollment(), "run-canonical-reporting");
+
+    await expect(
+      harness.restartCanonicalProbeWithoutObservationRuntime(
+        "run-canonical-reporting",
+        "probe_release_02",
+      ),
+    ).resolves.toMatchObject({
+      identity: { probeId: "probe_release_02" },
+      probe: { ActiveState: "active", SubState: "running", Type: "notify" },
+      runtime: { serviceLoadState: "masked", socketLoadState: "masked" },
+    });
+    await expect(
+      harness.restoreObservationRuntime("run-canonical-reporting"),
+    ).resolves.toEqual({ restored: true });
+    const restart = commands.find((command) =>
+      command.includes("# enoki-release-e2e:canonical-runtime-unavailable"),
+    );
+    expect(restart).toContain("systemctl mask --runtime");
+    expect(restart).toContain("systemctl restart enoki-probe.service");
+    expect(restart).toContain("registration_");
+    expect(restart).toContain("/var/lib/enoki-probe-registration/attempt.json");
+    expect(restart).toContain(
+      "/run/credentials/enoki-probe.service/registration-attempt",
+    );
+  });
+
   it("fingerprints same-path content, recursive directory closure, and file ownership metadata", async () => {
     const root = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-fingerprint-"),
@@ -651,7 +1147,7 @@ describe("Probe Host Harness", () => {
 
     await harness.assertDisposable("run-claim");
     await expect(
-      harness.install(officialInstallCommand, "run-claim"),
+      harness.install(officialEnrollment(), "run-claim"),
     ).rejects.toThrow("Host already claimed");
 
     const claim = commands.find((command) =>
@@ -688,14 +1184,6 @@ describe("Probe Host Harness", () => {
       ),
     ).toHaveLength(1);
     expect(executions[0].command).toContain("probe-install.toml");
-    for (const path of [
-      "/var/lib/enoki-probe-bootstrap/trust/delegation-generation",
-      "/var/lib/enoki-probe-bootstrap/trust/.delegation-generation.lock",
-      "/var/lib/enoki-probe-bootstrap/trust",
-      "/var/lib/enoki-probe-bootstrap/inbox",
-    ]) {
-      expect(executions[0].command).toContain(path);
-    }
     expect(executions[0].options).toEqual({ root: true });
   });
 
@@ -721,7 +1209,6 @@ describe("Probe Host Harness", () => {
               "/var/lib/enoki-probe-bootstrap",
               "/etc/enoki/probe-install.toml",
               "/etc/systemd/system/enoki-probe.service",
-              "/etc/sudoers.d/enoki-probe-operations",
               "/usr/local/bin/enoki-probe",
               "/var/lib/enoki-probe",
             ],
@@ -746,11 +1233,6 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:binary-version")) {
           return successfulCommandText("enoki-probe v1.2.3\n");
         }
-        if (command.includes("# enoki-release-e2e:probe-identity-path")) {
-          return successfulCommandText(
-            "/var/lib/enoki-probe/identity/probe-bootstrap.toml\n",
-          );
-        }
         if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
           return successfulCommandText("1\n");
         }
@@ -772,7 +1254,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-123");
-    await harness.install(officialInstallCommand, "run-123");
+    await harness.install(officialEnrollment(), "run-123");
     const installed = await harness.assertInstalled("run-123", "1.2.3");
     const identity = await harness.readProbeIdentity("run-123");
     await harness.beginUpgradeOwnershipTransition("run-123", "1.2.3");
@@ -829,423 +1311,11 @@ describe("Probe Host Harness", () => {
     expect(completedOwnership).toContain(
       'mv -- "$temporary" "$claim/resources"',
     );
-    expect(completedOwnership).toContain("identity_layout=v0_1_72");
-    expect(completedOwnership).toContain("identity_layout=current");
     expect(completedOwnership).toContain("schema_version = 2");
     expect(completedOwnership).toContain("! grep -Eq 'sudoers|upgrader'");
     expect(
       commands.filter((command) => command.includes("enk_enroll_secret")),
     ).toHaveLength(1);
-  });
-
-  it("recognizes the trusted v0.1.72 Probe identity layout at its legacy path", async () => {
-    let inventoryCount = 0;
-    const commands = [];
-    const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-legacy-"));
-    const metadataPath = path.join(root, "etc/enoki/probe-install.toml");
-    const identityPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
-    await mkdir(path.dirname(metadataPath), { recursive: true });
-    await writeFile(
-      metadataPath,
-      [
-        "schema_version = 1",
-        'hub_url = "https://hub.example"',
-        'install_path = "/usr/local/bin/enoki-probe"',
-        'identity_path = "/etc/enoki/probe-bootstrap.toml"',
-        'state_dir = "/var/lib/enoki-probe"',
-        'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
-        'service_name = "enoki-probe"',
-        'service_user = "enoki-probe"',
-        'service_group = "enoki-probe"',
-        'service_unit_path = "/etc/systemd/system/enoki-probe.service"',
-        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
-        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
-        `probe_asset_public_key_sha256 = "${"a".repeat(64)}"`,
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    // v0.1.72 writes this bootstrap material before its first enrollment has
-    // completed.  It is a valid installation identity *path*, but not yet a
-    // formal Probe identity.  The host boundary must not race that enrollment.
-    await writeFile(
-      identityPath,
-      'enrollment_token = "enk_enroll_temporary"\n',
-      "utf8",
-    );
-    await Promise.all([chmod(metadataPath, 0o600), chmod(identityPath, 0o600)]);
-
-    try {
-      const harness = createProbeHostHarness({
-        execute: async (command) => {
-          commands.push(command);
-          if (command.includes("# enoki-release-e2e:inventory")) {
-            inventoryCount += 1;
-            return successfulCommand(
-              inventoryCount === 1
-                ? {
-                    accounts: { group: false, user: false },
-                    files: [],
-                    units: [],
-                  }
-                : {
-                    accounts: { group: true, user: true },
-                    files: [
-                      "/etc/enoki/probe-bootstrap.toml",
-                      "/etc/enoki/probe-install.toml",
-                      "/etc/systemd/system/enoki-probe.service",
-                      "/etc/sudoers.d/enoki-probe-operations",
-                      "/usr/local/bin/enoki-probe",
-                      "/var/lib/enoki-probe",
-                    ],
-                    units: ["enoki-probe.service"],
-                  },
-            );
-          }
-          if (command.includes("# enoki-release-e2e:dependencies")) {
-            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-          }
-          if (command.includes("# enoki-release-e2e:service-boundary")) {
-            return successfulCommandText(
-              [
-                "LoadState=loaded",
-                "ActiveState=active",
-                "SubState=running",
-                "User=enoki-probe",
-                "Group=enoki-probe",
-                "FragmentPath=/etc/systemd/system/enoki-probe.service",
-              ].join("\n"),
-            );
-          }
-          if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
-            return successfulCommandText(
-              "enoki-probe-uninstaller internal-uninstaller",
-            );
-          }
-          if (command.includes("# enoki-release-e2e:binary-version")) {
-            return successfulCommandText("enoki-probe v0.1.72\n");
-          }
-          if (
-            command.includes("# enoki-release-e2e:probe-identity-path") ||
-            command.includes("# enoki-release-e2e:probe-identity")
-          ) {
-            try {
-              const { stdout } = await execFileAsync("sh", [
-                "-c",
-                command
-                  .replace(
-                    "metadata=/etc/enoki/probe-install.toml",
-                    `metadata=${metadataPath}`,
-                  )
-                  .replace(
-                    '[ "$(stat -c %u "$metadata")" = 0 ]',
-                    '[ "$(stat -c %u "$metadata")" = "$(id -u)" ]',
-                  )
-                  .replace(
-                    "v0_1_72) identity=/etc/enoki/probe-bootstrap.toml",
-                    `v0_1_72) identity=${identityPath}`,
-                  ),
-              ]);
-              return successfulCommandText(
-                stdout.replaceAll(
-                  identityPath,
-                  "/etc/enoki/probe-bootstrap.toml",
-                ),
-              );
-            } catch (error) {
-              return {
-                code: Number.isInteger(error?.code) ? error.code : 1,
-                stderr: error?.stderr ?? "",
-                stdout: error?.stdout ?? "",
-              };
-            }
-          }
-          return successfulCommandText(
-            command.includes("# enoki-release-e2e:record-resources")
-              ? "recorded\n"
-              : command.includes("# enoki-release-e2e:claim-run")
-                ? "claimed\n"
-                : productInstallerOutput(),
-          );
-        },
-      });
-
-      await harness.assertDisposable("run-legacy");
-      await harness.install(officialInstallCommand, "run-legacy");
-      await expect(
-        harness.assertInstalled("run-legacy", "0.1.72"),
-      ).resolves.toMatchObject({
-        identityPath: "/etc/enoki/probe-bootstrap.toml",
-        probeVersion: "0.1.72",
-      });
-
-      await expect(harness.readProbeIdentity("run-legacy")).rejects.toThrow(
-        /Probe Identity inspection failed/,
-      );
-
-      await writeFile(
-        identityPath,
-        'probe_id = "probe_release_legacy"\nprobe_private_key_pem = "test-private-key"\n',
-        "utf8",
-      );
-      await expect(harness.readProbeIdentity("run-legacy")).resolves.toEqual({
-        identitySha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-        probeId: "probe_release_legacy",
-      });
-
-      const identityInspection = commands.find((command) =>
-        command.includes("# enoki-release-e2e:probe-identity-path"),
-      );
-      expect(identityInspection).toContain("identity_layout=v0_1_72");
-      expect(identityInspection).toContain(
-        "identity=/etc/enoki/probe-bootstrap.toml",
-      );
-      expect(identityInspection).toContain(
-        '[ "$(stat -c %u "$metadata")" = 0 ]',
-      );
-      expect(identityInspection).toContain(
-        "elif grep -Fxq 'schema_version = 1' \"$metadata\"; then",
-      );
-      expect(identityInspection).toContain(
-        '[ "$(stat -c %a "$metadata")" = 600 ]',
-      );
-      expect(identityInspection).not.toContain("probe_private_key_pem");
-      expect(identityInspection).not.toContain("probe_id = ");
-      expect(
-        commands.find((command) =>
-          command.includes("# enoki-release-e2e:record-resources"),
-        ),
-      ).toContain("/etc/enoki/probe-bootstrap.toml");
-    } finally {
-      await rm(root, { force: true, recursive: true });
-    }
-  });
-
-  it.each([
-    [
-      "current",
-      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-      "probe_release_current",
-    ],
-    ["v0.1.72", "/etc/enoki/probe-bootstrap.toml", "probe_release_legacy"],
-  ])(
-    "executes the trusted %s metadata layout at its declared identity path",
-    async (_layout, identityPath, probeId) => {
-      const fixture = await createProbeMetadataShellFixture({
-        identityPath,
-        probeId,
-      });
-      try {
-        await expect(fixture.readIdentity()).resolves.toMatchObject({
-          probeId,
-        });
-      } finally {
-        await fixture.dispose();
-      }
-    },
-  );
-
-  it.skipIf(process.getuid?.() !== 0)(
-    "rejects metadata owned by a different existing user without chown",
-    async () => {
-      const fixture = await createProbeMetadataShellFixture({
-        identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        probeId: "probe_release_wrong_owner",
-      });
-      try {
-        const metadata = await readFile(fixture.metadataPath, "utf8");
-        await chmod(fixture.root, 0o755);
-        await chmod(path.dirname(fixture.metadataPath), 0o777);
-        await rm(fixture.metadataPath);
-        await execFileAsync("runuser", [
-          "-u",
-          "nobody",
-          "--",
-          "sh",
-          "-c",
-          'umask 077; printf "%s" "$1" > "$2"',
-          "sh",
-          metadata,
-          fixture.metadataPath,
-        ]);
-
-        await expect(fixture.readIdentity()).rejects.toThrow(
-          /Probe Identity inspection failed/,
-        );
-      } finally {
-        await fixture.dispose();
-      }
-    },
-  );
-
-  it.each([
-    [
-      "a metadata symlink",
-      async (fixture) => {
-        const target = path.join(fixture.root, "metadata-target.toml");
-        await writeFile(target, await readFile(fixture.metadataPath, "utf8"));
-        await rm(fixture.metadataPath);
-        await symlink(target, fixture.metadataPath);
-      },
-    ],
-    [
-      "group-writable metadata",
-      async (fixture) => {
-        await chmod(fixture.metadataPath, 0o620);
-      },
-    ],
-    [
-      "an unsupported schema",
-      async (fixture) => {
-        await writeFile(
-          fixture.metadataPath,
-          (await readFile(fixture.metadataPath, "utf8")).replace(
-            "schema_version = 1",
-            "schema_version = 2",
-          ),
-        );
-      },
-    ],
-    [
-      "a duplicate schema",
-      async (fixture) => {
-        await writeFile(
-          fixture.metadataPath,
-          `${await readFile(fixture.metadataPath, "utf8")}schema_version = 1\n`,
-        );
-      },
-    ],
-    [
-      "a duplicate mismatched identity path",
-      async (fixture) => {
-        await writeFile(
-          fixture.metadataPath,
-          `${await readFile(fixture.metadataPath, "utf8")}identity_path = "/etc/enoki/probe-bootstrap.toml"\n`,
-        );
-      },
-    ],
-  ])(
-    "rejects %s before trusting Probe installation metadata",
-    async (_case, mutate) => {
-      const fixture = await createProbeMetadataShellFixture({
-        identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        probeId: "probe_release_rejected",
-      });
-      try {
-        await mutate(fixture);
-        await expect(fixture.readIdentity()).rejects.toThrow(
-          /Probe Identity inspection failed/,
-        );
-      } finally {
-        await fixture.dispose();
-      }
-    },
-  );
-
-  it("executes current-layout ownership completion after Installer Recovery", async () => {
-    const fixture = await createOwnershipCompletionShellFixture();
-    const operation = failedUpgradeOperation();
-    try {
-      await prepareOwnershipCompletionFixture(
-        fixture,
-        "run-installer-recovery-completion",
-        operation,
-      );
-
-      await expect(
-        fixture.harness.recoverUpgradeWithInstaller(
-          officialInstallCommand,
-          "run-installer-recovery-completion",
-          operation,
-        ),
-      ).resolves.toMatchObject({ mode: "installer", status: "succeeded" });
-      expect(fixture.executedCompletionShell).toBe(true);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("rejects a legacy v0.1.72 identity layout after Installer Recovery without rewriting claim resources", async () => {
-    const fixture = await createOwnershipCompletionShellFixture();
-    const operation = failedUpgradeOperation();
-    try {
-      await prepareOwnershipCompletionFixture(
-        fixture,
-        "run-installer-recovery-legacy",
-        operation,
-      );
-      const resourcesBefore = await fixture.readClaimResources();
-      fixture.setInstallerIdentityPath("/etc/enoki/probe-bootstrap.toml");
-
-      await expect(
-        fixture.harness.recoverUpgradeWithInstaller(
-          officialInstallCommand,
-          "run-installer-recovery-legacy",
-          operation,
-        ),
-      ).rejects.toThrow(
-        /installer_recovery_requires_current_identity_layout: found v0_1_72/,
-      );
-      expect(fixture.executedCompletionShell).toBe(true);
-      expect(fixture.lastCompletionShell).toContain(
-        "installer_recovery_requires_current_identity_layout",
-      );
-      await expect(fixture.readClaimResources()).resolves.toBe(resourcesBefore);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("executes current-layout ownership completion after Repair", async () => {
-    const fixture = await createOwnershipCompletionShellFixture();
-    const operation = failedUpgradeOperation();
-    try {
-      await prepareOwnershipCompletionFixture(
-        fixture,
-        "run-repair-current-completion",
-        operation,
-      );
-      await fixture.harness.repair("run-repair-current-completion");
-
-      await expect(
-        fixture.harness.completeRepairOwnershipTransition(
-          "run-repair-current-completion",
-          operation,
-        ),
-      ).resolves.toMatchObject({ owned: true });
-      expect(fixture.executedCompletionShell).toBe(true);
-    } finally {
-      await fixture.dispose();
-    }
-  });
-
-  it("completes Repair with a supported legacy v0.1.72 identity layout and renews ownership for cleanup", async () => {
-    const fixture = await createOwnershipCompletionShellFixture();
-    const operation = failedUpgradeOperation();
-    const runId = "run-repair-legacy-completion";
-    try {
-      await prepareOwnershipCompletionFixture(fixture, runId, operation);
-      const resourcesBefore = await fixture.readClaimResources();
-      await fixture.materializeProbe("/etc/enoki/probe-bootstrap.toml");
-      await fixture.harness.repair(runId);
-
-      await expect(
-        fixture.harness.completeRepairOwnershipTransition(runId, operation),
-      ).resolves.toMatchObject({ owned: true });
-      expect(fixture.lastCompletionShell).not.toContain(
-        "installer_recovery_requires_current_identity_layout",
-      );
-      await expect(fixture.readClaimResources()).resolves.not.toBe(
-        resourcesBefore,
-      );
-      fixture.prepareCleanup();
-      await expect(fixture.harness.cleanup(runId)).resolves.toEqual({
-        clean: true,
-        removedPartialInstallation: true,
-      });
-    } finally {
-      await fixture.dispose();
-    }
   });
 
   it("rejects an installed Probe binary from a different candidate version", async () => {
@@ -1268,7 +1338,6 @@ describe("Probe Host Harness", () => {
               "/var/lib/enoki-probe-bootstrap",
               "/etc/enoki/probe-install.toml",
               "/etc/systemd/system/enoki-probe.service",
-              "/etc/sudoers.d/enoki-probe-operations",
               "/usr/local/bin/enoki-probe",
               "/var/lib/enoki-probe",
             ],
@@ -1289,11 +1358,6 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:binary-version")) {
           return successfulCommandText("enoki-probe 9.9.9\n");
         }
-        if (command.includes("# enoki-release-e2e:probe-identity-path")) {
-          return successfulCommandText(
-            "/var/lib/enoki-probe/identity/probe-bootstrap.toml\n",
-          );
-        }
         if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
           return successfulCommandText("1\n");
         }
@@ -1302,13 +1366,13 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-version");
-    await harness.install(officialInstallCommand, "run-version");
+    await harness.install(officialEnrollment(), "run-version");
     await expect(
       harness.assertInstalled("run-version", "1.2.3"),
     ).rejects.toThrow(/Probe binary version 9\.9\.9.*Candidate 1\.2\.3/);
   });
 
-  it("uses a run-owned systemd fault and the real root-only Probe Repair command", async () => {
+  it("uses a run-owned post-replacement fault and the real root-only Probe Repair command", async () => {
     const commands = [];
     const harness = createProbeHostHarness({
       execute: async (command, options) => {
@@ -1378,7 +1442,7 @@ describe("Probe Host Harness", () => {
     };
 
     await harness.assertDisposable("run-repair-host");
-    await harness.install(officialInstallCommand, "run-repair-host");
+    await harness.install(officialEnrollment(), "run-repair-host");
     await harness.beginUpgradeOwnershipTransition("run-repair-host", "1.2.3");
     await harness.armPostReplacementRestartFault("run-repair-host", "1.2.3");
     await harness.bindUpgradeOwnershipTransition("run-repair-host", pending);
@@ -1431,6 +1495,260 @@ describe("Probe Host Harness", () => {
     });
   });
 
+  it("rejects a transient service failure as Installed Bundle Failure Repair eligibility", async () => {
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(
+            '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+          );
+        }
+        if (command.includes("installed-bundle")) {
+          return successfulCommand({
+            cause: "installed_bundle_restart_failure",
+            probeVersion: "1.2.3",
+            status: "failed",
+          });
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-repair-eligibility");
+    await harness.install(officialEnrollment(), "run-repair-eligibility");
+    await expect(
+      harness.repairInstalledBundleFailure("run-repair-eligibility", "1.2.3"),
+    ).rejects.toThrow(/durable Observation Runtime failure eligibility/i);
+  });
+
+  it("exhausts the Observation Runtime budget and consumes its durable failure epoch through Repair", async () => {
+    const commands = [];
+    const runtimeSha256 = "a".repeat(64);
+    const harness = createProbeHostHarness({
+      execute: async (command, options) => {
+        commands.push({ command, options });
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(
+            '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText(
+            [
+              "activeState=failed",
+              "bootId=4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+              "bundleVersion=1.2.3",
+              `epochGeneration=${"b".repeat(64)}`,
+              "epochLinks=1",
+              "epochMode=600",
+              "epochOwner=0",
+              "hostId=7",
+              `identityReceiptSha256=${"c".repeat(64)}`,
+              `installStateSha256=${"d".repeat(64)}`,
+              `latchGeneration=${"b".repeat(64)}`,
+              "latchLinks=1",
+              "latchMode=600",
+              "latchOwner=0",
+              `manifestSha256=${"e".repeat(64)}`,
+              "probeId=probe_release_01",
+              "result=start-limit-hit",
+              "restartCount=2",
+              "role=observation_runtime",
+              `runtimeFaultSha256=${"f".repeat(64)}`,
+              `runtimeSha256=${runtimeSha256}`,
+              "startLimitBurst=3",
+              "startLimitIntervalSec=60",
+              "unit=enoki-observation-runtime.service",
+              `unitSha256=${"1".repeat(64)}`,
+              "",
+            ].join("\n"),
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText(
+            [
+              "bundleVersion=1.2.3",
+              "epochExists=0",
+              "faultBackupExists=0",
+              "latchExists=0",
+              "repairOutput=Probe repair completed.",
+              `runtimeSha256=${runtimeSha256}`,
+              "unit=enoki-observation-runtime.service",
+              "",
+            ].join("\n"),
+          );
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-repair");
+    await harness.install(officialEnrollment(), "run-runtime-repair");
+    await expect(
+      harness.repairInstalledBundleFailure("run-runtime-repair", "1.2.3"),
+    ).resolves.toMatchObject({
+      failure: {
+        activeState: "failed",
+        bundle: { runtimeSha256, version: "1.2.3" },
+        failureEpoch: {
+          generation: "b".repeat(64),
+          hostId: "7",
+          ownerUid: 0,
+        },
+        latch: { generation: "b".repeat(64), ownerUid: 0 },
+        recoveryBudget: { observedStarts: 3, startLimitBurst: 3 },
+        result: "start-limit-hit",
+        role: "observation_runtime",
+        status: "latched",
+        unit: "enoki-observation-runtime.service",
+      },
+      repair: {
+        failureEpochRemoved: true,
+        faultRemoved: true,
+        latchRemoved: true,
+        runtimeSha256,
+        sameBundle: true,
+      },
+    });
+
+    const exhausted = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:exhaust-observation-runtime-budget",
+      ),
+    );
+    expect(exhausted.options).toEqual({ root: true });
+    expect(exhausted.command).toContain(
+      "unit_file=/etc/systemd/system/enoki-observation-runtime.service",
+    );
+    expect(exhausted.command).toContain(
+      "runtime=/usr/local/bin/enoki-observation-runtime",
+    );
+    expect(exhausted.command).toContain("StartLimitBurst=");
+    expect(exhausted.command).toContain('$result" = start-limit-hit');
+    expect(exhausted.command).toContain(
+      "epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml",
+    );
+    expect(exhausted.command).toContain(
+      "latch=/var/lib/enoki-probe/runtime-failure/latch",
+    );
+    expect(exhausted.command).not.toContain("enoki-probe.service");
+    expect(exhausted.command).not.toContain("systemctl is-failed");
+    expect(exhausted.command).not.toContain("printf '{");
+    await expect(
+      execFileAsync("/bin/sh", ["-n", "-c", exhausted.command]),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    const repaired = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:repair-observation-runtime-failure",
+      ),
+    );
+    expect(repaired.command).toContain("/usr/local/bin/enoki-probe repair");
+    expect(repaired.command).toContain('[ ! -e "$epoch" ]');
+    expect(repaired.command).toContain('[ ! -e "$latch" ]');
+    await expect(
+      execFileAsync("/bin/sh", ["-n", "-c", repaired.command]),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+  });
+
+  it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
+    const commands = [];
+    const driverInput = {
+      assertOwnedRun(runId) {
+        expect(runId).toBe("run-runtime-recovery");
+      },
+      async execute(command, options) {
+        commands.push({ command, options });
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText(durableRuntimeFailureEvidenceOutput());
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          return {
+            code: 1,
+            stderr: "repair interrupted after failure epoch admission",
+            stdout: "",
+          };
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
+        throw new Error("unexpected production Host command");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    };
+    const interrupted =
+      createInstalledBundleFailureRepairHostDriver(driverInput);
+
+    await expect(
+      interrupted.repair("run-runtime-recovery", "1.2.3"),
+    ).rejects.toThrow("repair interrupted after failure epoch admission");
+
+    const restarted = createInstalledBundleFailureRepairHostDriver(driverInput);
+    await expect(restarted.cleanup("run-runtime-recovery")).resolves.toEqual({
+      clean: true,
+    });
+    const cleanup = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:cleanup-observation-runtime-failure",
+      ),
+    );
+    expect(cleanup.options).toEqual({ root: true });
+    expect(cleanup.command).toContain('mv -- "$backup" "$runtime"');
+    expect(cleanup.command).toContain(
+      "/usr/local/bin/enoki-probe-lifecycle-companion retry-runtime",
+    );
+    expect(cleanup.command).toContain(
+      "systemctl start enoki-observation-runtime.socket",
+    );
+    expect(cleanup.command).not.toMatch(
+      /rm .*runtime-failure\/(?:epoch|latch)/,
+    );
+    await expect(
+      execFileAsync("/bin/sh", ["-n", "-c", cleanup.command]),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+  });
+
   it("proves exact uninstall residue while retaining journald and shared dependencies", async () => {
     const dependencies = JSON.stringify({
       curl: "/usr/bin/curl",
@@ -1462,7 +1780,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-123");
-    await harness.install(officialInstallCommand, "run-123");
+    await harness.install(officialEnrollment(), "run-123");
     const completion = await harness.verifyUninstallCompletion("run-123");
 
     expect(completion).toEqual(
@@ -1514,7 +1832,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-local-uninstall");
-    await harness.install(officialInstallCommand, "run-local-uninstall");
+    await harness.install(officialEnrollment(), "run-local-uninstall");
     await expect(
       harness.localUninstall("run-local-uninstall"),
     ).resolves.toMatchObject({
@@ -1529,7 +1847,7 @@ describe("Probe Host Harness", () => {
       },
     });
     await harness.install(
-      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_reenroll' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+      officialEnrollment({ enrollmentToken: "enk_enroll_reenroll" }),
       "run-local-uninstall",
     );
     expect(commands).toContainEqual({
@@ -1587,7 +1905,7 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:installed-state")) {
           return successfulCommand(state);
         }
-        if (command.includes("ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat'")) {
+        if (command.includes("'enk_enroll_repeat' | python3")) {
           return {
             code: 1,
             stderr:
@@ -1598,20 +1916,21 @@ describe("Probe Host Harness", () => {
         return successfulCommandText(productInstallerOutput());
       },
     });
-    const repeatedCommand =
-      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate";
+    const repeatedEnrollment = officialEnrollment({
+      enrollmentToken: "enk_enroll_repeat",
+    });
 
     await harness.assertDisposable("run-repeat-add");
-    await harness.install(officialInstallCommand, "run-repeat-add");
+    await harness.install(officialEnrollment(), "run-repeat-add");
     const before = await harness.captureInstallationState("run-repeat-add");
     await expect(
-      harness.rejectRepeatedInstall(repeatedCommand, "run-repeat-add"),
+      harness.rejectRepeatedInstall(repeatedEnrollment, "run-repeat-add"),
     ).resolves.toMatchObject({ code: "existing_probe_installation" });
     const after = await harness.captureInstallationState("run-repeat-add");
 
     expect(after).toEqual(before);
     expect(commands).toContainEqual({
-      command: `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${repeatedCommand}\n`,
+      command: `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${repeatedEnrollment.installCommand}\n`,
       options: { root: false, sensitive: true },
     });
   });
@@ -1663,7 +1982,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-terminal-report");
-    await harness.install(officialInstallCommand, "run-terminal-report");
+    await harness.install(officialEnrollment(), "run-terminal-report");
     await expect(
       harness.awaitPermanentReportRejection("run-terminal-report"),
     ).resolves.toEqual(terminalEvidence);
@@ -1735,13 +2054,13 @@ describe("Probe Host Harness", () => {
             "LoadState=loaded\nActiveState=failed\nSubState=failed\n",
           );
         }
-        if (command.includes("ENOKI_ENROLLMENT_TOKEN")) installed = true;
+        if (command.includes("'enk_enroll_secret' | python3")) installed = true;
         return successfulCommandText(productInstallerOutput());
       },
     });
 
     await harness.assertDisposable("run-terminal-diagnostics");
-    await harness.install(officialInstallCommand, "run-terminal-diagnostics");
+    await harness.install(officialEnrollment(), "run-terminal-diagnostics");
     await expect(
       harness.collectDiagnostics("run-terminal-diagnostics"),
     ).resolves.toEqual({
@@ -1957,6 +2276,13 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:inspect-claim")) {
           return successfulCommandText("absent\n");
         }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
         if (command.includes("# enoki-release-e2e:dependencies")) {
           return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
         }
@@ -1968,7 +2294,7 @@ describe("Probe Host Harness", () => {
     });
     await harness.assertDisposable("run-partial");
     await expect(
-      harness.install(officialInstallCommand, "run-partial"),
+      harness.install(officialEnrollment(), "run-partial"),
     ).rejects.toMatchObject({
       code: "probe_installation_failed",
       installerEvidence: { code: 1, stderr: "interrupted" },
@@ -1993,7 +2319,6 @@ describe("Probe Host Harness", () => {
     expect(emergency).toContain("sha256sum");
     expect(emergency).toContain("find -P");
     expect(emergency).toContain("stat -c");
-    expect(emergency).toContain("/etc/enoki/probe-bootstrap.toml");
     expect(emergency).not.toContain("expected_resource()");
     expect(emergency).not.toContain('done < "$claim/resources"');
     expect(
@@ -2026,7 +2351,7 @@ describe("Probe Host Harness", () => {
 
     await harness.assertDisposable("run-recording-failure");
     await expect(
-      harness.install(officialInstallCommand, "run-recording-failure"),
+      harness.install(officialEnrollment(), "run-recording-failure"),
     ).rejects.toMatchObject({
       code: "probe_resource_recording_failed",
       installerEvidence: {
@@ -2085,12 +2410,19 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:inspect-claim")) {
           return successfulCommandText("absent\n");
         }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
         return successfulCommandText("recorded\n");
       },
     });
 
     await harness.assertDisposable("run-clean-release");
-    await harness.install(officialInstallCommand, "run-clean-release");
+    await harness.install(officialEnrollment(), "run-clean-release");
     await expect(harness.cleanup("run-clean-release")).resolves.toEqual({
       clean: true,
       removedPartialInstallation: false,
@@ -2169,7 +2501,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-aggregate-cleanup");
-    await harness.install(officialInstallCommand, "run-aggregate-cleanup");
+    await harness.install(officialEnrollment(), "run-aggregate-cleanup");
     await harness.armPostReplacementRestartFault(
       "run-aggregate-cleanup",
       "1.2.3",
@@ -2241,7 +2573,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-foreign-change");
-    await harness.install(officialInstallCommand, "run-foreign-change");
+    await harness.install(officialEnrollment(), "run-foreign-change");
 
     await expect(harness.cleanup("run-foreign-change")).rejects.toThrow(
       /fingerprint changed/,
@@ -2280,9 +2612,10 @@ describe("Hub Lifecycle Client", () => {
         if (pathname === "/api/web/enrollments") {
           return jsonResponse(
             {
+              ...officialEnrollment({
+                enrollmentToken: "enk_enroll_release_e2e_test_token",
+              }),
               enrollmentId: "enr_existing_host_0001",
-              enrollmentToken: "enk_enroll_release_e2e_test_token",
-              installCommand: officialInstallCommand,
               status: "pending",
               target: { hostId: 7, kind: "existing_host" },
             },
@@ -2444,6 +2777,45 @@ describe("Hub Lifecycle Client", () => {
         cookie: "enoki_owner_session=session-1",
       }),
     ]);
+  });
+
+  it("creates Trust Epoch manual reinstall Enrollment through the production Owner API", async () => {
+    const requests = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const pathname = new URL(url).pathname;
+        requests.push({ method: init.method ?? "GET", pathname });
+        if (pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (pathname === "/api/web/enrollments/manual-reinstall/7") {
+          return jsonResponse(
+            {
+              ...officialEnrollment(),
+              enrollmentId: "enr_manual_reinstall_0001",
+              target: { hostId: 7, kind: "manual_reinstall" },
+            },
+            201,
+          );
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(client.createManualReinstallEnrollment(7)).resolves.toEqual(
+      expect.objectContaining({
+        installCommand: officialInstallCommand,
+        target: { hostId: 7, kind: "manual_reinstall" },
+      }),
+    );
+    expect(requests).toContainEqual({
+      method: "POST",
+      pathname: "/api/web/enrollments/manual-reinstall/7",
+    });
   });
 
   it("keeps the DELETE response in evidence when the first poll fails", async () => {
@@ -2724,10 +3096,7 @@ describe("Hub Lifecycle Client", () => {
         });
       }
       if (pathname === "/api/web/enrollments" && method === "POST") {
-        return jsonResponse(
-          { enrollmentToken: "secret", installCommand: officialInstallCommand },
-          201,
-        );
+        return jsonResponse(officialEnrollment(), 201);
       }
       if (pathname === "/api/web/hosts" && method === "GET") {
         return jsonResponse({ hosts: [] });
@@ -2827,9 +3196,10 @@ describe("Hub Lifecycle Client", () => {
       }
       if (pathname === "/api/web/enrollments" && method === "POST") {
         return jsonResponse({
+          ...officialEnrollment({
+            enrollmentToken: "enk_enroll_client_evidence_token",
+          }),
           enrollmentId: "enr_client_evidence_0001",
-          enrollmentToken: "enk_enroll_client_evidence_token",
-          installCommand: officialInstallCommand,
           status: "pending",
           target: { kind: "new_host" },
         });
@@ -2890,9 +3260,10 @@ describe("Hub Lifecycle Client", () => {
       }
       if (pathname === "/api/web/enrollments" && method === "POST") {
         return jsonResponse({
+          ...officialEnrollment({
+            enrollmentToken: "enk_enroll_client_refresh_error_token",
+          }),
           enrollmentId: "enr_client_refresh_error_0001",
-          enrollmentToken: "enk_enroll_client_refresh_error_token",
-          installCommand: officialInstallCommand,
           status: "pending",
           target: { kind: "new_host" },
         });
@@ -3036,7 +3407,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async install(command) {
         calls.push("host.install");
-        expect(command).toBe(officialInstallCommand);
+        expect(command.installCommand).toBe(officialInstallCommand);
       },
       async verifyUninstallCompletion() {
         calls.push("host.verifyUninstallCompletion");
@@ -3096,12 +3467,7 @@ describe("Release E2E Orchestrator", () => {
     expect(written.at(-1)).toMatchObject({ result: { status: "failed" } });
   });
 
-  async function runExpandedFreshLifecycle({
-    enrollmentFault = null,
-    enrollmentIdMismatch = null,
-    enrollmentTargetMismatch = null,
-    hostFault = null,
-  } = {}) {
+  it("proves the expanded fresh installation lifecycle without resubmitting mutations", async () => {
     const calls = [];
     const completion = {
       clean: true,
@@ -3127,15 +3493,13 @@ describe("Release E2E Orchestrator", () => {
         SubState: "running",
       },
     };
+    const canonicalReportEvidence = canonicalRuntimeUnavailableEvidence();
     let enrollmentCount = 0;
     let installCount = 0;
-    let formalIdentityGeneration = 0;
-    let identityGeneration = 0;
     let lifecycle = "empty";
+    let canonicalRuntimeState = "available";
     let newEnrollmentCalls = 0;
     let offlineObservations = 0;
-    const commandCompletionReads = new Map();
-    const readinessObservations = new Map();
     let probeConfiguration = {
       enabledCollectorIds: ["official.cpu", "official.memory"],
       metricsCollectionIntervalSeconds: 5,
@@ -3150,36 +3514,6 @@ describe("Release E2E Orchestrator", () => {
     const initialEnrollment = enrollment({ kind: "new_host" });
     const rejectedEnrollment = enrollment({ kind: "new_host" });
     const reenrollment = enrollment({ hostId: 7, kind: "existing_host" });
-    const readyEnrollment = (value) => ({
-      ...value,
-      hostId: 7,
-      status: "ready",
-    });
-    const commandCompletion = (value, boundary) => {
-      if (enrollmentFault === boundary) {
-        const reads = (commandCompletionReads.get(boundary) ?? 0) + 1;
-        commandCompletionReads.set(boundary, reads);
-        return reads === 1
-          ? { ...value, hostId: null, status: "pending" }
-          : readyEnrollment(value);
-      }
-      if (enrollmentIdMismatch === boundary) {
-        return {
-          ...readyEnrollment(value),
-          enrollmentId: `enr_release_lifecycle_other_${boundary}`,
-        };
-      }
-      if (enrollmentTargetMismatch === boundary) {
-        return {
-          ...readyEnrollment(value),
-          target:
-            boundary === "initial"
-              ? { hostId: 7, kind: "existing_host" }
-              : { kind: "new_host" },
-        };
-      }
-      return readyEnrollment(value);
-    };
     const hub = {
       async authenticate() {
         calls.push("hub.authenticate");
@@ -3207,12 +3541,6 @@ describe("Release E2E Orchestrator", () => {
       },
       async getEnrollment(enrollmentId) {
         calls.push(`hub.getEnrollment:${enrollmentId}`);
-        if (enrollmentId === initialEnrollment.enrollmentId) {
-          return commandCompletion(initialEnrollment, "initial");
-        }
-        if (enrollmentId === reenrollment.enrollmentId) {
-          return commandCompletion(reenrollment, "reenrollment");
-        }
         return {
           enrollmentId,
           hostId: null,
@@ -3236,18 +3564,6 @@ describe("Release E2E Orchestrator", () => {
         if (lifecycle === "deleted") {
           throw new Error("deleted Host must not be read");
         }
-        if (lifecycle === "online" || lifecycle === "reenrolled") {
-          // A Host Profile is the public readiness boundary for the identity
-          // minted by this particular install.  In particular, the previous
-          // identity must not make a re-enrollment identity readable.
-          formalIdentityGeneration = identityGeneration;
-        }
-        const boundary = lifecycle === "online" ? "initial" : "reenrollment";
-        const observations = (readinessObservations.get(boundary) ?? 0) + 1;
-        readinessObservations.set(boundary, observations);
-        if (hostFault === boundary && observations === 1) {
-          return { ...readyHost(), status: "stale" };
-        }
         return readyHost({
           reportedProbeConfigurationVersion: "host-2-1",
         });
@@ -3266,21 +3582,32 @@ describe("Release E2E Orchestrator", () => {
             uptimeSeconds: 110,
           }),
         ];
-        return lifecycle === "reenrolled"
+        const reenrolled =
+          lifecycle === "reenrolled"
+            ? [
+                ...samples,
+                portableMetric({
+                  collectedAtMs: 30,
+                  sequence: 3,
+                  uptimeSeconds: 120,
+                }),
+                portableMetric({
+                  collectedAtMs: 40,
+                  sequence: 4,
+                  uptimeSeconds: 130,
+                }),
+              ]
+            : samples;
+        return canonicalRuntimeState === "restored"
           ? [
-              ...samples,
+              ...reenrolled,
               portableMetric({
-                collectedAtMs: 30,
+                collectedAtMs: 50,
                 sequence: 3,
-                uptimeSeconds: 120,
-              }),
-              portableMetric({
-                collectedAtMs: 40,
-                sequence: 4,
-                uptimeSeconds: 130,
+                uptimeSeconds: 140,
               }),
             ]
-          : samples;
+          : reenrolled;
       },
       async getHostProbeConfiguration() {
         calls.push("hub.getHostProbeConfiguration");
@@ -3364,8 +3691,6 @@ describe("Release E2E Orchestrator", () => {
       },
       async install() {
         installCount += 1;
-        identityGeneration += 1;
-        formalIdentityGeneration = 0;
         lifecycle = installCount === 1 ? "online" : "reenrolled";
         calls.push(`host.install:${installCount}`);
         return {
@@ -3389,15 +3714,61 @@ describe("Release E2E Orchestrator", () => {
         };
       },
       async readProbeIdentity() {
-        calls.push(`host.readProbeIdentity:${identityGeneration}`);
-        if (formalIdentityGeneration !== identityGeneration) {
-          throw new Error(
-            "Probe identity is unavailable until the matching core readiness observation succeeds",
-          );
-        }
-        return identityGeneration === 1
+        calls.push("host.readProbeIdentity");
+        return installCount === 1
           ? installedState.identity
           : { identitySha256: "d".repeat(64), probeId: "probe_release_02" };
+      },
+      async restartCanonicalProbeWithoutObservationRuntime() {
+        calls.push("host.restartCanonicalProbeWithoutObservationRuntime");
+        canonicalRuntimeState = "masked";
+        return {
+          identity: {
+            probeId: "probe_release_02",
+            registrationAttemptCredential: false,
+            registrationAttemptSource: false,
+            registrationDropIn: false,
+            transitionalRegistrationKeys: false,
+          },
+          probe: {
+            ActiveState: "active",
+            LoadState: "loaded",
+            Result: "success",
+            SubState: "running",
+            Type: "notify",
+          },
+          runtime: {
+            serviceLoadState: "masked",
+            socketLoadState: "masked",
+          },
+        };
+      },
+      async restoreObservationRuntime() {
+        calls.push("host.restoreObservationRuntime");
+        canonicalRuntimeState = "restored";
+        return { restored: true };
+      },
+      async repairInstalledBundleFailure() {
+        calls.push("host.repairInstalledBundleFailure");
+        return {
+          failure: {
+            activeState: "failed",
+            failureEpoch: {
+              hostId: "7",
+              probeId: "probe_release_01",
+            },
+            role: "observation_runtime",
+            status: "latched",
+            result: "start-limit-hit",
+            unit: "enoki-observation-runtime.service",
+          },
+          repair: {
+            failureEpochRemoved: true,
+            faultRemoved: true,
+            latchRemoved: true,
+            sameBundle: true,
+          },
+        };
       },
       async rejectRepeatedInstall() {
         calls.push("host.rejectRepeatedInstall");
@@ -3413,55 +3784,62 @@ describe("Release E2E Orchestrator", () => {
     };
     const written = [];
 
-    const scenarioRun = runReleaseE2EScenario({
-      candidateManifest: candidateManifest(),
-      environment: {
-        async cleanup() {
-          calls.push("environment.cleanup");
-          return { clean: true };
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifest(),
+        environment: {
+          async cleanup() {
+            calls.push("environment.cleanup");
+            return { clean: true };
+          },
+          async start() {
+            calls.push("environment.start");
+            return {
+              canonicalReports: {
+                arm({ expectedProbeId }) {
+                  calls.push(`canonicalReports.arm:${expectedProbeId}`);
+                },
+                diagnostics() {
+                  return { completed: true };
+                },
+                async waitForEvidence() {
+                  calls.push("canonicalReports.waitForEvidence");
+                  return canonicalReportEvidence;
+                },
+              },
+              host,
+              hub,
+            };
+          },
         },
-        async start() {
-          calls.push("environment.start");
-          return { host, hub };
+        evidenceSink: {
+          async write(value) {
+            written.push(value);
+          },
         },
-      },
-      evidenceSink: {
-        async write(value) {
-          written.push(value);
+        ownerPassword: "owner-password",
+        runId: "run-expanded-fresh",
+        scenario: "fresh-install-uninstall",
+        timing: {
+          intervalMs: 1,
+          sleep: async () => {},
+          timeoutMs: 10,
         },
-      },
-      ownerPassword: "owner-password",
-      runId: "run-expanded-fresh",
-      scenario: "fresh-install-uninstall",
-      timing: {
-        intervalMs: 1,
-        sleep: async () => {},
-        timeoutMs: 10,
-      },
-    });
-    const faultBoundary =
-      enrollmentFault ??
-      enrollmentIdMismatch ??
-      enrollmentTargetMismatch ??
-      hostFault;
-    if (faultBoundary) {
-      await expect(scenarioRun).rejects.toMatchObject({
-        code:
-          faultBoundary === "initial"
-            ? "initial_install_command_returned_before_readiness"
-            : "reenrollment_command_returned_before_readiness",
-      });
-      return { calls, written, faultBoundary };
-    }
-    await expect(scenarioRun).resolves.toEqual({ status: "succeeded" });
+      }),
+    ).resolves.toEqual({ status: "succeeded" });
 
     expect(calls).toEqual(
       expect.arrayContaining([
         "host.rejectRepeatedInstall",
+        "host.repairInstalledBundleFailure",
         "host.localUninstall",
         "hub.createEnrollment:existing_host",
         "hub.deleteHostHubOnly:7",
         "host.awaitPermanentReportRejection",
+        "canonicalReports.arm:probe_release_02",
+        "host.restartCanonicalProbeWithoutObservationRuntime",
+        "canonicalReports.waitForEvidence",
+        "host.restoreObservationRuntime",
       ]),
     );
     expect(calls.filter((call) => call === "host.install:1")).toHaveLength(1);
@@ -3487,29 +3865,60 @@ describe("Release E2E Orchestrator", () => {
     expect(calls.filter((call) => call === "host.localUninstall")).toHaveLength(
       2,
     );
-    for (const [install, enrollmentId, host] of [
-      [
-        "host.install:1",
-        `hub.getEnrollment:${initialEnrollment.enrollmentId}`,
-        "hub.getHost:online",
-      ],
-      [
-        "host.install:2",
-        `hub.getEnrollment:${reenrollment.enrollmentId}`,
-        "hub.getHost:reenrolled",
-      ],
-    ]) {
-      expect(calls.filter((call) => call === enrollmentId)).toHaveLength(1);
-      expect(calls.indexOf(install)).toBeLessThan(calls.indexOf(enrollmentId));
-      expect(calls.indexOf(enrollmentId)).toBeLessThan(calls.indexOf(host));
-    }
+    expect(calls.indexOf("host.repairInstalledBundleFailure")).toBeLessThan(
+      calls.indexOf("host.localUninstall"),
+    );
+    expect(
+      calls.indexOf("host.restartCanonicalProbeWithoutObservationRuntime"),
+    ).toBeLessThan(calls.indexOf("hub.deleteHostHubOnly:7"));
+    expect(calls.indexOf("canonicalReports.waitForEvidence")).toBeLessThan(
+      calls.lastIndexOf("hub.getHostMetrics"),
+    );
+    expect(calls.lastIndexOf("hub.getHostMetrics")).toBeLessThan(
+      calls.indexOf("host.restoreObservationRuntime"),
+    );
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
-      initialInstall: {
-        enrollment: {
-          enrollmentId: initialEnrollment.enrollmentId,
-          status: "pending",
-          target: { kind: "new_host" },
+      installedBundleFailureRepair: {
+        failure: {
+          failureEpoch: {
+            hostId: "7",
+            probeId: "probe_release_01",
+          },
+          result: "start-limit-hit",
+          role: "observation_runtime",
+          status: "latched",
+        },
+        host: {
+          hostProfile: { probeVersion: "1.2.3" },
+          id: 7,
+          status: "online",
+        },
+        identity: {
+          after: installedState.identity,
+          before: installedState.identity,
+        },
+        repair: {
+          failureEpochRemoved: true,
+          faultRemoved: true,
+          latchRemoved: true,
+          repairedVersion: "1.2.3",
+          sameBundle: true,
+        },
+      },
+      canonicalRuntimeUnavailableReporting: {
+        reporting: canonicalReportEvidence,
+        host: {
+          identity: { probeId: "probe_release_02" },
+          probe: { ActiveState: "active", SubState: "running" },
+          runtime: {
+            serviceLoadState: "masked",
+            socketLoadState: "masked",
+          },
+        },
+        ownerProjection: {
+          host: { id: 7, status: "online" },
+          metricsUnchanged: true,
         },
       },
       finalLocalUninstall: { completion: { clean: true } },
@@ -3542,150 +3951,16 @@ describe("Release E2E Orchestrator", () => {
       },
       repeatedAdd: { rejection: { code: "existing_probe_installation" } },
     });
-    expect(
-      JSON.stringify(written.at(-1).initialInstall.enrollment),
-    ).not.toMatch(
-      /enrollmentToken|installCommand|enk_enroll_release_e2e_test_token/,
-    );
-    expect(JSON.stringify(written.at(-1).reEnrollment.enrollment)).not.toMatch(
-      /enrollmentToken|installCommand|enk_enroll_release_e2e_test_token/,
-    );
-    return { calls, written };
-  }
-
-  it("proves the expanded fresh installation lifecycle without resubmitting mutations", async () => {
-    await runExpandedFreshLifecycle();
   });
 
-  function assertImmediateReadinessRead({
-    calls,
-    enrollmentId,
-    fault,
-    hostCall,
-    installCall,
-  }) {
-    expect(calls.filter((call) => call === enrollmentId)).toHaveLength(1);
-    expect(calls.filter((call) => call === hostCall)).toHaveLength(
-      fault === "host" ? 1 : 0,
-    );
-    const installIndex = calls.indexOf(installCall);
-    expect(
-      calls.slice(installIndex + 1, installIndex + (fault === "host" ? 3 : 2)),
-    ).toEqual(fault === "host" ? [enrollmentId, hostCall] : [enrollmentId]);
-  }
-
-  it("rejects an initial install command whose Enrollment has not completed", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      enrollmentFault: "initial",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
-      fault: "enrollment",
-      hostCall: "hub.getHost:online",
-      installCall: "host.install:1",
-    });
-  });
-
-  it("rejects an initial install command whose Host is stale", async () => {
-    const { calls } = await runExpandedFreshLifecycle({ hostFault: "initial" });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
-      fault: "host",
-      hostCall: "hub.getHost:online",
-      installCall: "host.install:1",
-    });
-  });
-
-  it("rejects a Host Re-enrollment command whose Enrollment has not completed", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      enrollmentFault: "reenrollment",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
-      fault: "enrollment",
-      hostCall: "hub.getHost:reenrolled",
-      installCall: "host.install:2",
-    });
-  });
-
-  it("rejects a Host Re-enrollment command whose Host is stale", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      hostFault: "reenrollment",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
-      fault: "host",
-      hostCall: "hub.getHost:reenrolled",
-      installCall: "host.install:2",
-    });
-  });
-
-  it("rejects an initial install command completed by another Enrollment", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      enrollmentIdMismatch: "initial",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
-      fault: "enrollment",
-      hostCall: "hub.getHost:online",
-      installCall: "host.install:1",
-    });
-  });
-
-  it("rejects a Host Re-enrollment command completed by another Enrollment", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      enrollmentIdMismatch: "reenrollment",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
-      fault: "enrollment",
-      hostCall: "hub.getHost:reenrolled",
-      installCall: "host.install:2",
-    });
-  });
-
-  it("rejects an initial install command completed for a different target before reading its Host", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      enrollmentTargetMismatch: "initial",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
-      fault: "enrollment",
-      hostCall: "hub.getHost:online",
-      installCall: "host.install:1",
-    });
-  });
-
-  it("rejects a Host Re-enrollment command completed for a different target before reading its Host", async () => {
-    const { calls } = await runExpandedFreshLifecycle({
-      enrollmentTargetMismatch: "reenrollment",
-    });
-    assertImmediateReadinessRead({
-      calls,
-      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
-      fault: "enrollment",
-      hostCall: "hub.getHost:reenrolled",
-      installCall: "host.install:2",
-    });
-  });
-
-  it("proves the pinned baseline Probe through one Owner-authorized upgrade and uninstall", async () => {
+  it("proves the pinned baseline Probe through Upgrade and retains its reporting timeout", async () => {
     const calls = [];
     let installed = false;
     let activeHub = "baseline";
     let upgraded = false;
-    let readableIdentityGeneration = null;
-    let identityGeneration = "baseline-install";
+    let candidateReportingReady = true;
     let configurationVersion = "default-v1";
     let metricsEpoch = 0;
-    let reportEpoch = 0;
     const hub = {
       async authenticate() {
         calls.push(`hub.authenticate:${activeHub}`);
@@ -3701,18 +3976,12 @@ describe("Release E2E Orchestrator", () => {
       },
       async getHost() {
         calls.push(`hub.getHost:${activeHub}:${upgraded}`);
-        if (activeHub === "baseline" && !upgraded) {
-          readableIdentityGeneration = "baseline-install";
-        }
-        if (activeHub === "candidate" && upgraded) {
-          readableIdentityGeneration = "candidate-upgrade";
-        }
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
-            probeVersion: upgraded ? "1.2.3" : "1.2.2",
+            probeVersion:
+              upgraded && candidateReportingReady ? "1.2.3" : "1.2.2",
           },
-          lastReportAtMs: ++reportEpoch,
           reportedProbeConfigurationVersion: configurationVersion,
         });
       },
@@ -3810,7 +4079,6 @@ describe("Release E2E Orchestrator", () => {
         calls.push(`hub.waitForProbeOperation:${operation.kind}`);
         if (operation.kind === "probe_upgrade") {
           upgraded = true;
-          identityGeneration = "candidate-upgrade";
           return [
             operation,
             {
@@ -3890,23 +4158,15 @@ describe("Release E2E Orchestrator", () => {
       },
       async install(command) {
         calls.push("host.install:baseline");
-        expect(command).toBe(officialInstallCommand);
+        expect(command.installCommand).toBe(officialInstallCommand);
         installed = true;
       },
       async readProbeIdentity() {
-        calls.push(`host.readProbeIdentity:${identityGeneration}`);
-        if (readableIdentityGeneration !== identityGeneration) {
-          throw new Error(
-            "Probe identity is unavailable until the matching core readiness observation succeeds",
-          );
-        }
+        calls.push(`host.readProbeIdentity:${upgraded}`);
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
         };
-      },
-      async recoverUpgradeWithInstaller() {
-        throw new Error("automatic Upgrade must not use Installer Recovery");
       },
       async verifyUninstallCompletion() {
         calls.push("host.verifyUninstallCompletion");
@@ -3934,11 +4194,15 @@ describe("Release E2E Orchestrator", () => {
       evidenceSink: { write: async (value) => written.push(value) },
       ownerPassword: "owner-password",
       runId: "run-baseline-upgrade",
-      scenario: "baseline-upgrade-uninstall",
+      scenario: "compatible-upgrade-uninstall",
       timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
     });
 
     expect(result).toEqual({ status: "succeeded" });
+    const baselineInstallIndex = calls.indexOf("host.install:baseline");
+    expect(
+      calls.indexOf("hub.listHosts:baseline", baselineInstallIndex),
+    ).toBeLessThan(calls.indexOf("host.readProbeIdentity:false"));
     expect(
       calls.filter((call) => call.startsWith("hub.requestProbeUpgrade:")),
     ).toEqual(["hub.requestProbeUpgrade:7"]);
@@ -3972,133 +4236,39 @@ describe("Release E2E Orchestrator", () => {
         }),
       ]),
     });
-  });
 
-  it("rejects a Candidate switch that only exposes persisted Baseline reporting", async () => {
-    const written = [];
-    let activeHub = "baseline";
-    let installed = false;
-    const persistedHost = readyHost({
-      hostProfile: {
-        ...readyHost().hostProfile,
-        probeVersion: "1.2.2",
-      },
-      lastReportAtMs: 100,
-    });
-    const persistedMetrics = [
-      portableMetric({ collectedAtMs: 90, sequence: 1 }),
-      portableMetric({ collectedAtMs: 95, sequence: 2 }),
-    ];
-    const hub = {
-      async authenticate() {},
-      async createEnrollment() {
-        return { installCommand: officialInstallCommand };
-      },
-      async getAuditLog() {
-        return [];
-      },
-      async getHost() {
-        return { ...persistedHost };
-      },
-      async getHostMetrics() {
-        return persistedMetrics.map((sample) => ({ ...sample }));
-      },
-      async getHostProbeConfiguration() {
-        return {
-          configuration: {
-            enabledCollectorIds: ["official.cpu", "official.memory"],
-            metricsCollectionIntervalSeconds: 5,
-            version: "default-v1",
-          },
-          mode: "inherit",
-        };
-      },
-      async isHostSoftDeleted() {
-        return false;
-      },
-      async listHosts() {
-        return installed ? [{ id: 7 }] : [];
-      },
-      async requestProbeUninstall() {
-        throw new Error("uninstall must not run without Candidate reporting");
-      },
-      async requestProbeUpgrade() {
-        throw new Error("upgrade must not run without Candidate reporting");
-      },
-      async switchToCandidate() {
-        activeHub = "candidate";
-      },
-      async updateHostProbeConfiguration() {
-        throw new Error(
-          "configuration must not run without Candidate reporting",
-        );
-      },
-      async waitForProbeOperation() {
-        throw new Error("operations must not run without Candidate reporting");
-      },
-    };
-    const host = {
-      async assertDisposable() {},
-      async assertInstalled() {},
-      async beginUpgradeOwnershipTransition() {
-        throw new Error("upgrade must not start without Candidate reporting");
-      },
-      async bindUpgradeOwnershipTransition() {},
-      async cleanup() {
-        return { clean: true };
-      },
-      async collectEvidence() {
-        return { activeHub };
-      },
-      async completeUpgradeOwnershipTransition() {},
-      async install() {
-        installed = true;
-      },
-      async readProbeIdentity() {
-        return {
-          identitySha256: "f".repeat(64),
-          probeId: "probe_release_01",
-        };
-      },
-      async recoverUpgradeWithInstaller() {},
-      async verifyUninstallCompletion() {
-        return { clean: true };
-      },
-    };
-
+    activeHub = "baseline";
+    upgraded = false;
+    candidateReportingReady = false;
+    configurationVersion = "default-v1";
+    installed = false;
+    metricsEpoch = 0;
     await expect(
       runReleaseE2EScenario({
         candidateManifest: candidateManifestWithBaseline(),
         environment: {
-          cleanup: async () => ({ clean: true }),
-          start: async () => ({ host, hub }),
+          async cleanup() {
+            return { clean: true };
+          },
+          async start() {
+            return { host, hub };
+          },
         },
-        evidenceSink: { write: async (value) => written.push(value) },
+        evidenceSink: { write: async () => {} },
         ownerPassword: "owner-password",
-        runId: "run-persisted-baseline-only",
-        scenario: "baseline-upgrade-uninstall",
+        runId: "run-baseline-upgrade-reporting-timeout",
+        scenario: "compatible-upgrade-uninstall",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
       }),
-    ).rejects.toMatchObject({
-      code: "baseline_probe_candidate_hub_compatibility_timeout",
-    });
-    expect(written.at(-1)).toMatchObject({
-      result: {
-        error: { code: "baseline_probe_candidate_hub_compatibility_timeout" },
-        status: "failed",
-      },
-    });
+    ).rejects.toMatchObject({ code: "candidate_probe_reporting_timeout" });
   });
 
-  it("recovers a terminal insufficient-privilege Upgrade with the Candidate installer", async () => {
+  it("fails a Compatible insufficient-privilege Upgrade without Enrollment fallback", async () => {
     let activeHub = "baseline";
     let configurationVersion = "default-v1";
     let installed = false;
-    let recovered = false;
-    let readableIdentityGeneration = null;
-    let identityGeneration = "baseline-install";
+    let candidateEnrollmentCreated = false;
     let metricsEpoch = 0;
-    let reportEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
       completedAtMs: 3,
@@ -4118,23 +4288,18 @@ describe("Release E2E Orchestrator", () => {
     const hub = {
       async authenticate() {},
       async createEnrollment() {
+        if (activeHub === "candidate") candidateEnrollmentCreated = true;
         return { installCommand: officialInstallCommand };
       },
       async getAuditLog() {
         return baselineUpgradeAuditLog();
       },
       async getHost() {
-        if (activeHub === "baseline" && !recovered) {
-          readableIdentityGeneration = "baseline-install";
-        } else if (activeHub === "candidate" && recovered) {
-          readableIdentityGeneration = "candidate-recovery";
-        }
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
-            probeVersion: recovered ? "1.2.3" : "1.2.2",
+            probeVersion: "1.2.2",
           },
-          lastReportAtMs: ++reportEpoch,
           reportedProbeConfigurationVersion: configurationVersion,
         });
       },
@@ -4242,27 +4407,9 @@ describe("Release E2E Orchestrator", () => {
         installed = true;
       },
       async readProbeIdentity() {
-        if (readableIdentityGeneration !== identityGeneration) {
-          throw new Error(
-            "Probe identity is unavailable until the matching core readiness observation succeeds",
-          );
-        }
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
-        };
-      },
-      async recoverUpgradeWithInstaller(command, _runId, operation) {
-        expect(activeHub).toBe("candidate");
-        expect(command).toBe(officialInstallCommand);
-        expect(operation).toEqual(failedUpgrade);
-        recovered = true;
-        identityGeneration = "candidate-recovery";
-        return {
-          failedOperationId: operation.id,
-          mode: "installer",
-          status: "succeeded",
-          targetProbeVersion: operation.targetProbeVersion,
         };
       },
       async verifyUninstallCompletion() {
@@ -4289,19 +4436,18 @@ describe("Release E2E Orchestrator", () => {
         evidenceSink: { write: async (value) => written.push(value) },
         ownerPassword: "owner-password",
         runId: "run-permission-recovery",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "compatible-upgrade-uninstall",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
       }),
-    ).resolves.toEqual({ status: "succeeded" });
+    ).rejects.toMatchObject({ code: "compatible_probe_upgrade_failed" });
+    expect(candidateEnrollmentCreated).toBe(false);
     expect(written.at(-1)).toMatchObject({
-      candidateHost: { hostProfile: { probeVersion: "1.2.3" } },
-      manualRecovery: {
-        failedOperationId: 41,
-        mode: "installer",
-        status: "succeeded",
-        targetProbeVersion: "1.2.3",
+      candidateHost: null,
+      manualRecovery: null,
+      result: {
+        error: { code: "compatible_probe_upgrade_failed" },
+        status: "failed",
       },
-      result: { status: "succeeded" },
       upgradeOperationTimeline: expect.arrayContaining([
         expect.objectContaining({ state: "pending" }),
         expect.objectContaining({
@@ -4317,9 +4463,7 @@ describe("Release E2E Orchestrator", () => {
     let activeHub = "baseline";
     let installed = false;
     let upgraded = false;
-    let readableIdentityGeneration = null;
-    let identityGeneration = "baseline-install";
-    let restored = false;
+    let metricsEpoch = 0;
     const snapshotDigest = `sha256:${"d".repeat(64)}`;
     const manifest = candidateManifestWithBaseline();
     const operation = {
@@ -4370,24 +4514,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async getHost() {
         calls.push(`hub.getHost:${activeHub}:${upgraded}`);
-        if (activeHub === "baseline" && !upgraded) {
-          readableIdentityGeneration = "baseline-install";
-        } else if (activeHub === "candidate" && upgraded) {
-          readableIdentityGeneration = "candidate-upgrade";
-        } else if (activeHub === "baseline" && upgraded) {
-          readableIdentityGeneration = "baseline-restored";
-        }
         const afterRestore = activeHub === "baseline" && upgraded;
-        const reportingEpoch =
-          activeHub === "candidate"
-            ? restored
-              ? 5
-              : upgraded
-                ? 3
-                : 2
-            : upgraded
-              ? 4
-              : 1;
         const filesystems = [
           {
             availableBytes: afterRestore ? 700_000_000 : 800_000_000,
@@ -4432,20 +4559,10 @@ describe("Release E2E Orchestrator", () => {
             probeVersion: upgraded ? "1.2.3" : "1.2.2",
             threadCount: afterRestore ? 600 : 550,
           },
-          lastReportAtMs: reportingEpoch * 10,
         });
       },
       async getHostMetrics() {
-        const metricsEpoch =
-          activeHub === "candidate"
-            ? restored
-              ? 5
-              : upgraded
-                ? 3
-                : 2
-            : upgraded
-              ? 4
-              : 1;
+        metricsEpoch += 1;
         const offset = metricsEpoch * 10;
         calls.push(`hub.getHostMetrics:${activeHub}:${upgraded}`);
         return [
@@ -4492,8 +4609,6 @@ describe("Release E2E Orchestrator", () => {
           recoveryTime: "2026-08-02T12:00:00.000Z",
         });
         activeHub = "baseline";
-        restored = true;
-        identityGeneration = "baseline-restored";
         return {
           image: {
             activeManifestDigest: manifest.releaseBaseline.hub.imageDigest,
@@ -4511,7 +4626,6 @@ describe("Release E2E Orchestrator", () => {
         calls.push(`hub.waitForProbeOperation:${requested.kind}`);
         if (requested.kind === "probe_upgrade") {
           upgraded = true;
-          identityGeneration = "candidate-upgrade";
         }
         return [
           requested,
@@ -4556,12 +4670,7 @@ describe("Release E2E Orchestrator", () => {
         calls.push("host.install:baseline");
       },
       async readProbeIdentity() {
-        calls.push(`host.readProbeIdentity:${identityGeneration}`);
-        if (readableIdentityGeneration !== identityGeneration) {
-          throw new Error(
-            "Probe identity is unavailable until the matching core readiness observation succeeds",
-          );
-        }
+        calls.push(`host.readProbeIdentity:${activeHub}:${upgraded}`);
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
@@ -4711,14 +4820,6 @@ describe("Release E2E Orchestrator", () => {
         status: "succeeded",
       },
       reporting: {
-        baselineCandidateHub: {
-          host: expect.objectContaining({ id: 7 }),
-          metrics: expect.any(Array),
-        },
-        postRestoreCandidateHub: {
-          host: expect.objectContaining({ id: 7 }),
-          metrics: expect.any(Array),
-        },
         restoredBaselineHub: {
           host: expect.objectContaining({ id: 7 }),
           metrics: expect.any(Array),
@@ -4742,7 +4843,6 @@ describe("Release E2E Orchestrator", () => {
     let activeHub = "baseline";
     let installed = false;
     let metricsEpoch = 0;
-    let reportEpoch = 0;
     let upgraded = false;
     const manifest = candidateManifestWithBaseline();
     const snapshotDigest = `sha256:${"d".repeat(64)}`;
@@ -4790,7 +4890,6 @@ describe("Release E2E Orchestrator", () => {
             ...readyHost().hostProfile,
             probeVersion: upgraded ? "1.2.3" : "1.2.2",
           },
-          lastReportAtMs: ++reportEpoch,
         });
         if (activeHub === "baseline" && upgraded) {
           host.hostProfile.hostname = "typed-but-wrong-hostname";
@@ -4932,8 +5031,7 @@ describe("Release E2E Orchestrator", () => {
     let installed = false;
     let invalidHostEvidence = false;
     let repaired = false;
-    let readableIdentityGeneration = null;
-    let identityGeneration = "baseline-install";
+    let metricsEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
       completedAtMs: 20,
@@ -4961,23 +5059,17 @@ describe("Release E2E Orchestrator", () => {
         return baselineUpgradeAuditLog();
       },
       async getHost() {
-        if (activeHub === "baseline" && !repaired) {
-          readableIdentityGeneration = "baseline-install";
-        } else if (activeHub === "candidate" && repaired) {
-          readableIdentityGeneration = "candidate-repair";
-        }
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
             probeVersion: repaired ? "1.2.3" : "1.2.2",
           },
-          lastReportAtMs: activeHub === "baseline" ? 10 : repaired ? 30 : 20,
           reportedProbeConfigurationVersion: configurationVersion,
         });
       },
       async getHostMetrics() {
-        const metricsEpoch = activeHub === "baseline" ? 1 : repaired ? 3 : 2;
-        const base = 0;
+        metricsEpoch += 1;
+        const base = repaired ? 10_000 : 0;
         return [
           portableMetric({
             collectedAtMs: base + metricsEpoch * 10,
@@ -5127,11 +5219,6 @@ describe("Release E2E Orchestrator", () => {
         installed = true;
       },
       async readProbeIdentity() {
-        if (readableIdentityGeneration !== identityGeneration) {
-          throw new Error(
-            "Probe identity is unavailable until the matching core readiness observation succeeds",
-          );
-        }
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
@@ -5143,7 +5230,6 @@ describe("Release E2E Orchestrator", () => {
       async repair() {
         calls.push("host.repair");
         repaired = true;
-        identityGeneration = "candidate-repair";
         return {
           output: "Probe Repair succeeded",
           probeId: "probe_release_01",
@@ -5235,7 +5321,7 @@ describe("Release E2E Orchestrator", () => {
           hostId: 7,
         },
         privilege: {
-          afterRepair: expect.stringContaining("internal-uninstaller"),
+          afterRepair: "",
           postUninstall: expect.objectContaining({ code: 0 }),
         },
         probeOperation: {
@@ -5286,9 +5372,8 @@ describe("Release E2E Orchestrator", () => {
     activeHub = "baseline";
     configurationVersion = "default-v1";
     installed = false;
+    metricsEpoch = 0;
     repaired = false;
-    readableIdentityGeneration = null;
-    identityGeneration = "baseline-install";
     await expect(
       runReleaseE2EScenario({
         candidateManifest: candidateManifestWithBaseline(),
@@ -5326,9 +5411,8 @@ describe("Release E2E Orchestrator", () => {
     configurationVersion = "default-v1";
     installed = false;
     invalidHostEvidence = true;
+    metricsEpoch = 0;
     repaired = false;
-    readableIdentityGeneration = null;
-    identityGeneration = "baseline-install";
     await expect(
       runReleaseE2EScenario({
         candidateManifest: candidateManifestWithBaseline(),
@@ -5539,6 +5623,8 @@ describe("Release E2E Orchestrator", () => {
       localUninstall: () => participant("host.localUninstall"),
       readProbeIdentity: () => participant("host.readProbeIdentity"),
       rejectRepeatedInstall: () => participant("host.rejectRepeatedInstall"),
+      repairInstalledBundleFailure: () =>
+        participant("host.repairInstalledBundleFailure"),
       verifyUninstallCompletion: () =>
         participant("host.verifyUninstallCompletion"),
     };
@@ -5685,6 +5771,7 @@ describe("Release E2E Orchestrator", () => {
       localUninstall: async () => {},
       readProbeIdentity: async () => {},
       rejectRepeatedInstall: async () => {},
+      repairInstalledBundleFailure: async () => {},
     };
     const hub = {
       authenticate: async () => {},
@@ -5756,7 +5843,7 @@ describe("Release E2E Orchestrator", () => {
 });
 
 describe("Release E2E command", () => {
-  it("atomically records a matrix-validation failure before candidate preparation", async () => {
+  it("rejects invalid planning inputs before creating artifacts or provisioning", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-release-run-"));
     const evidenceDir = path.join(root, "evidence");
     const matrixPath = path.join(root, "release-e2e-matrix.json");
@@ -5800,58 +5887,18 @@ describe("Release E2E command", () => {
         ),
       ).rejects.toMatchObject({ code: 1 });
 
-      const manifest = JSON.parse(
-        await readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
-      );
-      const evidence = JSON.parse(
-        await readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
-      );
-      expect(manifest).toMatchObject({
-        failure: {
-          error: { message: expect.stringMatching(/schemaVersion/i) },
-          phase: "matrix-validation",
-        },
-        hostMutationPossible: false,
-        phase: "failed",
-        runId: "run-early-matrix",
-        schemaVersion: 3,
-      });
-      expect(manifest.inputs).toMatchObject({
-        hostAdapter: "ci",
-        matrixCellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
-        matrixPath,
-      });
-      expect(evidence).toMatchObject({
-        diagnostics: {
-          error: { message: expect.stringMatching(/schemaVersion/i) },
-        },
-        phase: "failed",
-        result: { status: "failed" },
-        runId: "run-early-matrix",
-        schemaVersion: 2,
-      });
-      expect(JSON.stringify({ evidence, manifest })).not.toContain(
-        "must-not-be-recorded",
-      );
-
       await expect(
-        execFileAsync(process.execPath, [
-          script,
-          "verify-clean",
-          "--run-manifest",
-          path.join(evidenceDir, "run-manifest.json"),
-          "--host-adapter",
-          "ci",
-        ]),
-      ).resolves.toMatchObject({
-        stdout: expect.stringMatching(/no Host mutation was authorized/i),
-      });
+        readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(root, { force: true, recursive: true });
     }
   });
 
-  it("records candidate and CI adapter preparation failures with independently clean manifests", async () => {
+  it("creates no artifacts when candidate verification or the Host adapter fails preflight", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-release-run-"));
     const script = fileURLToPath(new URL("./release-e2e.mjs", import.meta.url));
     const matrixPath = fileURLToPath(
@@ -5866,7 +5913,6 @@ describe("Release E2E command", () => {
           RUNNER_ARCH: "X64",
           RUNNER_OS: "Linux",
         },
-        expected: /Candidate Manifest|candidate-manifest\.json|ENOENT/i,
         name: "candidate",
       },
       {
@@ -5877,7 +5923,6 @@ describe("Release E2E command", () => {
           RUNNER_ARCH: "",
           RUNNER_OS: "",
         },
-        expected: /GitHub Actions runner identity/i,
         name: "adapter",
       },
     ];
@@ -5921,29 +5966,12 @@ describe("Release E2E command", () => {
             },
           ),
         ).rejects.toMatchObject({ code: 1 });
-        const manifest = JSON.parse(
-          await readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
-        );
-        const evidence = JSON.parse(
-          await readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
-        );
-        expect(manifest).toMatchObject({
-          failure: {
-            error: { message: expect.stringMatching(testCase.expected) },
-            phase: "candidate-prepare",
-          },
-          hostMutationPossible: false,
-          phase: "failed",
-          scenario: "fresh-install-uninstall",
-        });
-        expect(evidence).toMatchObject({
-          phase: "failed",
-          result: { status: "failed" },
-          scenario: "fresh-install-uninstall",
-        });
-        expect(JSON.stringify({ evidence, manifest })).not.toContain(
-          "must-not-be-recorded",
-        );
+        await expect(
+          readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(
+          readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
       }
     } finally {
       await rm(root, { force: true, recursive: true });
@@ -5952,10 +5980,11 @@ describe("Release E2E command", () => {
 
   it("derives scenario selection from the matrix cell and the shared registry only", () => {
     expect(Object.keys(releaseE2EScenarioRegistry)).toEqual([
-      "baseline-upgrade-uninstall",
+      "compatible-upgrade-uninstall",
       "fresh-install-uninstall",
       "hub-restore-compatibility-window",
       "post-replacement-repair-uninstall",
+      "replacement-migration-uninstall",
     ]);
     const arguments_ = [
       "run",
@@ -6055,7 +6084,10 @@ describe("Release E2E command", () => {
       );
       await expect(
         adapter.release({ prepared, runId: "run-adapter" }),
-      ).resolves.toEqual({ clean: true });
+      ).resolves.toEqual({
+        clean: true,
+        recipe: { clean: true, skipped: "recipe_not_staged" },
+      });
     }
 
     expect(commandResults.map((call) => call.command)).toEqual([
@@ -6070,20 +6102,18 @@ describe("Release E2E command", () => {
     expect(commandResults[3].arguments_).toEqual(["-n", "sh", "-s"]);
   });
 
-  it("binds the non-root Bootstrap staging archive to the validated Candidate target and installs only its two fixed roles", async () => {
+  it("binds the non-root Bootstrap recipe staging to the validated Candidate recipe", async () => {
     const candidateDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-bootstrap-candidate-"),
     );
-    const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
-    const file = "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz";
-    const archive = Buffer.from("verified candidate bootstrap archive");
-    const sha256 = createHash("sha256").update(archive).digest("hex");
-    const extractedRoles = fakeExtractedBootstrapRoles(bootstrapDir);
-    await mkdir(bootstrapDir);
-    await writeFile(path.join(bootstrapDir, file), archive);
+    const recipeDir = path.join(candidateDir, "recipe");
+    const file = "enoki-probe-bootstrap.py";
+    const recipe = Buffer.from("verified candidate bootstrap recipe");
+    const sha256 = createHash("sha256").update(recipe).digest("hex");
+    await mkdir(recipeDir);
+    await writeFile(path.join(recipeDir, file), recipe);
     const commands = [];
     const transfers = [];
-    let extractionInput;
     try {
       const adapter = createCiReleaseInfrastructureAdapter({
         candidateManifestPath: path.join(
@@ -6101,35 +6131,29 @@ describe("Release E2E command", () => {
           candidateDir,
           manifest: {
             ...candidateManifest(),
-            bootstrap: {
-              ...candidateManifest().bootstrap,
-              files: [
-                {
-                  file,
-                  sha256,
-                  size: archive.byteLength,
-                  target: "x86_64-unknown-linux-gnu",
-                },
-              ],
+            bootstrapRecipe: {
+              ...candidateManifest().bootstrapRecipe,
+              file,
+              sha256,
+              size: recipe.byteLength,
             },
           },
         }),
         transferFile: async (transfer) => transfers.push(transfer),
-        withExtractedBootstrapArtifact: async (input, callback) => {
-          extractionInput = input;
-          return callback({ extractedRoles });
-        },
         runProcess: async (command, arguments_, options) => {
           commands.push({ command, arguments_, options });
           return successfulCommandText(
             command === "sh" &&
               options.input.includes(
-                "# enoki-release-e2e:candidate-bootstrap-stage",
+                "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
               )
-              ? "/tmp/enoki-release-e2e-bootstrap.abcdef\n"
-              : command === "sh"
+              ? "/tmp/enoki-release-e2e-recipe.abcdef\n"
+              : command === "sh" &&
+                  options.input.includes(
+                    "# enoki-release-e2e:candidate-bootstrap-recipe-verify",
+                  )
                 ? "verified\n"
-                : "installed\n",
+                : "removed\n",
           );
         },
       });
@@ -6139,57 +6163,40 @@ describe("Release E2E command", () => {
       });
       await expect(
         prepared.provisionBootstrap({ runId: "run-bootstrap" }),
-      ).resolves.toEqual({ file, sha256, target: "x86_64-unknown-linux-gnu" });
-
-      expect(extractionInput.expectedArchive).toEqual({
-        sha256,
-        size: archive.byteLength,
+      ).resolves.toEqual({
+        evidence: { file, sha256, version: "v1" },
+        workingDirectory: "/tmp/enoki-release-e2e-recipe.abcdef",
       });
 
       const staging = commands.find(({ command }) => command === "sh");
       expect(staging.options.input).toContain(
-        "# enoki-release-e2e:candidate-bootstrap-stage",
+        "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
       );
       expect(staging.options.input).toContain('[ "$(id -u)" != 0 ]');
-      expect(staging.options.input).not.toContain(archive.toString("base64"));
+      expect(staging.options.input).not.toContain(recipe.toString("base64"));
       expect(staging.options.input).not.toMatch(/curl|wget|http/);
       expect(transfers).toEqual([
         {
           destination:
-            "/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-acquire",
-          source: extractedRoles.acquirer.binaryPath,
-        },
-        {
-          destination:
-            "/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-activate",
-          source: extractedRoles.activator.binaryPath,
+            "/tmp/enoki-release-e2e-recipe.abcdef/enoki-probe-bootstrap.py",
+          source: path.join(recipeDir, file),
         },
       ]);
       const verification = commands.find(
         ({ command, options }) =>
           command === "sh" &&
           options.input.includes(
-            "# enoki-release-e2e:candidate-bootstrap-verify",
+            "# enoki-release-e2e:candidate-bootstrap-recipe-verify",
           ),
       );
       expect(verification.options.input).toContain(
-        `printf '%s  %s\\n' '${extractedRoles.acquirer.sha256}' "$stage_dir/enoki-probe-bootstrap-acquire"`,
+        `printf '%s  %s\\n' '${sha256}' "$recipe"`,
       );
       expect(verification.options.input).toContain('[ "$(id -u)" != 0 ]');
-      const installation = commands.find(({ command }) => command === "sudo");
-      expect(installation.arguments_).toEqual(["-n", "sh", "-s"]);
-      expect(installation.options.input).toContain(
-        "# enoki-release-e2e:candidate-bootstrap-install",
-      );
-      expect(installation.options.input).toContain(
-        "install -o root -g root -m 0755",
-      );
-      expect(installation.options.input).toContain("mv -T --");
-      expect(installation.options.input).not.toMatch(/\btar\b|base64|archive/);
-      expect(installation.options.input).not.toMatch(/curl|wget|http/);
-      expect(installation.options.input).toContain(
-        "rm -f -- '/usr/local/bin/enoki-probe-bootstrap-acquire' '/usr/local/bin/enoki-probe-bootstrap-activate'",
-      );
+      expect(commands.some(({ command }) => command === "sudo")).toBe(false);
+      await expect(
+        adapter.release({ runId: "run-bootstrap" }),
+      ).resolves.toMatchObject({ clean: true, recipe: { clean: true } });
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
     }
@@ -6206,17 +6213,76 @@ describe("Release E2E command", () => {
     expect(result.stderr).toMatch(/terminated by SIGKILL|timed out/i);
   });
 
-  it("transfers the validated Bootstrap archive over SSH with fixed scp arguments", async () => {
+  it("retains failed Bootstrap staging ownership when deletion cannot be verified", async () => {
+    const candidateDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-cleanup-"),
+    );
+    try {
+      const adapter = createCiReleaseInfrastructureAdapter({
+        candidateManifestPath: path.join(
+          candidateDir,
+          "candidate-manifest.json",
+        ),
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_RUN_ATTEMPT: "2",
+          GITHUB_RUN_ID: "1234",
+          RUNNER_ARCH: "X64",
+          RUNNER_OS: "Linux",
+        },
+        loadCandidate: async () => ({
+          candidateDir,
+          manifest: candidateManifest(),
+        }),
+        transferFile: async () => {
+          throw new Error("transfer failed");
+        },
+        runProcess: async (_command, _arguments, options) => {
+          if (
+            options.input.includes(
+              "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
+            )
+          ) {
+            return successfulCommandText(
+              "/tmp/enoki-release-e2e-recipe.failed01\n",
+            );
+          }
+          return {
+            code: 1,
+            stderr: "owned stage directory was not removed",
+            stdout: "",
+          };
+        },
+      });
+      const prepared = await adapter.prepare({
+        matrixCell: freshMatrixCell(),
+        runId: "run-bootstrap-cleanup",
+      });
+      await expect(
+        prepared.provisionBootstrap({ runId: "run-bootstrap-cleanup" }),
+      ).rejects.toMatchObject({
+        cleanupError: expect.objectContaining({
+          message: expect.stringContaining("was not removed"),
+        }),
+      });
+      await expect(
+        adapter.release({ runId: "run-bootstrap-cleanup" }),
+      ).rejects.toThrow(/was not removed/);
+    } finally {
+      await rm(candidateDir, { force: true, recursive: true });
+    }
+  });
+
+  it("transfers the validated Bootstrap recipe over SSH with fixed scp arguments", async () => {
     const candidateDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-bootstrap-ssh-candidate-"),
     );
-    const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
-    const file = "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz";
-    const archive = Buffer.from("verified candidate bootstrap archive");
-    const digest = createHash("sha256").update(archive).digest("hex");
-    const extractedRoles = fakeExtractedBootstrapRoles(bootstrapDir);
-    await mkdir(bootstrapDir);
-    await writeFile(path.join(bootstrapDir, file), archive);
+    const recipeDir = path.join(candidateDir, "recipe");
+    const file = "enoki-probe-bootstrap.py";
+    const recipe = Buffer.from("verified candidate bootstrap recipe");
+    const digest = createHash("sha256").update(recipe).digest("hex");
+    await mkdir(recipeDir);
+    await writeFile(path.join(recipeDir, file), recipe);
     const commands = [];
     try {
       const adapter = createSshReleaseInfrastructureAdapter({
@@ -6230,36 +6296,29 @@ describe("Release E2E command", () => {
           candidateDir,
           manifest: {
             ...candidateManifest(),
-            bootstrap: {
-              ...candidateManifest().bootstrap,
-              files: [
-                {
-                  file,
-                  sha256: digest,
-                  size: archive.byteLength,
-                  target: "x86_64-unknown-linux-gnu",
-                },
-              ],
+            bootstrapRecipe: {
+              ...candidateManifest().bootstrapRecipe,
+              file,
+              sha256: digest,
+              size: recipe.byteLength,
             },
           },
         }),
         transferFile: undefined,
-        withExtractedBootstrapArtifact: async (_input, callback) =>
-          callback({ extractedRoles }),
         runProcess: async (command, arguments_, options) => {
           commands.push({ arguments_, command, options });
           if (command === "scp") return successfulCommandText("");
           if (
             options.input.includes(
-              "# enoki-release-e2e:candidate-bootstrap-stage",
+              "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
             )
           ) {
             return successfulCommandText(
-              "/tmp/enoki-release-e2e-bootstrap.abcdef\n",
+              "/tmp/enoki-release-e2e-recipe.abcdef\n",
             );
           }
           return successfulCommandText(
-            options.input.includes("candidate-bootstrap-verify")
+            options.input.includes("candidate-bootstrap-recipe-verify")
               ? "verified\n"
               : "installed\n",
           );
@@ -6280,13 +6339,11 @@ describe("Release E2E command", () => {
           "StrictHostKeyChecking=accept-new",
           "UserKnownHostsFile=/tmp/release-e2e-known-hosts",
           "--",
-          extractedRoles.acquirer.binaryPath,
-          "release@192.0.2.10:/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-acquire",
+          path.join(recipeDir, file),
+          "release@192.0.2.10:/tmp/enoki-release-e2e-recipe.abcdef/enoki-probe-bootstrap.py",
         ]),
       );
-      expect(JSON.stringify(transfer)).not.toContain(
-        archive.toString("base64"),
-      );
+      expect(JSON.stringify(transfer)).not.toContain(recipe.toString("base64"));
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
     }
@@ -6341,6 +6398,7 @@ describe("Release E2E command", () => {
         "localUninstall",
         "readProbeIdentity",
         "rejectRepeatedInstall",
+        "repairInstalledBundleFailure",
         "verifyUninstallCompletion",
       ];
       const host = Object.fromEntries(
@@ -7504,28 +7562,95 @@ function successfulCommandText(stdout) {
   return { code: 0, stderr: "", stdout };
 }
 
+function durableRuntimeFailureEvidenceOutput(runtimeSha256 = "a".repeat(64)) {
+  return [
+    "activeState=failed",
+    "bootId=4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+    "bundleVersion=1.2.3",
+    `epochGeneration=${"b".repeat(64)}`,
+    "epochLinks=1",
+    "epochMode=600",
+    "epochOwner=0",
+    "hostId=7",
+    `identityReceiptSha256=${"c".repeat(64)}`,
+    `installStateSha256=${"d".repeat(64)}`,
+    `latchGeneration=${"b".repeat(64)}`,
+    "latchLinks=1",
+    "latchMode=600",
+    "latchOwner=0",
+    `manifestSha256=${"e".repeat(64)}`,
+    "probeId=probe_release_01",
+    "result=start-limit-hit",
+    "restartCount=2",
+    "role=observation_runtime",
+    `runtimeFaultSha256=${"f".repeat(64)}`,
+    `runtimeSha256=${runtimeSha256}`,
+    "startLimitBurst=3",
+    "startLimitIntervalSec=60",
+    "unit=enoki-observation-runtime.service",
+    `unitSha256=${"1".repeat(64)}`,
+    "",
+  ].join("\n");
+}
+
 function productInstallerOutput() {
   return "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n";
 }
 
 const officialInstallCommand =
-  "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate";
+  "printf '%s\\n' 'enk_enroll_secret' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'";
+
+function officialEnrollment(overrides = {}) {
+  const enrollmentToken = overrides.enrollmentToken ?? "enk_enroll_secret";
+  const hubUrl = overrides.hubUrl ?? "https://hub.example";
+  return {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recipe: {
+        file: "enoki-probe-bootstrap.py",
+        sha256: "e".repeat(64),
+        size: 123,
+        version: "v1",
+      },
+      rootFingerprint: "d".repeat(64),
+      schemaVersion: 1,
+      targets: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+      ],
+    },
+    enrollmentToken,
+    hubUrl,
+    installCommand: `printf '%s\\n' '${enrollmentToken}' | python3 -- ./enoki-probe-bootstrap.py --hub-origin '${hubUrl}'`,
+    ...overrides,
+  };
+}
 
 function candidateManifest() {
-  return {
-    bootstrap: {
-      directory: "probe-bootstrap",
+  return createReleaseCandidateManifest({
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
       distribution: "enoki",
-      files: [
-        {
-          file: "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz",
-          sha256: "c".repeat(64),
-          size: 123,
-          target: "x86_64-unknown-linux-gnu",
-        },
+      file: "enoki-probe-bootstrap.py",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recordFile: "enoki-probe-bootstrap-recipe.json",
+      recordSha256: "c".repeat(64),
+      recordSize: 456,
+      rootFingerprint: "d".repeat(64),
+      schemaVersion: 1,
+      sha256: "e".repeat(64),
+      size: 123,
+      targets: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
       ],
-      rootKeyId: "d".repeat(64),
-      version: "1.2.3",
+      version: "v1",
     },
     candidate: {
       commit: "0123456789abcdef0123456789abcdef01234567",
@@ -7533,23 +7658,23 @@ function candidateManifest() {
     },
     hub: {
       archive: "hub/enoki-hub-v1.2.3.oci.tar",
+      archiveSha256: "f".repeat(64),
       digest: `sha256:${"a".repeat(64)}`,
       embeddedProbeVersion: "1.2.3",
+      size: 789,
     },
-    kind: "enoki-release-candidate",
-    probeAssetSet: { version: "1.2.3" },
-    releaseBaseline: {
-      hub: {
-        archive: "hub/enoki-hub-v1.2.2.oci.tar",
-        digest: `sha256:${"b".repeat(64)}`,
-        imageDigest: `sha256:${"b".repeat(64)}`,
+    probeAssetSet: {
+      directory: "probe-assets",
+      files: [{ file: "manifest.json", sha256: "1".repeat(64), size: 12 }],
+      signingIdentity: {
+        algorithm: "rsa-sha256",
+        publicKeyFile: "signing-key.pem",
+        publicKeySha256: "2".repeat(64),
       },
-      kind: "enoki-release-baseline",
-      probeAssetSet: { version: "1.2.2" },
-      tag: "v1.2.2",
+      version: "1.2.3",
     },
-    schemaVersion: 3,
-  };
+    releaseBaseline: ordinaryReleaseBaseline(),
+  });
 }
 
 function candidateManifestWithBaseline({
@@ -7563,15 +7688,223 @@ function candidateManifestWithBaseline({
       digest: candidateHubDigest,
     },
     releaseBaseline: {
+      ...ordinaryReleaseBaseline(),
       hub: {
-        archive: "hub/enoki-hub-v1.2.2.oci.tar",
+        ...ordinaryReleaseBaseline().hub,
         digest: baselineHubDigest,
         imageDigest: baselineHubDigest,
+        sourceManifestSha256: baselineHubDigest.slice("sha256:".length),
       },
-      kind: "enoki-release-baseline",
-      probeAssetSet: { version: "1.2.2" },
-      tag: "v1.2.2",
     },
+  };
+}
+
+function candidateManifestWithMigrationBaseline() {
+  const base = candidateManifest();
+  const recipeRecord = bootstrapRecipeRecord(base);
+  const recordBytes = Buffer.from(`${JSON.stringify(recipeRecord, null, 2)}\n`);
+  return createReleaseCandidateManifest({
+    ...base,
+    bootstrapRecipe: {
+      ...base.bootstrapRecipe,
+      recordSha256: createHash("sha256").update(recordBytes).digest("hex"),
+      recordSize: recordBytes.byteLength,
+    },
+    releaseBaseline: migrationReleaseBaseline(),
+  });
+}
+
+function bootstrapRecipeRecord(manifest) {
+  return {
+    bundleVersion: manifest.bootstrapRecipe.bundleVersion,
+    distribution: manifest.bootstrapRecipe.distribution,
+    kind: manifest.bootstrapRecipe.kind,
+    recipe: {
+      file: manifest.bootstrapRecipe.file,
+      sha256: manifest.bootstrapRecipe.sha256,
+      size: manifest.bootstrapRecipe.size,
+      version: manifest.bootstrapRecipe.version,
+    },
+    rootFingerprint: manifest.bootstrapRecipe.rootFingerprint,
+    schemaVersion: manifest.bootstrapRecipe.schemaVersion,
+    targets: manifest.bootstrapRecipe.targets,
+  };
+}
+
+function candidateRecipeProvenance(manifest) {
+  const record = bootstrapRecipeRecord(manifest);
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+  return {
+    activeHub: "candidate",
+    hubDigest: manifest.hub.digest,
+    kind: "enoki-release-e2e-bootstrap-recipe-provenance",
+    record,
+    recordFile: manifest.bootstrapRecipe.recordFile,
+    recordSha256: createHash("sha256").update(recordBytes).digest("hex"),
+    recordSize: recordBytes.byteLength,
+    schemaVersion: 1,
+  };
+}
+
+function migrationReleaseBaseline() {
+  return {
+    authorization: {
+      file: "trust-epoch-migration-authorization.json",
+      legacyReleaseSha256: "a".repeat(64),
+      sha256: "b".repeat(64),
+      signatureFile: "trust-epoch-migration-authorization.json.sig",
+      signatureSha256: "c".repeat(64),
+    },
+    catalogSnapshot: createReleaseCatalogSnapshot([
+      {
+        assets: [],
+        draft: false,
+        id: 74,
+        prerelease: false,
+        tagName: "v0.1.74",
+        targetCommitish: "main",
+      },
+    ]),
+    githubRelease: {
+      id: 74,
+      peeledCommitSha: "d".repeat(40),
+      repository: "YKDZ/enoki",
+      tagRefSha: "e".repeat(40),
+      targetCommitish: "main",
+    },
+    hub: {
+      archive: "hub/enoki-hub-v0.1.74.oci.tar",
+      archiveSha256: "f".repeat(64),
+      digest: `sha256:${"3".repeat(64)}`,
+      image: "ghcr.io/ykdz/enoki-hub",
+      imageDigest: `sha256:${"2".repeat(64)}`,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      platform: { architecture: "amd64", os: "linux" },
+      size: 123,
+      sourceManifest: "hub-source-manifest.json",
+      sourceManifestSha256: "3".repeat(64),
+      sourceManifestSize: 456,
+    },
+    kind: "enoki-trust-epoch-migration-baseline",
+    legacyProbeAssets: {
+      directory: "probe-assets",
+      files: [
+        {
+          name: "enoki-probe-v0.1.74-x86_64-linux.tar.gz",
+          sha256: "4".repeat(64),
+          size: 789,
+        },
+      ],
+    },
+    schemaVersion: 1,
+    tag: "v0.1.74",
+    transition: "replacement-required",
+  };
+}
+
+function ordinaryReleaseBaseline() {
+  return {
+    catalogSnapshot: createReleaseCatalogSnapshot([
+      {
+        assets: [],
+        draft: false,
+        id: 122,
+        prerelease: false,
+        tagName: "v1.2.2",
+        targetCommitish: "main",
+      },
+    ]),
+    githubRelease: {
+      id: 122,
+      peeledCommitSha: "3".repeat(40),
+      repository: "YKDZ/enoki",
+      tagRefSha: "4".repeat(40),
+      targetCommitish: "main",
+    },
+    hub: {
+      archive: "hub/enoki-hub-v1.2.2.oci.tar",
+      archiveSha256: "5".repeat(64),
+      digest: `sha256:${"6".repeat(64)}`,
+      image: "ghcr.io/ykdz/enoki-hub",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      platform: { architecture: "amd64", os: "linux" },
+      size: 234,
+      sourceManifest: "hub-source-manifest.json",
+      sourceManifestSha256: "6".repeat(64),
+      sourceManifestSize: 345,
+    },
+    kind: "enoki-release-baseline",
+    probeAssetSet: {
+      directory: "probe-assets",
+      files: [{ file: "manifest.json", sha256: "7".repeat(64), size: 12 }],
+      signingIdentity: {
+        algorithm: "rsa-sha256",
+        publicKeyFile: "signing-key.pem",
+        publicKeySha256: "8".repeat(64),
+      },
+      trustRoot: { publicKeySha256: "9".repeat(64) },
+      version: "1.2.2",
+    },
+    schemaVersion: 2,
+    tag: "v1.2.2",
+  };
+}
+
+function canonicalRuntimeUnavailableEvidence() {
+  return {
+    bootId: "boot-c4-01",
+    bootReport: {
+      acceptedSequenceEnd: 1,
+      bytes: 128,
+      payloadSha256: "1".repeat(64),
+      reconciliation: {
+        currentProbeConfigurationVersion: "host-2-1",
+        pendingOperation: "absent",
+        requestedSnapshotCollectorIdsCount: 0,
+      },
+      responseDelivered: true,
+      responseSha256: "2".repeat(64),
+      sequence: 1,
+      upstreamStatus: 200,
+    },
+    failureReport: {
+      attempts: [
+        {
+          acceptedSequenceEnd: 2,
+          response: "dropped",
+          responseSha256: "4".repeat(64),
+          upstreamStatus: 200,
+        },
+        {
+          acceptedSequenceEnd: 2,
+          response: "delivered",
+          responseSha256: "5".repeat(64),
+          upstreamStatus: 200,
+        },
+      ],
+      bytes: 64,
+      collectionOutcomeCount: 0,
+      metricsCount: 0,
+      payloadSha256: "3".repeat(64),
+      probeConfigurationVersion: "host-2-1",
+      reason: "observation_runtime_unavailable",
+      retryPayloadSha256: "3".repeat(64),
+      sequence: 2,
+    },
+    kind: "canonical-runtime-unavailable-report-evidence",
+    receiptConvergence: {
+      contract: "report-sequence-ack-idempotency",
+      key: {
+        bootId: "boot-c4-01",
+        probeId: "probe_release_02",
+        sequence: 2,
+      },
+      requestAttemptCount: 2,
+      uniquePayloadCount: 1,
+    },
+    probeId: "probe_release_02",
+    schemaVersion: 1,
   };
 }
 
@@ -7584,21 +7917,6 @@ function freshMatrixCell() {
     operatingSystemVersion: "22.04",
     runner: "ubuntu-22.04",
     scenarioId: "fresh-install-uninstall",
-  };
-}
-
-function fakeExtractedBootstrapRoles(directory) {
-  return {
-    acquirer: {
-      binaryPath: path.join(directory, "enoki-probe-bootstrap-acquire"),
-      sha256: "a".repeat(64),
-      size: 123,
-    },
-    activator: {
-      binaryPath: path.join(directory, "enoki-probe-bootstrap-activate"),
-      sha256: "b".repeat(64),
-      size: 456,
-    },
   };
 }
 
@@ -7624,7 +7942,6 @@ function readyHost(overrides = {}) {
       probeVersion: "1.2.3",
     },
     id: 7,
-    lastReportAtMs: 1,
     probeUpgradeStatus: null,
     reportedProbeConfigurationVersion: "default-v1",
     status: "online",
@@ -7808,7 +8125,6 @@ function successfulRepairBoundaryEvidence() {
       "/etc/enoki/probe-install.toml",
       "/etc/systemd/system/enoki-probe.service",
       "/var/lib/enoki-probe",
-      "/etc/sudoers.d/enoki-probe-operations",
     ],
     units: ["enoki-probe.service"],
   };
@@ -7950,7 +8266,7 @@ function successfulRepairBoundaryEvidence() {
     },
     repairedHost: readyHost(),
     repairHostBoundary: {
-      identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+      delegationGeneration: 1,
       inventory: installedInventory,
       probeVersion: "1.2.3",
       service: {
@@ -7961,8 +8277,7 @@ function successfulRepairBoundaryEvidence() {
         SubState: "running",
         User: "enoki-probe",
       },
-      sudoers:
-        "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller internal-uninstaller\n",
+      sudoers: "",
     },
     result: { status: "succeeded" },
     uninstallCompletion: {
@@ -7981,6 +8296,14 @@ function successfulRepairBoundaryEvidence() {
   };
 }
 
+function bindRepairEvidenceToBaseline(evidence, baseline) {
+  const digest = baseline.hub.imageDigest;
+  evidence.hubEvidence.runtime.baselineManifestDigest = digest;
+  evidence.hubEvidence.runtime.runtimeHistory.find(
+    (entry) => entry.hub === "baseline",
+  ).manifestDigest = digest;
+}
+
 function portableMetric(overrides = {}) {
   return {
     collectedAtMs: 10,
@@ -7990,6 +8313,318 @@ function portableMetric(overrides = {}) {
     sequence: 1,
     uptimeSeconds: 100,
     ...overrides,
+  };
+}
+
+function migrationBaselineEnvironment(
+  calls,
+  candidateManifest,
+  { candidateConfigurationNeverRetained = false } = {},
+) {
+  const legacyIdentity = {
+    identitySha256: "a".repeat(64),
+    probeId: "probe_release_legacy",
+  };
+  const replacementIdentity = {
+    identitySha256: "b".repeat(64),
+    probeId: "probe_release_replacement",
+  };
+  const requestedUninstall = {
+    acceptedAtMs: null,
+    completedAtMs: null,
+    createdAtMs: 30,
+    failure: null,
+    hostId: 7,
+    id: 42,
+    kind: "probe_uninstall",
+    runningAtMs: null,
+    state: "pending",
+    targetProbeVersion: "",
+    updatedAtMs: 30,
+  };
+  const succeededUninstall = {
+    ...requestedUninstall,
+    acceptedAtMs: 31,
+    completedAtMs: 32,
+    runningAtMs: 31,
+    state: "succeeded",
+    updatedAtMs: 32,
+  };
+  const uninstallTimeline = [
+    requestedUninstall,
+    succeededUninstall,
+    { ...succeededUninstall },
+  ];
+  let configuration = {
+    enabledCollectorIds: ["official.cpu", "official.memory"],
+    metricsCollectionIntervalSeconds: 30,
+    version: "default-v1",
+  };
+  let configurationSequence = 0;
+  let listCalls = 0;
+  let metricSequence = 3;
+  let replaced = false;
+  let candidateHostObservations = 0;
+  const hostMetadata = {
+    connectAddress: "release-test-host",
+    description: "retained description",
+    displayName: "retained Host",
+    observedIp: "192.0.2.10",
+  };
+  const currentHost = ({
+    reportedVersion = configuration.version,
+    warnings = [],
+  } = {}) =>
+    readyHost({
+      hostMetadata,
+      hostProfile: {
+        ...readyHost().hostProfile,
+        probeVersion: replaced ? "1.2.3" : "0.1.74",
+      },
+      reportedProbeConfigurationVersion: reportedVersion,
+      warnings,
+    });
+  const metrics = () =>
+    Array.from({ length: metricSequence }, (_, index) =>
+      portableMetric({
+        collectedAtMs: (index + 1) * 10,
+        sequence: index + 1,
+      }),
+    );
+  const auditLog = [
+    ...lifecycleAuditLog(),
+    {
+      action: "probe.manual_reinstall_identity_replaced",
+      actor: "system",
+      details: {
+        enrollmentId: "enr_manual_reinstall_behavior",
+        newProbeId: replacementIdentity.probeId,
+        oldProbeId: legacyIdentity.probeId,
+        sourceProbeSha256: ["c".repeat(64)],
+        targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetProbeVersion: "1.2.3",
+      },
+      id: 9,
+      occurredAtMs: 90,
+      outcome: "success",
+      subjectId: "7",
+      subjectType: "host",
+    },
+  ];
+  const successfulInstallResult = (runId, bootstrapRecipeProvenance) => ({
+    bootstrapRecipeProvenance,
+    output: {
+      code: 0,
+      stderr: "",
+      stdout: productInstallerOutput(),
+    },
+    runId,
+  });
+  const host = {
+    async assertDisposable() {},
+    async assertInstalled() {
+      if (!replaced) return { probeVersion: "0.1.74" };
+      return {
+        delegationGeneration: 1,
+        inventory: {
+          accounts: { group: true, user: true },
+          files: [
+            "/usr/local/bin/enoki-probe",
+            "/etc/systemd/system/enoki-probe.service",
+          ],
+          units: ["enoki-probe.service"],
+        },
+        probeVersion: "1.2.3",
+        service: {
+          ActiveState: "active",
+          FragmentPath: "/etc/systemd/system/enoki-probe.service",
+          Group: "enoki-probe",
+          LoadState: "loaded",
+          SubState: "running",
+          User: "enoki-probe",
+        },
+        sudoers: "",
+      };
+    },
+    async cleanup() {
+      return { clean: true };
+    },
+    async collectEvidence() {
+      return { journaldRetained: true };
+    },
+    async install(enrollment, runId) {
+      calls.push("host.install:legacy-v0.1.74");
+      expect(enrollment.installCommand).toBe(
+        "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+      );
+      return successfulInstallResult(runId, null);
+    },
+    async manualReinstall(enrollment, runId) {
+      calls.push(`host.manualReinstall:${enrollment.target.kind}`);
+      expect(enrollment.installCommand).toBe(officialInstallCommand);
+      replaced = true;
+      metricSequence += 1;
+      return successfulInstallResult(
+        runId,
+        candidateRecipeProvenance(candidateManifest),
+      );
+    },
+    async readProbeIdentity() {
+      return replaced ? replacementIdentity : legacyIdentity;
+    },
+    async verifyUninstallCompletion() {
+      return {
+        clean: true,
+        inventory: {
+          accounts: { group: false, user: false },
+          files: [],
+          units: [],
+        },
+        journaldRetained: true,
+        sharedDependenciesRetained: true,
+      };
+    },
+  };
+  const hub = {
+    async authenticate() {},
+    async captureBaselineStateSnapshot() {
+      calls.push("hub.captureBaselineStateSnapshot");
+      return {
+        baselineImageDigest: `sha256:${"2".repeat(64)}`,
+        baselineVersion: "v0.1.74",
+        hotDataFileCount: 1,
+        hotDataFiles: ["data-root/enoki.db"],
+        manifestDigest: `sha256:${"7".repeat(64)}`,
+        recoveryTime: "2026-08-23T00:00:00.000Z",
+        roots: [
+          { id: "data-root", included: true, path: "/data" },
+          {
+            id: "metrics-archive",
+            included: true,
+            path: "/data/metrics-archive",
+          },
+        ],
+        tool: "enoki-hub-state",
+        version: "v1",
+      };
+    },
+    async collectEvidence() {
+      return { apiTimeline: [] };
+    },
+    async createEnrollment() {
+      return {
+        enrollmentToken: "enk_enroll_legacy",
+        hubUrl: "https://hub.example",
+        installCommand:
+          "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+      };
+    },
+    async createManualReinstallEnrollment() {
+      return officialEnrollment({
+        enrollmentId: "enr_manual_reinstall_behavior",
+        target: { hostId: 7, kind: "manual_reinstall" },
+      });
+    },
+    async getAuditLog() {
+      return auditLog;
+    },
+    async getHost() {
+      if (!replaced) return currentHost();
+      candidateHostObservations += 1;
+      const reportedVersion =
+        candidateConfigurationNeverRetained || candidateHostObservations === 1
+          ? "default-v1"
+          : configuration.version;
+      const configurationError = candidateHostObservations === 2;
+      calls.push(
+        `hub.getHost:candidate:${reportedVersion}:${configurationError ? "configuration-error" : "clean"}`,
+      );
+      return currentHost({
+        reportedVersion,
+        warnings: configurationError
+          ? [{ code: "probe_configuration_error" }]
+          : [],
+      });
+    },
+    async getHostMetrics() {
+      const result = metrics();
+      metricSequence += 1;
+      return result;
+    },
+    async getHostProbeConfiguration() {
+      return { configuration: { ...configuration }, mode: "override" };
+    },
+    async isHostSoftDeleted() {
+      return true;
+    },
+    async listHosts() {
+      listCalls += 1;
+      return listCalls === 1 ? [] : [{ id: 7 }];
+    },
+    async requestProbeUninstall() {
+      return uninstallTimeline[0];
+    },
+    async restoreBaselineStateSnapshot() {
+      calls.push("hub.restoreBaselineStateSnapshot");
+      return {
+        image: {
+          activeManifestDigest: `sha256:${"2".repeat(64)}`,
+          expectedManifestDigest: `sha256:${"2".repeat(64)}`,
+        },
+        restore: {
+          manifestDigest: `sha256:${"7".repeat(64)}`,
+          status: "succeeded",
+        },
+        verify: {
+          manifestDigest: `sha256:${"7".repeat(64)}`,
+          status: "succeeded",
+        },
+      };
+    },
+    async switchToCandidate() {
+      calls.push("hub.switchToCandidate");
+    },
+    async updateHostProbeConfiguration(_hostId, input) {
+      configurationSequence += 1;
+      configuration = {
+        ...input.configuration,
+        version: `host-7-${configurationSequence}`,
+      };
+      return { configuration: { ...configuration }, mode: "override" };
+    },
+    async waitForProbeOperation() {
+      return uninstallTimeline;
+    },
+  };
+  return {
+    async cleanup() {
+      return { clean: true };
+    },
+    async start() {
+      return {
+        host,
+        hub,
+        infrastructure: {
+          artifactAccess: "github-actions",
+          connection: "local",
+          kind: "ci",
+          matrixCellId: "ubuntu-22.04-x86_64--replacement-migration-uninstall",
+          provisioning: "github-hosted-runner",
+        },
+        releaseTestHost: {
+          architecture: "x86_64",
+          deviceView: true,
+          journaldSocket: true,
+          operatingSystem: "ubuntu",
+          operatingSystemVersion: "22.04",
+          pid1: "systemd",
+          rootFilesystem: true,
+          systemdNotifySocket: true,
+          unifiedCgroup: true,
+          virtualization: "kvm",
+        },
+      };
+    },
   };
 }
 
@@ -8027,331 +8662,4 @@ function operationPollingClient(observe) {
     },
     sleep: async () => {},
   });
-}
-
-function probeInstallMetadata(identityPath) {
-  return [
-    "schema_version = 1",
-    'hub_url = "https://hub.example"',
-    'install_path = "/usr/local/bin/enoki-probe"',
-    `identity_path = "${identityPath}"`,
-    'state_dir = "/var/lib/enoki-probe"',
-    'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
-    'service_name = "enoki-probe"',
-    'service_user = "enoki-probe"',
-    'service_group = "enoki-probe"',
-    'service_unit_path = "/etc/systemd/system/enoki-probe.service"',
-    'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
-    'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
-    `probe_asset_public_key_sha256 = "${"a".repeat(64)}"`,
-    "",
-  ].join("\n");
-}
-
-function bootstrapProbeInstallMetadata() {
-  return [
-    "schema_version = 2",
-    'hub_url = "https://hub.example"',
-    'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"',
-    'install_path = "/usr/local/bin/enoki-probe"',
-    'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
-    'state_dir = "/var/lib/enoki-probe"',
-    `probe_distribution_root_sha256 = "${"a".repeat(64)}"`,
-    'bootstrap_state_dir = "/var/lib/enoki-probe-bootstrap"',
-    'bootstrap_acquirer_path = "/usr/local/bin/enoki-probe-bootstrap-acquire"',
-    'bootstrap_activator_path = "/usr/local/bin/enoki-probe-bootstrap-activate"',
-    'service_name = "enoki-probe"',
-    'service_user = "enoki-probe"',
-    'service_group = "enoki-probe"',
-    'service_unit_path = "/etc/systemd/system/enoki-probe.service"',
-    "",
-  ].join("\n");
-}
-
-async function createProbeMetadataShellFixture({ identityPath, probeId }) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-metadata-"));
-  const metadataOwnerUid = fixtureOwnerUid();
-  const metadataPath = path.join(root, "etc/enoki/probe-install.toml");
-  const resolvedIdentityPath = path.join(root, identityPath);
-  await mkdir(path.dirname(metadataPath), { recursive: true });
-  await mkdir(path.dirname(resolvedIdentityPath), { recursive: true });
-  await writeFile(metadataPath, probeInstallMetadata(identityPath), "utf8");
-  await writeFile(
-    resolvedIdentityPath,
-    `probe_id = "${probeId}"\nprobe_private_key_pem = "test-private-key"\n`,
-    "utf8",
-  );
-  await Promise.all([
-    chmod(metadataPath, 0o600),
-    chmod(resolvedIdentityPath, 0o600),
-  ]);
-
-  let claimed = false;
-  const harness = createProbeHostHarness({
-    execute: async (command) => {
-      if (command.includes("# enoki-release-e2e:inventory")) {
-        return successfulCommand({
-          accounts: { group: false, user: false },
-          files: [],
-          units: [],
-        });
-      }
-      if (command.includes("# enoki-release-e2e:dependencies")) {
-        return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-      }
-      if (command.includes("# enoki-release-e2e:claim")) {
-        claimed = true;
-        return successfulCommandText("owned\n");
-      }
-      if (command.includes("# enoki-release-e2e:record-resources")) {
-        return successfulCommandText("recorded\n");
-      }
-      if (command.includes("# enoki-release-e2e:probe-identity")) {
-        return executeShell(
-          remapProbeMetadataFixtureShell(command, root, metadataOwnerUid),
-        );
-      }
-      return successfulCommandText(productInstallerOutput());
-    },
-  });
-  await harness.assertDisposable("run-metadata");
-  await harness.install(officialInstallCommand, "run-metadata");
-  if (!claimed) {
-    throw new Error("metadata fixture did not establish a harness claim");
-  }
-  return {
-    dispose: () => rm(root, { force: true, recursive: true }),
-    identityPath: resolvedIdentityPath,
-    metadataPath,
-    readIdentity: () => harness.readProbeIdentity("run-metadata"),
-    root,
-  };
-}
-
-const completionPathSuffixes = Object.freeze([
-  "/var/lib/enoki-release-e2e",
-  "/var/lib/enoki-probe",
-  "/etc/enoki",
-  "/etc/systemd/system",
-  "/etc/sudoers.d",
-  "/usr/local/bin/enoki-probe",
-]);
-
-const metadataRootOwnerCheck = '[ "$(stat -c %u "$metadata")" = 0 ]';
-
-function fixtureOwnerUid() {
-  const uid = process.getuid?.();
-  if (!Number.isSafeInteger(uid) || uid < 0) {
-    throw new Error("Release E2E shell fixture requires a numeric process UID");
-  }
-  return String(uid);
-}
-
-function remapMetadataOwnerCheck(command, metadataOwnerUid) {
-  return command
-    .split(metadataRootOwnerCheck)
-    .join(`[ "$(stat -c %u "$metadata")" = ${metadataOwnerUid} ]`);
-}
-
-function remapProbeMetadataFixtureShell(command, root, metadataOwnerUid) {
-  return remapMetadataOwnerCheck(
-    command
-      .replace(
-        "metadata=/etc/enoki/probe-install.toml",
-        `metadata=${path.join(root, "/etc/enoki/probe-install.toml")}`,
-      )
-      .replace(
-        "current) identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        `current) identity=${path.join(root, "/var/lib/enoki-probe/identity/probe-bootstrap.toml")}`,
-      )
-      .replace(
-        "v0_1_72) identity=/etc/enoki/probe-bootstrap.toml",
-        `v0_1_72) identity=${path.join(root, "/etc/enoki/probe-bootstrap.toml")}`,
-      ),
-    metadataOwnerUid,
-  );
-}
-
-function remapCompletionShell(command, root) {
-  const remappedPaths = completionPathSuffixes.reduce(
-    (script, suffix) => script.split(suffix).join(path.join(root, suffix)),
-    command,
-  );
-  return remapMetadataOwnerCheck(remappedPaths, fixtureOwnerUid());
-}
-
-async function createOwnershipCompletionShellFixture({
-  installerIdentityPath = "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-} = {}) {
-  const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-completion-"));
-  let cleanupPrepared = false;
-  let cleanupRemovedResources = false;
-  let executedCompletionShell = false;
-  let lastCompletionShell = null;
-  let nextInstallerIdentityPath = installerIdentityPath;
-  const materializeProbe = async (identityPath = nextInstallerIdentityPath) => {
-    const binaryPath = path.join(root, "/usr/local/bin/enoki-probe");
-    const metadataPath = path.join(root, "/etc/enoki/probe-install.toml");
-    const resolvedIdentityPath = path.join(root, identityPath);
-    const alternateIdentityPath = path.join(
-      root,
-      identityPath === "/etc/enoki/probe-bootstrap.toml"
-        ? "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
-        : "/etc/enoki/probe-bootstrap.toml",
-    );
-    await Promise.all([
-      mkdir(path.dirname(binaryPath), { recursive: true }),
-      mkdir(path.dirname(metadataPath), { recursive: true }),
-      mkdir(path.dirname(resolvedIdentityPath), { recursive: true }),
-    ]);
-    await rm(alternateIdentityPath, { force: true });
-    await writeFile(binaryPath, "candidate-probe", "utf8");
-    await writeFile(
-      metadataPath,
-      remapCompletionShell(
-        identityPath === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
-          ? bootstrapProbeInstallMetadata()
-          : probeInstallMetadata(identityPath),
-        root,
-      ),
-      "utf8",
-    );
-    await writeFile(
-      resolvedIdentityPath,
-      'probe_id = "probe_release_completion"\nprobe_private_key_pem = "test-private-key"\n',
-      "utf8",
-    );
-    await Promise.all([
-      chmod(metadataPath, 0o600),
-      chmod(resolvedIdentityPath, 0o600),
-    ]);
-  };
-  const harness = createProbeHostHarness({
-    execute: async (command) => {
-      if (command.includes("# enoki-release-e2e:inventory")) {
-        if (cleanupPrepared && !cleanupRemovedResources) {
-          return successfulCommand({
-            accounts: { group: false, user: false },
-            files: [
-              "/usr/local/bin/enoki-probe",
-              "/etc/enoki/probe-bootstrap.toml",
-              "/etc/enoki/probe-install.toml",
-              "/var/lib/enoki-probe",
-            ],
-            units: ["enoki-probe.service"],
-          });
-        }
-        return successfulCommand({
-          accounts: { group: false, user: false },
-          files: [],
-          units: [],
-        });
-      }
-      if (command.includes("# enoki-release-e2e:dependencies")) {
-        return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-      }
-      if (command.includes("# enoki-release-e2e:probe-repair")) {
-        return successfulCommandText(
-          "Probe Repair succeeded: probe=probe_release_completion version=1.2.3\n",
-        );
-      }
-      if (command.includes("# enoki-release-e2e:emergency-cleanup")) {
-        cleanupRemovedResources = true;
-        return successfulCommandText("");
-      }
-      if (command.includes("# enoki-release-e2e:daemon-reload")) {
-        return successfulCommandText("");
-      }
-      if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
-        await materializeProbe();
-        return successfulCommandText(productInstallerOutput());
-      }
-      if (
-        command.includes(
-          "# enoki-release-e2e:complete-installer-recovery-ownership",
-        ) ||
-        command.includes("# enoki-release-e2e:complete-repair-ownership")
-      ) {
-        executedCompletionShell = true;
-        lastCompletionShell = remapCompletionShell(command, root);
-      }
-      return executeShell(remapCompletionShell(command, root));
-    },
-  });
-  return {
-    dispose: () => rm(root, { force: true, recursive: true }),
-    get executedCompletionShell() {
-      return executedCompletionShell;
-    },
-    harness,
-    get lastCompletionShell() {
-      return lastCompletionShell;
-    },
-    materializeProbe,
-    prepareCleanup() {
-      cleanupPrepared = true;
-    },
-    readClaimResources: () =>
-      readFile(
-        path.join(root, "/var/lib/enoki-release-e2e/claim/resources"),
-        "utf8",
-      ),
-    setInstallerIdentityPath(identityPath) {
-      nextInstallerIdentityPath = identityPath;
-    },
-  };
-}
-
-async function prepareOwnershipCompletionFixture(fixture, runId, operation) {
-  await fixture.harness.assertDisposable(runId);
-  await fixture.harness.install(officialInstallCommand, runId);
-  await fixture.harness.beginUpgradeOwnershipTransition(
-    runId,
-    operation.targetProbeVersion,
-  );
-  await fixture.harness.bindUpgradeOwnershipTransition(
-    runId,
-    pendingUpgradeOperation(),
-  );
-}
-
-function pendingUpgradeOperation() {
-  return {
-    acceptedAtMs: null,
-    completedAtMs: null,
-    createdAtMs: 1,
-    failure: null,
-    hostId: 7,
-    id: 41,
-    kind: "probe_upgrade",
-    runningAtMs: null,
-    state: "pending",
-    targetProbeVersion: "1.2.3",
-    updatedAtMs: 1,
-  };
-}
-
-function failedUpgradeOperation() {
-  return {
-    ...pendingUpgradeOperation(),
-    acceptedAtMs: 2,
-    completedAtMs: 20,
-    failure: { code: "insufficient_privilege", message: "permission denied" },
-    runningAtMs: 2,
-    state: "failed",
-    updatedAtMs: 20,
-  };
-}
-
-async function executeShell(command) {
-  try {
-    const { stderr, stdout } = await execFileAsync("sh", ["-c", command]);
-    return { code: 0, stderr, stdout };
-  } catch (error) {
-    return {
-      code: typeof error.code === "number" ? error.code : 1,
-      stderr: error.stderr ?? error.message,
-      stdout: error.stdout ?? "",
-    };
-  }
 }

@@ -35,6 +35,7 @@ const host: HostSummary = {
     mode: "inherit",
     version: "default-v1",
   },
+  probeUpgradeProblem: null,
   probeVersion: "0.1.0",
   status: "online",
   system: "linux",
@@ -71,7 +72,7 @@ describe("Host overview card", () => {
     expect(html).not.toContain(">online<");
   });
 
-  it("marks and highlights the ready Host on its dedicated detail control", async () => {
+  it("marks and highlights the ready Host without changing its button contract", async () => {
     const html = await renderToString(
       createSSRApp(HostCard, {
         highlighted: true,
@@ -84,17 +85,27 @@ describe("Host overview card", () => {
     expect(html).toContain('tabindex="0"');
   });
 
-  it("exposes Probe Re-enrollment on an offline Host card only", async () => {
+  it("shows the compact active Probe Upgrade problem marker", async () => {
+    const html = await renderToString(
+      createSSRApp(HostCard, {
+        host: {
+          ...host,
+          probeUpgradeProblem: { status: "in_progress" },
+        } as HostSummary,
+      }),
+    );
+
+    expect(html).toContain("探针升级中");
+    expect(html).not.toContain("探针升级失败");
+  });
+
+  it("exposes ordinary Probe re-enrollment only for an offline Host", async () => {
     const offlineHtml = await renderToString(
       createSSRApp(HostCard, {
         host: { ...host, status: "offline" },
       }),
     );
-    const onlineHtml = await renderToString(
-      createSSRApp(HostCard, {
-        host,
-      }),
-    );
+    const onlineHtml = await renderToString(createSSRApp(HostCard, { host }));
 
     expect(offlineHtml).toContain("重新注册探针");
     expect(onlineHtml).not.toContain("重新注册探针");

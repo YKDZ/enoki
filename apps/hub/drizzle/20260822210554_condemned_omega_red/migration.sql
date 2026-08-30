@@ -1,0 +1,1 @@
+ALTER TABLE `report_observations` ADD `cpu_resource_collection_outcome_reason` integer;

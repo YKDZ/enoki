@@ -136,7 +136,6 @@ describe("Hub structured logging", () => {
       ["GET", "/api/web/auth/session", "web_auth_session"],
       ["GET", "/api/web/audit-log", "web_audit_log"],
       ["POST", "/api/web/enrollments", "web_enrollments"],
-      ["POST", "/api/web/enrollments/existing-host/42", "web_enrollments"],
       ["GET", "/api/web/enrollments/42", "web_enrollment"],
       ["GET", "/api/web/hosts", "web_hosts"],
       ["GET", "/api/web/hosts/42", "web_host"],
@@ -168,6 +167,11 @@ describe("Hub structured logging", () => {
       ["GET", "/api/probe/assets/probe.tar.gz", "probe_asset"],
       [
         "POST",
+        "/api/web/hosts/probe-upgrade-requests",
+        "web_probe_upgrade_request",
+      ],
+      [
+        "POST",
         "/api/web/hosts/42/probe-upgrade-requests",
         "web_probe_upgrade_request",
       ],
@@ -184,10 +188,29 @@ describe("Hub structured logging", () => {
     }
 
     expect(hubRouteId("GET", "/attacker-controlled-path")).toBe("unknown");
+    expect(hubRouteId("POST", "/api/web/enrollments/existing-host/42")).toBe(
+      "unknown",
+    );
     expect(hubRouteId("GET", "/api/probe/config")).toBe("unknown");
     expect(hubRouteId("GET", "/api/web/hosts/42/probe-upgrade-requests")).toBe(
       "unknown",
     );
+  });
+
+  it("logs the retired ExistingHost URL as unknown while keeping canonical enrollment typed", async () => {
+    const memory = createMemoryHubLogger({ level: "debug" });
+    const app = createHubApp({ logger: memory.logger });
+
+    const response = await app.request(
+      "/api/web/enrollments/existing-host/42",
+      { method: "POST" },
+    );
+
+    expect(response.status).toBe(404);
+    expect(memory.events).toContainEqual(
+      expect.objectContaining({ routeId: "unknown", status: 404 }),
+    );
+    expect(hubRouteId("POST", "/api/web/enrollments")).toBe("web_enrollments");
   });
 
   it("keeps routine Probe Configuration requests out of the default info log", async () => {

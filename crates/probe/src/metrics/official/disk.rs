@@ -1,51 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, FilesystemCapacity,
-    MetricCollector, filesystem_capacity, unix_time_millis,
-};
-use crate::protocol::enoki::v1::{DiskUsageMetric, MetricSample};
-
-pub const DEFINITION: CollectorDefinition =
-    CollectorDefinition::new(CollectorId::Disk, CollectorCadence::EveryTick);
-
-#[derive(Default)]
-pub struct DiskMetricCollector {
-    previous: Option<DiskCounterSnapshot>,
-}
-
-impl MetricCollector for DiskMetricCollector {
-    fn definition(&self) -> CollectorDefinition {
-        DEFINITION
-    }
-
-    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let disk_counters = fs::read_to_string("/proc/diskstats")
-            .ok()
-            .and_then(|contents| collect_disk_counters_from_proc_diskstats(&contents));
-        let disks = fs::read_to_string("/proc/mounts")
-            .map(|contents| {
-                collect_disk_metrics_from_mounts(
-                    &contents,
-                    |mount_point| filesystem_capacity(mount_point),
-                    disk_counters.as_ref(),
-                    self.previous.as_ref(),
-                )
-            })
-            .unwrap_or_default();
-        if let Some(snapshot) = disk_counters {
-            self.previous = Some(snapshot);
-        }
-        let produced = !disks.is_empty();
-        sample.disks = disks;
-
-        Ok(produced)
-    }
-}
+use crate::metrics::{FilesystemCapacity, unix_time_millis};
+use crate::protocol::enoki::v1::DiskUsageMetric;
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "cgroup", "cgroup2", "debugfs", "devtmpfs", "fusectl", "overlay", "proc", "squashfs", "sysfs",
@@ -126,6 +85,13 @@ pub fn collect_disk_metrics_from_mounts(
 }
 
 pub fn collect_disk_counters_from_proc_diskstats(contents: &str) -> Option<DiskCounterSnapshot> {
+    collect_disk_counters_from_proc_diskstats_at(contents, unix_time_millis())
+}
+
+pub fn collect_disk_counters_from_proc_diskstats_at(
+    contents: &str,
+    collected_at_ms: i64,
+) -> Option<DiskCounterSnapshot> {
     let counters_by_name = contents
         .lines()
         .filter_map(parse_diskstats_line)
@@ -133,7 +99,7 @@ pub fn collect_disk_counters_from_proc_diskstats(contents: &str) -> Option<DiskC
         .collect::<BTreeMap<_, _>>();
 
     (!counters_by_name.is_empty()).then_some(DiskCounterSnapshot {
-        collected_at_ms: unix_time_millis(),
+        collected_at_ms,
         counters_by_name,
     })
 }
@@ -272,4 +238,78 @@ fn parse_diskstats_line(line: &str) -> Option<DiskCounters> {
         io_time_ms: columns.get(12)?.parse().ok()?,
         weighted_io_time_ms: columns.get(13)?.parse().ok()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mounts_keep_real_unique_filesystems_and_preserve_escaped_paths() {
+        let mounts = "/dev/vda1 / ext4 rw 0 0\ntmpfs /run tmpfs rw 0 0\nproc /proc proc rw 0 0\noverlay /var/lib/docker/overlay2 overlay rw 0 0\n/dev/vdb1 /srv/data xfs rw 0 0\n/dev/vdb1 /srv/data-bind xfs rw,bind 0 0\n/dev/vdc1 /mnt/empty ext4 rw 0 0\n/dev/vdd1 /media/My\\040Disk ext4 rw 0 0\n";
+        let disks = collect_disk_metrics_from_mounts(
+            mounts,
+            |mount_point| match mount_point {
+                "/" => Some(capacity(1_000, 250, 300)),
+                "/srv/data" => Some(capacity(4_000, 900, 1_000)),
+                "/srv/data-bind" => Some(capacity(4_000, 950, 1_100)),
+                "/mnt/empty" => Some(capacity(0, 0, 0)),
+                "/media/My Disk" => Some(capacity(5_000, 1_500, 2_000)),
+                _ => None,
+            },
+            None,
+            None,
+        );
+
+        assert_eq!(
+            disks
+                .iter()
+                .map(|disk| (
+                    disk.mount_point.as_str(),
+                    disk.filesystem_type.as_str(),
+                    disk.used_bytes,
+                    disk.total_bytes,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/", "ext4", 750, 1_000),
+                ("/media/My Disk", "ext4", 3_500, 5_000),
+                ("/srv/data", "xfs", 3_100, 4_000),
+            ],
+        );
+    }
+
+    #[test]
+    fn diskstats_compute_byte_and_latency_deltas_for_the_mount_device() {
+        let previous = collect_disk_counters_from_proc_diskstats_at(
+            "253 0 vda1 10 0 20 40 30 0 50 60 0 70 80 0 0 0 0\n",
+            1_000,
+        )
+        .expect("previous counters");
+        let current = collect_disk_counters_from_proc_diskstats_at(
+            "253 0 vda1 15 0 28 50 34 0 58 72 0 78 90 0 0 0 0\n",
+            1_100,
+        )
+        .expect("current counters");
+        let disks = collect_disk_metrics_from_mounts(
+            "/dev/vda1 / ext4 rw 0 0\n",
+            |_| Some(capacity(1_000, 250, 300)),
+            Some(&current),
+            Some(&previous),
+        );
+
+        assert_eq!(disks[0].read_bytes_delta, 8 * 512);
+        assert_eq!(disks[0].write_bytes_delta, 8 * 512);
+        assert_eq!(disks[0].read_await_ms, Some(2.0));
+        assert_eq!(disks[0].write_await_ms, Some(3.0));
+        assert_eq!(disks[0].io_utilization_percent, Some(8.0));
+    }
+
+    fn capacity(total_bytes: u64, free_bytes: u64, available_bytes: u64) -> FilesystemCapacity {
+        FilesystemCapacity {
+            total_bytes,
+            free_bytes,
+            available_bytes,
+        }
+    }
 }

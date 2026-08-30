@@ -46,10 +46,15 @@ function app(
         };
       },
       inspectPending: () => null,
+      hydrateLegacyOrdinaryPendingClosure: () => {},
+      installationInspectionDecision: () => ({ kind: "invalid" }),
+      lifecycleAuthorityTokenHashForHost: () => null,
+      replayRegistrationOutcome: () => null,
       readStatus: () => null,
       registerNewHost: () => null,
       rejectInstallation: () => null,
       resolveStartupReport: () => null,
+      terminalReplacementPredecessorForHost: () => null,
     },
     now: () => 1_725_000_000_000,
   });
@@ -57,7 +62,7 @@ function app(
 }
 
 describe("Existing Host Enrollment API", () => {
-  it("does not expose the removed legacy ExistingHost creation endpoint", async () => {
+  it("does not expose the retired legacy ExistingHost creation endpoint", async () => {
     const { calls, routes } = app("offline");
 
     const response = await routes.request("/existing-host/7", {

@@ -16,7 +16,7 @@
     "db:push": "drizzle-kit push --config drizzle.config.ts && drizzle-kit push --config drizzle.official-metrics.config.ts",
     "start": "node dist/src/server.js",
     "test": "turbo run build --filter=@enoki/hub && pnpm run test:built",
-    "test:built": "vitest run",
+    "test:built": "vitest run --maxWorkers=1",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.typecheck.json"
   },
   "dependencies": {
@@ -31,6 +31,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@enoki/probe-release": "workspace:*",
     "@tsconfig/node24": "^24.0.4",
     "@types/node": "catalog:",
     "@types/ws": "^8.18.1",

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
 import { hashStableHostProfile } from "./host-profile-hash";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import {
   createTestProbeIdentity,
   signedJsonProbeHeaders,
@@ -46,6 +47,8 @@ async function createTemporaryDatabase() {
 async function startHubServer(options: {
   database: Awaited<ReturnType<typeof createTemporaryDatabase>>;
   now?: () => number;
+  probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: string | Buffer;
 }) {
   const server = await createHubNodeServer({
     auth: {
@@ -60,6 +63,12 @@ async function startHubServer(options: {
       capacity: 20,
     }),
     port: 0,
+    probeAssets: options.probeAssetDir
+      ? {
+          assetDir: options.probeAssetDir,
+          trustedRootPublicKeyPem: options.probeDistributionRootPublicKeyPem,
+        }
+      : undefined,
   });
   openServers.push(server);
 
@@ -153,6 +162,7 @@ async function sendReport(
     cpuPercent?: number;
     diskAvailable?: boolean;
     hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+    hostProfileAlreadyStored?: boolean;
     sequence?: number;
   } = {},
 ) {
@@ -246,10 +256,14 @@ async function sendReport(
       },
     ],
   });
-  expect(
-    ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
-      .requestedSnapshotCollectorIds,
-  ).toEqual(["official.host-profile"]);
+  const requestedSnapshotCollectorIds = ReportResponse.decode(
+    new Uint8Array(await compactResponse.arrayBuffer()),
+  ).requestedSnapshotCollectorIds;
+  if (options.hostProfileAlreadyStored) {
+    expect(requestedSnapshotCollectorIds).toEqual([]);
+    return;
+  }
+  expect(requestedSnapshotCollectorIds).toEqual(["official.host-profile"]);
   await postReport({
     metrics: [],
     snapshots: [
@@ -432,23 +446,15 @@ function openWebSocket(
   });
 }
 
-function readWebSocketJson(
-  socket: WebSocket,
-  predicate: (message: unknown) => boolean = () => true,
-) {
+function readWebSocketJson(socket: WebSocket) {
   return new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for WebSocket message."));
     }, 500);
     const onMessage = (data: WebSocket.RawData) => {
-      const message = JSON.parse(data.toString()) as unknown;
-      if (!predicate(message)) {
-        return;
-      }
-
       cleanup();
-      resolve(message);
+      resolve(JSON.parse(data.toString()));
     };
     const onError = (error: Error) => {
       cleanup();
@@ -498,12 +504,10 @@ function readHostRemoved(socket: WebSocket) {
 function collectWebSocketJson(
   socket: WebSocket,
   options: {
-    predicate?: (message: unknown) => boolean;
     quietMs?: number;
     timeoutMs?: number;
   } = {},
 ) {
-  const predicate = options.predicate ?? (() => true);
   const quietMs = options.quietMs ?? 50;
   const timeoutMs = options.timeoutMs ?? 500;
 
@@ -525,12 +529,7 @@ function collectWebSocketJson(
       }, quietMs);
     };
     const onMessage = (data: WebSocket.RawData) => {
-      const message = JSON.parse(data.toString()) as unknown;
-      if (!predicate(message)) {
-        return;
-      }
-
-      messages.push(message);
+      messages.push(JSON.parse(data.toString()));
       finishAfterQuiet();
     };
     const onError = (error: Error) => {
@@ -543,6 +542,76 @@ function collectWebSocketJson(
         clearTimeout(quietTimer);
       }
 
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
+type HostSummaryWithDiskHealth = {
+  host: {
+    collectorCapabilities: {
+      official: {
+        diskHealth: unknown;
+      };
+    };
+    probeUpgradeProblem: unknown;
+  };
+  type: "host_summary";
+};
+
+function isHostSummaryWithDiskHealth(
+  message: unknown,
+): message is HostSummaryWithDiskHealth {
+  if (
+    typeof message !== "object" ||
+    message === null ||
+    !(
+      "type" in message &&
+      message.type === "host_summary" &&
+      "host" in message &&
+      typeof message.host === "object" &&
+      message.host !== null &&
+      "collectorCapabilities" in message.host &&
+      typeof message.host.collectorCapabilities === "object" &&
+      message.host.collectorCapabilities !== null &&
+      "official" in message.host.collectorCapabilities &&
+      typeof message.host.collectorCapabilities.official === "object" &&
+      message.host.collectorCapabilities.official !== null
+    )
+  ) {
+    return false;
+  }
+
+  return "diskHealth" in message.host.collectorCapabilities.official;
+}
+
+function waitForHostSummaryWithDiskHealth(socket: WebSocket) {
+  return new Promise<HostSummaryWithDiskHealth>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(
+        new Error("Timed out waiting for a Host summary with disk health."),
+      );
+    }, 500);
+    const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as unknown;
+      if (!isHostSummaryWithDiskHealth(message)) {
+        return;
+      }
+
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
       socket.off("message", onMessage);
       socket.off("error", onError);
     };
@@ -911,79 +980,289 @@ describe("WebSocket live updates", () => {
     await sendStartupReport(baseUrl, registration, {
       bootId: "boot-live-summary",
     });
-    const summaryMessages = collectWebSocketJson(socket, {
-      predicate: (message) => {
-        if (!message || typeof message !== "object") {
-          return false;
-        }
-
-        const summary = message as {
-          host?: { collectorCapabilities?: unknown; id?: unknown };
-          type?: unknown;
-        };
-        return (
-          summary.type === "host_summary" &&
-          summary.host?.id === 1 &&
-          typeof summary.host.collectorCapabilities === "object" &&
-          summary.host.collectorCapabilities !== null
-        );
-      },
+    database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: null,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1_725_000_009_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: 1,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "pending",
+      supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_009_000,
     });
+    const initialOverviewResponse = await fetch(`${baseUrl}/api/web/hosts`, {
+      headers: { cookie: ownerSession },
+    });
+    const initialOverview = (await initialOverviewResponse.json()) as {
+      hosts: Array<{ probeUpgradeProblem: unknown }>;
+    };
+    const summaryAfterSnapshotReplay = waitForHostSummaryWithDiskHealth(socket);
     await sendReport(baseUrl, registration, {
       bootId: "boot-live-summary",
       diskAvailable: false,
       sequence: 2,
     });
 
-    await expect(summaryMessages).resolves.toEqual(
-      expect.arrayContaining([
-        {
-          host: {
-            id: 1,
-            collectorCapabilities: {
-              official: {
-                diskHealth: {
-                  diagnostic: "SMART data is unsupported",
-                  status: 6,
-                },
-              },
-            },
-            lastSeenAtMs: 1_725_000_010_000,
-            latestMetrics: {
-              batteryPercent: null,
-              batteryState: null,
-              collectedAtMs: 1_725_000_009_500,
-              cpuIdlePercent: null,
-              cpuIowaitPercent: null,
-              cpuPercent: 42.5,
-              cpuStealPercent: null,
-              cpuSystemPercent: null,
-              cpuUserPercent: null,
-              diskTotalBytes: 2_048,
-              diskUsedBytes: 1_536,
-              memoryCacheBytes: null,
-              memoryTotalBytes: 2_147_483_648,
-              memoryUsedBytes: 1_073_741_824,
-              networkRxBitsPerSecond: 6_400,
-              networkRxBytesDelta: 4_000,
-              networkTxBitsPerSecond: 3_200,
-              networkTxBytesDelta: 2_000,
-              receivedAtMs: 1_725_000_010_000,
-              swapTotalBytes: null,
-              swapUsedBytes: null,
-              temperatureCelsius: null,
-              uptimeSeconds: 86_400,
-            },
-            status: "online",
-            warningFlags: {
-              clockSkew: false,
-              probeConfigurationError: false,
+    const receivedSummary = await summaryAfterSnapshotReplay;
+    expect(receivedSummary).toEqual({
+      host: {
+        id: 1,
+        collectorCapabilities: {
+          official: {
+            diskHealth: {
+              diagnostic: "SMART data is unsupported",
+              status: 6,
             },
           },
-          type: "host_summary",
         },
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: {
+          batteryPercent: null,
+          batteryState: null,
+          collectedAtMs: 1_725_000_009_500,
+          cpuIdlePercent: null,
+          cpuIowaitPercent: null,
+          cpuPercent: 42.5,
+          cpuStealPercent: null,
+          cpuSystemPercent: null,
+          cpuUserPercent: null,
+          diskTotalBytes: 2_048,
+          diskUsedBytes: 1_536,
+          memoryCacheBytes: null,
+          memoryTotalBytes: 2_147_483_648,
+          memoryUsedBytes: 1_073_741_824,
+          networkRxBitsPerSecond: 6_400,
+          networkRxBytesDelta: 4_000,
+          networkTxBitsPerSecond: 3_200,
+          networkTxBytesDelta: 2_000,
+          receivedAtMs: 1_725_000_010_000,
+          swapTotalBytes: null,
+          swapUsedBytes: null,
+          temperatureCelsius: null,
+          uptimeSeconds: 86_400,
+        },
+        probeUpgradeProblem: { status: "in_progress" },
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+      type: "host_summary",
+    });
+    expect(receivedSummary.host.probeUpgradeProblem).toEqual(
+      initialOverview.hosts[0]?.probeUpgradeProblem,
+    );
+    expect(JSON.stringify(receivedSummary)).not.toContain("failureCode");
+    expect(JSON.stringify(receivedSummary)).not.toContain("failureMessage");
+
+    const currentOperation = database.probeOperations.findLatestForHost(1);
+    expect(currentOperation).not.toBeNull();
+    database.probeOperations.updateProbeUpgradeRequest({
+      ...currentOperation!,
+      completedAtMs: 1_725_000_009_500,
+      failureCode: "private_failure_code",
+      failureMessage:
+        "curl https://recovery.example/private?enrollment_secret=enk_private",
+      state: "failed",
+      updatedAtMs: 1_725_000_009_500,
+    });
+    const failedSummaryMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+      sequence: 3,
+    });
+    const failedSummaries = await failedSummaryMessages;
+    expect(failedSummaries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          host: expect.objectContaining({
+            probeUpgradeProblem: { status: "failed" },
+          }),
+          type: "host_summary",
+        }),
       ]),
     );
+    expect(JSON.stringify(failedSummaries)).not.toContain(
+      "private_failure_code",
+    );
+    expect(JSON.stringify(failedSummaries)).not.toContain("curl");
+    expect(JSON.stringify(failedSummaries)).not.toContain("recovery.example");
+    expect(JSON.stringify(failedSummaries)).not.toContain("enk_private");
+
+    database.hosts.recordReport(1, {
+      lastReportAtMs: 1_725_000_010_000,
+      probeAssetBundleBootId: "boot-live-summary",
+      probeAssetBundleProbeId: registration.probeId,
+      probeAssetBundleVersion: "0.2.0",
+    });
+    const recoveredHostProfile = {
+      ...baselineHostProfile(),
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "v0.2.0",
+    };
+    database.snapshotCollectors.write({
+      collectorId: "official.host-profile",
+      hostId: 1,
+      payload: recoveredHostProfile,
+      profileProbeAssetBundleVersion: "0.2.0",
+      snapshotHash: hashStableHostProfile(recoveredHostProfile),
+      updatedAtMs: 1_725_000_009_600,
+    });
+    const recoveredSummaryMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+      hostProfile: recoveredHostProfile,
+      hostProfileAlreadyStored: true,
+      sequence: 4,
+    });
+    await expect(recoveredSummaryMessages).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          host: expect.objectContaining({
+            probeUpgradeProblem: null,
+          }),
+          type: "host_summary",
+        }),
+      ]),
+    );
+
+    await closeSocket(socket);
+    database.close();
+  });
+
+  it("fails an accepted timeout on the first overview summary without requiring Host detail", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const { baseUrl } = await startHubServer({
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-overview-timeout",
+    });
+    const operation = database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: nowMs - 5 * 60 * 1_000 - 1,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: nowMs - 6 * 60 * 1_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: 1,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "accepted",
+      supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: nowMs - 5 * 60 * 1_000 - 1,
+    });
+
+    const firstOverview = await fetch(`${baseUrl}/api/web/hosts`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(firstOverview.status).toBe(200);
+    await expect(firstOverview.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: 1,
+          probeUpgradeProblem: { status: "failed" },
+        }),
+      ],
+    });
+    expect(database.probeOperations.findById(operation.id!)).toEqual(
+      expect.objectContaining({
+        failureCode: "accepted_timeout",
+        state: "failed",
+      }),
+    );
+
+    const secondOverview = await fetch(`${baseUrl}/api/web/hosts`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(secondOverview.status).toBe(200);
+    const failureAudits = database.audit
+      .recent(10)
+      .filter((event) => event.action === "probe_upgrade_request.fail");
+    expect(failureAudits).toHaveLength(1);
+
+    database.close();
+  });
+
+  it("broadcasts the authoritative Host summary after Owner create and cancel", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+      probeAssetDir: assetDir,
+      probeDistributionRootPublicKeyPem: release.rootPublicKeyPem,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-owner-transition",
+    });
+    const socket = await openWebSocket(webSocketUrl, { cookie: ownerSession });
+
+    const createdSummary = readWebSocketJson(socket);
+    const creation = await fetch(
+      `${baseUrl}/api/web/hosts/1/probe-upgrade-requests`,
+      {
+        headers: { cookie: ownerSession },
+        method: "POST",
+      },
+    );
+    expect(creation.status).toBe(201);
+    const created = (await creation.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    await expect(createdSummary).resolves.toEqual({
+      host: expect.objectContaining({
+        id: 1,
+        probeUpgradeProblem: { status: "in_progress" },
+      }),
+      type: "host_summary",
+    });
+
+    const canceledSummary = readWebSocketJson(socket);
+    const cancellation = await fetch(
+      `${baseUrl}/api/web/hosts/1/probe-upgrade-requests/${created.probeUpgradeRequest.id}`,
+      {
+        headers: { cookie: ownerSession },
+        method: "DELETE",
+      },
+    );
+    expect(cancellation.status).toBe(200);
+    await expect(canceledSummary).resolves.toEqual({
+      host: expect.objectContaining({
+        id: 1,
+        probeUpgradeProblem: null,
+      }),
+      type: "host_summary",
+    });
 
     await closeSocket(socket);
     database.close();
@@ -1149,22 +1428,7 @@ describe("WebSocket live updates", () => {
         type: "subscribe_host_detail",
       }),
     );
-    const profileUpdate = readWebSocketJson(socket, (message) => {
-      if (!message || typeof message !== "object") {
-        return false;
-      }
-
-      const update = message as {
-        hostId?: unknown;
-        hostProfile?: { hostname?: unknown };
-        type?: unknown;
-      };
-      return (
-        update.type === "host_profile" &&
-        update.hostId === 1 &&
-        update.hostProfile?.hostname === "profile-live-host"
-      );
-    });
+    const messages = collectWebSocketJson(socket);
     await sendReport(baseUrl, registration, {
       bootId: "boot-profile-live",
       hostProfile: {
@@ -1192,15 +1456,19 @@ describe("WebSocket live updates", () => {
       sequence: 2,
     });
 
-    await expect(profileUpdate).resolves.toEqual({
-      hostId: 1,
-      hostProfile: expect.objectContaining({
-        cpuCount: 4,
-        hostname: "profile-live-host",
-        probeVersion: "0.2.0",
-      }),
-      type: "host_profile",
-    });
+    await expect(messages).resolves.toEqual(
+      expect.arrayContaining([
+        {
+          hostId: 1,
+          hostProfile: expect.objectContaining({
+            cpuCount: 4,
+            hostname: "profile-live-host",
+            probeVersion: "0.2.0",
+          }),
+          type: "host_profile",
+        },
+      ]),
+    );
 
     await closeSocket(socket);
     database.close();

@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 const readme = await readFile("README.md", "utf8");
 
 describe("README authentication configuration contract", () => {
-  it("rejects the audited contradiction even when both no-password switches are mentioned", () => {
+  it("rejects an unconditional password requirement", () => {
     const contradictedContract = [
-      "所有部署都必须显式设置 `OWNER_PASSWORD`。",
+      "所有环境都必须显式设置 `OWNER_PASSWORD`。",
       "`ENOKI_WEB_UI_NO_PASSWORD=true` 会启用无密码模式。",
       "生产或 Docker 环境还必须设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true`。",
     ].join(" ");
@@ -67,13 +67,19 @@ describe("README authentication configuration contract", () => {
     expect(insecureConfirmation?.description).toContain(
       "ENOKI_WEB_UI_NO_PASSWORD=true",
     );
+    expect(insecureConfirmation?.description).toContain(
+      "不会单独启用无密码模式",
+    );
   });
 });
 
 const noPasswordExceptionPattern = /除[^。；]*无密码模式[^。；]*(?:外|之外)/;
+const unconditionalPasswordPattern =
+  /(?:^|[。；\n])\s*(?:-\s*)?所有(?:环境|部署)都必须显式设置 `OWNER_PASSWORD`/;
 
 function expectAuthProseContract(text) {
   expect(text).toMatch(noPasswordExceptionPattern);
+  expect(text).not.toMatch(unconditionalPasswordPattern);
   expectOwnerPasswordRequired(text);
   expect(text).toContain("ENOKI_WEB_UI_NO_PASSWORD=true");
   expect(text).toContain("ENOKI_ALLOW_INSECURE_NO_PASSWORD=true");

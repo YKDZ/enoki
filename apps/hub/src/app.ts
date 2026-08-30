@@ -18,11 +18,12 @@ import type { HostStatusThresholds } from "./database/hosts.js";
 import type { HubDatabase } from "./database/index.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createEnrollmentRoutes } from "./enrollment/routes.js";
-import { hostSummaryResponse } from "./hosts/api-response.js";
+import { defaultProbeOperationTimeouts } from "./hosts/probe-upgrade-timeout.js";
 import {
   createHostRoutes,
   createProbeOperationRoutes,
 } from "./hosts/routes.js";
+import { projectHostSummaries } from "./hosts/summary-projection.js";
 import {
   createHubRequestLoggingMiddleware,
   createNoopHubLogger,
@@ -42,6 +43,7 @@ import {
   createProbeAssetRoutes,
   type ProbeAssetRouteOptions,
 } from "./probe/assets.js";
+import type { ForwardTransitions } from "./probe/forward-transitions.js";
 import { createProbeRoutes } from "./probe/routes.js";
 import { createWebAssetHandler } from "./web-assets.js";
 
@@ -55,10 +57,11 @@ export type HubAppOptions = {
   auth?: AuthConfig;
   clockSkewThresholdMs?: number;
   database?: HubDatabase;
+  forwardTransitions?: ForwardTransitions;
   installation?: InstallationCommandConfig;
   listener?: HubListener;
   logger?: HubLogger;
-  probeAssets?: ProbeAssetRouteOptions;
+  probeAssets?: HubProbeAssetOptions;
   hostStatus?: HostStatusThresholds;
   now?: () => number;
   ownerSessions?: OwnerSessionRepository;
@@ -75,11 +78,16 @@ export type HubAppOptions = {
   webDistPath?: string;
 };
 
+export type HubProbeAssetOptions = ProbeAssetRouteOptions & {
+  trustedRootPublicKeyPem?: Buffer | string;
+};
+
 export type ProbeApiAppOptions = Pick<
   HubAppOptions,
   | "app"
   | "clockSkewThresholdMs"
   | "database"
+  | "forwardTransitions"
   | "hostStatus"
   | "liveUpdates"
   | "logger"
@@ -193,6 +201,21 @@ export function createHubApp(options: HubAppOptions = {}) {
       );
     }
     if (options.database) {
+      const hostRouteServices = {
+        audit: options.database.audit,
+        hostStatus: options.hostStatus,
+        hosts: options.database.hosts,
+        liveUpdates,
+        metrics: options.database.metrics,
+        now: options.now,
+        probeAssetDir: options.probeAssets?.assetDir,
+        probeDistributionRootPublicKeyPem:
+          options.probeAssets?.trustedRootPublicKeyPem,
+        probeOperationTimeouts: options.probeOperations,
+        probeConfigurations: options.database.probeConfigurations,
+        probeOperations: options.database.probeOperations,
+        snapshotCollectors: options.database.snapshotCollectors,
+      };
       app.route(
         "/api/web/audit-log",
         createAuditLogRoutes({ audit: options.database.audit }),
@@ -203,26 +226,16 @@ export function createHubApp(options: HubAppOptions = {}) {
           audit: options.database.audit,
           enrollments: options.database.enrollments,
           hostStatus: options.hostStatus,
+          hosts: options.database.hosts,
           installation: options.installation,
           now: options.now,
-        }),
-      );
-      app.route(
-        "/api/web/hosts",
-        createHostRoutes({
-          audit: options.database.audit,
-          hostStatus: options.hostStatus,
-          hosts: options.database.hosts,
-          liveUpdates,
-          metrics: options.database.metrics,
-          now: options.now,
           probeAssetDir: options.probeAssets?.assetDir,
-          probeOperationTimeouts: options.probeOperations,
-          probeConfigurations: options.database.probeConfigurations,
+          probeDistributionRootPublicKeyPem:
+            options.probeAssets?.trustedRootPublicKeyPem,
           probeOperations: options.database.probeOperations,
-          snapshotCollectors: options.database.snapshotCollectors,
         }),
       );
+      app.route("/api/web/hosts", createHostRoutes(hostRouteServices));
       app.route(
         "/api/web/probe-operations",
         createProbeOperationRoutes({
@@ -249,42 +262,15 @@ export function createHubApp(options: HubAppOptions = {}) {
     }
     app.get("/api/web/hosts", (context) => {
       const nowMs = options.now?.() ?? Date.now();
-
       const response = {
-        hosts:
-          options.database?.hosts
-            .listSummaries({
-              hostProfileForHost: (hostId) =>
-                options.database?.snapshotCollectors.hostProfile.read(hostId) ??
-                null,
-              latestMetricForHost: (hostId) =>
-                options.database?.metrics.findLatestSample(hostId) ?? null,
+        hosts: options.database
+          ? projectHostSummaries(options.database, {
               nowMs,
-              probeConfigurationForHost: (hostId) => {
-                const effective =
-                  options.database?.probeConfigurations.getEffectiveForHost(
-                    hostId,
-                  );
-
-                return {
-                  mode: effective?.mode ?? "inherit",
-                  version: effective?.configuration.version ?? "default-v1",
-                };
-              },
-              thresholds: options.hostStatus,
-            })
-            .map((host) => {
-              const effective =
-                options.database?.probeConfigurations.getEffectiveForHost(
-                  host.id,
-                );
-              const intervalSeconds =
-                effective?.configuration.metricsCollectionIntervalSeconds ?? 5;
-
-              return hostSummaryResponse(host, {
-                metricsCollectionIntervalSeconds: intervalSeconds,
-              });
-            }) ?? [],
+              timeouts:
+                options.probeOperations ?? defaultProbeOperationTimeouts,
+              userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+            }).map((projection) => projection.response)
+          : [],
       } satisfies HostsResponse;
 
       return context.json(response);
@@ -366,10 +352,12 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
     createProbeRoutes({
       audit: options.database.audit,
       enrollments: options.database.enrollments,
+      forwardTransitions: options.forwardTransitions,
       hosts: options.database.hosts,
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,
       probeOperations: options.database.probeOperations,
+      probeOperationTimeouts: options.probeOperations,
       reportTransaction: options.database.reportTransaction,
       snapshotCollectors: options.database.snapshotCollectors,
       clockSkewThresholdMs: options.clockSkewThresholdMs,
@@ -377,6 +365,9 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       liveUpdates: options.liveUpdates ?? null,
       now: options.now,
       probeOperationTokenSecret: options.probeOperationTokenSecret,
+      probeAssetDir: options.probeAssets?.assetDir,
+      probeDistributionRootPublicKeyPem:
+        options.probeAssets?.trustedRootPublicKeyPem,
       probeApiOrigin: options.probeApiOrigin,
       trustedProxyCidrs: options.trustedProxyCidrs,
     }),

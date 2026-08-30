@@ -38,6 +38,16 @@ export const managedTerminologyRules = [
     phrase: "Probe Asset Bundle",
     replacement: "探针安装包",
   },
+  {
+    pattern: /\bStartup bundle\b/g,
+    phrase: "Startup bundle",
+    replacement: "启动报告探针安装包",
+  },
+  {
+    pattern: /\bbundle digest\b/g,
+    phrase: "bundle digest",
+    replacement: "探针安装包摘要",
+  },
   { pattern: /\bProbe API\b/g, phrase: "Probe API", replacement: "探针 API" },
   { pattern: /\bProbe\b/g, phrase: "Probe", replacement: "探针" },
   { pattern: /主机信息/g, phrase: "主机信息", replacement: "主机元数据" },

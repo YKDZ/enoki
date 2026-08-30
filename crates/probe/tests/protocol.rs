@@ -36,9 +36,12 @@ fn generated_rust_protocol_encodes_probe_registration() {
         os: "linux".to_string(),
         process_count: 123,
         probe_version: "0.1.0".to_string(),
+        probe_asset_bundle_version: "0.1.0".to_string(),
         thread_count: 456,
     };
     let request = ProbeRegistrationRequest {
+        candidate_signature: Vec::new(),
+        canonical_attempt: Vec::new(),
         enrollment_token: "enrollment-token".to_string(),
         installation_inspection: None,
         installation_rejection: None,
@@ -123,12 +126,15 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
         ],
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         probe_configuration_error: None,
         probe_configuration_version: "config-v1".to_string(),
         probe_id: "probe-01".to_string(),
         sequence_end: 8,
         sequence_start: 7,
         snapshots: Vec::new(),
+        probe_asset_bundle_version: String::new(),
     };
 
     let encoded = request.encode_to_vec();
@@ -213,7 +219,10 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
             id: "operation-01".to_string(),
             operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                 current_probe_version: "0.1.0".to_string(),
+                host_id: "7".to_string(),
                 operation_token: "operation-token-01".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                target_manifest_sha256: "a".repeat(64),
                 target_probe_version: "0.2.0".to_string(),
             })),
         }),
@@ -248,14 +257,18 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
             status: Some(Status::Failed(ProbeOperationFailed {
                 error_code: "unsupported_installation".to_string(),
                 message: "systemd is unavailable".to_string(),
+                ..ProbeOperationFailed::default()
             })),
         }],
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         probe_configuration_error: None,
         probe_configuration_version: "default-v1".to_string(),
         probe_id: "probe-01".to_string(),
         sequence_end: 1,
         sequence_start: 1,
         snapshots: Vec::new(),
+        probe_asset_bundle_version: String::new(),
     };
 
     let decoded_request = ProbeReportRequest::decode(request.encode_to_vec().as_slice())

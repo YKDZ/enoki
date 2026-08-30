@@ -15,6 +15,9 @@ message ProbeUpgradeOperation {
   string current_probe_version = 1;
   string target_probe_version = 2;
   string operation_token = 3;
+  string target_asset_set_digest = 4;
+  string host_id = 5;
+  string target_manifest_sha256 = 6;
 }
 
 message ProbeUninstallOperation {
@@ -42,4 +45,8 @@ message ProbeOperationSucceeded {}
 message ProbeOperationFailed {
   string error_code = 1;
   string message = 2;
+  // 由 root 持有、按领域分离的激活后证据。Probe 仅转发这些不透明值；
+  // Hub 在持久化前对其进行验证。
+  string repair_eligibility_evidence = 3;
+  string repair_eligibility_signature = 4;
 }

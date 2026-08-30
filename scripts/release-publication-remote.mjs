@@ -73,7 +73,7 @@ export function createGitHubGhcrPublicationRemote({
       return normalizeGitHubRelease(release);
     },
 
-    async createDraftRelease({ commit, version }) {
+    async createDraftRelease({ body, commit, version }) {
       const response = await command("gh", [
         "api",
         "--method",
@@ -86,9 +86,25 @@ export function createGitHubGhcrPublicationRemote({
         "-f",
         `name=${version}`,
         "-f",
-        `body=Enoki ${version}`,
+        `body=${body}`,
         "-F",
         "draft=true",
+      ]);
+      return normalizeGitHubRelease(JSON.parse(response.stdout));
+    },
+
+    async updateDraftReleaseBody({ body, version }) {
+      const release = await this.getRelease({ version });
+      if (!release?.draft) {
+        throw new Error(`draft Release ${version} disappeared`);
+      }
+      const response = await command("gh", [
+        "api",
+        "--method",
+        "PATCH",
+        `repos/${repository}/releases/${release.id}`,
+        "-f",
+        `body=${body}`,
       ]);
       return normalizeGitHubRelease(JSON.parse(response.stdout));
     },
@@ -230,6 +246,51 @@ async function verifyPublicCandidate({
           );
         }
         await writeFile(path.join(probeAssetDir, expected.file), bytes);
+      }
+      const recipe = candidateManifest.bootstrapRecipe;
+      const publicRecipe = release.assets[recipe.file];
+      if (!publicRecipe?.downloadUrl) {
+        throw new Error(
+          `public Probe Bootstrap recipe is missing: ${recipe.file}`,
+        );
+      }
+      const recipeResponse = await fetchImpl(publicRecipe.downloadUrl, {
+        credentials: "omit",
+        redirect: "follow",
+      });
+      if (!recipeResponse.ok) {
+        throw new Error(
+          `public Probe Bootstrap recipe ${recipe.file} returned ${recipeResponse.status}`,
+        );
+      }
+      const recipeBytes = Buffer.from(await recipeResponse.arrayBuffer());
+      if (
+        recipeBytes.length !== recipe.size ||
+        sha256(recipeBytes) !== recipe.sha256
+      ) {
+        throw new Error(
+          `public Probe Bootstrap recipe does not match candidate: ${recipe.file}`,
+        );
+      }
+      const publicRecord = release.assets[recipe.recordFile];
+      if (!publicRecord?.downloadUrl) {
+        throw new Error(
+          `public Probe Bootstrap recipe record is missing: ${recipe.recordFile}`,
+        );
+      }
+      const recordResponse = await fetchImpl(publicRecord.downloadUrl, {
+        credentials: "omit",
+        redirect: "follow",
+      });
+      const recordBytes = Buffer.from(await recordResponse.arrayBuffer());
+      if (
+        !recordResponse.ok ||
+        recordBytes.length !== recipe.recordSize ||
+        sha256(recordBytes) !== recipe.recordSha256
+      ) {
+        throw new Error(
+          "public Probe Bootstrap recipe record does not match candidate",
+        );
       }
       publicAssetsReady = true;
     });
@@ -472,6 +533,7 @@ function normalizeGitHubRelease(release) {
         },
       ]),
     ),
+    body: release.body,
     draft: release.draft,
     id: release.id,
     targetCommit: release.target_commitish,

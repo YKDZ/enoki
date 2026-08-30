@@ -27,6 +27,51 @@ describe("Web Feedback Coordinator", () => {
     });
   });
 
+  it("delivers one all-Host summary while untracked per-Host terminal results stay suppressed", () => {
+    vi.useFakeTimers();
+    const delivery = recordingDelivery();
+    const feedback = createWebFeedbackCoordinator({ delivery });
+    feedback.submit({
+      attemptId: 1,
+      failed: 0,
+      kind: "probe-upgrade-all-submitted",
+      skipped: 4,
+      submitted: 2,
+    });
+    feedback.submit({
+      hostId: 3,
+      kind: "probe-upgrade-transition",
+      operationId: 42,
+      state: "succeeded",
+    });
+    vi.runAllTimers();
+
+    expect(delivery.deliver).toHaveBeenCalledExactlyOnceWith({
+      description: "已提交 2 台，跳过 4 台，失败 0 台。",
+      level: "success",
+      title: "已提交探针升级",
+    });
+  });
+
+  it("delivers a separate summary for each repeated all-Host submission", () => {
+    vi.useFakeTimers();
+    const delivery = recordingDelivery();
+    const feedback = createWebFeedbackCoordinator({ delivery });
+
+    for (const attemptId of [1, 2]) {
+      feedback.submit({
+        attemptId,
+        failed: 0,
+        kind: "probe-upgrade-all-submitted",
+        skipped: 4,
+        submitted: 2,
+      });
+      vi.runAllTimers();
+    }
+
+    expect(delivery.deliver).toHaveBeenCalledTimes(2);
+  });
+
   it("clears terminal correlation and permits a second Host to report the same outcome", () => {
     vi.useFakeTimers();
     const delivery = recordingDelivery();

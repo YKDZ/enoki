@@ -28,7 +28,7 @@ Enoki **有**以下功能：
 - 从 Hub 分发探针二进制文件从而不依赖探针侧额外网络连通性
 - REST API
 - 主页的卡片瀑布流 / 表格视图
-- Hub 侧删除主机或卸载探针并删除主机
+- Hub 侧可协调探针卸载；本机也可执行 `sudo enoki-probe uninstall`。管理员可对签名发布转换明确允许的相邻版本发起兼容升级，并可显式修复已进入 recovery-pending 的升级
 - 探针常态下不拥有 root 权限
 - CPU / RAM / 磁盘 / 网络接口等多种常见指标
 - 基于时钟的指标级采集 / 上报间隔
@@ -56,20 +56,21 @@ Enoki **有**以下功能：
 
 Enoki 的安全边界尽量保持简单：
 
-- 管理界面可查看主机元数据并触发删除主机或卸载探针并删除主机，建议仅在可信网络中使用
+- 管理界面可查看主机元数据和操作状态；当前支持显式兼容升级、升级修复、Hub 组合卸载和本机卸载
 - 除显式启用无密码模式外，所有部署都必须显式设置 `OWNER_PASSWORD`；`ENOKI_WEB_UI_NO_PASSWORD=true` 只适合完全可信的内网、演示或临时截图环境。生产或 Docker 环境必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true` 才能启用无密码模式
 - 管理面和探针 API 分别使用显式 Origin；两者可按部署网络选择 HTTP 或 HTTPS。显式的非 loopback HTTP 会在 Hub 启动时记录一次结构化警告：它放弃了传输保密性和服务器身份认证，但不会放宽应用认证
 - 探针注册后会生成自己的非对称身份密钥，后续上报和操作状态使用请求签名证明身份。签名会绑定请求方法、目标地址、路径、查询参数、随机数、时间戳和请求体摘要
 - Hub 不终止 TLS、不重定向 HTTP 到 HTTPS，也不发送 HSTS；证书、协议跳转和 HSTS 由反向代理、隧道或其他网络终止层统一配置
 - `ENOKI_TRUSTED_PROXY_CIDRS` 只用于从 `X-Forwarded-For` 取得 Observed IP 审计证据；它不影响 Origin、认证、授权、拒绝、限流或客户端网络准入，且忽略 `X-Real-IP`
 - 探针身份私钥和启动配置需要保持私密，配置文件不应允许其他用户读取
-- Hub 只在 `/api/probe/assets/*` 有界分发已签名的探针安装包；签名 Bootstrap 会校验资产清单签名、受信根、授权代次、归档校验和、目标版本和本地防降级规则
-- 探针只会从最初安装时配置的 Hub 下载资产。安装器会把 Hub 地址写入 root-owned 安装元数据，签名 Bootstrap 会在令牌校验、资产下载和状态上报前校验引导地址与该元数据一致
+- Hub 只在 `/api/probe/assets/*` 有界分发已签名的探针安装包；常驻探针只响应管理员明确创建且与当前身份和安装收据匹配的兼容升级请求
+- 安装器会把 Hub 地址、每安装生命周期验权材料和已验证安装回执写入 root 所有的安装元数据；常驻探针只协调升级与卸载请求，独立的有界生命周期角色离线验证授权并执行固定事务。本地卸载不删除 Hub 中的主机记录
 - 官方版使用本仓库配置的资产签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针安装包
-- Hub 管理员可以触发卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界。
-- 探针常态下不以 root 运行；需要本机提权的官方采集器通过受限 systemd/sudoers 入口执行内置操作，不支持下发任意系统命令
-- 旧 schema 1 安装才依赖既有操作 sudoers 完成升级。schema 2 的签名 Bootstrap 不创建也不保留该旧操作 sudoers；采集器 sudoers 独立按安装时的本机前置条件暴露。官方示例特权采集器是 `disk-health.smartctl`，没有匹配前置条件时不会保留采集器 sudoers 文件
-- 特权采集器目前只有超时和网络访问限制，不是完整执行沙箱。Hub、管理员、探针配置、主机概况或指标上报不能在运行时启用 helper 或改写 sudoers
+- Hub 管理员可以创建探针操作请求，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界；常驻探针自身不提权，root 生命周期角色只接受固定协议、固定 stage 和绑定当前安装事实的授权。
+- 常驻探针不以 root 运行，也不直接读取设备事实或执行 `smartctl`。Observation Runtime 只通过构建期固定的本机 Resource Provider 合同取得结果；Hub、管理员、探针配置、主机概况或指标上报都不能传入路径、命令、参数、权限配置或采集器列表
+- Observation Runtime 独占官方采集器的固定注册、调度、指标计算、delta 状态和有界结果；常驻探针只请求完整观测窗口，按已验证配置筛选已完成字段并沿认证上报路径转发。新安装不会创建已退役的采集 helper sudoers
+- System State Provider 与 Disk Health Provider 是相互独立的一次性 systemd socket 激活进程。两者都有固定调用者身份、激活预算、运行期限和有界 typed response；Disk Health Provider 还使用固定 `smartctl` 绝对候选路径和参数，清空继承环境并仅设置固定的 `LANG=C`，同时固定工作目录以及子进程超时与回收合同
+- 探针、观测进程、两类采集进程和生命周期进程的生产 unit 使用与签名角色一致的固定最小权限配置，限制 capability、设备、网络、文件系统、进程视图、命名空间、系统调用、任务数、内存和文件创建权限。两类采集进程还受固定并发、激活速率、执行期限和完整进程组清理约束，文件读取另由构建期固定的 Landlock allowlist 限制。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；卸载仅执行固定清单，只有签名发布转换明确声明兼容的相邻新架构版本可由管理员逐台发起升级，未完成激活只经显式 Repair 按 durable journal 恢复
 
 ## 部署
 
@@ -86,73 +87,24 @@ OWNER_PASSWORD='请替换为开发密码' \
 pnpm dev
 ```
 
-探针的可选本机 helper 前置条件只在安装流程中评估。例如主机后来安装或移除了 `smartctl`，Disk Health helper 不会被 Web UI、探针配置或运行时主机概况自动改变；请手动重装探针，让安装流程重新渲染 collector-helper sudoers。
+Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl` 候选路径，并把工具缺失等稳定前置条件作为主机概况 capability 上报；单次执行失败只形成有界的 Collection Outcome，不会被误记成主机能力变化。Web UI 和远端配置不能启用额外工具或改变 Provider 权限。
 
-先从 GitHub Release 下载与目标 Linux 平台匹配的签名 Bootstrap 及其 SHA-256 文件，校验、解压并安装两个固定角色。以下示例以 x86-64 Linux 为例，请把版本替换为实际 Release tag：
+从对应版本的不可变 GitHub Release 下载 `enoki-probe-bootstrap.py` 与 `enoki-probe-bootstrap-recipe.json`。执行前逐项完成以下对照：
 
-```sh
-RELEASE_TAG='v请替换为版本'
-TARGET='x86_64-unknown-linux-gnu'
-ARCHIVE="enoki-probe-bootstrap-${TARGET}.tar.gz"
-BASE_URL="https://github.com/YKDZ/enoki/releases/download/${RELEASE_TAG}"
-curl --fail --location --remote-name "${BASE_URL}/${ARCHIVE}"
-curl --fail --location --remote-name "${BASE_URL}/${ARCHIVE}.sha256"
-sha256sum -c "${ARCHIVE}.sha256"
-tar -xzf "${ARCHIVE}"
-sudo install -m 0755 enoki-probe-bootstrap-acquire /usr/local/bin/enoki-probe-bootstrap-acquire
-sudo install -m 0755 enoki-probe-bootstrap-activate /usr/local/bin/enoki-probe-bootstrap-activate
-```
+1. record 的 `recipe.version`、`recipe.size` 和 `recipe.sha256` 必须分别等于 Release body 的 Recipe version、Size 和 SHA-256，并与下载的 recipe 实际字节一致。
+2. record 的 `rootFingerprint` 必须等于 Release body 的 Distribution root fingerprint，并与 Hub 安装界面显示的分发信任根指纹完全一致。
+3. record 的 `bundleVersion` 必须等于 Release body 的 Bundle version，并与 Hub 安装界面显示的探针安装包版本完全一致。
+4. record 的 `targets` 必须按原顺序逐项等于 Release body 的 Targets，并与 Hub 安装界面“支持的目标平台”列表逐项完全一致，不得遗漏。
 
-获取程序不提权，激活程序只负责本机激活。Bootstrap 安装包本身不由 Hub 下载、替换或升级。
+这三处共同提供同一份 exact identity 的 Hub 外对照。recipe 是一份可审计的静态获取配方，不是第二个签名归档；它只依赖目标 Linux 上的 Python 3、OpenSSL 和 sudo。不要从待信 recipe 自身推导这些对照值，也不要使用当前 Hub 返回的动态脚本或由 Hub 选择信任根来冒充此官方路径。
 
-然后在 Hub Web UI 中生成一次性安装命令并在目标主机以当前非 root 用户执行。命令只把 `ENOKI_HUB_URL` 和 `ENOKI_ENROLLMENT_TOKEN` 交给 acquirer；其输出经管道交给 `sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`。因此网络获取和验证不会以 root 运行，令牌也不会作为 root 的环境变量传递。
+把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和全部运行组件的精确摘要与大小，再在同一个 fresh transaction 中发布 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`lifecycle-companion`、`bootstrap-acquirer` 与 `bootstrap-activator` 七个固定角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
-当前 Hub 不支持 schema 2 探针自动升级；需要更新时请在目标主机手动重装探针。旧 schema 1 探针的升级仍依赖其既有 sudoers。后续 Web UI 会改进安装、更新和卸载的生命周期操作；“手动重装探针”只影响目标主机，不会暗示删除 Hub 中的主机记录。
-
-Hub 只对已安装探针所需的签名安装包提供有界分发。若在主机本机执行“卸载探针”，只会移除本机探针，不会删除 Hub 中的主机；需要两侧一并清理时，请在 Hub 中选择“卸载探针并删除主机”。
+Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机特权操作；卸载、显式兼容升级与升级修复交由独立的固定角色完成。升级候选由非特权探针一次下载并完整验证，root 角色只复验固定暂存收据且不联网；root 在打开暂存目录、持久化 generation 或检查当前安装之前就 durable consume 本次授权，任何外层失败后同一授权也不可重放。激活前失败保留旧安装并只能走新的管理员操作；只有 root-owned schema 2 journal 证明激活已开始，`sudo enoki-probe repair` 才会经 Lifecycle Companion 生成带新鲜 nonce 的短期签名 evidence，由清空补充组、禁止重新提权的固定 Bootstrap Acquirer 换取与失败操作、探针身份、目标版本和全部探针安装包摘要精确绑定的短期 Repair Authority；Hub 对匿名交换使用有界的全局、来源和已验证主机预算。root 离线复验并在独立 journal 单次消费后，将完整签名 evidence/authority capsule 与完成阶段 durable 保存，且用独立 versioned HMAC 覆盖完整 capsule 和每次状态迁移；进程退出、authority 过期或原 Upgrade journal 已推进后，只有 `consumed` 与 `completion-pending` 会从磁盘精确恢复，无需联网、下载或新 nonce。`unresolved` 是 terminal：再次显式执行必须生成 fresh evidence/nonce 并等待 Hub 将旧 Repair 标为 failed 后创建新 Repair operation，绝不恢复或重新运行旧 operation。`completion-pending` 的完成提交失败保持本机状态为 running，不降为 failed；已知的手工重装 disposition 则以严格 `probe_manual_reinstall_required` 贯穿 Companion 和 CLI。其他失败不自动重试、降级或改写原失败 Upgrade。Hub 只有在同一探针身份、同一 bootId 的启动报告探针安装包版本与主机概况同时证明目标版本时才把 Repair 标为成功。
 
 `ENOKI_PROBE_API_ORIGIN` 只能是 `scheme://host[:port]`，不支持路径前缀。若既有探针依赖未文档化的前缀，请调整网络路由后在 Hub 中使用“手动重新安装探针”；没有旧前缀兼容层。
 
-### 维护者发布信任初始化
-
-维护者只需执行一次根信任仪式。下面命令在 Linux 上创建权限为 `0700` 的受控目录，用 CSPRNG 生成根密钥口令，并创建 RSA-4096 根密钥、RSA-4096 日常发布密钥和 generation 1 授权：
-
-```sh
-umask 077
-CEREMONY_DIR="$PWD/.probe-trust-ceremony"
-install -d -m 0700 "$CEREMONY_DIR"
-openssl rand -base64 48 > "$CEREMONY_DIR/root-passphrase"
-chmod 0600 "$CEREMONY_DIR/root-passphrase"
-
-node scripts/probe-trust.mjs init-root \
-  --output-dir "$CEREMONY_DIR/root" \
-  --passphrase-file "$CEREMONY_DIR/root-passphrase"
-node scripts/probe-trust.mjs init-release-key \
-  --output-dir "$CEREMONY_DIR/release"
-node scripts/probe-trust.mjs authorize-release-key \
-  --root-private-key "$CEREMONY_DIR/root/root-private-key.pem" \
-  --root-passphrase-file "$CEREMONY_DIR/root-passphrase" \
-  --release-public-key "$CEREMONY_DIR/release/release-public-key.pem" \
-  --generation 1 \
-  --output-dir "$CEREMONY_DIR/delegation"
-node scripts/probe-trust.mjs verify \
-  --root-public-key "$CEREMONY_DIR/root/root-public-key.pem" \
-  --delegation "$CEREMONY_DIR/delegation/trust-delegation.json" \
-  --signature "$CEREMONY_DIR/delegation/trust-delegation.json.sig" \
-  --highest-accepted-generation 1
-```
-
-把文件内容配置到 GitHub Actions：
-
-| GitHub 类型 | 名称                                            | 值                                                       |
-| ----------- | ----------------------------------------------- | -------------------------------------------------------- |
-| Variable    | `ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM`  | `root/root-public-key.pem` 原文                          |
-| Variable    | `ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM`      | `release/release-public-key.pem` 原文                    |
-| Variable    | `ENOKI_PROBE_TRUST_DELEGATION_JSON`             | `delegation/trust-delegation.json` 原文                  |
-| Variable    | `ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64` | `base64 -w0 delegation/trust-delegation.json.sig` 的输出 |
-| Secret      | `ENOKI_PROBE_ASSET_SIGNING_KEY_PEM`             | `release/release-private-key.pem` 原文                   |
-
-根私钥 `root/root-private-key.pem` 和根口令绝不能上传到 GitHub；应离线备份并限制访问。日常发布只使用 release 私钥，不需要也不应接触根私钥。轮换日常发布密钥时才离线取出根私钥，创建更高 generation 的新授权。
+当签名的发布转换合同判定当前探针无法安全原地升级时，Hub 会显示原因并生成一条有有效期、仅可成功使用一次的手动重装命令。该命令清理旧本机安装后复验并安装目标签名包，替换探针身份但保留 Hub 中的主机、主机元数据、指标历史与审计记录；失败不会删除 Hub 主机，也不会回退到旧权限实现。单独“卸载探针”同样只清理本机安装，不等同于“删除主机”或“卸载探针并删除主机”。
 
 Hub 容器内默认监听两个端口：
 
@@ -232,7 +184,7 @@ services:
 | `ENOKI_METRICS_ARCHIVE_PERIOD`                   | `monthly`                            | 指标归档文件分段，可选 `daily` 或 `monthly`                                                                                                                         |
 | `ENOKI_METRICS_ARCHIVE_DIR`                      | `${ENOKI_DATA_ROOT}/metrics-archive` | 指标归档文件目录。Docker 默认是 `/data/metrics-archive`。                                                                                                           |
 | `ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS`             | `300`                                | 探针时间与 Hub 时间偏移超过此值时记录时钟偏移。                                                                                                                     |
-| `ENOKI_PROBE_ASSET_DIR`                          | `/app/probe-assets`                  | Hub 有界分发已签名探针安装包的目录；不包含 Bootstrap。                                                                                                              |
+| `ENOKI_PROBE_ASSET_DIR`                          | `/app/probe-assets`                  | Hub 有界分发已签名探针安装包及其验证元数据的目录；每个 versioned 单一安装包包含固定 Bootstrap entries。                                                             |
 | `ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS` | `300`                                | 探针操作已接收但未开始运行的超时时间。                                                                                                                              |
 | `ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS`  | `900`                                | 探针操作运行中的超时时间。                                                                                                                                          |
 | `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET`     | 启动时随机生成                       | 探针升级 / 卸载操作 token 签名密钥。多实例或需要跨重启保留未完成操作时应设置为稳定随机值。                                                                          |

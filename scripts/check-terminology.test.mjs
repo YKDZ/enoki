@@ -22,6 +22,8 @@ describe("Chinese product terminology", () => {
     ["Probe Configuration", "探针配置"],
     ["Probe Asset Set", "探针安装包"],
     ["Probe Asset Bundle", "探针安装包"],
+    ["Startup bundle", "启动报告探针安装包"],
+    ["bundle digest", "探针安装包摘要"],
     ["Probe API", "探针 API"],
     ["Probe", "探针"],
     ["主机信息", "主机元数据"],

@@ -9,6 +9,14 @@ import type {
   EnrollmentTarget,
 } from "../database/enrollments.js";
 import type { HostStatusThresholds } from "../database/hosts.js";
+import type { HostRepository } from "../database/hosts.js";
+import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import { evaluateProbeUpgradeEligibility } from "../probe/asset-set.js";
+import { manualProbeReinstallPolicy } from "../probe/manual-reinstall-policy.js";
+import {
+  readProbeReleaseContextFromDirectory,
+  unavailableProbeReleaseContext,
+} from "../probe/release-context.js";
 import {
   createDefaultInstallationCommandConfig,
   type InstallationCommandConfig,
@@ -22,8 +30,12 @@ export type EnrollmentRouteServices = {
   audit?: AuditRepository;
   enrollments: EnrollmentRepository;
   hostStatus?: HostStatusThresholds;
+  hosts?: HostRepository;
   installation?: InstallationCommandConfig;
   now?: () => number;
+  probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: Buffer | string;
+  probeOperations?: ProbeOperationRepository;
 };
 
 export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
@@ -38,6 +50,91 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       return context.json({ error: "invalid_enrollment_target" }, 400);
     }
     return createOwnerEnrollment(context, services, installation, now, target);
+  });
+
+  routes.post("/manual-reinstall/:hostId", async (context) => {
+    const hostId = positiveInteger(context.req.param("hostId"));
+    if (!hostId || !services.hosts) {
+      return context.json({ error: "manual_reinstall_unavailable" }, 409);
+    }
+    const host = services.hosts.findActiveById(hostId);
+    if (!host) {
+      return context.json({ error: "host_not_found" }, 404);
+    }
+    const releaseContext = services.probeAssetDir
+      ? await readProbeReleaseContextFromDirectory({
+          assetDir: services.probeAssetDir,
+          trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+        })
+      : unavailableProbeReleaseContext();
+    const terminalPredecessor =
+      services.enrollments.terminalReplacementPredecessorForHost({
+        currentProbeId: host.probeId,
+        hostId,
+      });
+    const terminalRecovery = terminalReplacementRecovery({
+      predecessor: terminalPredecessor,
+      releaseTransition: releaseContext.releaseTransition,
+    });
+    const policy = manualProbeReinstallPolicy({
+      eligibility: evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: releaseContext.assetSet.version,
+        probeAssetSetVersionNonUpgradeableReason:
+          releaseContext.assetSet.nonUpgradeableReason,
+        probeVersion: host.probeVersion,
+        releaseTransition: releaseContext.releaseTransition,
+      }),
+      hostLastReportAtMs: host.lastReportAtMs,
+      hostProbeVersion: host.probeVersion,
+      latestOperation:
+        services.probeOperations?.findLatestForHost(hostId) ?? null,
+      nowMs: now(),
+      offlineAfterMs: services.hostStatus?.offlineAfterMs ?? 90_000,
+      sourceProbeSha256:
+        releaseContext.releaseTransition?.sourceProbeSha256 ?? [],
+      targetAssetSetDigest: releaseContext.assetSet.targetAssetSetDigest,
+      targetProbeVersion: releaseContext.assetSet.version,
+    });
+    if (!policy && !terminalRecovery) {
+      return context.json({ error: "manual_reinstall_not_required" }, 409);
+    }
+    const expectedHubOrigin = installation.probeApiOrigin;
+    if (!expectedHubOrigin) {
+      return context.json({ error: "manual_reinstall_unavailable" }, 409);
+    }
+    if (terminalRecovery) {
+      return createOwnerEnrollment(context, services, installation, now, {
+        expectedHubOrigin,
+        expectedProbeId: host.probeId,
+        expectedProbeVersion: terminalRecovery.predecessor.targetProbeVersion,
+        hostId,
+        kind: "manual_reinstall",
+        replacementPredecessorAssetSetDigest:
+          terminalRecovery.predecessor.targetAssetSetDigest,
+        replacementPredecessorEnrollmentId:
+          terminalRecovery.predecessor.enrollmentId,
+        sourceProbeSha256: terminalRecovery.sourceProbeSha256,
+        targetBundles: releaseContext.releaseTransition!.targetBundles ?? [],
+        targetAssetSetDigest:
+          releaseContext.releaseTransition!.targetAssetSetDigest,
+        targetProbeVersion:
+          releaseContext.releaseTransition!.targetProbeVersion,
+      });
+    }
+    if (!policy) {
+      return context.json({ error: "manual_reinstall_not_required" }, 409);
+    }
+    return createOwnerEnrollment(context, services, installation, now, {
+      expectedHubOrigin,
+      expectedProbeId: host.probeId,
+      expectedProbeVersion: policy.sourceProbeVersion,
+      hostId,
+      kind: "manual_reinstall",
+      sourceProbeSha256: policy.sourceProbeSha256,
+      targetBundles: releaseContext.releaseTransition?.targetBundles ?? [],
+      targetAssetSetDigest: policy.targetAssetSetDigest,
+      targetProbeVersion: policy.targetProbeVersion,
+    });
   });
 
   routes.get("/:enrollmentId", (context) => {
@@ -117,6 +214,19 @@ function createOwnerEnrollment(
     enrollmentToken,
     ...renderInstallCommand(installation, {
       enrollmentToken,
+      ...(target.kind === "manual_reinstall"
+        ? {
+            replacementMigration: {
+              enrollmentId,
+              expectedProbeId: target.expectedProbeId,
+              sourceProbeSha256: target.sourceProbeSha256,
+              sourceProbeVersion: target.expectedProbeVersion,
+              targetAssetSetDigest: target.targetAssetSetDigest,
+              targetHostId: String(target.hostId),
+              targetProbeVersion: target.targetProbeVersion,
+            },
+          }
+        : {}),
     }),
   } satisfies EnrollmentResponse;
 
@@ -171,4 +281,35 @@ function createEnrollmentToken() {
 
 function createEnrollmentId() {
   return `enr_${randomBytes(16).toString("base64url")}`;
+}
+
+function positiveInteger(value: string) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function terminalReplacementRecovery(input: {
+  predecessor: ReturnType<
+    EnrollmentRepository["terminalReplacementPredecessorForHost"]
+  >;
+  releaseTransition: ReturnType<
+    typeof unavailableProbeReleaseContext
+  >["releaseTransition"];
+}) {
+  if (!input.predecessor || !input.releaseTransition) return null;
+  const sourceProbeSha256 =
+    input.predecessor.targetProbeVersion ===
+      input.releaseTransition.targetProbeVersion &&
+    input.predecessor.targetAssetSetDigest ===
+      input.releaseTransition.targetAssetSetDigest
+      ? input.releaseTransition.targetProbeSha256
+      : input.predecessor.targetProbeVersion ===
+            input.releaseTransition.sourceProbeVersion &&
+          input.predecessor.targetAssetSetDigest ===
+            input.releaseTransition.sourceAssetSetDigest
+        ? input.releaseTransition.sourceProbeSha256
+        : null;
+  return sourceProbeSha256?.length === 4
+    ? { predecessor: input.predecessor, sourceProbeSha256 }
+    : null;
 }

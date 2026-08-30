@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use enoki_probe::cli::{ProbeCommand, parse_probe_command, render_probe_output};
-use enoki_probe::local_privilege_boundary::PrivilegedCollectorHelperId;
+use enoki_probe::cli::{
+    ProbeCommand, parse_probe_command, render_probe_output, render_probe_repair_failure,
+};
 
 #[test]
 fn renders_version_output_for_owner_smoke_checks() {
@@ -19,6 +20,31 @@ fn renders_help_without_remote_administration_language() {
     assert!(output.contains("reports Host observations to the Hub"));
     assert!(output.contains("enoki-probe register --hub-url"));
     assert!(!output.contains("command execution"));
+}
+
+#[test]
+fn repair_output_describes_explicit_local_and_hub_authorization() {
+    let output = render_probe_output(ProbeCommand::Repair);
+    assert!(output.contains("explicit local administrator"));
+    assert!(output.contains("Hub authorization"));
+    for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
+        assert!(!output.contains(unsupported_guidance));
+    }
+}
+
+#[test]
+fn repair_cli_renders_the_typed_manual_reinstall_disposition() {
+    assert_eq!(
+        render_probe_repair_failure("probe_manual_reinstall_required"),
+        "Probe repair failed: code=probe_manual_reinstall_required.\n",
+    );
+}
+
+#[test]
+fn help_lists_the_delivered_argument_free_local_uninstall() {
+    let output = render_probe_output(ProbeCommand::Help);
+    assert!(output.contains("sudo enoki-probe uninstall"));
+    assert!(render_probe_output(ProbeCommand::Uninstall).contains("lifecycle service"));
 }
 
 #[test]
@@ -62,7 +88,7 @@ fn parses_probe_run_command_for_systemd_service_entrypoint() {
 }
 
 #[test]
-fn parses_the_typed_probe_local_lifecycle_entrypoint_for_a_staged_candidate_only() {
+fn rejects_the_retired_probe_local_lifecycle_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "local-install".to_string(),
@@ -72,14 +98,14 @@ fn parses_the_typed_probe_local_lifecycle_entrypoint_for_a_staged_candidate_only
 
     assert_eq!(
         command,
-        ProbeCommand::InternalLocalLifecycle {
-            candidate_binary: PathBuf::from("/tmp/enoki-probe-candidate"),
+        ProbeCommand::Rejected {
+            code: "probe_lifecycle_companion_required",
         },
     );
 }
 
 #[test]
-fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
+fn rejects_the_retired_internal_probe_upgrader_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-upgrader".to_string(),
@@ -89,14 +115,14 @@ fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
 
     assert_eq!(
         command,
-        ProbeCommand::InternalUpgrader {
-            bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
+        ProbeCommand::Rejected {
+            code: "probe_lifecycle_companion_required",
         },
     );
 }
 
 #[test]
-fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() {
+fn rejects_the_retired_internal_probe_uninstaller_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-uninstaller".to_string(),
@@ -106,8 +132,8 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
 
     assert_eq!(
         command,
-        ProbeCommand::InternalUninstaller {
-            bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
+        ProbeCommand::Rejected {
+            code: "probe_lifecycle_companion_required",
         },
     );
 }
@@ -187,7 +213,7 @@ fn probe_repair_forbidden_arguments_exit_nonzero_with_a_stable_code() {
 }
 
 #[test]
-fn parses_internal_privileged_collector_helper_command_for_compiled_helper_id_only() {
+fn retired_privileged_collector_helper_command_is_not_reachable() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-privileged-collector-helper".to_string(),
@@ -195,16 +221,11 @@ fn parses_internal_privileged_collector_helper_command_for_compiled_helper_id_on
         "disk-health.smartctl".to_string(),
     ]);
 
-    assert_eq!(
-        command,
-        ProbeCommand::InternalPrivilegedCollectorHelper {
-            helper_id: PrivilegedCollectorHelperId::DiskHealthSmartctl,
-        },
-    );
+    assert_eq!(command, ProbeCommand::Help);
 }
 
 #[test]
-fn parses_internal_collector_helper_sudoers_render_command_for_installer_boundary() {
+fn retired_collector_helper_sudoers_command_is_not_reachable() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-render-collector-helper-sudoers".to_string(),
@@ -214,13 +235,7 @@ fn parses_internal_collector_helper_sudoers_render_command_for_installer_boundar
         "/usr/local/bin/enoki-probe".to_string(),
     ]);
 
-    assert_eq!(
-        command,
-        ProbeCommand::InternalRenderCollectorHelperSudoers {
-            service_user: "enoki-probe".to_string(),
-            probe_binary: PathBuf::from("/usr/local/bin/enoki-probe"),
-        },
-    );
+    assert_eq!(command, ProbeCommand::Help);
 }
 
 #[test]

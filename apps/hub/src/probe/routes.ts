@@ -1,111 +1,58 @@
 import { Buffer } from "node:buffer";
-import {
-  createHash,
-  createPublicKey,
-  createVerify,
-  randomBytes,
-} from "node:crypto";
+import { createHash } from "node:crypto";
 
-import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
-import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
-import type { Context } from "hono";
 
-import type { AuditRepository } from "../database/audit.js";
-import type { EnrollmentRepository } from "../database/enrollments.js";
+import type { HostRepository } from "../database/hosts.js";
+import { broadcastHostRemovedHint } from "../live-updates.js";
+import { createForwardTransitions } from "./forward-transitions.js";
 import {
-  hostProfilePersistenceValues,
-  type SnapshotCollectorStorageRegistry,
-  type SnapshotReplayReceiptWireShape,
-  type SnapshotReplayRequestKey,
-} from "../database/host-profiles.js";
-import type {
-  HostStatusThresholds,
-  HostRepository,
-} from "../database/hosts.js";
-import type { ProbeReportTransaction } from "../database/index.js";
-import type { MetricsRepository } from "../database/metrics.js";
-import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
-import type { ProbeOperationRepository } from "../database/probe-operations.js";
-import {
-  maxEnrollmentRejectionCodeLength,
-  maxEnrollmentRejectionMessageLength,
-} from "../enrollment/lifecycle.js";
-import { hashSecret } from "../enrollment/routes.js";
-import {
-  broadcastHostReadyHint,
-  broadcastHostRemovedHint,
-  liveSummaryFromHost,
-  type LiveUpdateBroadcaster,
-} from "../live-updates.js";
-import { deriveObservedIp, type TrustedProxyCidr } from "../network.js";
-import { defaultProbeConfiguration } from "./configuration.js";
-import { permitsLegacyFullHostProfileObservation } from "./legacy-report-compatibility.js";
+  canonicalLifecycleUpgradeAuthority,
+  deriveLifecycleAuthorityKey,
+  signLifecycleUpgradeAuthority,
+  type LifecycleUpgradeAuthority,
+} from "./lifecycle-authority.js";
 import {
   defaultProbeOperationTokenTtlMs,
-  issueProbeOperationToken,
   validateProbeOperationToken,
 } from "./operation-token.js";
 import {
   acknowledgeProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
-  succeedReportedProbeOperation,
   startProbeUpgradeRequest,
-  succeedProbeUpgradeRequestFromHostProfile,
+  succeedReportedProbeOperation,
   type ProbeUpgradeRequest,
 } from "./operation.js";
-
-const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
-const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
-const ReportRequest = enoki.v1.ProbeReportRequest as any;
-const ReportResponse = enoki.v1.ProbeReportResponse as any;
-const HostProfileSnapshotMessage = enoki.v1.HostProfileSnapshot as any;
+import { verifyProbeRequestSignature } from "./probe-identity.js";
+import { createProbeRegistrationRoutes } from "./registration-delivery.js";
+import { readProbeReleaseContextFromDirectory } from "./release-context.js";
+import { createProbeRepairAuthorizationRoutes } from "./repair-routes.js";
+import { createProbeReportRoutes } from "./report-reconciliation.js";
+import {
+  parseProbeOperationId,
+  probeJsonError,
+  readCappedRequestBody,
+} from "./route-http.js";
+import {
+  defaultProbeOperationTokenSecret,
+  type ProbeRouteServices,
+} from "./route-services.js";
 const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest as any;
 const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse as any;
-const hostProfileCollectorId = "official.host-profile";
-const maxProbeRegistrationPayloadBytes = 256 * 1024;
-const maxProbeReportPayloadBytes = 1024 * 1024;
 const maxProbeOperationPayloadBytes = 16 * 1024;
-const maxReportObservationRange = 10_000;
-const defaultClockSkewThresholdMs = 5 * 60 * 1000;
-const enrollmentVerificationTtlMs = 60 * 1000;
-const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
 
-type ProtoMessage = Record<string, any>;
-
-class ReportBusinessRejection extends Error {
-  constructor(
-    readonly code: string,
-    readonly status: 400 | 409,
-  ) {
-    super(code);
-  }
-}
-
-export type ProbeRouteServices = {
-  audit?: AuditRepository;
-  enrollments: EnrollmentRepository;
-  hosts: HostRepository;
-  metrics: MetricsRepository;
-  probeConfigurations: ProbeConfigurationRepository;
-  probeOperations?: ProbeOperationRepository;
-  reportTransaction: ProbeReportTransaction;
-  snapshotCollectors?: SnapshotCollectorStorageRegistry;
-  clockSkewThresholdMs?: number;
-  hostStatus?: HostStatusThresholds;
-  liveUpdates?: LiveUpdateBroadcaster | null;
-  now?: () => number;
-  probeOperationTokenSecret?: string;
-  probeApiOrigin?: string;
-  trustedProxyCidrs?: TrustedProxyCidr[];
-};
+export type { ProbeRouteServices } from "./route-services.js";
 
 export function createProbeRoutes(services: ProbeRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
-
+  const forwardTransitions =
+    services.forwardTransitions ??
+    createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations!,
+    });
   routes.use("*", async (context, next) => {
     if (!isIdentityContentEncoding(context.req.raw.headers)) {
       return probeJsonError("payload_compression_not_supported", 415);
@@ -113,790 +60,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     return next();
   });
-
-  routes.post("/register", async (context) => {
-    if (
-      contentLengthExceeds(
-        context.req.raw.headers,
-        maxProbeRegistrationPayloadBytes,
-      )
-    ) {
-      return probeJsonError("probe_registration_too_large", 413);
-    }
-
-    const requestBody = await readCappedRequestBody(
-      context.req.raw,
-      maxProbeRegistrationPayloadBytes,
-    );
-
-    if (!requestBody) {
-      return probeJsonError("probe_registration_too_large", 413);
-    }
-
-    const request = decodeRegistrationRequest(requestBody);
-
-    if (!request?.enrollmentToken) {
-      return probeJsonError("invalid_enrollment_token", 401);
-    }
-
-    const installationRejection = registrationInstallationRejection(request);
-    if (installationRejection === "invalid") {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
-    const installationInspection = registrationInstallationInspection(request);
-    if (installationInspection === "invalid") {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
-    if (installationInspection) {
-      const enrollment = services.enrollments.inspectPending({
-        nowMs: now(),
-        tokenHash: hashSecret(request.enrollmentToken),
-      });
-      if (!enrollment) {
-        return probeJsonError("invalid_enrollment_token", 401);
-      }
-      const body = RegistrationResponse.encode(
-        RegistrationResponse.create({
-          installationInspection: {
-            targetKind:
-              enrollment.targetKind === "new_host"
-                ? enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST
-                : enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST,
-          },
-        }),
-      ).finish();
-      return context.body(toArrayBuffer(body), 200, {
-        "cache-control": "no-store",
-        "content-type": "application/x-protobuf",
-      });
-    }
-    if (installationRejection) {
-      const { existingProbeId, ...rejection } = installationRejection;
-      const rejectionResult = services.enrollments.rejectInstallation({
-        ...rejection,
-        existingProbeId,
-        rejectedAtMs: now(),
-        tokenHash: hashSecret(request.enrollmentToken),
-      });
-      if (!rejectionResult) {
-        return probeJsonError("invalid_enrollment_token", 401);
-      }
-      if (rejectionResult.outcome === "rejected") {
-        services.audit?.record({
-          action: "enrollment.installation_rejected",
-          actor: "system",
-          details: {
-            code: installationRejection.code,
-            enrollmentId: rejectionResult.enrollment.enrollmentId,
-          },
-          occurredAtMs: rejectionResult.enrollment.rejectedAtMs ?? now(),
-          outcome: "success",
-          subjectId: String(rejectionResult.enrollment.id),
-          subjectType: "enrollment_token",
-        });
-      }
-      return context.body(null, 204, { "cache-control": "no-store" });
-    }
-
-    if (!validProbePublicKeyPem(request.probePublicKeyPem)) {
-      return probeJsonError("probe_public_key_required", 400);
-    }
-
-    if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
-
-    if (!validRegistrationResponsibilities(request)) {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
-
-    const hostProfileSnapshot = hostProfileSnapshotFromRegistration(request);
-    if (
-      hostProfileSnapshot?.snapshotHash &&
-      hostProfileSnapshot.snapshotHash !== hostProfileSnapshot.canonicalHash
-    ) {
-      return probeJsonError("snapshot_hash_mismatch", 400);
-    }
-
-    const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    if (!hostProfileSnapshot || !hostProfile) {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
-
-    const registeredAtMs = now();
-    const probeId = createProbeId();
-    const probeSecretPlaceholder = createProbeSecret();
-    const hostProfileHash = hostProfileSnapshot.canonicalHash;
-    const observedIp = observedIpFromContext(
-      context,
-      services.trustedProxyCidrs,
-    );
-    const displayName =
-      hostProfile.hostname?.trim() || fallbackDisplayName(probeId);
-    const registration = services.enrollments.registerNewHost({
-      host: {
-        architecture: hostProfile.architecture || null,
-        clockSkewDetected: false,
-        connectAddress:
-          firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
-        createdAtMs: registeredAtMs,
-        cpuCount: hostProfile.cpuCount || null,
-        cpuModel: hostProfile.cpuModel?.trim() || null,
-        displayName,
-        displayNameEdited: false,
-        hostname: hostProfile.hostname || null,
-        kernel: hostProfile.kernel || null,
-        lastClockSkewMs: null,
-        lastReportAtMs: null,
-        memoryTotalBytes: hostProfile.memoryTotalBytes
-          ? Number(hostProfile.memoryTotalBytes)
-          : null,
-        observedIp,
-        probePublicKeyPem: request.probePublicKeyPem,
-        os: hostProfile.os || null,
-        probeConfigurationVersion: defaultProbeConfiguration.version,
-        probeId,
-        probeSecretHash: hashSecret(probeSecretPlaceholder),
-        probeVersion: hostProfile.probeVersion || null,
-      },
-      hostProfile: hostProfilePersistenceValues({
-        payload: hostProfile,
-        snapshotHash: hostProfileHash,
-        updatedAtMs: registeredAtMs,
-      }),
-      registeredAtMs,
-      tokenHash: hashSecret(request.enrollmentToken),
-      verificationDeadlineAtMs: registeredAtMs + enrollmentVerificationTtlMs,
-    });
-
-    if (!registration) {
-      return probeJsonError("invalid_enrollment_token", 401);
-    }
-
-    const body = RegistrationResponse.encode(
-      RegistrationResponse.create({
-        initialConfiguration: defaultProbeConfiguration,
-        enrollmentId: registration.enrollment.enrollmentId,
-        probeId,
-        serverTimeMs: registeredAtMs,
-      }),
-    ).finish();
-
-    return context.body(toArrayBuffer(body), 200, {
-      "cache-control": "no-store",
-      "content-type": "application/x-protobuf",
-    });
-  });
-
-  routes.post("/report", async (context) => {
-    if (
-      contentLengthExceeds(context.req.raw.headers, maxProbeReportPayloadBytes)
-    ) {
-      return probeJsonError("probe_report_too_large", 413);
-    }
-
-    const requestBody = await readCappedRequestBody(
-      context.req.raw,
-      maxProbeReportPayloadBytes,
-    );
-
-    if (!requestBody) {
-      return probeJsonError("probe_report_too_large", 413);
-    }
-
-    const host = authenticateProbe(
-      services.hosts,
-      context.req.raw,
-      requestBody,
-      services.probeApiOrigin,
-    );
-
-    if (!host) {
-      return probeJsonError("probe_identity_required", 401);
-    }
-
-    const request = decodeReportRequest(requestBody);
-
-    if (!request) {
-      return probeJsonError("malformed_probe_report", 400);
-    }
-
-    if (request.probeId !== host.probeId) {
-      return probeJsonError("probe_identity_required", 401);
-    }
-
-    const validatedReport = validateReportEnvelope(request);
-
-    if (!validatedReport) {
-      return probeJsonError("malformed_probe_report", 400);
-    }
-
-    if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
-      return probeJsonError("malformed_probe_report", 400);
-    }
-
-    const hostProfileSnapshot = hostProfileSnapshotFromReport(request);
-
-    if (
-      hostProfileSnapshot?.hostProfile &&
-      hostProfileSnapshot.snapshotHash &&
-      hostProfileSnapshot.snapshotHash !== hostProfileSnapshot.canonicalHash
-    ) {
-      return probeJsonError("malformed_probe_report", 400);
-    }
-
-    const reportResponsibility = reportResponsibilityFor({
-      hostProfileSnapshot,
-      report: validatedReport,
-      request,
-    });
-    if (!reportResponsibility) {
-      return probeJsonError("malformed_probe_report", 400);
-    }
-
-    const reportReceivedAtMs = now();
-    const prevalidatedOperations = planProbeOperationReportApplication({
-      acknowledgements: request.operationAcknowledgements ?? [],
-      hostId: host.id,
-      nowMs: reportReceivedAtMs,
-      services,
-      statuses: request.operationStatuses ?? [],
-    });
-    if (prevalidatedOperations.error) {
-      return probeJsonError(prevalidatedOperations.error, 400);
-    }
-
-    const ingestReport = (reportServices: ProbeRouteServices) => {
-      const services = reportServices;
-      let snapshotReplayToFulfill: SnapshotReplayRequestKey | null = null;
-      let snapshotReplayWireShape: SnapshotReplayReceiptWireShape | null = null;
-      const replaySequenceAlreadyAccepted = services.metrics.hasObservation({
-        bootId: request.bootId,
-        probeId: request.probeId,
-        sequence: validatedReport.sequenceStart,
-      });
-      const bootStartAlreadyAccepted = services.metrics.hasObservation({
-        bootId: request.bootId,
-        probeId: request.probeId,
-        sequence: 1,
-      });
-      const hasCurrentReplayOnlyContents =
-        hasSnapshotReplayOnlyContents(request);
-      const isFullHostProfileReport =
-        reportResponsibility === "full_host_profile" ||
-        (reportResponsibility === "startup" &&
-          replaySequenceAlreadyAccepted &&
-          hasCurrentReplayOnlyContents);
-      let isSnapshotReplay = false;
-      if (isFullHostProfileReport) {
-        const snapshotHash =
-          hostProfileSnapshot?.snapshotHash ??
-          hostProfileSnapshot?.canonicalHash;
-        if (!snapshotHash) {
-          throw new ReportBusinessRejection("malformed_probe_report", 400);
-        }
-        const replayRequest: SnapshotReplayRequestKey = {
-          bootId: request.bootId,
-          collectorId: hostProfileCollectorId,
-          hostId: host.id,
-          sequence: validatedReport.sequenceStart,
-          snapshotHash,
-        };
-        const replayRequestStatus =
-          services.snapshotCollectors?.snapshotReplayRequestStatus(
-            replayRequest,
-          ) ?? null;
-        const hasPendingSnapshotReplayRequest =
-          services.snapshotCollectors?.hasPendingSnapshotReplayRequest({
-            bootId: request.bootId,
-            collectorId: hostProfileCollectorId,
-            hostId: host.id,
-          }) ?? false;
-        // v0.1.72 advances to the next sequence when following a compact
-        // Host Profile request. Only a still-pending request can authorize
-        // that initial +1 full snapshot; after fulfillment its exact retry is
-        // matched against the durable receipt below, never inferred from a
-        // predecessor request and a successor Observation.
-        const pendingLegacyReplayRequest =
-          services.snapshotCollectors?.pendingLegacySnapshotReplayRequest(
-            replayRequest,
-          ) ?? null;
-        const replayReceipt =
-          services.snapshotCollectors?.snapshotReplayReceipt(replayRequest) ??
-          null;
-        const hasNoMetrics = (request.metrics ?? []).length === 0;
-        const permitsLegacyFullObservation =
-          reportResponsibility === "full_host_profile" &&
-          permitsLegacyFullHostProfileObservation({
-            reportedProbeVersion:
-              hostProfileSnapshot?.hostProfile?.probeVersion,
-            storedProbeVersion: host.probeVersion,
-          });
-        // Snapshot Replay must exactly match the tuple the Hub requested. Its
-        // receipt already exists, while recordObservation is an idempotent no-op.
-        // A fulfilled tuple accepts only its exact lost-response retry.
-        if (!services.snapshotCollectors) {
-          if (!permitsLegacyFullObservation) {
-            throw new ReportBusinessRejection("malformed_probe_report", 400);
-          }
-        } else {
-          if (
-            replaySequenceAlreadyAccepted &&
-            hasCurrentReplayOnlyContents &&
-            replayRequestStatus === "pending"
-          ) {
-            // The current-Probe replay uses the already accepted sequence;
-            // this pending request is fulfilled by its full snapshot.
-            snapshotReplayToFulfill = replayRequest;
-            snapshotReplayWireShape = "current_sequence";
-            isSnapshotReplay = true;
-          } else if (
-            replaySequenceAlreadyAccepted &&
-            hasCurrentReplayOnlyContents &&
-            replayReceipt?.wireShape === "current_sequence" &&
-            replayReceipt.acceptedSnapshotHash === snapshotHash &&
-            replayReceipt.key.sequence === replayRequest.sequence
-          ) {
-            // Exact current-Probe replay retry. Its receipt already exists.
-            isSnapshotReplay = true;
-          } else if (
-            replaySequenceAlreadyAccepted &&
-            hasNoMetrics &&
-            replayReceipt?.wireShape === "legacy_successor" &&
-            replayReceipt.acceptedSnapshotHash === snapshotHash &&
-            replayReceipt.key.sequence + 1 === replayRequest.sequence &&
-            permitsLegacyFullObservation
-          ) {
-            // Idempotent retry of the v0.1.72 successor-sequence follow-up.
-            isSnapshotReplay = true;
-          } else if (
-            !replaySequenceAlreadyAccepted &&
-            hasNoMetrics &&
-            pendingLegacyReplayRequest &&
-            permitsLegacyFullObservation
-          ) {
-            snapshotReplayToFulfill = pendingLegacyReplayRequest;
-            snapshotReplayWireShape = "legacy_successor";
-            isSnapshotReplay = true;
-          } else if (
-            permitsLegacyFullObservation &&
-            bootStartAlreadyAccepted &&
-            replayRequestStatus === null &&
-            !hasPendingSnapshotReplayRequest &&
-            !pendingLegacyReplayRequest &&
-            !replayReceipt
-          ) {
-            // v0.1.72 also emitted ordinary full Host Profile Observations
-            // after its boot had started. No pending or matching replay state
-            // means this is a new time slice, not a replay inferred from its
-            // payload shape.
-          } else {
-            throw new ReportBusinessRejection("malformed_probe_report", 400);
-          }
-        }
-      }
-      const startupEnrollment =
-        !isSnapshotReplay &&
-        isProbeStartupReport({
-          report: validatedReport,
-          reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
-          request,
-        })
-          ? services.enrollments.resolveStartupReport({
-              enrollmentId: nonemptyString(request.enrollmentId),
-              hostId: host.id,
-              reportedAtMs: reportReceivedAtMs,
-            })
-          : null;
-
-      if (startupEnrollment?.status === "rejected") {
-        // Commit the Enrollment's terminal timeout by itself, then reject the
-        // report after the transaction. This preserves the status transition
-        // while guaranteeing that no report effects can accompany it.
-        return {
-          detailSamples: [] as HostDetailSample[],
-          hostProfileUpdate: null,
-          hostRemovedIds: [] as number[],
-          readyEnrollment: null,
-          reportReceivedAtMs,
-          responseBody: new Uint8Array(),
-          startupRejection: new ReportBusinessRejection(
-            "probe_startup_timeout",
-            409,
-          ),
-        };
-      }
-
-      const operationPlan = planProbeOperationReportApplication({
-        acknowledgements: request.operationAcknowledgements ?? [],
-        hostId: host.id,
-        nowMs: reportReceivedAtMs,
-        services,
-        statuses: request.operationStatuses ?? [],
-      });
-      if (operationPlan.error) {
-        throw new ReportBusinessRejection(operationPlan.error, 400);
-      }
-      const operationApplication = applyProbeOperationReports({
-        hostId: host.id,
-        nowMs: reportReceivedAtMs,
-        operations: operationPlan.operations,
-        services,
-      });
-
-      if (operationApplication.error) {
-        throw new ReportBusinessRejection(operationApplication.error, 400);
-      }
-
-      const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
-      const reportedHostProfileHash =
-        hostProfileSnapshot?.canonicalHash ?? null;
-      const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
-      const knownHostProfileSnapshot =
-        services.snapshotCollectors
-          ?.get(hostProfileCollectorId)
-          ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
-      const snapshotReplayRequest =
-        !reportedHostProfile &&
-        !knownHostProfileSnapshot &&
-        reportedSnapshotHash
-          ? {
-              bootId: request.bootId,
-              collectorId: hostProfileCollectorId,
-              hostId: host.id,
-              requestedAtMs: reportReceivedAtMs,
-              sequence: validatedReport.sequenceEnd,
-              snapshotHash: reportedSnapshotHash,
-            }
-          : null;
-      const requestedSnapshotCollectorIds = snapshotReplayRequest
-        ? [hostProfileCollectorId]
-        : [];
-      if (snapshotReplayRequest) {
-        services.snapshotCollectors?.requestSnapshotReplay({
-          ...snapshotReplayRequest,
-        });
-      }
-      const clockSkew = detectClockSkew(
-        request.metrics ?? [],
-        reportReceivedAtMs,
-        services.clockSkewThresholdMs ?? defaultClockSkewThresholdMs,
-      );
-
-      const observedIp = observedIpFromContext(
-        context,
-        services.trustedProxyCidrs,
-      );
-
-      services.hosts.recordReport(host.id, {
-        architecture: reportedHostProfile?.architecture || undefined,
-        clockSkewDetected: clockSkew.detected,
-        connectAddress: reportConnectAddress(
-          reportedHostProfile,
-          host,
-          observedIp,
-        ),
-        cpuCount: reportedHostProfile
-          ? reportedHostProfile.cpuCount || null
-          : undefined,
-        cpuModel: reportedHostProfile
-          ? reportedHostProfile.cpuModel?.trim() || null
-          : undefined,
-        hostname: reportedHostProfile?.hostname || undefined,
-        kernel: reportedHostProfile?.kernel || undefined,
-        lastClockSkewMs: clockSkew.lastDeltaMs,
-        lastReportAtMs: reportReceivedAtMs,
-        memoryTotalBytes: reportedHostProfile
-          ? unsignedNumber(reportedHostProfile.memoryTotalBytes) || null
-          : undefined,
-        observedIp,
-        os: reportedHostProfile?.os || undefined,
-        probeConfigurationVersion:
-          request.probeConfigurationVersion || undefined,
-        probeConfigurationError: request.probeConfigurationError
-          ? {
-              errorCode: request.probeConfigurationError.errorCode ?? "",
-              failedVersion:
-                request.probeConfigurationError.failedVersion ?? "",
-              message: request.probeConfigurationError.message ?? "",
-              reportedAtMs: reportReceivedAtMs,
-            }
-          : null,
-        probeVersion: reportedHostProfile?.probeVersion || undefined,
-      });
-      let hostProfileUpdate: HostProfileSnapshot | null = null;
-      if (reportedHostProfile && reportedHostProfileHash) {
-        const result = services.snapshotCollectors?.write({
-          collectorId: hostProfileCollectorId,
-          hostId: host.id,
-          observedIp,
-          payload: reportedHostProfile,
-          snapshotHash: reportedHostProfileHash,
-          updatedAtMs: reportReceivedAtMs,
-        });
-        if (result?.changed) {
-          hostProfileUpdate = result.view;
-        }
-      }
-      if (
-        snapshotReplayToFulfill &&
-        (!snapshotReplayWireShape ||
-          !reportedHostProfileHash ||
-          !services.snapshotCollectors?.fulfillSnapshotReplay({
-            ...snapshotReplayToFulfill,
-            acceptedSnapshotHash: reportedHostProfileHash,
-            acceptedSequence: validatedReport.sequenceStart,
-            fulfilledAtMs: reportReceivedAtMs,
-            wireShape: snapshotReplayWireShape,
-          }))
-      ) {
-        throw new ReportBusinessRejection("malformed_probe_report", 400);
-      }
-      const storedReportedHostProfile =
-        !reportedHostProfile &&
-        hostProfileSnapshot &&
-        services.snapshotCollectors?.hostProfile.hasSnapshot(
-          host.id,
-          reportedSnapshotHash,
-        )
-          ? services.snapshotCollectors.hostProfile.read(host.id)
-          : null;
-      markProbeUpgradeSucceededFromHostProfile({
-        hostId: host.id,
-        hostProfile: reportedHostProfile ?? storedReportedHostProfile,
-        nowMs: reportReceivedAtMs,
-        services,
-      });
-
-      const samplesBySequence = new Map<number, ProtoMessage>(
-        ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
-          unsignedNumber(sample.sequence),
-          sample,
-        ]),
-      );
-      const detailSamples: HostDetailSample[] = [];
-
-      for (
-        let sequence = validatedReport.sequenceStart;
-        sequence <= validatedReport.sequenceEnd;
-        sequence += 1
-      ) {
-        const sample = samplesBySequence.get(sequence);
-
-        if (sample) {
-          const inserted = services.metrics.recordObservationSample({
-            observation: {
-              bootId: request.bootId,
-              hostId: host.id,
-              probeId: host.probeId,
-              receivedAtMs: reportReceivedAtMs,
-              sequence,
-            },
-            sample: {
-              bootId: request.bootId,
-              collectedAtMs: signedNumber(sample.collectedAtMs),
-              cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map(
-                (core) => ({
-                  idle: unsignedNumber(core.idle),
-                  iowait: unsignedNumber(core.iowait),
-                  irq: unsignedNumber(core.irq),
-                  name: core.name ?? "",
-                  nice: unsignedNumber(core.nice),
-                  softirq: unsignedNumber(core.softirq),
-                  steal: unsignedNumber(core.steal),
-                  system: unsignedNumber(core.system),
-                  usagePercent: core.usagePercent ?? 0,
-                  user: unsignedNumber(core.user),
-                }),
-              ),
-              batteryPercent: metricUnsignedField(sample, "batteryPercent"),
-              batteryState: hasMetricField(sample, "batteryState")
-                ? sample.batteryState || null
-                : null,
-              cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
-              cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
-              cpuPercent: metricField(sample, "cpuPercent"),
-              cpuStealPercent: metricField(sample, "cpuStealPercent"),
-              cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
-              cpuUserPercent: metricField(sample, "cpuUserPercent"),
-              disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
-                availableBytes: unsignedNumber(disk.availableBytes),
-                filesystemType: disk.filesystemType ?? "",
-                ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
-                mountPoint: disk.mountPoint ?? "",
-                readAwaitMs: metricField(disk, "readAwaitMs"),
-                readBytesDelta: unsignedNumber(disk.readBytesDelta),
-                totalBytes: unsignedNumber(disk.totalBytes),
-                usedBytes: unsignedNumber(disk.usedBytes),
-                weightedIoPercent: metricField(disk, "weightedIoPercent"),
-                writeAwaitMs: metricField(disk, "writeAwaitMs"),
-                writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
-              })),
-              diskHealth: ((sample.diskHealth ?? []) as ProtoMessage[]).map(
-                (disk) => ({
-                  deviceName: disk.deviceName ?? "",
-                  model: disk.model || null,
-                  passed: Boolean(disk.passed),
-                  powerOnHours: unsignedMetricField(disk, "powerOnHours"),
-                  role: disk.role || null,
-                  serialNumber: disk.serialNumber || null,
-                  temperatureCelsius: metricField(disk, "temperatureCelsius"),
-                  totalBytes: unsignedMetricField(disk, "totalBytes"),
-                  usageMountPoint: disk.usageMountPoint || null,
-                  usedBytes: unsignedMetricField(disk, "usedBytes"),
-                }),
-              ),
-              diskTotalBytes: sample.disks?.length
-                ? sumUnsigned(
-                    sample.disks as ProtoMessage[],
-                    (disk: ProtoMessage) => disk.totalBytes,
-                  )
-                : null,
-              diskUsedBytes: sample.disks?.length
-                ? sumUnsigned(
-                    sample.disks as ProtoMessage[],
-                    (disk: ProtoMessage) => disk.usedBytes,
-                  )
-                : null,
-              load1: metricField(sample, "load_1"),
-              load5: metricField(sample, "load_5"),
-              load15: metricField(sample, "load_15"),
-              hostId: host.id,
-              memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
-              memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
-              memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
-              networkInterfaces: (
-                (sample.networkInterfaces ?? []) as ProtoMessage[]
-              ).map((networkInterface) => ({
-                name: networkInterface.name ?? "",
-                rxBytes: unsignedNumber(networkInterface.rxBytes),
-                rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
-                txBytes: unsignedNumber(networkInterface.txBytes),
-                txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
-              })),
-              networkRxBytesDelta: sample.networkInterfaces?.length
-                ? sumUnsigned(
-                    sample.networkInterfaces as ProtoMessage[],
-                    (networkInterface: ProtoMessage) =>
-                      networkInterface.rxBytesDelta,
-                  )
-                : null,
-              networkTxBytesDelta: sample.networkInterfaces?.length
-                ? sumUnsigned(
-                    sample.networkInterfaces as ProtoMessage[],
-                    (networkInterface: ProtoMessage) =>
-                      networkInterface.txBytesDelta,
-                  )
-                : null,
-              probeId: host.probeId,
-              receivedAtMs: reportReceivedAtMs,
-              sequence,
-              swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
-              swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
-              temperatureCelsius: metricField(sample, "temperatureCelsius"),
-              uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
-            },
-          });
-
-          if (inserted) {
-            detailSamples.push(
-              liveDetailSampleFromMetricSample(
-                host.id,
-                sample,
-                reportReceivedAtMs,
-              ),
-            );
-          }
-        } else {
-          services.metrics.recordObservationSample({
-            observation: {
-              bootId: request.bootId,
-              hostId: host.id,
-              probeId: host.probeId,
-              receivedAtMs: reportReceivedAtMs,
-              sequence,
-            },
-          });
-        }
-      }
-
-      const readyEnrollment =
-        startupEnrollment?.status === "ready"
-          ? startupEnrollment.enrollment
-          : null;
-
-      const responseBody = ReportResponse.encode(
-        ReportResponse.create({
-          acceptedSequenceEnd: validatedReport.sequenceEnd,
-          requestedSnapshotCollectorIds,
-          currentProbeConfigurationVersion:
-            services.probeConfigurations.getEffectiveForHost(host.id)
-              .configuration.version,
-          pendingOperation: pendingProbeOperationForHost(
-            services,
-            host.id,
-            host.probeId,
-            reportReceivedAtMs,
-          ),
-          serverTimeMs: reportReceivedAtMs,
-        }),
-      ).finish();
-
-      return {
-        detailSamples,
-        hostProfileUpdate,
-        hostRemovedIds: operationApplication.hostRemovedIds,
-        readyEnrollment,
-        reportReceivedAtMs,
-        responseBody,
-        startupRejection: null,
-      };
-    };
-
-    let ingested: ReturnType<typeof ingestReport>;
-    try {
-      ingested = services.reportTransaction.run((transactionalServices) =>
-        ingestReport({ ...services, ...transactionalServices }),
-      );
-    } catch (error) {
-      if (error instanceof ReportBusinessRejection) {
-        return probeJsonError(error.code, error.status);
-      }
-      throw error;
-    }
-
-    if (ingested.startupRejection) {
-      return probeJsonError(
-        ingested.startupRejection.code,
-        ingested.startupRejection.status,
-      );
-    }
-
-    broadcastHostSummary(services, host.id, ingested.reportReceivedAtMs);
-    if (ingested.hostProfileUpdate) {
-      services.liveUpdates?.broadcastHostProfile(
-        host.id,
-        ingested.hostProfileUpdate,
-      );
-    }
-    for (const sample of ingested.detailSamples) {
-      services.liveUpdates?.broadcastDetailSample(sample);
-    }
-    if (ingested.readyEnrollment?.enrollmentId) {
-      broadcastHostReadyHint(services.liveUpdates, {
-        enrollmentId: ingested.readyEnrollment.enrollmentId,
-        hostId: host.id,
-      });
-    }
-    for (const removedHostId of ingested.hostRemovedIds) {
-      broadcastHostRemovedHint(services.liveUpdates, removedHostId);
-    }
-
-    return context.body(toArrayBuffer(ingested.responseBody), 200, {
-      "cache-control": "no-store",
-      "content-type": "application/x-protobuf",
-    });
-  });
+  routes.route("/", createProbeRepairAuthorizationRoutes(services));
+  routes.route("/", createProbeRegistrationRoutes(services));
+  routes.route("/", createProbeReportRoutes(services));
 
   routes.post("/operations/:operationId/token/validate", async (context) => {
     const requestBody = await readCappedRequestBody(
@@ -944,12 +110,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest ?? "",
       targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
 
     if (result.error) {
       return probeJsonError(result.error, 403);
+    }
+
+    if (operation.kind === "probe_upgrade") {
+      return context.json({ valid: true }, 200, {
+        "cache-control": "no-store",
+      });
     }
 
     const acknowledged = acknowledgeProbeUpgradeRequest({
@@ -970,6 +143,117 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     });
   });
 
+  routes.post(
+    "/operations/:operationId/upgrade-stage/admit",
+    async (context) => {
+      const requestBody = await readCappedRequestBody(
+        context.req.raw,
+        maxProbeOperationPayloadBytes,
+      );
+      if (!requestBody) return probeJsonError("probe_report_too_large", 413);
+      const host = authenticateProbe(
+        services.hosts,
+        context.req.raw,
+        requestBody,
+        services.probeApiOrigin,
+      );
+      if (!host) return probeJsonError("probe_identity_required", 401);
+      const operationId = parseProbeOperationId(
+        context.req.param("operationId"),
+      );
+      const body = readUpgradeStageAdmissionBody(requestBody);
+      const operation =
+        operationId === null
+          ? null
+          : (services.probeOperations?.findById(operationId) ?? null);
+      if (!operation || operation.hostId !== host.id) {
+        return probeJsonError("probe_operation_not_found", 404);
+      }
+      if (!body || operation.kind !== "probe_upgrade") {
+        return probeJsonError("malformed_probe_upgrade_stage_admission", 400);
+      }
+      const operationNowMs = now();
+      const token = validateProbeOperationToken({
+        nowMs: operationNowMs,
+        operation,
+        probeId: host.probeId,
+        secret: probeOperationTokenSecret(services),
+        targetAssetSetDigest: body.targetAssetSetDigest,
+        targetProbeVersion: body.targetBundleVersion,
+        token: body.token,
+      });
+      if (token.error) return probeJsonError(token.error, 403);
+      if (
+        !services.probeAssetDir ||
+        !services.probeDistributionRootPublicKeyPem
+      ) {
+        return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      }
+      const release = await readProbeReleaseContextFromDirectory({
+        assetDir: services.probeAssetDir,
+        trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+      });
+      const transition = release.releaseTransition;
+      if (
+        transition?.classification !== "compatible" ||
+        transition.sourceProbeVersion !== body.sourceBundleVersion ||
+        transition.targetProbeVersion !== body.targetBundleVersion ||
+        transition.targetAssetSetDigest !== body.targetAssetSetDigest ||
+        !transition.targetBundles?.some(
+          (bundle) => bundle.bundleManifestSha256 === body.targetManifestSha256,
+        )
+      ) {
+        return probeJsonError("probe_upgrade_authority_rejected", 409);
+      }
+      const authority: LifecycleUpgradeAuthority = {
+        schemaVersion: 1,
+        hubOrigin: services.probeApiOrigin ?? "",
+        hostId: String(host.id),
+        probeId: host.probeId,
+        operationId: String(operation.id),
+        sourceBundleVersion: body.sourceBundleVersion,
+        sourceInstallStateSha256: body.sourceInstallStateSha256,
+        sourceManifestSha256: body.sourceManifestSha256,
+        targetBundleVersion: body.targetBundleVersion,
+        targetAssetSetDigest: body.targetAssetSetDigest,
+        targetManifestSha256: body.targetManifestSha256,
+        verifiedStageSha256: body.verifiedStageSha256,
+        expiresAtMs: operationNowMs + defaultProbeOperationTokenTtlMs,
+      };
+      const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
+        host.id,
+      );
+      const hubOrigin = services.probeApiOrigin ?? "";
+      if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+        return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      }
+      const key = deriveLifecycleAuthorityKey(
+        Buffer.from(tokenHash, "hex"),
+        hubOrigin,
+      );
+      const canonicalAuthority = canonicalLifecycleUpgradeAuthority(authority);
+      const admitted =
+        services.probeOperations?.admitPendingProbeUpgradeRequest(
+          operationId!,
+          operationNowMs,
+          body.targetManifestSha256,
+          createHash("sha256").update(canonicalAuthority).digest("hex"),
+          body.verifiedStageSha256,
+        );
+      if (!admitted) {
+        return probeJsonError("probe_operation_status_invalid", 409);
+      }
+      return context.json(
+        {
+          authority,
+          signature: signLifecycleUpgradeAuthority(canonicalAuthority, key),
+        },
+        200,
+        { "cache-control": "no-store" },
+      );
+    },
+  );
+
   routes.post("/operations/:operationId/status", async (context) => {
     const requestBody = await readCappedRequestBody(
       context.req.raw,
@@ -978,17 +262,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     if (!requestBody) {
       return probeJsonError("probe_report_too_large", 413);
-    }
-
-    const host = authenticateProbe(
-      services.hosts,
-      context.req.raw,
-      requestBody,
-      services.probeApiOrigin,
-    );
-
-    if (!host) {
-      return probeJsonError("probe_identity_required", 401);
     }
 
     const operationId = parseProbeOperationId(context.req.param("operationId"));
@@ -1001,20 +274,38 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_operation_not_found", 404);
     }
 
-    if (operation.hostId !== host.id) {
-      return probeJsonError("probe_operation_token_probe_mismatch", 403);
-    }
-
     const body = readOperationStatusBody(requestBody);
     if (!body) {
       return probeJsonError("malformed_probe_operation_status", 400);
     }
 
+    const allowDeletedTerminalUninstall =
+      operation.kind === "probe_uninstall" &&
+      operation.state === "succeeded" &&
+      body.status === "succeeded";
+    const host = authenticateProbeOperationStatus(
+      services.hosts,
+      context.req.raw,
+      requestBody,
+      services.probeApiOrigin,
+      allowDeletedTerminalUninstall,
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    if (operation.hostId !== host.id) {
+      return probeJsonError("probe_operation_token_probe_mismatch", 403);
+    }
+
     const tokenResult = validateProbeOperationToken({
+      allowSucceededUninstallReplay: allowDeletedTerminalUninstall,
       nowMs: now(),
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest ?? "",
       targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
@@ -1023,12 +314,30 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError(tokenResult.error, 403);
     }
 
+    if (operation.kind !== "probe_uninstall" && body.status === "failed") {
+      const reconciled = forwardTransitions.reconcileAuthenticatedEvidence({
+        evidence: [
+          {
+            code: body.errorCode ?? "probe_operation_failed",
+            hostId: host.id,
+            kind: "operation_failed",
+            message: body.message ?? "",
+            observedAtMs: now(),
+            operationId,
+          },
+        ],
+      });
+      if (reconciled.kind === "refused") {
+        return probeJsonError("malformed_probe_operation_status", 400);
+      }
+      return context.json({ accepted: true }, 200, {
+        "cache-control": "no-store",
+      });
+    }
+
     const statusResult =
       body.status === "succeeded"
-        ? succeedReportedProbeOperation({
-            nowMs: now(),
-            operation,
-          })
+        ? succeedReportedProbeOperation({ nowMs: now(), operation })
         : failReportedProbeUpgradeRequest({
             code: body.errorCode ?? "probe_operation_failed",
             message: body.message ?? "",
@@ -1100,141 +409,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   return routes;
 }
 
-function registrationInstallationRejection(
-  request: ProtoMessage,
-):
-  | { code: string; existingProbeId: string | null; message: string }
-  | "invalid"
-  | null {
-  const rejection = request.installationRejection;
-  if (!rejection) {
-    return null;
-  }
-  if (
-    request.installationInspection ||
-    request.probePublicKeyPem ||
-    (request.snapshots ?? []).length > 0
-  ) {
-    return "invalid";
-  }
-  const code = typeof rejection.code === "string" ? rejection.code : "";
-  const existingProbeId =
-    code === "existing_probe_installation" &&
-    validPublicProbeId(rejection.existingProbeId)
-      ? rejection.existingProbeId
-      : null;
-  const message = installationRejectionMessages[code];
-  if (
-    !message ||
-    code.length > maxEnrollmentRejectionCodeLength ||
-    message.length > maxEnrollmentRejectionMessageLength
-  ) {
-    return "invalid";
-  }
-  return { code, existingProbeId, message };
-}
-
-function registrationInstallationInspection(
-  request: ProtoMessage,
-): "invalid" | { readonly kind: "inspection" } | null {
-  if (!request.installationInspection) {
-    return null;
-  }
-  if (
-    request.installationRejection ||
-    request.probePublicKeyPem ||
-    (request.snapshots ?? []).length > 0
-  ) {
-    return "invalid";
-  }
-  return { kind: "inspection" };
-}
-
-function validPublicProbeId(value: unknown): value is string {
-  return typeof value === "string" && /^probe_[A-Za-z0-9_-]{1,90}$/.test(value);
-}
-
-const installationRejectionMessages: Record<string, string> = {
-  existing_probe_installation: "existing local Probe installation detected",
-  probe_bound_to_different_hub:
-    "local Probe installation is bound to a different Hub",
-  probe_installation_metadata_invalid:
-    "local Probe installation metadata is unsafe or incomplete",
-};
-
-function isProbeStartupReport(input: {
-  report: { sequenceEnd: number; sequenceStart: number };
-  reportedHostProfile: ProtoMessage | null;
-  request: ProtoMessage;
-}) {
-  return (
-    input.report.sequenceStart === 1 &&
-    input.report.sequenceEnd === 1 &&
-    input.reportedHostProfile !== null &&
-    (input.request.metrics ?? []).length === 0
-  );
-}
-
-function nonemptyString(value: unknown) {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function pendingProbeOperationForHost(
-  services: ProbeRouteServices,
-  hostId: number,
-  probeId: string,
-  nowMs: number,
-): ProtoMessage | null {
-  const operation = services.probeOperations?.findActiveForHost(hostId);
-
-  if (!operation || operation.state !== "pending") {
-    return null;
-  }
-
-  return probeUpgradeOperationMessage(operation, {
-    expiresAtMs: nowMs + defaultProbeOperationTokenTtlMs,
-    probeId,
-    secret: probeOperationTokenSecret(services),
-  });
-}
-
-function probeUpgradeOperationMessage(
-  operation: ProbeUpgradeRequest,
-  tokenInput: {
-    expiresAtMs: number;
-    probeId: string;
-    secret: string;
-  },
-): ProtoMessage {
-  if (operation.kind === "probe_uninstall") {
-    return {
-      id: String(operation.id),
-      probeUninstall: {
-        operationToken: issueProbeOperationToken({
-          expiresAtMs: tokenInput.expiresAtMs,
-          operation,
-          probeId: tokenInput.probeId,
-          secret: tokenInput.secret,
-        }),
-      },
-    };
-  }
-
-  return {
-    id: String(operation.id),
-    probeUpgrade: {
-      currentProbeVersion: operation.currentProbeVersion ?? "",
-      operationToken: issueProbeOperationToken({
-        expiresAtMs: tokenInput.expiresAtMs,
-        operation,
-        probeId: tokenInput.probeId,
-        secret: tokenInput.secret,
-      }),
-      targetProbeVersion: operation.targetProbeVersion,
-    },
-  };
-}
-
 function probeOperationTokenSecret(services: ProbeRouteServices) {
   return services.probeOperationTokenSecret ?? defaultProbeOperationTokenSecret;
 }
@@ -1242,6 +416,7 @@ function probeOperationTokenSecret(services: ProbeRouteServices) {
 function readTokenValidationBody(requestBody: Uint8Array) {
   try {
     const body = JSON.parse(new TextDecoder().decode(requestBody)) as {
+      targetAssetSetDigest?: unknown;
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -1249,6 +424,8 @@ function readTokenValidationBody(requestBody: Uint8Array) {
     if (
       typeof body.token !== "string" ||
       body.token.length === 0 ||
+      (Object.hasOwn(body, "targetAssetSetDigest") &&
+        typeof body.targetAssetSetDigest !== "string") ||
       (Object.hasOwn(body, "targetProbeVersion") &&
         typeof body.targetProbeVersion !== "string")
     ) {
@@ -1256,11 +433,64 @@ function readTokenValidationBody(requestBody: Uint8Array) {
     }
 
     return {
+      targetAssetSetDigest:
+        typeof body.targetAssetSetDigest === "string"
+          ? body.targetAssetSetDigest
+          : undefined,
       targetProbeVersion:
         typeof body.targetProbeVersion === "string"
           ? body.targetProbeVersion
           : undefined,
       token: body.token,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readUpgradeStageAdmissionBody(requestBody: Uint8Array) {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
+      string,
+      unknown
+    >;
+    const keys = [
+      "sourceBundleVersion",
+      "sourceInstallStateSha256",
+      "sourceManifestSha256",
+      "targetAssetSetDigest",
+      "targetBundleVersion",
+      "targetManifestSha256",
+      "token",
+      "verifiedStageSha256",
+    ];
+    if (
+      Object.keys(body).sort().join("\0") !== keys.sort().join("\0") ||
+      keys.some((key) => typeof body[key] !== "string") ||
+      !/^[0-9a-f]{64}$/.test(String(body.sourceInstallStateSha256)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.sourceManifestSha256)) ||
+      !/^sha256:[0-9a-f]{64}$/.test(String(body.targetAssetSetDigest)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.targetManifestSha256)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.verifiedStageSha256)) ||
+      !/^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/.test(
+        String(body.sourceBundleVersion),
+      ) ||
+      !/^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/.test(
+        String(body.targetBundleVersion),
+      ) ||
+      !(body.token as string).length
+    ) {
+      return null;
+    }
+    return body as {
+      sourceBundleVersion: string;
+      sourceInstallStateSha256: string;
+      sourceManifestSha256: string;
+      targetAssetSetDigest: string;
+      targetBundleVersion: string;
+      targetManifestSha256: string;
+      token: string;
+      verifiedStageSha256: string;
     };
   } catch {
     return null;
@@ -1273,6 +503,7 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       errorCode?: unknown;
       message?: unknown;
       status?: unknown;
+      targetAssetSetDigest?: unknown;
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -1281,6 +512,8 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       typeof body.token !== "string" ||
       body.token.length === 0 ||
       (body.status !== "succeeded" && body.status !== "failed") ||
+      (Object.hasOwn(body, "targetAssetSetDigest") &&
+        typeof body.targetAssetSetDigest !== "string") ||
       (Object.hasOwn(body, "targetProbeVersion") &&
         typeof body.targetProbeVersion !== "string") ||
       (Object.hasOwn(body, "errorCode") &&
@@ -1294,6 +527,10 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       errorCode: typeof body.errorCode === "string" ? body.errorCode : null,
       message: typeof body.message === "string" ? body.message : null,
       status: body.status,
+      targetAssetSetDigest:
+        typeof body.targetAssetSetDigest === "string"
+          ? body.targetAssetSetDigest
+          : undefined,
       targetProbeVersion:
         typeof body.targetProbeVersion === "string"
           ? body.targetProbeVersion
@@ -1303,224 +540,6 @@ function readOperationStatusBody(requestBody: Uint8Array) {
   } catch {
     return null;
   }
-}
-
-function applyProbeOperationReports(input: {
-  hostId: number;
-  nowMs: number;
-  operations: ProbeUpgradeRequest[];
-  services: ProbeRouteServices;
-}): { error: string | null; hostRemovedIds: number[] } {
-  const hostRemovedIds: number[] = [];
-  for (const operation of input.operations) {
-    const updated =
-      input.services.probeOperations?.updateProbeUpgradeRequest(operation) ??
-      operation;
-    const removed = completeProbeUninstallIfSucceeded({
-      nowMs: input.nowMs,
-      operation: updated,
-      services: input.services,
-    });
-    if (removed !== null) {
-      hostRemovedIds.push(removed);
-    }
-  }
-
-  return { error: null, hostRemovedIds };
-}
-
-function planProbeOperationReportApplication(input: {
-  acknowledgements: ProtoMessage[];
-  hostId: number;
-  nowMs: number;
-  services: ProbeRouteServices;
-  statuses: ProtoMessage[];
-}):
-  | { error: string; operations: [] }
-  | {
-      error: null;
-      operations: ProbeUpgradeRequest[];
-    } {
-  if (
-    !input.services.probeOperations &&
-    (input.acknowledgements.length > 0 || input.statuses.length > 0)
-  ) {
-    return {
-      error: "malformed_probe_operation_acknowledgement",
-      operations: [],
-    };
-  }
-
-  const stagedOperations = new Map<number, ProbeUpgradeRequest>();
-  const operationsToUpdate = new Map<number, ProbeUpgradeRequest>();
-
-  for (const acknowledgement of input.acknowledgements) {
-    const operation = findReportableProbeOperation(
-      input.services,
-      input.hostId,
-      acknowledgement.operationId,
-      stagedOperations,
-    );
-
-    if (!operation) {
-      return {
-        error: "malformed_probe_operation_acknowledgement",
-        operations: [],
-      };
-    }
-
-    if (isClosedProbeOperation(operation)) {
-      continue;
-    }
-
-    const result = acknowledgeProbeUpgradeRequest({
-      nowMs: input.nowMs,
-      operation,
-    });
-
-    if (result.error) {
-      return {
-        error: "malformed_probe_operation_acknowledgement",
-        operations: [],
-      };
-    }
-
-    if (result.acknowledged !== operation) {
-      stageProbeOperationUpdate(
-        result.acknowledged,
-        stagedOperations,
-        operationsToUpdate,
-      );
-    }
-  }
-
-  for (const status of input.statuses) {
-    const operation = findReportableProbeOperation(
-      input.services,
-      input.hostId,
-      status.operationId,
-      stagedOperations,
-    );
-
-    if (!operation) {
-      return {
-        error: "malformed_probe_operation_status",
-        operations: [],
-      };
-    }
-
-    if (isClosedProbeOperation(operation)) {
-      continue;
-    }
-
-    const result = applyProbeOperationStatus(status, operation, input.nowMs);
-
-    if (result.error) {
-      return {
-        error: "malformed_probe_operation_status",
-        operations: [],
-      };
-    }
-
-    if (result.operation !== operation) {
-      stageProbeOperationUpdate(
-        result.operation,
-        stagedOperations,
-        operationsToUpdate,
-      );
-    }
-  }
-
-  return {
-    error: null,
-    operations: [...operationsToUpdate.values()],
-  };
-}
-
-function stageProbeOperationUpdate(
-  operation: ProbeUpgradeRequest,
-  stagedOperations: Map<number, ProbeUpgradeRequest>,
-  operationsToUpdate: Map<number, ProbeUpgradeRequest>,
-) {
-  if (operation.id === null) {
-    return;
-  }
-
-  stagedOperations.set(operation.id, operation);
-  operationsToUpdate.set(operation.id, operation);
-}
-
-function isClosedProbeOperation(operation: ProbeUpgradeRequest) {
-  return ["canceled", "failed", "succeeded", "superseded"].includes(
-    operation.state,
-  );
-}
-
-function findReportableProbeOperation(
-  services: ProbeRouteServices,
-  hostId: number,
-  operationId: string | null | undefined,
-  stagedOperations?: Map<number, ProbeUpgradeRequest>,
-) {
-  const id = parseProbeOperationId(operationId);
-
-  if (id === null) {
-    return null;
-  }
-
-  const stagedOperation = stagedOperations?.get(id);
-  if (stagedOperation) {
-    return stagedOperation;
-  }
-
-  const active = services.probeOperations?.findActiveForHost(hostId);
-  if (active?.id === id) {
-    return active;
-  }
-
-  const operation = services.probeOperations?.findById(id);
-  if (
-    operation?.hostId === hostId &&
-    ["failed", "superseded", "canceled", "succeeded"].includes(operation.state)
-  ) {
-    return operation;
-  }
-
-  return null;
-}
-
-function applyProbeOperationStatus(
-  status: ProtoMessage,
-  operation: ProbeUpgradeRequest,
-  nowMs: number,
-) {
-  if (status.running && !status.failed) {
-    return startProbeUpgradeRequest({
-      nowMs,
-      operation,
-    });
-  }
-
-  if (status.failed && !status.running && status.failed.errorCode) {
-    return failReportedProbeUpgradeRequest({
-      code: status.failed.errorCode,
-      message: status.failed.message ?? "",
-      nowMs,
-      operation,
-    });
-  }
-
-  if (status.succeeded && !status.running && !status.failed) {
-    return succeedReportedProbeOperation({
-      nowMs,
-      operation,
-    });
-  }
-
-  return {
-    error: "probe_operation_status_invalid" as const,
-    operation,
-  };
 }
 
 function completeProbeUninstallIfSucceeded(input: {
@@ -1545,244 +564,12 @@ function completeProbeUninstallIfSucceeded(input: {
   return null;
 }
 
-function markProbeUpgradeSucceededFromHostProfile(input: {
-  hostId: number;
-  hostProfile: {
-    probeVersion?: string | null;
-  } | null;
-  nowMs: number;
-  services: ProbeRouteServices;
-}) {
-  if (!input.hostProfile?.probeVersion) {
-    return;
-  }
-
-  const active = input.services.probeOperations?.findActiveForHost(
-    input.hostId,
-  );
-  if (!active) {
-    return;
-  }
-
-  const succeeded = succeedProbeUpgradeRequestFromHostProfile({
-    hostProfile: input.hostProfile,
-    nowMs: input.nowMs,
-    operation: active,
-  });
-
-  if (succeeded) {
-    input.services.probeOperations?.updateProbeUpgradeRequest(succeeded);
-  }
-}
-
-function parseProbeOperationId(operationId: string | null | undefined) {
-  if (!operationId || !/^[1-9]\d*$/.test(operationId)) {
-    return null;
-  }
-
-  return Number(operationId);
-}
-
-function broadcastHostSummary(
-  services: ProbeRouteServices,
-  hostId: number,
-  nowMs: number,
-) {
-  if (!services.liveUpdates) {
-    return;
-  }
-
-  const hostSummary = services.hosts
-    .listSummaries({
-      hostProfileForHost: (hostId) =>
-        services.snapshotCollectors?.hostProfile.read(hostId) ?? null,
-      latestMetricForHost: (hostId) =>
-        services.metrics.findLatestSample(hostId),
-      nowMs,
-      probeConfigurationForHost: (hostId) => {
-        const effective =
-          services.probeConfigurations.getEffectiveForHost(hostId);
-
-        return {
-          mode: effective.mode,
-          version: effective.configuration.version,
-        };
-      },
-      thresholds: services.hostStatus,
-    })
-    .find((summary) => summary.id === hostId);
-
-  if (hostSummary) {
-    const effectiveConfiguration =
-      services.probeConfigurations.getEffectiveForHost(hostId);
-
-    services.liveUpdates.broadcastHostSummary(
-      liveSummaryFromHost(hostSummary, {
-        metricsCollectionIntervalSeconds:
-          effectiveConfiguration.configuration.metricsCollectionIntervalSeconds,
-      }),
-    );
-  }
-}
-
-function liveDetailSampleFromMetricSample(
-  hostId: number,
-  sample: ProtoMessage,
-  receivedAtMs: number,
-): HostDetailSample {
-  return {
-    collectedAtMs: signedNumber(sample.collectedAtMs),
-    cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map((core) => ({
-      name: core.name ?? "",
-      usagePercent: core.usagePercent ?? 0,
-    })),
-    batteryPercent: metricUnsignedField(sample, "batteryPercent"),
-    batteryState: hasMetricField(sample, "batteryState")
-      ? sample.batteryState || null
-      : null,
-    cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
-    cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
-    cpuPercent: metricField(sample, "cpuPercent"),
-    cpuStealPercent: metricField(sample, "cpuStealPercent"),
-    cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
-    cpuUserPercent: metricField(sample, "cpuUserPercent"),
-    disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
-      availableBytes: unsignedNumber(disk.availableBytes),
-      filesystemType: disk.filesystemType ?? "",
-      ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
-      mountPoint: disk.mountPoint ?? "",
-      readAwaitMs: metricField(disk, "readAwaitMs"),
-      readBytesDelta: unsignedNumber(disk.readBytesDelta),
-      totalBytes: unsignedNumber(disk.totalBytes),
-      usedBytes: unsignedNumber(disk.usedBytes),
-      weightedIoPercent: metricField(disk, "weightedIoPercent"),
-      writeAwaitMs: metricField(disk, "writeAwaitMs"),
-      writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
-    })),
-    ...(((sample.diskHealth ?? []) as ProtoMessage[]).length
-      ? {
-          diskHealth: ((sample.diskHealth ?? []) as ProtoMessage[]).map(
-            (disk) => ({
-              deviceName: disk.deviceName ?? "",
-              model: disk.model || null,
-              passed: Boolean(disk.passed),
-              powerOnHours: unsignedMetricField(disk, "powerOnHours"),
-              role: disk.role || null,
-              serialNumber: disk.serialNumber || null,
-              temperatureCelsius: metricField(disk, "temperatureCelsius"),
-              totalBytes: unsignedMetricField(disk, "totalBytes"),
-              usageMountPoint: disk.usageMountPoint || null,
-              usedBytes: unsignedMetricField(disk, "usedBytes"),
-            }),
-          ),
-        }
-      : {}),
-    hostId,
-    memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
-    memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
-    memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
-    networkInterfaces: ((sample.networkInterfaces ?? []) as ProtoMessage[]).map(
-      (networkInterface) => ({
-        name: networkInterface.name ?? "",
-        rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
-        txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
-      }),
-    ),
-    receivedAtMs,
-    sequence: unsignedNumber(sample.sequence),
-    swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
-    swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
-    temperatureCelsius: metricField(sample, "temperatureCelsius"),
-    uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
-  };
-}
-
-function decodeRegistrationRequest(body: Uint8Array): any | null {
-  try {
-    return RegistrationRequest.decode(body);
-  } catch {
-    return null;
-  }
-}
-
-function decodeReportRequest(body: Uint8Array): ProtoMessage | null {
-  try {
-    return ReportRequest.decode(body) as ProtoMessage;
-  } catch {
-    return null;
-  }
-}
-
 function decodeConfigurationRequest(body: Uint8Array): any | null {
   try {
     return ConfigurationRequest.decode(body);
   } catch {
     return null;
   }
-}
-
-function hostProfileSnapshotFromRegistration(request: ProtoMessage) {
-  const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(
-    (snapshot) =>
-      snapshot.collectorId === hostProfileCollectorId && snapshot.hostProfile,
-  );
-
-  if (!snapshot?.hostProfile) {
-    return null;
-  }
-
-  const snapshotHash =
-    typeof snapshot.snapshotHash === "string" && snapshot.snapshotHash.trim()
-      ? snapshot.snapshotHash
-      : null;
-
-  return {
-    canonicalHash: hashHostProfile(snapshot.hostProfile),
-    hostProfile: snapshot.hostProfile,
-    snapshotHash,
-  };
-}
-
-function validRegistrationResponsibilities(request: ProtoMessage) {
-  const snapshots = (request.snapshots ?? []) as ProtoMessage[];
-
-  return (
-    snapshots.length === 1 &&
-    snapshots[0]?.collectorId === hostProfileCollectorId &&
-    Boolean(snapshots[0]?.hostProfile)
-  );
-}
-
-function hostProfileSnapshotFromReport(request: ProtoMessage) {
-  const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(
-    (snapshot) => snapshot.collectorId === hostProfileCollectorId,
-  );
-
-  if (!snapshot) {
-    return null;
-  }
-
-  const snapshotHash =
-    typeof snapshot.snapshotHash === "string" && snapshot.snapshotHash.trim()
-      ? snapshot.snapshotHash
-      : null;
-  const hostProfile = snapshot.hostProfile ?? null;
-
-  return {
-    canonicalHash: hostProfile ? hashHostProfile(hostProfile) : null,
-    hostProfile,
-    snapshotHash,
-  };
-}
-
-function snapshotPayloadBranchesMatchCollectorIds(request: ProtoMessage) {
-  return ((request.snapshots ?? []) as ProtoMessage[]).every((snapshot) => {
-    if (snapshot.hostProfile) {
-      return snapshot.collectorId === hostProfileCollectorId;
-    }
-
-    return true;
-  });
 }
 
 const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
@@ -1814,11 +601,29 @@ function authenticateProbe(
   return null;
 }
 
+function authenticateProbeOperationStatus(
+  hosts: HostRepository,
+  request: Request,
+  body: Uint8Array,
+  probeApiOrigin: string | undefined,
+  allowDeletedTerminalUninstall: boolean,
+) {
+  const authentication = authenticateSignedProbeRequest(
+    hosts,
+    request,
+    body,
+    probeApiOrigin,
+    allowDeletedTerminalUninstall,
+  );
+  return authentication.kind === "authenticated" ? authentication.host : null;
+}
+
 function authenticateSignedProbeRequest(
   hosts: HostRepository,
   request: Request,
   body: Uint8Array,
   probeApiOrigin = "http://localhost",
+  includeDeleted = false,
 ): SignedProbeAuthentication {
   const headers = request.headers;
   const probeId = headers.get("x-enoki-probe-id")?.trim() ?? "";
@@ -1841,7 +646,9 @@ function authenticateSignedProbeRequest(
     return { kind: "invalid" };
   }
 
-  const host = hosts.findByProbeId(probeId);
+  const host = includeDeleted
+    ? hosts.findByProbeIdIncludingDeleted(probeId)
+    : hosts.findByProbeId(probeId);
   if (!host?.probePublicKeyPem) {
     return { kind: "invalid" };
   }
@@ -1911,37 +718,6 @@ function canonicalOriginPathAndQuery(request: Request, probeApiOrigin: string) {
   return `${probeApiOrigin}${url.pathname}${url.search}`;
 }
 
-function verifyProbeRequestSignature(
-  publicKeyPem: string,
-  payload: string,
-  signature: string,
-) {
-  try {
-    const verifier = createVerify("RSA-SHA256");
-    verifier.update(payload);
-    verifier.end();
-    return verifier.verify(publicKeyPem, Buffer.from(signature, "hex"));
-  } catch {
-    return false;
-  }
-}
-
-function validProbePublicKeyPem(publicKeyPem: string | null | undefined) {
-  if (!publicKeyPem) {
-    return false;
-  }
-
-  try {
-    const publicKey = createPublicKey(publicKeyPem);
-    return (
-      publicKey.asymmetricKeyType === "rsa" &&
-      (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) >= 2048
-    );
-  } catch {
-    return false;
-  }
-}
-
 function isIdentityContentEncoding(headers: Headers) {
   const contentEncoding = headers.get("content-encoding");
 
@@ -1950,402 +726,6 @@ function isIdentityContentEncoding(headers: Headers) {
     contentEncoding.trim() === "" ||
     contentEncoding.toLowerCase() === "identity"
   );
-}
-
-function contentLengthExceeds(headers: Headers, maxBytes: number) {
-  const contentLength = headers.get("content-length")?.trim();
-
-  if (!contentLength || !/^\d+$/.test(contentLength)) {
-    return false;
-  }
-
-  return Number(contentLength) > maxBytes;
-}
-
-async function readCappedRequestBody(request: Request, maxBytes: number) {
-  if (!request.body) {
-    return new Uint8Array();
-  }
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        break;
-      }
-
-      totalBytes += value.byteLength;
-
-      if (totalBytes > maxBytes) {
-        await reader.cancel();
-        return null;
-      }
-
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new Uint8Array(totalBytes);
-  let offset = 0;
-
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return body;
-}
-
-function probeJsonError(
-  error: string,
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 415,
-) {
-  return new Response(JSON.stringify({ error }), {
-    headers: {
-      "cache-control": "no-store",
-      "content-type": "application/json",
-    },
-    status,
-  });
-}
-
-function createProbeId() {
-  return `probe_${randomBytes(16).toString("base64url")}`;
-}
-
-function createProbeSecret() {
-  return `enk_probe_${randomBytes(32).toString("base64url")}`;
-}
-
-function hashHostProfile(hostProfile: ProtoMessage) {
-  const bytes = HostProfileSnapshotMessage.encode(
-    HostProfileSnapshotMessage.create(stableHostProfile(hostProfile)),
-  ).finish();
-
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
-  return {
-    ...hostProfile,
-    filesystems: [...(hostProfile.filesystems ?? [])].sort(
-      (left, right) =>
-        compareProtoStrings(left.mountPoint, right.mountPoint) ||
-        compareProtoStrings(left.filesystemType, right.filesystemType),
-    ),
-    networkInterfaces: [...(hostProfile.networkInterfaces ?? [])]
-      .map((networkInterface) => ({
-        ...networkInterface,
-        addresses: [...new Set(networkInterface.addresses ?? [])].sort(
-          compareProtoStrings,
-        ),
-      }))
-      .sort((left, right) => compareProtoStrings(left.name, right.name)),
-  };
-}
-
-function compareProtoStrings(left: unknown, right: unknown) {
-  return Buffer.compare(
-    Buffer.from(String(left ?? ""), "utf8"),
-    Buffer.from(String(right ?? ""), "utf8"),
-  );
-}
-
-function validateReportEnvelope(request: ProtoMessage) {
-  const sequenceStart = unsignedNumber(request.sequenceStart);
-  const sequenceEnd = unsignedNumber(request.sequenceEnd);
-
-  if (
-    !request.bootId ||
-    sequenceStart < 1 ||
-    sequenceEnd < sequenceStart ||
-    sequenceEnd - sequenceStart + 1 > maxReportObservationRange
-  ) {
-    return null;
-  }
-
-  const samples = request.metrics ?? [];
-  const sequenceCount = sequenceEnd - sequenceStart + 1;
-
-  if (samples.length === 0 && sequenceCount !== 1) {
-    return null;
-  }
-
-  if (samples.length > 0 && samples.length !== sequenceCount) {
-    return null;
-  }
-
-  const sampleSequences = new Set<number>();
-
-  for (const sample of samples) {
-    const sequence = unsignedNumber(sample.sequence);
-    const collectedAtMs = signedNumber(sample.collectedAtMs);
-
-    if (
-      sequence < sequenceStart ||
-      sequence > sequenceEnd ||
-      collectedAtMs < 1 ||
-      (hasMetricField(sample, "cpuPercent") &&
-        !Number.isFinite(sample.cpuPercent))
-    ) {
-      return null;
-    }
-
-    if (sampleSequences.has(sequence)) {
-      return null;
-    }
-
-    sampleSequences.add(sequence);
-  }
-
-  for (
-    let sequence = sequenceStart;
-    samples.length > 0 && sequence <= sequenceEnd;
-    sequence += 1
-  ) {
-    if (!sampleSequences.has(sequence)) {
-      return null;
-    }
-  }
-
-  return { sequenceEnd, sequenceStart };
-}
-
-function reportResponsibilityFor(input: {
-  hostProfileSnapshot: ReturnType<typeof hostProfileSnapshotFromReport>;
-  report: { sequenceEnd: number; sequenceStart: number };
-  request: ProtoMessage;
-}):
-  | "full_host_profile"
-  | "legacy_observation"
-  | "observation"
-  | "startup"
-  | null {
-  const snapshots = (input.request.snapshots ?? []) as ProtoMessage[];
-  const snapshot = input.hostProfileSnapshot;
-
-  // Older Probes predate compact snapshot references. Keep their ordinary
-  // Observation Batches compatible, including a legacy sequence-one metrics
-  // batch that was never a Probe Startup Report, while requiring current
-  // Probes to use the typed constructor shape below.
-  if (snapshots.length === 0) {
-    return "legacy_observation";
-  }
-
-  if (
-    snapshots.length !== 1 ||
-    !snapshot ||
-    snapshots[0]?.collectorId !== hostProfileCollectorId
-  ) {
-    return null;
-  }
-
-  if (snapshot.hostProfile === null && !snapshot.snapshotHash) {
-    return null;
-  }
-
-  const isStartup =
-    input.report.sequenceStart === 1 && input.report.sequenceEnd === 1;
-  if (isStartup) {
-    return snapshot.hostProfile !== null &&
-      (input.request.metrics ?? []).length === 0 &&
-      typeof input.request.probeConfigurationVersion === "string" &&
-      input.request.probeConfigurationVersion.length > 0 &&
-      !input.request.probeConfigurationError
-      ? "startup"
-      : null;
-  }
-
-  if (snapshot.hostProfile !== null) {
-    return "full_host_profile";
-  }
-
-  return "observation";
-}
-
-function hasSnapshotReplayOnlyContents(request: ProtoMessage) {
-  return (
-    (request.metrics ?? []).length === 0 &&
-    !request.probeConfigurationError &&
-    (request.operationAcknowledgements ?? []).length === 0 &&
-    (request.operationStatuses ?? []).length === 0
-  );
-}
-
-function detectClockSkew(
-  samples: ProtoMessage[],
-  receivedAtMs: number,
-  thresholdMs: number,
-) {
-  const deltas = samples.map((sample) =>
-    Math.abs(receivedAtMs - signedNumber(sample.collectedAtMs)),
-  );
-  const lastDeltaMs = deltas.length > 0 ? Math.max(...deltas) : null;
-
-  return {
-    detected: lastDeltaMs !== null && lastDeltaMs >= thresholdMs,
-    lastDeltaMs,
-  };
-}
-
-function firstHostProfileAddress(hostProfile: ProtoMessage | null | undefined) {
-  for (const networkInterface of (hostProfile?.networkInterfaces ??
-    []) as ProtoMessage[]) {
-    const address = (networkInterface.addresses as string[] | undefined)?.find(
-      (candidate: string) => candidate.trim() !== "",
-    );
-
-    if (address) {
-      return address;
-    }
-  }
-
-  return null;
-}
-
-function reportConnectAddress(
-  hostProfile: ProtoMessage | null | undefined,
-  host: {
-    connectAddress: string;
-    observedIp: string | null;
-  },
-  observedIp: string | null,
-) {
-  const hostProfileAddress = firstHostProfileAddress(hostProfile);
-  if (hostProfileAddress) {
-    return hostProfileAddress;
-  }
-
-  if (!host.connectAddress || host.connectAddress === host.observedIp) {
-    return observedIp;
-  }
-
-  return undefined;
-}
-
-function unsignedNumber(
-  value: number | { toNumber: () => number } | null | undefined,
-) {
-  if (value === null || value === undefined) {
-    return 0;
-  }
-
-  return typeof value === "number" ? value : value.toNumber();
-}
-
-function signedNumber(
-  value: number | { toNumber: () => number } | null | undefined,
-) {
-  return unsignedNumber(value);
-}
-
-function metricField(
-  sample: object,
-  field:
-    | "cpuPercent"
-    | "cpuUserPercent"
-    | "cpuSystemPercent"
-    | "cpuIowaitPercent"
-    | "cpuStealPercent"
-    | "cpuIdlePercent"
-    | "ioUtilizationPercent"
-    | "load_1"
-    | "load_5"
-    | "load_15"
-    | "readAwaitMs"
-    | "temperatureCelsius"
-    | "weightedIoPercent"
-    | "writeAwaitMs",
-) {
-  const value = (sample as Record<string, unknown>)[field];
-
-  return hasMetricField(sample, field) && typeof value === "number"
-    ? value
-    : null;
-}
-
-function metricUnsignedField(
-  sample: object,
-  field:
-    | "batteryPercent"
-    | "memoryCacheBytes"
-    | "memoryTotalBytes"
-    | "memoryUsedBytes"
-    | "swapTotalBytes"
-    | "swapUsedBytes"
-    | "uptimeSeconds",
-) {
-  return hasMetricField(sample, field)
-    ? unsignedNumber(
-        (sample as Record<string, unknown>)[field] as
-          | number
-          | { toNumber: () => number }
-          | null
-          | undefined,
-      )
-    : null;
-}
-
-function unsignedMetricField(sample: object, field: string) {
-  return hasMetricField(sample, field)
-    ? unsignedNumber(
-        (sample as Record<string, unknown>)[field] as
-          | number
-          | { toNumber: () => number }
-          | null
-          | undefined,
-      )
-    : null;
-}
-
-function hasMetricField(sample: object, field: string) {
-  return Object.prototype.hasOwnProperty.call(sample, field);
-}
-
-function sumUnsigned<T>(
-  values: T[],
-  select: (value: T) => number | { toNumber: () => number } | null | undefined,
-) {
-  return values.reduce((sum, value) => sum + unsignedNumber(select(value)), 0);
-}
-
-function fallbackDisplayName(probeId: string) {
-  return probeId.slice(0, 14);
-}
-
-function observedIpFromContext(
-  context: Context,
-  trustedProxyCidrs: TrustedProxyCidr[] | undefined,
-) {
-  const request = context.req.raw;
-  return deriveObservedIp({
-    directPeer: directRemoteAddress(context),
-    trustedProxyCidrs: trustedProxyCidrs ?? [],
-    xForwardedFor: request.headers.get("x-forwarded-for"),
-  });
-}
-
-function directRemoteAddress(context: Context) {
-  try {
-    return normalizeRemoteAddress(getConnInfo(context).remote.address);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeRemoteAddress(address: string | undefined) {
-  if (!address) {
-    return null;
-  }
-
-  return address.startsWith("::ffff:") ? address.slice(7) : address;
 }
 
 function toArrayBuffer(bytes: Uint8Array) {

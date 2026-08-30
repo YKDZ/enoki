@@ -17,6 +17,7 @@ export type {
   MetricsWindow,
   ProbeConfiguration,
   ProbeConfigurationResponse,
+  ProbeUpgradeAllResponse,
   ProbeUpgradeRequestResponse,
   SessionResponse,
 } from "@enoki/api-client";

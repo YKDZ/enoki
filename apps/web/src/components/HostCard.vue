@@ -20,6 +20,7 @@ import {
 import { hostStatusText } from "@/lib/host-display";
 
 import type { HostSummary } from "../types";
+import HostCardProbeUpgradeProblemBadge from "./HostCardProbeUpgradeProblemBadge.vue";
 import HostReenrollmentAction from "./HostReenrollmentAction.vue";
 
 const props = defineProps<{
@@ -127,6 +128,9 @@ function memoryPercent() {
           <Badge :class="statusClass(host.status)" variant="outline">
             {{ hostStatusText(host.status) }}
           </Badge>
+          <HostCardProbeUpgradeProblemBadge
+            :problem="host.probeUpgradeProblem"
+          />
           <Badge
             v-if="host.clockSkew.detected"
             class="gap-1 border-[var(--status-stale-border)] bg-[var(--status-stale-bg)] text-[var(--status-stale-fg)]"

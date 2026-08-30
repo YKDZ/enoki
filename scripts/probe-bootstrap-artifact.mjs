@@ -5,7 +5,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   rm,
   writeFile,
@@ -15,9 +14,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { inflateRawSync } from "node:zlib";
 
+import { readRegularFileSnapshot } from "@enoki/probe-release";
+
 const execFileAsync = promisify(execFile);
 const identityMagic = Buffer.from("ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0");
-const maxProbeBootstrapArchiveBytes = 64 * 1024 * 1024;
+export const probeBootstrapArchiveMaximumBytes = 64 * 1024 * 1024;
 const expectedProbeBootstrapRoles = Object.freeze([
   { name: "enoki-probe-bootstrap-acquire", role: "acquirer" },
   { name: "enoki-probe-bootstrap-activate", role: "activator" },
@@ -89,7 +90,36 @@ async function inspectProbeBootstrapArchiveInput({
   if (typeof archivePath !== "string") {
     throw new Error("Probe Bootstrap archive path is invalid");
   }
-  const archive = await readBoundedArchive(archivePath);
+  const archive = await readProbeBootstrapArchiveSnapshot(
+    archivePath,
+    expectedArchive,
+  );
+  return inspectProbeBootstrapArchiveBytes({
+    archive,
+    distribution,
+    expectedArchive,
+    rootKeyId,
+    target,
+    version,
+  });
+}
+
+async function inspectProbeBootstrapArchiveBytes({
+  archive,
+  distribution,
+  expectedArchive,
+  rootKeyId,
+  target,
+  version,
+}) {
+  assertBuildTrust({ distribution, rootKeyId, target, version });
+  if (
+    !Buffer.isBuffer(archive) ||
+    archive.byteLength <= 0 ||
+    archive.byteLength > probeBootstrapArchiveMaximumBytes
+  ) {
+    throw new Error("Probe Bootstrap archive size is invalid");
+  }
   assertExpectedArchive(archive, expectedArchive);
   const archiveRoles = parseExactProbeBootstrapArchive(archive);
   const [acquirer, activator] = await Promise.all(
@@ -116,72 +146,51 @@ async function inspectProbeBootstrapArchiveInput({
       },
       sha256: sha256(archive),
     },
+    archive,
     roleBytes: { acquirer: acquirer.binary, activator: activator.binary },
   };
 }
 
 function assertExpectedArchive(archive, expectedArchive) {
   if (expectedArchive === undefined) return;
+  validateExpectedArchive(expectedArchive);
   if (
-    !isPlainObject(expectedArchive) ||
-    Object.keys(expectedArchive).sort().join(",") !== "sha256,size" ||
-    !/^[0-9a-f]{64}$/.test(expectedArchive.sha256 ?? "") ||
-    !Number.isSafeInteger(expectedArchive.size) ||
-    expectedArchive.size <= 0 ||
     archive.byteLength !== expectedArchive.size ||
     sha256(archive) !== expectedArchive.sha256
   ) {
     throw new Error(
-      "Candidate Probe Bootstrap archive no longer matches validated Candidate",
+      "Probe Bootstrap archive does not match the expected release bytes",
     );
   }
 }
 
-// Keeps archive parsing outside elevated authority. The callback receives only
-// two digest-checked, regular role binaries in a private controller-owned
-// directory; the directory is removed even when transfer or installation
-// fails.
-export async function withExtractedProbeBootstrapArtifact(input, callback) {
+export async function withVerifiedProbeBootstrapArchive(input, callback) {
   if (typeof callback !== "function") {
-    throw new Error("Probe Bootstrap extraction requires a callback");
+    throw new Error("Probe Bootstrap archive snapshot requires a callback");
   }
-  const inspected = await inspectProbeBootstrapArchiveInput(input);
-  const inspection = inspected.public;
+  if (typeof input?.archivePath !== "string") {
+    throw new Error("Probe Bootstrap archive path is invalid");
+  }
+  const expectedArchive = validateExpectedArchive(input.expectedArchive, true);
+  const archive = await readProbeBootstrapArchiveSnapshot(
+    input.archivePath,
+    expectedArchive,
+  );
+  return withPrivateProbeBootstrapArchive(archive, callback);
+}
+
+async function withPrivateProbeBootstrapArchive(archive, callback) {
   const temporaryDirectory = await mkdtemp(
-    path.join(tmpdir(), "enoki-probe-bootstrap-inspected-"),
+    path.join(tmpdir(), "enoki-probe-bootstrap-verified-"),
   );
   try {
     await chmod(temporaryDirectory, 0o700);
-    const extractedRoles = {};
-    for (const { name, role } of expectedProbeBootstrapRoles) {
-      const binaryPath = path.join(temporaryDirectory, name);
-      await writeFile(binaryPath, inspected.roleBytes[role], {
-        flag: "wx",
-        mode: 0o755,
-      });
-      const details = await lstat(binaryPath);
-      if (
-        !details.isFile() ||
-        details.isSymbolicLink() ||
-        (details.mode & 0o777) !== 0o755
-      ) {
-        throw new Error("Probe Bootstrap extracted role binary is unsafe");
-      }
-      const binary = await readFile(binaryPath);
-      const expected = inspection.roles[role];
-      if (
-        binary.byteLength !== expected.size ||
-        sha256(binary) !== expected.sha256
-      ) {
-        throw new Error(
-          "Probe Bootstrap archive changed while extracting inspected roles",
-        );
-      }
-      extractedRoles[role] = { ...expected, binaryPath };
-    }
+    const archivePath = path.join(temporaryDirectory, "probe-bootstrap.tar.gz");
+    await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 });
     return await callback({
-      ...inspection,
-      extractedRoles: Object.freeze(extractedRoles),
+      archivePath,
+      sha256: sha256(archive),
+      size: archive.byteLength,
       temporaryDirectory,
     });
   } finally {
@@ -189,25 +198,132 @@ export async function withExtractedProbeBootstrapArtifact(input, callback) {
   }
 }
 
-async function readBoundedArchive(archivePath) {
-  const handle = await open(archivePath, "r");
-  try {
-    const details = await handle.stat();
-    if (
-      !details.isFile() ||
-      details.size <= 0 ||
-      details.size > maxProbeBootstrapArchiveBytes
-    ) {
-      throw new Error("Probe Bootstrap archive size is invalid");
-    }
-    const archive = await handle.readFile();
-    if (archive.byteLength !== details.size) {
-      throw new Error("Probe Bootstrap archive changed while being read");
-    }
-    return archive;
-  } finally {
-    await handle.close();
+// Keeps archive parsing outside elevated authority. The callback receives only
+// two digest-checked, regular role binaries in a private controller-owned
+// directory; the directory is removed even when transfer or installation
+// fails.
+export async function withVerifiedProbeBootstrapArtifact(input, callback) {
+  if (typeof callback !== "function") {
+    throw new Error("Probe Bootstrap extraction requires a callback");
   }
+  const inspected = await inspectProbeBootstrapArchiveInput(input);
+  return withVerifiedProbeBootstrapArtifactInspection(inspected, callback);
+}
+
+export async function withVerifiedProbeBootstrapArtifactBytes(input, callback) {
+  if (typeof callback !== "function") {
+    throw new Error("Probe Bootstrap extraction requires a callback");
+  }
+  const inspected = await inspectProbeBootstrapArchiveBytes(input);
+  return withVerifiedProbeBootstrapArtifactInspection(inspected, callback);
+}
+
+async function withVerifiedProbeBootstrapArtifactInspection(
+  inspected,
+  callback,
+) {
+  const inspection = inspected.public;
+  return withPrivateProbeBootstrapArchive(
+    inspected.archive,
+    async ({ archivePath, temporaryDirectory }) => {
+      const extractedRoles = {};
+      for (const { name, role } of expectedProbeBootstrapRoles) {
+        const binaryPath = path.join(temporaryDirectory, name);
+        await writeFile(binaryPath, inspected.roleBytes[role], {
+          flag: "wx",
+          mode: 0o755,
+        });
+        const details = await lstat(binaryPath);
+        if (
+          !details.isFile() ||
+          details.isSymbolicLink() ||
+          (details.mode & 0o777) !== 0o755
+        ) {
+          throw new Error("Probe Bootstrap extracted role binary is unsafe");
+        }
+        const binary = await readFile(binaryPath);
+        const expected = inspection.roles[role];
+        if (
+          binary.byteLength !== expected.size ||
+          sha256(binary) !== expected.sha256
+        ) {
+          throw new Error(
+            "Probe Bootstrap archive changed while extracting inspected roles",
+          );
+        }
+        extractedRoles[role] = { ...expected, binaryPath };
+      }
+      return await callback({
+        ...inspection,
+        archivePath,
+        extractedRoles: Object.freeze(extractedRoles),
+        temporaryDirectory,
+      });
+    },
+  );
+}
+
+async function readProbeBootstrapArchiveSnapshot(archivePath, expectedArchive) {
+  const expected = validateExpectedArchive(expectedArchive);
+  const expectedSize =
+    expected?.size ?? (await boundedArchiveSize(archivePath));
+  const { bytes } = await readRegularFileSnapshot(
+    archivePath,
+    "Probe Bootstrap archive",
+    {
+      expectedSize,
+      maximumSize: probeBootstrapArchiveMaximumBytes,
+    },
+  );
+  assertExpectedArchive(bytes, expected);
+  return bytes;
+}
+
+async function boundedArchiveSize(archivePath) {
+  let details;
+  try {
+    details = await lstat(archivePath, { bigint: true });
+  } catch {
+    throw new Error(
+      "Probe Bootstrap archive must be a regular non-symbolic-link file",
+    );
+  }
+  if (!details.isFile() || details.isSymbolicLink() || details.nlink > 1n) {
+    throw new Error(
+      "Probe Bootstrap archive must be a regular single-link file",
+    );
+  }
+  if (
+    details.size <= 0n ||
+    details.size > BigInt(probeBootstrapArchiveMaximumBytes)
+  ) {
+    throw new Error("Probe Bootstrap archive size is invalid");
+  }
+  return Number(details.size);
+}
+
+function validateExpectedArchive(expectedArchive, required = false) {
+  if (expectedArchive === undefined) {
+    if (required) {
+      throw new Error(
+        "Probe Bootstrap archive snapshot requires expected release bytes",
+      );
+    }
+    return undefined;
+  }
+  if (
+    !isPlainObject(expectedArchive) ||
+    Object.keys(expectedArchive).sort().join(",") !== "sha256,size" ||
+    !/^[0-9a-f]{64}$/.test(expectedArchive.sha256 ?? "") ||
+    !Number.isSafeInteger(expectedArchive.size) ||
+    expectedArchive.size <= 0 ||
+    expectedArchive.size > probeBootstrapArchiveMaximumBytes
+  ) {
+    throw new Error(
+      "Probe Bootstrap archive does not match the expected release bytes",
+    );
+  }
+  return expectedArchive;
 }
 
 function parseExactProbeBootstrapArchive(archive) {
@@ -237,7 +353,7 @@ function parseExactProbeBootstrapArchive(archive) {
     if (
       !Number.isSafeInteger(size) ||
       size <= 0 ||
-      size > maxProbeBootstrapArchiveBytes
+      size > probeBootstrapArchiveMaximumBytes
     ) {
       throw unsafeBootstrapArchive();
     }
@@ -280,7 +396,7 @@ function decompressOneExactGzipMember(archive) {
   try {
     result = inflateRawSync(archive.subarray(offset), {
       info: true,
-      maxOutputLength: maxProbeBootstrapArchiveBytes,
+      maxOutputLength: probeBootstrapArchiveMaximumBytes,
     });
   } catch {
     throw unsafeBootstrapArchive();
@@ -290,7 +406,7 @@ function decompressOneExactGzipMember(archive) {
   if (
     !Number.isSafeInteger(compressedLength) ||
     trailerOffset + 8 !== archive.byteLength ||
-    result.buffer.byteLength > maxProbeBootstrapArchiveBytes ||
+    result.buffer.byteLength > probeBootstrapArchiveMaximumBytes ||
     archive.readUInt32LE(trailerOffset) !== crc32(result.buffer) ||
     archive.readUInt32LE(trailerOffset + 4) !== result.buffer.byteLength >>> 0
   ) {
@@ -391,7 +507,9 @@ export async function packageProbeBootstrapArtifact({
   if (!/^(?:0|[1-9]\d*)$/.test(sourceDateEpoch ?? "")) {
     throw new Error("source date epoch must be a non-negative integer");
   }
-  const roleBinaries = exactRoleBinaries(binaries);
+  const roleBinaries = exactRoleBinaries(binaries).map(
+    ({ binaryPath, role }) => ({ binaryPath: path.resolve(binaryPath), role }),
+  );
   const inspections = await Promise.all(
     roleBinaries.map(({ binaryPath, role }) =>
       inspectProbeBootstrapBinary({
@@ -409,13 +527,6 @@ export async function packageProbeBootstrapArtifact({
   }
   const file = `enoki-probe-bootstrap-${target}.tar.gz`;
   const archivePath = path.join(outputDir, file);
-  // GNU tar applies each later --directory relative to the previous one.
-  // Resolve role paths before invoking it so packaging cannot depend on that
-  // mutable process directory state.
-  const archiveRoleBinaries = roleBinaries.map(({ binaryPath, role }) => ({
-    binaryPath: path.resolve(binaryPath),
-    role,
-  }));
   await mkdir(outputDir, { recursive: true });
   await execFileAsync(
     "tar",
@@ -432,7 +543,7 @@ export async function packageProbeBootstrapArtifact({
       "--mode=0755",
       "--file",
       archivePath,
-      ...archiveRoleBinaries.flatMap(({ binaryPath }) => [
+      ...roleBinaries.flatMap(({ binaryPath }) => [
         "--directory",
         path.dirname(binaryPath),
         path.basename(binaryPath),

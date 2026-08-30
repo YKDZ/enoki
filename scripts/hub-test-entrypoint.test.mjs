@@ -60,6 +60,7 @@ async function createFixture() {
     ].map((path) => cp(path, join(fixtureRoot, path))),
     copySourceDirectory("apps/hub", fixtureRoot),
     copySourceDirectory("packages/api-client", fixtureRoot),
+    copySourceDirectory("packages/probe-release", fixtureRoot),
     copySourceDirectory("packages/proto", fixtureRoot),
   ]);
 

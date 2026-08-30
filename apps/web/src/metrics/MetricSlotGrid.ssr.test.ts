@@ -79,6 +79,7 @@ const host: HostDetail = {
     isUpgradeable: false,
     nonUpgradeableReason: "probe_asset_set_version_missing",
   },
+  probeUpgradeProblem: null,
   probeUpgradeStatus: null,
   probeVersion: "0.1.0",
   reportedProbeConfigurationVersion: "default-v1",

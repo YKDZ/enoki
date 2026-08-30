@@ -3,6 +3,7 @@ import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
   metricCpuCores,
+  metricCollectorOutcomes,
   metricDisks,
   metricNetworkInterfaces,
   metricSamples,
@@ -24,6 +25,12 @@ type MetricsWriteDatabase = Pick<MetricsDatabase, "insert">;
 export type RawMetricSampleInput = {
   bootId: string;
   collectedAtMs: number;
+  collectorOutcomes?: Array<{
+    collectorId: string;
+    state: 1 | 2 | 3;
+    failureCode: string | null;
+    failurePhase: 1 | 2 | null;
+  }>;
   cpuCores?: Array<{
     idle: number;
     iowait: number;
@@ -98,7 +105,9 @@ export type RawMetricSampleInput = {
 
 export type ReportObservationInput = {
   bootId: string;
+  cpuResourceCollectionOutcomeReason?: number | null;
   hostId: number;
+  observationWindowFailureReason?: number | null;
   probeId: string;
   receivedAtMs: number;
   sequence: number;
@@ -142,9 +151,18 @@ export type MetricHistorySample = MetricSampleRow & {
 };
 
 export type MetricsRepository = {
+  findObservation: (
+    input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
+  ) => {
+    cpuResourceCollectionOutcomeReason: number | null;
+    observationWindowFailureReason: number | null;
+  } | null;
   hasObservation: (
     input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
   ) => boolean;
+  observationReceivedAtMs: (
+    input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
+  ) => number | null;
   findLatestSample: (hostId: number) =>
     | (MetricSampleRow & {
         diskHealth: MetricHistorySample["diskHealth"];
@@ -167,6 +185,27 @@ export function createMetricsRepository(
   database: MetricsDatabase,
 ): MetricsRepository {
   return {
+    findObservation(input) {
+      return (
+        database
+          .select({
+            cpuResourceCollectionOutcomeReason:
+              reportObservations.cpuResourceCollectionOutcomeReason,
+            observationWindowFailureReason:
+              reportObservations.observationWindowFailureReason,
+          })
+          .from(reportObservations)
+          .where(
+            and(
+              eq(reportObservations.bootId, input.bootId),
+              eq(reportObservations.probeId, input.probeId),
+              eq(reportObservations.sequence, input.sequence),
+            ),
+          )
+          .limit(1)
+          .get() ?? null
+      );
+    },
     hasObservation(input) {
       return Boolean(
         database
@@ -181,6 +220,22 @@ export function createMetricsRepository(
           )
           .limit(1)
           .get(),
+      );
+    },
+    observationReceivedAtMs(input) {
+      return (
+        database
+          .select({ receivedAtMs: reportObservations.receivedAtMs })
+          .from(reportObservations)
+          .where(
+            and(
+              eq(reportObservations.bootId, input.bootId),
+              eq(reportObservations.probeId, input.probeId),
+              eq(reportObservations.sequence, input.sequence),
+            ),
+          )
+          .limit(1)
+          .get()?.receivedAtMs ?? null
       );
     },
     findLatestSample(hostId) {
@@ -384,7 +439,11 @@ function insertReportObservation(
     .insert(reportObservations)
     .values({
       bootId: input.bootId,
+      cpuResourceCollectionOutcomeReason:
+        input.cpuResourceCollectionOutcomeReason ?? null,
       hostId: input.hostId,
+      observationWindowFailureReason:
+        input.observationWindowFailureReason ?? null,
       probeId: input.probeId,
       receivedAtMs: input.receivedAtMs,
       sequence: input.sequence,
@@ -428,6 +487,19 @@ function insertMetricSample(
 
   if (!sample) {
     return;
+  }
+
+  for (const outcome of input.collectorOutcomes ?? []) {
+    database
+      .insert(metricCollectorOutcomes)
+      .values({
+        collectorId: outcome.collectorId,
+        failureCode: outcome.failureCode,
+        failurePhase: outcome.failurePhase,
+        metricSampleId: sample.id,
+        state: outcome.state,
+      })
+      .run();
   }
 
   if (

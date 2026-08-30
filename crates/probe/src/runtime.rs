@@ -1,4 +1,17 @@
-use std::{collections::HashSet, error::Error, fmt, fs, io::Read, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    error::Error,
+    fmt, fs,
+    io::{Read, Write},
+    net::Shutdown,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    time::Duration,
+};
+
+use enoki_probe_bootstrap::lifecycle::{
+    LifecycleRequest, LifecycleResponse, LifecycleResultStatus, MAX_LIFECYCLE_REQUEST_BYTES,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -11,9 +24,12 @@ use crate::registration::{
 };
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
-    host_profile::collect_local_host_profile,
     hub_url,
-    metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
+    metrics::{CollectorId, MetricsCollectionConfig},
+    observation_runtime::{
+        ObservationClientError, ObservationWindowClient, SystemStateResourceAcquisitionFailure,
+        UnixObservationRuntimeClient,
+    },
     protocol::enoki::v1::{
         HostProfileSnapshot, ProbeConfigurationError, ProbeConfigurationRequest,
         ProbeConfigurationResponse, ProbeOperationFailed, ProbeOperationRunning,
@@ -25,16 +41,18 @@ use crate::{
         observation_batch_report, snapshot_replay_report, startup_report,
     },
     transport::{HttpAttemptError, post_protobuf},
-    upgrader::{
-        ProbeUninstallerLaunch, ProbeUpgraderCommandOutput, ProbeUpgraderLaunch,
-        ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
-        launch_systemd_probe_uninstaller, launch_systemd_probe_upgrader,
-        parse_probe_upgrader_result,
-    },
 };
 use prost::Message;
+use serde::Deserialize;
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
+type FinalizedObservationBatch = (
+    u64,
+    u64,
+    Vec<crate::protocol::enoki::v1::MetricSample>,
+    Vec<crate::protocol::enoki::v1::CpuResourceCollectionOutcome>,
+    Option<HostProfileSnapshot>,
+);
 pub const PERMANENT_REPORT_EXIT_STATUS: i32 = 78;
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
@@ -118,18 +136,6 @@ pub trait ProbeTransport: RegistrationTransport + ReportTransport {}
 
 pub trait ProbeRuntimeSleeper {
     fn sleep(&mut self, duration: Duration);
-}
-
-pub trait HostProfileProvider {
-    fn collect_host_profile(&mut self) -> HostProfileSnapshot;
-}
-
-pub struct LocalHostProfileProvider;
-
-impl HostProfileProvider for LocalHostProfileProvider {
-    fn collect_host_profile(&mut self) -> HostProfileSnapshot {
-        collect_local_host_profile()
-    }
 }
 
 pub struct ThreadProbeRuntimeSleeper;
@@ -271,41 +277,69 @@ pub fn run_probe_with_loop_control(
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
 ) -> Result<(), ProbeRunError> {
-    let mut host_profile_provider = LocalHostProfileProvider;
-
-    run_probe_with_loop_control_and_host_profile_provider(
+    let observation_runtime = UnixObservationRuntimeClient::production();
+    run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_client(
         input,
         transport,
         sleeper,
         control,
-        &mut host_profile_provider,
+        LifecycleCompanionOperationRunner::from_bootstrap,
+        notify_systemd_ready,
+        &observation_runtime,
     )
 }
 
-pub fn run_probe_with_loop_control_and_host_profile_provider(
+#[doc(hidden)]
+pub fn run_probe_with_loop_control_and_observation_client(
     input: ProbeRunInput,
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
+    observation_runtime: &impl ObservationWindowClient,
 ) -> Result<(), ProbeRunError> {
-    run_probe_with_loop_control_and_runner_factory(
+    run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_client(
         input,
         transport,
         sleeper,
         control,
-        host_profile_provider,
-        InstalledProbeOperationRunner::from_bootstrap,
+        LifecycleCompanionOperationRunner::from_bootstrap,
+        notify_systemd_ready,
+        observation_runtime,
     )
 }
 
+#[cfg(test)]
 fn run_probe_with_loop_control_and_runner_factory<Runner>(
     input: ProbeRunInput,
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
+) -> Result<(), ProbeRunError>
+where
+    Runner: ProbeOperationRunner,
+{
+    let observation_runtime = UnixObservationRuntimeClient::production();
+    run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_client(
+        input,
+        transport,
+        sleeper,
+        control,
+        runner_factory,
+        notify_systemd_ready,
+        &observation_runtime,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_client<Runner>(
+    input: ProbeRunInput,
+    transport: &mut impl ProbeTransport,
+    sleeper: &mut impl ProbeRuntimeSleeper,
+    control: RunLoopControl,
+    runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
+    notify_ready: impl FnMut() -> Result<(), std::io::Error>,
+    observation_runtime: &impl ObservationWindowClient,
 ) -> Result<(), ProbeRunError>
 where
     Runner: ProbeOperationRunner,
@@ -315,20 +349,21 @@ where
         transport,
         sleeper,
         control,
-        host_profile_provider,
         runner_factory,
-        notify_systemd_ready,
+        notify_ready,
+        observation_runtime,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_probe_with_loop_control_and_runner_factory_and_notifier<Runner>(
     input: ProbeRunInput,
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     mut runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
     mut notify_ready: impl FnMut() -> Result<(), std::io::Error>,
+    observation_runtime: &impl ObservationWindowClient,
 ) -> Result<(), ProbeRunError>
 where
     Runner: ProbeOperationRunner,
@@ -343,9 +378,9 @@ where
             transport,
             sleeper,
             control,
-            host_profile_provider,
             &mut operation_runner,
             &mut notify_ready,
+            observation_runtime,
         )?;
         return Ok(());
     }
@@ -376,22 +411,23 @@ where
         transport,
         sleeper,
         control,
-        host_profile_provider,
         &mut operation_runner,
         &mut notify_ready,
+        observation_runtime,
     )?;
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_reporting_loop(
     bootstrap_config: &BootstrapConfig,
     transport: &mut impl ReportTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     operation_runner: &mut impl ProbeOperationRunner,
     notify_ready: &mut impl FnMut() -> Result<(), std::io::Error>,
+    observation_runtime: &impl ObservationWindowClient,
 ) -> Result<(), ProbeRunError> {
     if report_limit_reached(0, control) {
         return Ok(());
@@ -417,7 +453,8 @@ fn run_reporting_loop(
         .probe_configuration_version
         .as_deref()
         .unwrap_or("");
-    let mut host_profile = host_profile_provider.collect_host_profile();
+    let mut host_profile: Option<HostProfileSnapshot> = None;
+    let mut full_host_profile_reported = false;
     let boot_id = new_boot_id();
     let local_operation_statuses = read_local_operation_statuses(bootstrap_config);
     let mut active_configuration =
@@ -425,15 +462,17 @@ fn run_reporting_loop(
     let mut pending_configuration_error = None;
     let mut sequence = 1;
     let mut reports_sent = 0;
-    let mut metrics_collector = MetricsCollector::default();
-    let mut operation_reports = ProbeOperationReportQueue::default();
+    let mut operation_reports = ProbeOperationReportQueue::with_seen_operation_ids(
+        local_operation_statuses
+            .iter()
+            .map(|status| status.operation_id.clone()),
+    );
     let request = startup_report(StartupReportInput {
         boot_id: &boot_id,
         enrollment_id: bootstrap_config
             .enrollment_id
             .as_deref()
             .unwrap_or_default(),
-        host_profile: host_profile.clone(),
         operation_progress: OperationReportProgress::from_statuses(local_operation_statuses),
         probe_configuration_version: &active_configuration.version,
         probe_id,
@@ -445,9 +484,13 @@ fn run_reporting_loop(
         request.encode_to_vec(),
         sleeper,
     )?;
-    notify_ready().map_err(ProbeRunError::Notify)?;
+    let mut local_ready = !bootstrap_config.requires_current_host_profile_readiness();
+    if local_ready {
+        notify_ready().map_err(ProbeRunError::Notify)?;
+    }
     refresh_probe_request_auth(&mut request_auth, &response);
     reports_sent += 1;
+    operation_reports.observe_response(&response, operation_runner);
     if !report_limit_reached(reports_sent, control) {
         let outcome = apply_newer_configuration_if_needed(
             transport,
@@ -459,66 +502,65 @@ fn run_reporting_loop(
         )?;
         active_configuration = outcome.active_configuration;
         pending_configuration_error = outcome.configuration_error;
-        operation_reports.observe_response(&response, operation_runner);
-    }
-
-    if host_profile_snapshot_requested(&response) {
-        if report_limit_reached(reports_sent, control) {
-            return Ok(());
-        }
-
-        // Snapshot Replay supplements the accepted Startup Report rather than
-        // creating another Metrics time slice, so it reuses sequence one and
-        // the exact snapshot that its compact reference identified. Recollecting
-        // here could produce a different hash for a changing local fact.
-        let request = snapshot_replay_report(SnapshotReplayInput {
-            boot_id: &boot_id,
-            host_profile: host_profile.clone(),
-            probe_configuration_version: &active_configuration.version,
-            probe_id,
-            sequence,
-        });
-        let response = post_report_with_transient_retry(
-            transport,
-            hub_url,
-            &request_auth,
-            request.encode_to_vec(),
-            sequence,
-            sleeper,
-            active_configuration.reporting_interval,
-        )?;
-        refresh_probe_request_auth(&mut request_auth, &response);
-        reports_sent += 1;
-        if !report_limit_reached(reports_sent, control) {
-            let outcome = apply_newer_configuration_if_needed(
-                transport,
-                hub_url,
-                probe_id,
-                &request_auth,
-                active_configuration,
-                &response,
-            )?;
-            active_configuration = outcome.active_configuration;
-            pending_configuration_error = outcome.configuration_error;
-            operation_reports.observe_response(&response, operation_runner);
-        }
     }
 
     while !report_limit_reached(reports_sent, control) {
-        let (sequence_start, sequence_end, metrics) = collect_observation_batch(
-            sleeper,
-            &active_configuration,
-            &mut sequence,
-            &mut metrics_collector,
-        );
+        let collected =
+            collect_observation_batch(&active_configuration, &mut sequence, observation_runtime);
+        let (
+            sequence_start,
+            sequence_end,
+            metrics,
+            cpu_resource_collection_outcomes,
+            runtime_host_profile,
+            observation_window_failure,
+        ) = match collected {
+            Ok((sequence_start, sequence_end, metrics, cpu_outcome, profile)) => (
+                sequence_start,
+                sequence_end,
+                metrics,
+                cpu_outcome,
+                profile,
+                None,
+            ),
+            Err(error) => {
+                let failure_sequence = sequence.saturating_add(1);
+                sequence = failure_sequence;
+                let reason = match error {
+                    ObservationClientError::BundleIncoherent => crate::protocol::enoki::v1::ObservationWindowFailureReason::ProbeAssetBundleIncoherent,
+                    ObservationClientError::Unavailable => crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeUnavailable,
+                    ObservationClientError::InvalidRequest | ObservationClientError::InvalidResponse | ObservationClientError::WindowFailed => crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeInvalidResponse,
+                };
+                (
+                    failure_sequence,
+                    failure_sequence,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(crate::protocol::enoki::v1::ObservationWindowFailure {
+                        reason: reason as i32,
+                    }),
+                )
+            }
+        };
+        let observation_window_failed = observation_window_failure.is_some();
 
-        let latest_host_profile = host_profile_provider.collect_host_profile();
-        host_profile = latest_host_profile;
+        if let Some(profile) = runtime_host_profile.as_ref() {
+            host_profile = Some(profile.clone());
+        }
+        let send_full_host_profile = runtime_host_profile.is_some() && !full_host_profile_reported;
 
         let request = observation_batch_report(ObservationBatchInput {
             boot_id: &boot_id,
-            host_profile: &host_profile,
+            enrollment_id: bootstrap_config
+                .enrollment_id
+                .as_deref()
+                .unwrap_or_default(),
+            cpu_resource_collection_outcomes,
+            host_profile: runtime_host_profile.as_ref(),
+            host_profile_is_full: send_full_host_profile,
             metrics,
+            observation_window_failure,
             operation_progress: operation_reports.take_progress(),
             probe_configuration_error: pending_configuration_error.take(),
             probe_configuration_version: &active_configuration.version,
@@ -536,8 +578,14 @@ fn run_reporting_loop(
             sleeper,
             active_configuration.reporting_interval,
         )?;
+        if !local_ready && send_full_host_profile {
+            notify_ready().map_err(ProbeRunError::Notify)?;
+            local_ready = true;
+        }
         refresh_probe_request_auth(&mut request_auth, &response);
+        full_host_profile_reported |= send_full_host_profile;
         reports_sent += 1;
+        operation_reports.observe_response(&response, operation_runner);
         if !report_limit_reached(reports_sent, control) {
             let outcome = apply_newer_configuration_if_needed(
                 transport,
@@ -549,18 +597,17 @@ fn run_reporting_loop(
             )?;
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
-            operation_reports.observe_response(&response, operation_runner);
         }
 
         if host_profile_snapshot_requested(&response)
             && !report_limit_reached(reports_sent, control)
+            && let Some(host_profile) = host_profile.clone()
         {
             // Replay supplements the accepted Observation Batch and preserves
-            // its sequence end. It must serialize the exact snapshot whose hash
-            // the Hub requested; the next collection advances from that batch.
+            // its sequence end; the next collection advances from that batch.
             let request = snapshot_replay_report(SnapshotReplayInput {
                 boot_id: &boot_id,
-                host_profile: host_profile.clone(),
+                host_profile,
                 probe_configuration_version: &active_configuration.version,
                 probe_id,
                 sequence,
@@ -589,6 +636,10 @@ fn run_reporting_loop(
                 pending_configuration_error = outcome.configuration_error;
                 operation_reports.observe_response(&response, operation_runner);
             }
+        }
+
+        if observation_window_failed && !report_limit_reached(reports_sent, control) {
+            sleeper.sleep(active_configuration.metrics_collection_interval);
         }
     }
 
@@ -635,7 +686,9 @@ struct ProbeUpgradeRunnerInput<'a> {
 
 struct ProbeUpgradeRunnerOperationMetadata<'a> {
     current_probe_version: &'a str,
+    host_id: &'a str,
     operation_id: &'a str,
+    target_asset_set_digest: &'a str,
     target_probe_version: &'a str,
 }
 
@@ -661,113 +714,428 @@ trait ProbeOperationRunner {
     ) -> ProbeUpgradeRunnerOutcome;
 }
 
-struct InstalledProbeOperationRunner {
-    bootstrap_config_path: PathBuf,
-    install_path: Option<PathBuf>,
-    launch: Option<String>,
+const LIFECYCLE_COMPANION_SOCKET: &str = "/run/enoki-probe-lifecycle-companion.sock";
+const LIFECYCLE_UPGRADE_SOCKET: &str = "/run/enoki-probe-lifecycle-upgrade.sock";
+
+struct ProbeUpgradeAcquisitionInput<'a> {
+    host_id: &'a str,
+    operation_id: &'a str,
+    operation_token: &'a str,
+    target_asset_set_digest: &'a str,
+    target_probe_version: &'a str,
+    source_bundle_version: &'a str,
+    source_install_state_sha256: &'a str,
+    source_manifest_sha256: &'a str,
 }
 
-impl InstalledProbeOperationRunner {
-    fn from_bootstrap(bootstrap_config: &BootstrapConfig, bootstrap_config_path: PathBuf) -> Self {
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdmittedUpgradeAuthority {
+    schema_version: u16,
+    hub_origin: String,
+    host_id: String,
+    probe_id: String,
+    operation_id: String,
+    source_bundle_version: String,
+    source_install_state_sha256: String,
+    source_manifest_sha256: String,
+    target_bundle_version: String,
+    target_asset_set_digest: String,
+    target_manifest_sha256: String,
+    verified_stage_sha256: String,
+    expires_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpgradeStageAdmissionResponse {
+    authority: AdmittedUpgradeAuthority,
+    signature: String,
+}
+
+trait ProbeUpgradeAcquisitionPort {
+    fn acquire(
+        &mut self,
+        input: ProbeUpgradeAcquisitionInput<'_>,
+    ) -> Result<UpgradeStageAdmissionResponse, &'static str>;
+}
+
+struct HttpProbeUpgradeAcquisition {
+    hub_origin: String,
+    probe_id: String,
+    probe_private_key_pem: String,
+    server_time_offset_ms: i64,
+}
+
+impl ProbeUpgradeAcquisitionPort for HttpProbeUpgradeAcquisition {
+    fn acquire(
+        &mut self,
+        input: ProbeUpgradeAcquisitionInput<'_>,
+    ) -> Result<UpgradeStageAdmissionResponse, &'static str> {
+        let stage = enoki_probe_bootstrap::acquisition::acquire_probe_upgrade_once(
+            enoki_probe_bootstrap::acquisition::ProbeUpgradeAcquisition {
+                hub_origin: self.hub_origin.clone(),
+                operation_id: input.operation_id.to_owned(),
+                target_asset_set_digest: input.target_asset_set_digest.to_owned(),
+                target_version: input.target_probe_version.to_owned(),
+            },
+        )
+        .map_err(|failure| match failure {
+            enoki_probe_bootstrap::acquisition::AcquisitionFailure::Permanent => {
+                "lifecycle.upgrade_candidate_invalid"
+            }
+            _ => "lifecycle.upgrade_acquisition_failed",
+        })?;
+        let admitted = (|| {
+            let url = hub_url::endpoint(
+                &self.hub_origin,
+                &format!(
+                    "/api/probe/operations/{}/upgrade-stage/admit",
+                    input.operation_id
+                ),
+            )
+            .map_err(|_| "lifecycle.invalid_authority")?;
+            let body = serde_json::to_vec(&serde_json::json!({
+                "sourceBundleVersion": input.source_bundle_version,
+                "sourceInstallStateSha256": input.source_install_state_sha256,
+                "sourceManifestSha256": input.source_manifest_sha256,
+                "targetAssetSetDigest": input.target_asset_set_digest,
+                "targetBundleVersion": stage.target_version,
+                "targetManifestSha256": stage.target_manifest_sha256,
+                "token": input.operation_token,
+                "verifiedStageSha256": stage.verified_stage_sha256,
+            }))
+            .map_err(|_| "lifecycle.invalid_authority")?;
+            let auth = ProbeRequestAuth {
+                probe_id: &self.probe_id,
+                probe_private_key_pem: &self.probe_private_key_pem,
+                server_time_offset_ms: self.server_time_offset_ms,
+            };
+            let headers = signed_probe_request_headers("POST", &url, &auth, &body)
+                .map_err(|_| "lifecycle.invalid_authority")?;
+            let agent = ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout(Duration::from_secs(30))
+                .build();
+            let mut request = agent
+                .post(&url)
+                .set("accept", "application/json")
+                .set("content-type", "application/json");
+            for (name, value) in headers {
+                request = request.set(name, &value);
+            }
+            let response = request
+                .send_bytes(&body)
+                .map_err(|_| "lifecycle.authority_rejected")?;
+            if response.status() != 200 {
+                return Err("lifecycle.authority_rejected");
+            }
+            let mut response_bytes = Vec::new();
+            response
+                .into_reader()
+                .take(16 * 1024 + 1)
+                .read_to_end(&mut response_bytes)
+                .map_err(|_| "lifecycle.authority_rejected")?;
+            if response_bytes.len() > 16 * 1024 {
+                return Err("lifecycle.authority_rejected");
+            }
+            let admitted: UpgradeStageAdmissionResponse =
+                serde_json::from_slice(&response_bytes)
+                    .map_err(|_| "lifecycle.authority_rejected")?;
+            if admitted.authority.schema_version != 1
+                || admitted.authority.hub_origin != self.hub_origin
+                || admitted.authority.host_id != input.host_id
+                || admitted.authority.probe_id != self.probe_id
+                || admitted.authority.operation_id != input.operation_id
+                || admitted.authority.source_bundle_version != input.source_bundle_version
+                || admitted.authority.source_install_state_sha256
+                    != input.source_install_state_sha256
+                || admitted.authority.source_manifest_sha256 != input.source_manifest_sha256
+                || admitted.authority.target_bundle_version != stage.target_version
+                || admitted.authority.target_asset_set_digest != stage.target_asset_set_digest
+                || admitted.authority.target_manifest_sha256 != stage.target_manifest_sha256
+                || admitted.authority.verified_stage_sha256 != stage.verified_stage_sha256
+            {
+                return Err("lifecycle.authority_rejected");
+            }
+            Ok(admitted)
+        })();
+        if admitted.is_err() {
+            let _ = enoki_probe_bootstrap::acquisition::discard_unadmitted_probe_upgrade_stage(
+                input.operation_id,
+            );
+        }
+        admitted
+    }
+}
+
+struct DisabledProbeUpgradeAcquisition;
+
+impl ProbeUpgradeAcquisitionPort for DisabledProbeUpgradeAcquisition {
+    fn acquire(
+        &mut self,
+        _: ProbeUpgradeAcquisitionInput<'_>,
+    ) -> Result<UpgradeStageAdmissionResponse, &'static str> {
+        Err("lifecycle.install_receipt_missing")
+    }
+}
+
+struct LifecycleCompanionOperationRunner {
+    probe_id: Option<String>,
+    install_state_sha256: Option<String>,
+    target_manifest_sha256: Option<String>,
+    bundle_version: Option<String>,
+    socket_path: PathBuf,
+    upgrade_socket_path: PathBuf,
+    upgrade_acquisition: Box<dyn ProbeUpgradeAcquisitionPort>,
+}
+
+impl LifecycleCompanionOperationRunner {
+    fn from_bootstrap(bootstrap_config: &BootstrapConfig, _bootstrap_config_path: PathBuf) -> Self {
+        let upgrade_acquisition: Box<dyn ProbeUpgradeAcquisitionPort> = bootstrap_config
+            .hub_url
+            .as_deref()
+            .zip(bootstrap_config.probe_id.as_deref())
+            .zip(bootstrap_config.probe_private_key_pem.as_deref())
+            .map_or_else(
+                || {
+                    Box::new(DisabledProbeUpgradeAcquisition)
+                        as Box<dyn ProbeUpgradeAcquisitionPort>
+                },
+                |((hub_origin, probe_id), private_key)| {
+                    Box::new(HttpProbeUpgradeAcquisition {
+                        hub_origin: hub_origin.to_owned(),
+                        probe_id: probe_id.to_owned(),
+                        probe_private_key_pem: private_key.to_owned(),
+                        server_time_offset_ms: bootstrap_config.server_time_offset_ms.unwrap_or(0),
+                    })
+                },
+            );
         Self {
-            bootstrap_config_path,
-            install_path: bootstrap_config.install_path.as_ref().map(PathBuf::from),
-            launch: bootstrap_config.upgrader_launch.clone(),
+            probe_id: bootstrap_config.probe_id.clone(),
+            install_state_sha256: bootstrap_config.install_state_sha256.clone(),
+            target_manifest_sha256: bootstrap_config.target_manifest_sha256.clone(),
+            bundle_version: bootstrap_config.bundle_version.clone(),
+            socket_path: PathBuf::from(LIFECYCLE_COMPANION_SOCKET),
+            upgrade_socket_path: PathBuf::from(LIFECYCLE_UPGRADE_SOCKET),
+            upgrade_acquisition,
         }
     }
 }
 
-impl ProbeOperationRunner for InstalledProbeOperationRunner {
+impl ProbeOperationRunner for LifecycleCompanionOperationRunner {
     fn run_probe_upgrade(
         &mut self,
         input: ProbeUpgradeRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome {
-        let _ = input.operation.current_probe_version;
-        let Some(install_path) = self.install_path.clone() else {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Upgrader launch is not configured.".to_string(),
-            });
+        let Some((_probe_id, install_state, source_manifest, source_version)) = self
+            .probe_id
+            .as_deref()
+            .zip(self.install_state_sha256.as_deref())
+            .zip(self.target_manifest_sha256.as_deref())
+            .zip(self.bundle_version.as_deref())
+            .map(|(((probe_id, install_state), manifest), version)| {
+                (probe_id, install_state, manifest, version)
+            })
+        else {
+            return lifecycle_companion_failure("lifecycle.install_receipt_missing");
         };
-        if self.launch.as_deref() != Some("systemd") {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Upgrader requires a systemd installation.".to_string(),
-            });
+        if source_version != input.operation.current_probe_version {
+            return lifecycle_companion_failure("lifecycle.authority_mismatch");
         }
-
-        let mut runner = SystemProbeUpgraderCommandRunner;
-        probe_upgrade_outcome_from_launch_result(launch_systemd_probe_upgrader(
-            ProbeUpgraderLaunch {
-                bootstrap_config_path: self.bootstrap_config_path.clone(),
-                install_path,
-                operation_id: input.operation.operation_id.to_string(),
-                target_probe_version: input.operation.target_probe_version.to_string(),
-                token: input.stdin.to_string(),
-            },
-            &mut runner,
-        ))
+        let admitted = match self
+            .upgrade_acquisition
+            .acquire(ProbeUpgradeAcquisitionInput {
+                host_id: input.operation.host_id,
+                operation_id: input.operation.operation_id,
+                operation_token: input.stdin,
+                target_asset_set_digest: input.operation.target_asset_set_digest,
+                target_probe_version: input.operation.target_probe_version,
+                source_bundle_version: source_version,
+                source_install_state_sha256: install_state,
+                source_manifest_sha256: source_manifest,
+            }) {
+            Ok(stage) => stage,
+            Err(code) => return lifecycle_companion_failure(code),
+        };
+        let Ok(request) = LifecycleRequest::hub_upgrade(
+            &admitted.authority.hub_origin,
+            &admitted.authority.host_id,
+            &admitted.authority.probe_id,
+            &admitted.authority.operation_id,
+            &admitted.authority.source_bundle_version,
+            &admitted.authority.source_install_state_sha256,
+            &admitted.authority.source_manifest_sha256,
+            &admitted.authority.target_bundle_version,
+            &admitted.authority.target_asset_set_digest,
+            &admitted.authority.target_manifest_sha256,
+            &admitted.authority.verified_stage_sha256,
+            admitted.authority.expires_at_ms,
+            &admitted.signature,
+        ) else {
+            return lifecycle_companion_failure("lifecycle.invalid_authority");
+        };
+        match request_lifecycle_companion_at(&self.upgrade_socket_path, &request) {
+            Ok(response) if response.status() == LifecycleResultStatus::Succeeded => {
+                ProbeUpgradeRunnerOutcome::Running
+            }
+            Ok(response) => lifecycle_companion_failure(response.code()),
+            Err(()) => lifecycle_companion_failure("lifecycle.companion_unavailable"),
+        }
     }
 
     fn run_probe_uninstall(
         &mut self,
         input: ProbeUninstallRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome {
-        let Some(install_path) = self.install_path.clone() else {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Uninstaller launch is not configured.".to_string(),
-            });
+        let Some((probe_id, install_state, manifest, version)) = self
+            .probe_id
+            .as_deref()
+            .zip(self.install_state_sha256.as_deref())
+            .zip(self.target_manifest_sha256.as_deref())
+            .zip(self.bundle_version.as_deref())
+            .map(|(((probe_id, install_state), manifest), version)| {
+                (probe_id, install_state, manifest, version)
+            })
+        else {
+            return lifecycle_companion_failure("lifecycle.install_receipt_missing");
         };
-        if self.launch.as_deref() != Some("systemd") {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Uninstaller requires a systemd installation.".to_string(),
-            });
+        let Ok(request) = LifecycleRequest::hub_uninstall(
+            probe_id,
+            input.operation_id,
+            input.stdin,
+            install_state,
+            manifest,
+            version,
+        ) else {
+            return lifecycle_companion_failure("lifecycle.invalid_authority");
+        };
+        match request_lifecycle_companion_at(&self.socket_path, &request) {
+            Ok(response) if response.status() == LifecycleResultStatus::Succeeded => {
+                ProbeUpgradeRunnerOutcome::Running
+            }
+            Ok(response) => lifecycle_companion_failure(response.code()),
+            Err(()) => lifecycle_companion_failure("lifecycle.companion_unavailable"),
         }
-
-        let mut runner = SystemProbeUpgraderCommandRunner;
-        probe_upgrade_outcome_from_launch_result(launch_systemd_probe_uninstaller(
-            ProbeUninstallerLaunch {
-                bootstrap_config_path: self.bootstrap_config_path.clone(),
-                install_path,
-                operation_id: input.operation_id.to_string(),
-                token: input.stdin.to_string(),
-            },
-            &mut runner,
-        ))
     }
 }
 
-fn probe_upgrade_outcome_from_launch_result(
-    result: Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError>,
-) -> ProbeUpgradeRunnerOutcome {
-    match result {
-        Ok(output) => match parse_probe_upgrader_result(&output.stdout) {
-            Some(result) if result.status == "running" => ProbeUpgradeRunnerOutcome::Running,
-            Some(result) if result.status == "failed" => {
-                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                    error_code: result
-                        .error_code
-                        .unwrap_or_else(|| "probe_upgrader_failed".to_string()),
-                    message: result.message.unwrap_or_default(),
-                })
-            }
-            _ => ProbeUpgradeRunnerOutcome::Running,
-        },
-        Err(ProbeUpgraderLaunchError::UnsupportedInstallation(message)) => {
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message,
-            })
-        }
-        Err(ProbeUpgraderLaunchError::InsufficientPrivilege(message)) => {
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "insufficient_privilege".to_string(),
-                message,
-            })
+fn request_lifecycle_companion_at(
+    socket_path: &std::path::Path,
+    request: &LifecycleRequest,
+) -> Result<LifecycleResponse, ()> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|_| ())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(90)))
+        .map_err(|_| ())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ())?;
+    stream
+        .write_all(&request.encode().map_err(|_| ())?)
+        .map_err(|_| ())?;
+    stream.shutdown(Shutdown::Write).map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    stream
+        .take(MAX_LIFECYCLE_REQUEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    LifecycleResponse::decode(&bytes).map_err(|_| ())
+}
+
+pub fn request_local_probe_uninstall() -> Result<(), &'static str> {
+    let config = read_bootstrap_config(&PathBuf::from(
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ))
+    .map_err(|_| "lifecycle.identity_invalid")?;
+    let Some((probe_id, install_state, manifest, version)) = config
+        .probe_id
+        .as_deref()
+        .zip(config.install_state_sha256.as_deref())
+        .zip(config.target_manifest_sha256.as_deref())
+        .zip(config.bundle_version.as_deref())
+        .map(|(((probe_id, install_state), manifest), version)| {
+            (probe_id, install_state, manifest, version)
+        })
+    else {
+        return Err("lifecycle.install_receipt_missing");
+    };
+    let request = LifecycleRequest::local_uninstall(probe_id, install_state, manifest, version)
+        .map_err(|_| "lifecycle.invalid_authority")?;
+    let response =
+        request_lifecycle_companion_at(std::path::Path::new(LIFECYCLE_COMPANION_SOCKET), &request)
+            .map_err(|_| "lifecycle.companion_unavailable")?;
+    match response.status() {
+        LifecycleResultStatus::Succeeded => Ok(()),
+        LifecycleResultStatus::Failed | LifecycleResultStatus::NotEnabled => {
+            Err("lifecycle.uninstall_failed")
         }
     }
+}
+
+pub fn request_local_probe_repair() -> Result<(), &'static str> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("lifecycle.root_required");
+    }
+    let invoking_uid = invoking_admin_id("SUDO_UID")?;
+    let invoking_gid = invoking_admin_id("SUDO_GID")?;
+    let config = read_bootstrap_config(&PathBuf::from(
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ))
+    .map_err(|_| "lifecycle.identity_invalid")?;
+    let Some((probe_id, install_state, manifest, version)) = config
+        .probe_id
+        .as_deref()
+        .zip(config.install_state_sha256.as_deref())
+        .zip(config.target_manifest_sha256.as_deref())
+        .zip(config.bundle_version.as_deref())
+        .map(|(((probe_id, install_state), manifest), version)| {
+            (probe_id, install_state, manifest, version)
+        })
+    else {
+        return Err("lifecycle.install_receipt_missing");
+    };
+    let request = LifecycleRequest::local_repair(
+        probe_id,
+        install_state,
+        manifest,
+        version,
+        invoking_uid,
+        invoking_gid,
+    )
+    .map_err(|_| "lifecycle.invalid_authority")?;
+    let response =
+        request_lifecycle_companion_at(std::path::Path::new(LIFECYCLE_COMPANION_SOCKET), &request)
+            .map_err(|_| "lifecycle.companion_unavailable")?;
+    local_probe_repair_response(&response)
+}
+
+fn local_probe_repair_response(response: &LifecycleResponse) -> Result<(), &'static str> {
+    match response.status() {
+        LifecycleResultStatus::Succeeded => Ok(()),
+        LifecycleResultStatus::Failed if response.code() == "probe_manual_reinstall_required" => {
+            Err("probe_manual_reinstall_required")
+        }
+        LifecycleResultStatus::Failed | LifecycleResultStatus::NotEnabled => {
+            Err("lifecycle.repair_unresolved")
+        }
+    }
+}
+
+fn invoking_admin_id(name: &str) -> Result<u32, &'static str> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value != 0)
+        .ok_or("lifecycle.local_authorization_required")
+}
+
+fn lifecycle_companion_failure(code: &str) -> ProbeUpgradeRunnerOutcome {
+    ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+        error_code: code.to_owned(),
+        message: "The local Probe lifecycle operation failed.".to_owned(),
+        ..ProbeOperationFailed::default()
+    })
 }
 
 #[derive(Default)]
@@ -777,6 +1145,13 @@ struct ProbeOperationReportQueue {
 }
 
 impl ProbeOperationReportQueue {
+    fn with_seen_operation_ids(ids: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            seen_operation_ids: ids.into_iter().filter(|id| !id.is_empty()).collect(),
+            statuses: Vec::new(),
+        }
+    }
+
     fn observe_response(
         &mut self,
         response: &ProbeReportResponse,
@@ -796,7 +1171,9 @@ impl ProbeOperationReportQueue {
                     stdin: &probe_upgrade.operation_token,
                     operation: ProbeUpgradeRunnerOperationMetadata {
                         current_probe_version: &probe_upgrade.current_probe_version,
+                        host_id: &probe_upgrade.host_id,
                         operation_id: &operation.id,
+                        target_asset_set_digest: &probe_upgrade.target_asset_set_digest,
                         target_probe_version: &probe_upgrade.target_probe_version,
                     },
                 })
@@ -835,6 +1212,38 @@ impl ProbeOperationReportQueue {
 mod operation_report_tests {
     use super::*;
 
+    struct RecordingUpgradeAcquisition;
+
+    impl ProbeUpgradeAcquisitionPort for RecordingUpgradeAcquisition {
+        fn acquire(
+            &mut self,
+            input: ProbeUpgradeAcquisitionInput<'_>,
+        ) -> Result<UpgradeStageAdmissionResponse, &'static str> {
+            assert_eq!(input.host_id, "7");
+            assert_eq!(input.operation_id, "operation_01");
+            assert_eq!(input.operation_token, "operation-token");
+            assert_eq!(input.target_probe_version, "1.2.3");
+            Ok(UpgradeStageAdmissionResponse {
+                authority: AdmittedUpgradeAuthority {
+                    schema_version: 1,
+                    hub_origin: "https://hub.example".to_owned(),
+                    host_id: input.host_id.to_owned(),
+                    probe_id: "probe_01".to_owned(),
+                    operation_id: input.operation_id.to_owned(),
+                    source_bundle_version: input.source_bundle_version.to_owned(),
+                    source_install_state_sha256: input.source_install_state_sha256.to_owned(),
+                    source_manifest_sha256: input.source_manifest_sha256.to_owned(),
+                    target_bundle_version: input.target_probe_version.to_owned(),
+                    target_asset_set_digest: input.target_asset_set_digest.to_owned(),
+                    target_manifest_sha256: "d".repeat(64),
+                    verified_stage_sha256: "e".repeat(64),
+                    expires_at_ms: 1_800_000_000_000,
+                },
+                signature: "signed-authority".to_owned(),
+            })
+        }
+    }
+
     #[test]
     fn successful_operation_launch_acknowledges_and_reports_running_in_one_request() {
         struct RunningRunner;
@@ -866,7 +1275,10 @@ mod operation_report_tests {
                     operation: Some(Operation::ProbeUpgrade(
                         crate::protocol::enoki::v1::ProbeUpgradeOperation {
                             current_probe_version: "0.1.0".to_string(),
+                            host_id: "7".to_string(),
                             operation_token: "operation-token".to_string(),
+                            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                            target_manifest_sha256: "a".repeat(64),
                             target_probe_version: "0.2.0".to_string(),
                         },
                     )),
@@ -886,41 +1298,224 @@ mod operation_report_tests {
     }
 
     #[test]
-    fn successful_upgrader_launch_reports_running() {
-        let outcome = probe_upgrade_outcome_from_launch_result(Ok(ProbeUpgraderCommandOutput {
-            stdout: "Probe Upgrader result: operation=operation-01 status=running\n".to_string(),
-        }));
+    fn compatible_upgrade_hands_one_verified_stage_and_bound_authority_to_companion() {
+        use std::os::unix::net::UnixListener;
+
+        let temporary = tempfile::tempdir().expect("临时目录");
+        let socket = temporary.path().join("lifecycle.sock");
+        let listener = UnixListener::bind(&socket).expect("绑定生命周期socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("接收生命周期请求");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).expect("读取请求");
+            let request = LifecycleRequest::decode(&bytes).expect("typed升级请求");
+            assert_eq!(
+                request.transition(),
+                enoki_probe_bootstrap::lifecycle::LifecycleTransition::Upgrade
+            );
+            assert!(matches!(
+                request.authority(),
+                enoki_probe_bootstrap::lifecycle::LifecycleRequestAuthority::HubUpgrade {
+                    host_id,
+                    probe_id,
+                    source_bundle_version,
+                    source_install_state_sha256,
+                    source_manifest_sha256,
+                    target_bundle_version,
+                    target_asset_set_digest,
+                    target_manifest_sha256,
+                    verified_stage_sha256,
+                    ..
+                } if host_id == "7"
+                    && probe_id == "probe_01"
+                    && source_bundle_version == "1.2.2"
+                    && source_install_state_sha256 == &"a".repeat(64)
+                    && source_manifest_sha256 == &"b".repeat(64)
+                    && target_bundle_version == "1.2.3"
+                    && target_asset_set_digest == &format!("sha256:{}", "c".repeat(64))
+                    && target_manifest_sha256 == &"d".repeat(64)
+                    && verified_stage_sha256 == &"e".repeat(64)
+            ));
+            stream
+                .write_all(&LifecycleResponse::succeeded().encode())
+                .expect("返回成功");
+        });
+        let mut runner = LifecycleCompanionOperationRunner {
+            probe_id: Some("probe_01".to_owned()),
+            install_state_sha256: Some("a".repeat(64)),
+            target_manifest_sha256: Some("b".repeat(64)),
+            bundle_version: Some("1.2.2".to_owned()),
+            socket_path: PathBuf::from(LIFECYCLE_COMPANION_SOCKET),
+            upgrade_socket_path: socket,
+            upgrade_acquisition: Box::new(RecordingUpgradeAcquisition),
+        };
+        let outcome = runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
+            stdin: "operation-token",
+            operation: ProbeUpgradeRunnerOperationMetadata {
+                current_probe_version: "1.2.2",
+                host_id: "7",
+                operation_id: "operation_01",
+                target_asset_set_digest: &format!("sha256:{}", "c".repeat(64)),
+                target_probe_version: "1.2.3",
+            },
+        });
 
         assert!(matches!(outcome, ProbeUpgradeRunnerOutcome::Running));
+        server.join().expect("Companion线程");
     }
 
     #[test]
-    fn launch_insufficient_privilege_reports_failed_status() {
-        let outcome = probe_upgrade_outcome_from_launch_result(Err(
-            ProbeUpgraderLaunchError::InsufficientPrivilege("sudo denied".to_string()),
-        ));
+    fn lifecycle_companion_socket_round_trips_one_bound_uninstall_request() {
+        use std::os::unix::net::UnixListener;
 
-        assert!(matches!(
-            outcome,
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                ref error_code,
-                ref message,
-            }) if error_code == "insufficient_privilege" && message == "sudo denied"
-        ));
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("lifecycle.sock");
+        let listener = UnixListener::bind(&socket).expect("bind lifecycle socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept lifecycle request");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).expect("read request");
+            let request = LifecycleRequest::decode(&bytes).expect("typed request");
+            assert_eq!(
+                request.transition(),
+                enoki_probe_bootstrap::lifecycle::LifecycleTransition::Uninstall
+            );
+            stream
+                .write_all(&LifecycleResponse::succeeded().encode())
+                .expect("write response");
+        });
+        let request = LifecycleRequest::hub_uninstall(
+            "probe_01",
+            "operation_01",
+            "operation-token",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+        )
+        .expect("bound request");
+
+        let response =
+            request_lifecycle_companion_at(&socket, &request).expect("companion response");
+
+        assert_eq!(response.status(), LifecycleResultStatus::Succeeded);
+        server.join().expect("server thread");
     }
 
     #[test]
-    fn unsupported_installation_reports_failed_status() {
-        let outcome = probe_upgrade_outcome_from_launch_result(Err(
-            ProbeUpgraderLaunchError::UnsupportedInstallation("sudo missing".to_string()),
-        ));
+    fn manual_reinstall_survives_acquirer_companion_runtime_and_cli_boundaries() {
+        let response = crate::upgrader::repair_acquirer_exit_lifecycle_response(Some(3))
+            .expect("Acquirer exit 3 is the one typed manual disposition");
+        assert_eq!(response.code(), "probe_manual_reinstall_required");
+        let code = local_probe_repair_response(&response).unwrap_err();
+        assert_eq!(code, "probe_manual_reinstall_required");
+        assert_eq!(
+            crate::cli::render_probe_repair_failure(code),
+            "Probe repair failed: code=probe_manual_reinstall_required.\n",
+        );
+        assert!(crate::upgrader::repair_acquirer_exit_lifecycle_response(Some(1)).is_none());
+    }
 
+    #[test]
+    fn probe_forwards_one_hub_uninstall_to_companion_and_reports_running_without_retry() {
+        use std::os::unix::net::UnixListener;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("lifecycle.sock");
+        let listener = UnixListener::bind(&socket).expect("bind lifecycle socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept lifecycle request");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).expect("read request");
+            let request = LifecycleRequest::decode(&bytes).expect("typed request");
+            assert!(matches!(
+                request.authority(),
+                enoki_probe_bootstrap::lifecycle::LifecycleRequestAuthority::HubOperation {
+                    operation_id,
+                    operation_token,
+                    ..
+                } if operation_id == "operation_01" && operation_token == "operation-token"
+            ));
+            stream
+                .write_all(&LifecycleResponse::succeeded().encode())
+                .expect("write response");
+        });
+        let response = ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_owned(),
+            pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                id: "operation_01".to_owned(),
+                operation: Some(Operation::ProbeUninstall(
+                    crate::protocol::enoki::v1::ProbeUninstallOperation {
+                        operation_token: "operation-token".to_owned(),
+                    },
+                )),
+            }),
+            requested_snapshot_collector_ids: Vec::new(),
+            server_time_ms: 1,
+        };
+        let mut runner = LifecycleCompanionOperationRunner {
+            probe_id: Some("probe_01".to_owned()),
+            install_state_sha256: Some("a".repeat(64)),
+            target_manifest_sha256: Some("b".repeat(64)),
+            bundle_version: Some("1.2.3".to_owned()),
+            socket_path: socket,
+            upgrade_socket_path: PathBuf::from(LIFECYCLE_UPGRADE_SOCKET),
+            upgrade_acquisition: Box::new(DisabledProbeUpgradeAcquisition),
+        };
+        let mut queue = ProbeOperationReportQueue::default();
+
+        queue.observe_response(&response, &mut runner);
+        queue.observe_response(&response, &mut runner);
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
+
+        assert_eq!(acknowledgements.len(), 1);
+        assert!(matches!(statuses[0].status, Some(Status::Running(_))));
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn unavailable_companion_acknowledges_once_without_retrying_the_operation() {
+        let response = ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_owned(),
+            pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                id: "operation-01".to_owned(),
+                operation: Some(Operation::ProbeUpgrade(
+                    crate::protocol::enoki::v1::ProbeUpgradeOperation {
+                        current_probe_version: "0.1.0".to_owned(),
+                        host_id: "7".to_owned(),
+                        operation_token: "operation-token".to_owned(),
+                        target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                        target_manifest_sha256: "a".repeat(64),
+                        target_probe_version: "0.2.0".to_owned(),
+                    },
+                )),
+            }),
+            requested_snapshot_collector_ids: Vec::new(),
+            server_time_ms: 1,
+        };
+        let mut queue = ProbeOperationReportQueue::default();
+        let mut runner = LifecycleCompanionOperationRunner {
+            probe_id: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
+            socket_path: PathBuf::from(LIFECYCLE_COMPANION_SOCKET),
+            upgrade_socket_path: PathBuf::from(LIFECYCLE_UPGRADE_SOCKET),
+            upgrade_acquisition: Box::new(DisabledProbeUpgradeAcquisition),
+        };
+
+        queue.observe_response(&response, &mut runner);
+        queue.observe_response(&response, &mut runner);
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
+
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(statuses.len(), 1);
         assert!(matches!(
-            outcome,
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                ref error_code,
-                ref message,
-            }) if error_code == "unsupported_installation" && message == "sudo missing"
+            statuses[0].status,
+            Some(Status::Failed(ref failure))
+                if failure.error_code == "lifecycle.install_receipt_missing"
+                    && failure.message == "The local Probe lifecycle operation failed."
         ));
     }
 
@@ -936,6 +1531,7 @@ mod operation_report_tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "insufficient_privilege".to_string(),
                     message: "sudo denied".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             }
 
@@ -946,6 +1542,7 @@ mod operation_report_tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "insufficient_privilege".to_string(),
                     message: "sudo denied".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             }
         }
@@ -961,7 +1558,10 @@ mod operation_report_tests {
                     operation: Some(Operation::ProbeUpgrade(
                         crate::protocol::enoki::v1::ProbeUpgradeOperation {
                             current_probe_version: "0.1.0".to_string(),
+                            host_id: "7".to_string(),
                             operation_token: "operation-token".to_string(),
+                            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                            target_manifest_sha256: "a".repeat(64),
                             target_probe_version: "0.2.0".to_string(),
                         },
                     )),
@@ -1072,37 +1672,112 @@ fn notify_systemd_ready() -> Result<(), std::io::Error> {
 }
 
 fn collect_observation_batch(
-    sleeper: &mut impl ProbeRuntimeSleeper,
     active_configuration: &ActiveProbeConfiguration,
     sequence: &mut u64,
-    metrics_collector: &mut MetricsCollector,
-) -> (u64, u64, Vec<crate::protocol::enoki::v1::MetricSample>) {
+    observation_runtime: &impl ObservationWindowClient,
+) -> Result<FinalizedObservationBatch, ObservationClientError> {
     let sequence_start = *sequence + 1;
-
-    if !active_configuration.metrics_config.any_enabled() {
-        sleeper.sleep(active_configuration.reporting_interval);
-        *sequence += 1;
-
-        return (sequence_start, *sequence, Vec::new());
-    }
-
-    let schedule = CollectorCadenceSchedule::for_tick_interval(
+    let runtime_window = observation_runtime.request_finalized_window(
         active_configuration.metrics_collection_interval,
-    );
-    let mut metrics = Vec::new();
-
-    for _ in 0..REPORTING_WINDOW_TICKS {
-        sleeper.sleep(active_configuration.metrics_collection_interval);
-        *sequence += 1;
-        metrics.push(metrics_collector.collect_after(
-            *sequence,
-            active_configuration.metrics_collection_interval,
-            schedule,
-            &active_configuration.metrics_config,
-        ));
+        sequence_start,
+    )?;
+    if runtime_window.attempts.len() != REPORTING_WINDOW_TICKS as usize {
+        return Err(ObservationClientError::InvalidResponse);
     }
 
-    (sequence_start, *sequence, metrics)
+    let host_profile = runtime_window.host_profile;
+    let mut metrics = Vec::with_capacity(runtime_window.attempts.len());
+    let mut outcomes = Vec::new();
+    for (index, attempt) in runtime_window.attempts.into_iter().enumerate() {
+        let expected_sequence = sequence_start + index as u64;
+        if attempt.sequence != expected_sequence
+            || attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some()
+        {
+            return Err(ObservationClientError::InvalidResponse);
+        }
+        if let Some(runtime_sample) = attempt.sample {
+            let mut sample = crate::protocol::enoki::v1::MetricSample {
+                sequence: attempt.sequence,
+                ..Default::default()
+            };
+            merge_runtime_metrics(
+                &mut sample,
+                runtime_sample,
+                &active_configuration.metrics_config,
+            );
+            metrics.push(sample);
+        } else if let Some(failure) = attempt.cpu_resource_outcome {
+            outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
+                sequence: attempt.sequence,
+                reason: match failure {
+                    SystemStateResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
+                    SystemStateResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
+                    SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
+                },
+            });
+        }
+    }
+    *sequence = sequence_start.saturating_add(REPORTING_WINDOW_TICKS - 1);
+    Ok((sequence_start, *sequence, metrics, outcomes, host_profile))
+}
+
+fn merge_runtime_metrics(
+    sample: &mut crate::protocol::enoki::v1::MetricSample,
+    cpu_sample: crate::protocol::enoki::v1::MetricSample,
+    config: &MetricsCollectionConfig,
+) {
+    sample.collected_at_ms = cpu_sample.collected_at_ms;
+    sample.collector_outcomes = cpu_sample
+        .collector_outcomes
+        .into_iter()
+        .filter(|outcome| {
+            if outcome.collector_id == crate::collectors::HOST_PROFILE_COLLECTOR_ID {
+                return true;
+            }
+            CollectorId::from_config_id(&outcome.collector_id)
+                .is_some_and(|id| config.collector_enabled(id))
+        })
+        .collect();
+    if config.collector_enabled(CollectorId::Cpu) {
+        sample.cpu_cores = cpu_sample.cpu_cores;
+        sample.cpu_percent = cpu_sample.cpu_percent;
+        sample.cpu_idle_percent = cpu_sample.cpu_idle_percent;
+        sample.cpu_iowait_percent = cpu_sample.cpu_iowait_percent;
+        sample.cpu_steal_percent = cpu_sample.cpu_steal_percent;
+        sample.cpu_system_percent = cpu_sample.cpu_system_percent;
+        sample.cpu_user_percent = cpu_sample.cpu_user_percent;
+    }
+    if config.collector_enabled(CollectorId::Load) {
+        sample.load_1 = cpu_sample.load_1;
+        sample.load_5 = cpu_sample.load_5;
+        sample.load_15 = cpu_sample.load_15;
+    }
+    if config.collector_enabled(CollectorId::Memory) {
+        sample.memory_total_bytes = cpu_sample.memory_total_bytes;
+        sample.memory_used_bytes = cpu_sample.memory_used_bytes;
+        sample.memory_cache_bytes = cpu_sample.memory_cache_bytes;
+        sample.swap_total_bytes = cpu_sample.swap_total_bytes;
+        sample.swap_used_bytes = cpu_sample.swap_used_bytes;
+    }
+    if config.collector_enabled(CollectorId::Uptime) {
+        sample.uptime_seconds = cpu_sample.uptime_seconds;
+    }
+    if config.collector_enabled(CollectorId::Network) {
+        sample.network_interfaces = cpu_sample.network_interfaces;
+    }
+    if config.collector_enabled(CollectorId::Disk) {
+        sample.disks = cpu_sample.disks;
+    }
+    if config.collector_enabled(CollectorId::Temperature) {
+        sample.temperature_celsius = cpu_sample.temperature_celsius;
+    }
+    if config.collector_enabled(CollectorId::Battery) {
+        sample.battery_percent = cpu_sample.battery_percent;
+        sample.battery_state = cpu_sample.battery_state;
+    }
+    if config.collector_enabled(CollectorId::DiskHealth) {
+        sample.disk_health = cpu_sample.disk_health;
+    }
 }
 
 fn apply_newer_configuration_if_needed(
@@ -1235,19 +1910,21 @@ impl ActiveProbeConfiguration {
 
 struct BootstrapConfig {
     bootstrap_config_path: Option<PathBuf>,
+    bundle_version: Option<String>,
     enabled_collector_ids: Option<Vec<String>>,
     enrollment_id: Option<String>,
     enrollment_token: Option<String>,
     hub_url: Option<String>,
-    install_path: Option<String>,
+    install_state_sha256: Option<String>,
     metrics_collection_interval_seconds: Option<u64>,
     operation_status_path: Option<String>,
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
     probe_private_key_pem: Option<String>,
+    registration_signed_attempt_sha256: Option<String>,
     server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
-    upgrader_launch: Option<String>,
+    target_manifest_sha256: Option<String>,
 }
 
 impl BootstrapConfig {
@@ -1267,6 +1944,12 @@ impl BootstrapConfig {
                 .map_err(ReportError::InvalidConfig),
             None => Ok(MetricsCollectionConfig::all_enabled()),
         }
+    }
+
+    fn requires_current_host_profile_readiness(&self) -> bool {
+        self.registration_signed_attempt_sha256
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
     }
 }
 
@@ -1298,11 +1981,12 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
 
     Ok(BootstrapConfig {
         bootstrap_config_path: Some(path.clone()),
+        bundle_version: string_value(&value, "bundle_version")?,
         enabled_collector_ids: string_array_value(&value, "enabled_collector_ids")?,
         enrollment_id: string_value(&value, "enrollment_id")?,
         enrollment_token: string_value(&value, "enrollment_token")?,
         hub_url: string_value(&value, "hub_url")?,
-        install_path: string_value(&value, "install_path")?,
+        install_state_sha256: string_value(&value, "install_state_sha256")?,
         metrics_collection_interval_seconds: integer_value(
             &value,
             "metrics_collection_interval_seconds",
@@ -1311,9 +1995,13 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         probe_configuration_version: string_value(&value, "probe_configuration_version")?,
         probe_id: string_value(&value, "probe_id")?,
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
+        registration_signed_attempt_sha256: string_value(
+            &value,
+            "registration_signed_attempt_sha256",
+        )?,
         server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         state_dir: string_value(&value, "state_dir")?,
-        upgrader_launch: string_value(&value, "upgrader_launch")?,
+        target_manifest_sha256: string_value(&value, "target_manifest_sha256")?,
     })
 }
 
@@ -1375,6 +2063,16 @@ fn read_local_operation_statuses(bootstrap_config: &BootstrapConfig) -> Vec<Prob
                 error_code: local_status_string(&value, "error_code")
                     .unwrap_or_else(|| "probe_upgrader_failed".to_string()),
                 message: local_status_string(&value, "message").unwrap_or_default(),
+                repair_eligibility_evidence: local_status_string(
+                    &value,
+                    "repair_eligibility_evidence",
+                )
+                .unwrap_or_default(),
+                repair_eligibility_signature: local_status_string(
+                    &value,
+                    "repair_eligibility_signature",
+                )
+                .unwrap_or_default(),
             })),
         }],
         _ => Vec::new(),
@@ -1494,44 +2192,190 @@ fn signed_integer_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observation_runtime::ObservationWindowResult;
     use crate::protocol::enoki::v1::{
         ProbeConfigurationResponse, ProbeRegistrationResponse, ProbeReportRequest,
         ProbeUpgradeOperation,
     };
-    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    };
+
+    struct FakeObservationWindowClient {
+        cadences: Mutex<Vec<Duration>>,
+        result: ObservationWindowResult,
+    }
+
+    impl ObservationWindowClient for FakeObservationWindowClient {
+        fn request_finalized_window(
+            &self,
+            cadence: Duration,
+            _sequence_start: u64,
+        ) -> Result<ObservationWindowResult, ObservationClientError> {
+            self.cadences.lock().expect("cadences").push(cadence);
+            Ok(self.result.clone())
+        }
+    }
+
+    #[test]
+    fn cpu_window_is_requested_once_and_its_authoritative_timestamps_are_reused() {
+        let active_configuration = ActiveProbeConfiguration {
+            metrics_collection_interval: Duration::from_secs(7),
+            metrics_config: MetricsCollectionConfig::from_enabled_collectors([
+                CollectorId::Cpu,
+                CollectorId::Memory,
+            ]),
+            reporting_interval: Duration::from_secs(21),
+            version: "default-v1".to_string(),
+        };
+        let client = FakeObservationWindowClient {
+            cadences: Mutex::new(Vec::new()),
+            result: ObservationWindowResult {
+                host_profile: None,
+                attempts: [7_000, 14_000, 21_000]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, collected_at_ms)| {
+                        crate::observation_runtime::ObservationAttemptResult {
+                            sequence: index as u64 + 1,
+                            sample: Some(crate::protocol::enoki::v1::MetricSample {
+                                collected_at_ms,
+                                cpu_percent: Some(12.5),
+                                memory_used_bytes: Some(42),
+                                ..Default::default()
+                            }),
+                            cpu_resource_outcome: None,
+                        }
+                    })
+                    .collect(),
+            },
+        };
+        let mut sequence = 0;
+
+        let (_, _, samples, outcome, _) =
+            collect_observation_batch(&active_configuration, &mut sequence, &client)
+                .expect("Observation Batch");
+
+        assert_eq!(
+            *client.cadences.lock().expect("cadences"),
+            [Duration::from_secs(7)]
+        );
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.collected_at_ms)
+                .collect::<Vec<_>>(),
+            [7_000, 14_000, 21_000]
+        );
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.cpu_percent == Some(12.5))
+        );
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.memory_used_bytes == Some(42))
+        );
+        assert!(outcome.is_empty());
+    }
+
+    struct RuntimeMetricsWindowClient;
+
+    impl ObservationWindowClient for RuntimeMetricsWindowClient {
+        fn request_finalized_window(
+            &self,
+            cadence: Duration,
+            sequence_start: u64,
+        ) -> Result<ObservationWindowResult, ObservationClientError> {
+            Ok(ObservationWindowResult {
+                host_profile: None,
+                attempts: (0..REPORTING_WINDOW_TICKS)
+                    .map(
+                        |tick| crate::observation_runtime::ObservationAttemptResult {
+                            sequence: sequence_start + tick,
+                            sample: Some(crate::protocol::enoki::v1::MetricSample {
+                                collected_at_ms: cadence.as_millis() as i64 * (tick as i64 + 1),
+                                load_1: Some(1.0),
+                                memory_used_bytes: Some(42),
+                                ..Default::default()
+                            }),
+                            cpu_resource_outcome: None,
+                        },
+                    )
+                    .collect(),
+            })
+        }
+    }
+
+    #[test]
+    fn cpu_acquisition_outcome_keeps_other_metrics_in_the_same_window() {
+        let active_configuration = ActiveProbeConfiguration {
+            metrics_collection_interval: Duration::from_secs(5),
+            metrics_config: MetricsCollectionConfig::from_enabled_collectors([
+                CollectorId::Cpu,
+                CollectorId::Memory,
+            ]),
+            reporting_interval: Duration::from_secs(15),
+            version: "default-v1".to_string(),
+        };
+        let client = FakeObservationWindowClient {
+            cadences: Mutex::new(Vec::new()),
+            result: ObservationWindowResult {
+                host_profile: None,
+                attempts: (1..=3)
+                    .map(
+                        |sequence| crate::observation_runtime::ObservationAttemptResult {
+                            sequence,
+                            sample: None,
+                            cpu_resource_outcome: Some(
+                                SystemStateResourceAcquisitionFailure::Unavailable,
+                            ),
+                        },
+                    )
+                    .collect(),
+            },
+        };
+        let mut sequence = 0;
+        let (_, _, samples, outcome, _) =
+            collect_observation_batch(&active_configuration, &mut sequence, &client)
+                .expect("partial Observation Batch");
+
+        assert!(samples.is_empty());
+        assert_eq!(
+            outcome.iter().map(|outcome| outcome.reason).collect::<Vec<_>>(),
+            vec![
+                crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable
+                    as i32;
+                3
+            ]
+        );
+    }
 
     #[cfg(unix)]
     use std::os::unix::{fs::PermissionsExt, fs::symlink};
 
     #[test]
-    fn observation_batch_keeps_low_frequency_collectors_off_high_frequency_ticks() {
+    fn observation_batch_uses_runtime_finalized_system_state_on_every_due_tick() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(5),
-            metrics_config: MetricsCollectionConfig::all_enabled(),
+            metrics_config: MetricsCollectionConfig::from_enabled_collectors([
+                CollectorId::Memory,
+                CollectorId::Load,
+            ]),
             reporting_interval: Duration::from_secs(15),
             version: "default-v1".to_string(),
         };
         let mut sequence = 1;
-        let mut sleeper = NoopSleeper;
-        let mut metrics_collector = MetricsCollector::from_registry(
-            crate::metrics::CollectorRegistry::from_collectors(vec![
-                Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::EveryTick,
-                    metric_field: FakeMetricField::Cpu,
-                }),
-                Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::Every12Ticks,
-                    metric_field: FakeMetricField::Load,
-                }),
-            ]),
-        );
-
-        let (_, _, metrics) = collect_observation_batch(
-            &mut sleeper,
+        let (_, _, metrics, _, _) = collect_observation_batch(
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
-        );
+            &RuntimeMetricsWindowClient,
+        )
+        .expect("non-CPU Observation Batch succeeds");
 
         assert_eq!(
             metrics
@@ -1543,53 +2387,44 @@ mod tests {
         assert!(
             metrics
                 .iter()
-                .all(|sample| sample.cpu_percent == Some(42.0))
+                .all(|sample| sample.memory_used_bytes == Some(42))
         );
-        assert!(metrics.iter().all(|sample| sample.load_1.is_none()));
+        assert!(metrics.iter().all(|sample| sample.load_1 == Some(1.0)));
     }
 
     #[test]
-    fn observation_batch_collects_low_frequency_metrics_every_four_reporting_windows() {
+    fn observation_batch_does_not_reapply_probe_local_cadence_to_runtime_results() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(7),
-            metrics_config: MetricsCollectionConfig::all_enabled(),
+            metrics_config: MetricsCollectionConfig::from_enabled_collectors([CollectorId::Load]),
             reporting_interval: Duration::from_secs(21),
             version: "default-v1".to_string(),
         };
         let mut sequence = 0;
-        let mut sleeper = NoopSleeper;
-        let mut metrics_collector =
-            MetricsCollector::from_registry(crate::metrics::CollectorRegistry::from_collectors(
-                vec![Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::Every12Ticks,
-                    metric_field: FakeMetricField::Load,
-                })],
-            ));
-
-        let (_, _, first_metrics) = collect_observation_batch(
-            &mut sleeper,
+        let (_, _, first_metrics, _, _) = collect_observation_batch(
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
-        );
-        let (_, _, second_metrics) = collect_observation_batch(
-            &mut sleeper,
+            &RuntimeMetricsWindowClient,
+        )
+        .expect("first non-CPU Observation Batch succeeds");
+        let (_, _, second_metrics, _, _) = collect_observation_batch(
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
-        );
-        let (_, _, third_metrics) = collect_observation_batch(
-            &mut sleeper,
+            &RuntimeMetricsWindowClient,
+        )
+        .expect("second non-CPU Observation Batch succeeds");
+        let (_, _, third_metrics, _, _) = collect_observation_batch(
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
-        );
-        let (_, _, fourth_metrics) = collect_observation_batch(
-            &mut sleeper,
+            &RuntimeMetricsWindowClient,
+        )
+        .expect("third non-CPU Observation Batch succeeds");
+        let (_, _, fourth_metrics, _, _) = collect_observation_batch(
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
-        );
+            &RuntimeMetricsWindowClient,
+        )
+        .expect("fourth non-CPU Observation Batch succeeds");
 
         assert_eq!(
             [
@@ -1604,57 +2439,16 @@ mod tests {
             .collect::<Vec<_>>(),
             (1..=12).collect::<Vec<_>>(),
         );
-        assert!(
+        assert_eq!(
             first_metrics
                 .iter()
                 .chain(&second_metrics)
                 .chain(&third_metrics)
-                .all(|sample| sample.load_1.is_none())
-        );
-        assert_eq!(
-            fourth_metrics
-                .iter()
+                .chain(&fourth_metrics)
                 .filter_map(|sample| sample.load_1)
                 .collect::<Vec<_>>(),
-            vec![1.0],
+            vec![1.0; 12],
         );
-    }
-
-    enum FakeMetricField {
-        Cpu,
-        Load,
-    }
-
-    struct FakeMetricCollector {
-        cadence: crate::metrics::CollectorCadence,
-        metric_field: FakeMetricField,
-    }
-
-    impl crate::metrics::MetricCollector for FakeMetricCollector {
-        fn definition(&self) -> crate::metrics::CollectorDefinition {
-            crate::metrics::CollectorDefinition::new(self.metric_field.collector_id(), self.cadence)
-        }
-
-        fn collect(
-            &mut self,
-            sample: &mut crate::protocol::enoki::v1::MetricSample,
-        ) -> Result<bool, crate::metrics::CollectorError> {
-            match self.metric_field {
-                FakeMetricField::Cpu => sample.cpu_percent = Some(42.0),
-                FakeMetricField::Load => sample.load_1 = Some(1.0),
-            }
-
-            Ok(true)
-        }
-    }
-
-    impl FakeMetricField {
-        fn collector_id(&self) -> crate::metrics::CollectorId {
-            match self {
-                FakeMetricField::Cpu => crate::metrics::CollectorId::Cpu,
-                FakeMetricField::Load => crate::metrics::CollectorId::Load,
-            }
-        }
     }
 
     #[derive(Default)]
@@ -1662,6 +2456,7 @@ mod tests {
         observed_current_probe_version: Option<String>,
         observed_operation_id: Option<String>,
         observed_stdin: Option<String>,
+        observed_target_asset_set_digest: Option<String>,
         observed_target_probe_version: Option<String>,
         outcome: Option<ProbeUpgradeRunnerOutcome>,
     }
@@ -1675,6 +2470,8 @@ mod tests {
                 Some(input.operation.current_probe_version.to_string());
             self.observed_operation_id = Some(input.operation.operation_id.to_string());
             self.observed_stdin = Some(input.stdin.to_string());
+            self.observed_target_asset_set_digest =
+                Some(input.operation.target_asset_set_digest.to_string());
             self.observed_target_probe_version =
                 Some(input.operation.target_probe_version.to_string());
 
@@ -1682,6 +2479,7 @@ mod tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "unsupported_installation".to_string(),
                     message: "not installed".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             })
         }
@@ -1697,6 +2495,7 @@ mod tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "unsupported_installation".to_string(),
                     message: "not installed".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             })
         }
@@ -1844,13 +2643,7 @@ mod tests {
         assert_eq!(startup.sequence_start, 1);
         assert_eq!(startup.sequence_end, 1);
         assert!(startup.metrics.is_empty());
-        assert_eq!(startup.snapshots.len(), 1);
-        assert!(matches!(
-            startup.snapshots[0].payload,
-            Some(crate::protocol::enoki::v1::snapshot::Payload::HostProfile(
-                _
-            ))
-        ));
+        assert!(startup.snapshots.is_empty());
     }
 
     #[test]
@@ -1983,20 +2776,558 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(1),
             },
-            &mut LocalHostProfileProvider,
-            InstalledProbeOperationRunner::from_bootstrap,
+            LifecycleCompanionOperationRunner::from_bootstrap,
             || {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
                     "notify socket unavailable",
                 ))
             },
+            &UnixObservationRuntimeClient::production(),
         );
 
         let error = result.expect_err("failed notify must prevent local readiness");
         assert!(matches!(error, ProbeRunError::Notify(_)));
         assert!(!error.is_permanent_report_failure());
         assert_eq!(transport.report_attempts.len(), 1);
+    }
+
+    #[test]
+    fn canonical_startup_ack_notifies_before_config_operation_and_unavailable_window() {
+        struct CausalTransport {
+            events: Arc<Mutex<Vec<&'static str>>>,
+            requests: Vec<(String, Vec<u8>)>,
+            responses: VecDeque<Vec<u8>>,
+        }
+
+        impl RegistrationTransport for CausalTransport {
+            fn post_protobuf(
+                &mut self,
+                _url: &str,
+                _body: Vec<u8>,
+            ) -> Result<Vec<u8>, RegistrationError> {
+                panic!("canonical identity must not register")
+            }
+        }
+
+        impl ReportTransport for CausalTransport {
+            fn post_protobuf_with_auth(
+                &mut self,
+                url: &str,
+                _auth: &ProbeRequestAuth<'_>,
+                body: Vec<u8>,
+            ) -> Result<Vec<u8>, ReportError> {
+                self.events
+                    .lock()
+                    .expect("events")
+                    .push(if url.ends_with("/api/probe/config") {
+                        "config"
+                    } else {
+                        "report"
+                    });
+                self.requests.push((url.to_string(), body));
+                Ok(self.responses.pop_front().expect("response is configured"))
+            }
+        }
+
+        impl ProbeTransport for CausalTransport {}
+
+        struct CausalOperationRunner {
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl ProbeOperationRunner for CausalOperationRunner {
+            fn run_probe_upgrade(
+                &mut self,
+                _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                self.events.lock().expect("events").push("operation");
+                ProbeUpgradeRunnerOutcome::Running
+            }
+
+            fn run_probe_uninstall(
+                &mut self,
+                _input: ProbeUninstallRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                panic!("upgrade response must not run uninstall")
+            }
+        }
+
+        struct UnavailableRuntime {
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl ObservationWindowClient for UnavailableRuntime {
+            fn request_finalized_window(
+                &self,
+                _cadence: Duration,
+                _sequence_start: u64,
+            ) -> Result<ObservationWindowResult, ObservationClientError> {
+                self.events.lock().expect("events").push("runtime");
+                Err(ObservationClientError::Unavailable)
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 5",
+                "enabled_collector_ids = []",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+
+        let operation = crate::protocol::enoki::v1::ProbeOperation {
+            id: "operation-01".to_string(),
+            operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation::default())),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut transport = CausalTransport {
+            events: Arc::clone(&events),
+            requests: Vec::new(),
+            responses: VecDeque::from([
+                ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "global-2".to_string(),
+                    pending_operation: Some(operation),
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec(),
+                ProbeConfigurationResponse {
+                    enabled_collector_ids: Vec::new(),
+                    metrics_collection_interval_seconds: 1,
+                    version: "global-2".to_string(),
+                }
+                .encode_to_vec(),
+                ProbeReportResponse {
+                    accepted_sequence_end: 2,
+                    current_probe_configuration_version: "global-2".to_string(),
+                    pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 2,
+                }
+                .encode_to_vec(),
+            ]),
+        };
+        let notifier_events = Arc::clone(&events);
+        let runner_events = Arc::clone(&events);
+        let runtime = UnavailableRuntime {
+            events: Arc::clone(&events),
+        };
+
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+            move |_config, _path| CausalOperationRunner {
+                events: Arc::clone(&runner_events),
+            },
+            move || {
+                notifier_events.lock().expect("events").push("notify");
+                Ok(())
+            },
+            &runtime,
+        )
+        .expect("canonical startup remains ready while the Runtime is unavailable");
+
+        assert_eq!(
+            events.lock().expect("events").as_slice(),
+            [
+                "report",
+                "notify",
+                "operation",
+                "config",
+                "runtime",
+                "report"
+            ]
+        );
+        let reports = transport
+            .requests
+            .iter()
+            .filter(|(url, _)| url.ends_with("/api/probe/report"))
+            .map(|(_, body)| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+            .collect::<Vec<_>>();
+        assert_eq!(reports.len(), 2);
+        assert_eq!((reports[0].sequence_start, reports[0].sequence_end), (1, 1));
+        assert_eq!(reports[0].probe_configuration_version, "default-v1");
+        assert!(reports[0].metrics.is_empty());
+        assert!(reports[0].observation_window_failure.is_none());
+        assert_eq!((reports[1].sequence_start, reports[1].sequence_end), (2, 2));
+        assert_eq!(reports[1].probe_configuration_version, "global-2");
+        assert_eq!(
+            reports[1].operation_acknowledgements[0].operation_id,
+            "operation-01"
+        );
+        assert!(reports[1].metrics.is_empty());
+        assert_eq!(
+            reports[1]
+                .observation_window_failure
+                .as_ref()
+                .map(|failure| failure.reason),
+            Some(
+                crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeUnavailable
+                    as i32
+            )
+        );
+    }
+
+    #[test]
+    fn replacement_identity_notifies_only_after_hub_accepts_current_host_profile() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "enrollment_id = \"enr_0123456789abcdef\"",
+                "probe_id = \"probe_replacement_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                &format!("registration_signed_attempt_sha256 = {:?}", "a".repeat(64)),
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+        let observation_runtime = FakeObservationWindowClient {
+            cadences: Mutex::new(Vec::new()),
+            result: ObservationWindowResult {
+                host_profile: Some(HostProfileSnapshot::default()),
+                attempts: (2..=4)
+                    .map(
+                        |sequence| crate::observation_runtime::ObservationAttemptResult {
+                            sequence,
+                            sample: Some(crate::protocol::enoki::v1::MetricSample::default()),
+                            cpu_resource_outcome: None,
+                        },
+                    )
+                    .collect(),
+            },
+        };
+
+        let notified = Cell::new(0_u8);
+        let mut startup_only = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses: VecDeque::from([Ok(ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1,
+            }
+            .encode_to_vec())]),
+        };
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path: bootstrap_config_path.clone(),
+            },
+            &mut startup_only,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(1),
+            },
+            LifecycleCompanionOperationRunner::from_bootstrap,
+            || {
+                notified.set(notified.get() + 1);
+                Ok(())
+            },
+            &observation_runtime,
+        )
+        .expect("startup report remains locally non-ready");
+        assert_eq!(notified.get(), 0);
+
+        let mut through_host_profile = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses: VecDeque::from([
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec()),
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 4,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 2,
+                }
+                .encode_to_vec()),
+            ]),
+        };
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut through_host_profile,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+            LifecycleCompanionOperationRunner::from_bootstrap,
+            || {
+                notified.set(notified.get() + 1);
+                Ok(())
+            },
+            &observation_runtime,
+        )
+        .expect("accepted current Host Profile establishes local readiness");
+        assert_eq!(notified.get(), 1);
+    }
+
+    #[test]
+    fn first_host_profile_is_retried_then_later_profiles_remain_compact() {
+        struct ChangingHostProfileClient {
+            requests: Mutex<u8>,
+        }
+
+        impl ObservationWindowClient for ChangingHostProfileClient {
+            fn request_finalized_window(
+                &self,
+                _cadence: Duration,
+                sequence_start: u64,
+            ) -> Result<ObservationWindowResult, ObservationClientError> {
+                let mut requests = self.requests.lock().expect("requests");
+                *requests += 1;
+                Ok(ObservationWindowResult {
+                    host_profile: Some(HostProfileSnapshot {
+                        hostname: format!("host-profile-{}", (*requests).div_ceil(2)),
+                        ..Default::default()
+                    }),
+                    attempts: (sequence_start..sequence_start + 3)
+                        .map(
+                            |sequence| crate::observation_runtime::ObservationAttemptResult {
+                                sequence,
+                                sample: Some(crate::protocol::enoki::v1::MetricSample {
+                                    collected_at_ms: sequence as i64,
+                                    ..Default::default()
+                                }),
+                                cpu_resource_outcome: None,
+                            },
+                        )
+                        .collect(),
+                })
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+        let mut report_responses = VecDeque::from([1, 4, 7, 10, 13].map(|accepted_sequence_end| {
+            Ok(ProbeReportResponse {
+                accepted_sequence_end,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1,
+            }
+            .encode_to_vec())
+        }));
+        report_responses.insert(
+            1,
+            Err(ReportError::Attempt(HttpAttemptError::ResponseRead(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection ended during the full Host Profile response",
+                ),
+            ))),
+        );
+        let mut transport = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses,
+        };
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(5),
+            },
+            LifecycleCompanionOperationRunner::from_bootstrap,
+            || Ok(()),
+            &ChangingHostProfileClient {
+                requests: Mutex::new(0),
+            },
+        )
+        .expect("later Host Profile hashes remain compact");
+
+        let observation_reports = transport.report_attempts[1..]
+            .iter()
+            .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report"))
+            .collect::<Vec<_>>();
+        assert_eq!(transport.report_attempts[1], transport.report_attempts[2]);
+        assert!(matches!(
+            observation_reports[0].snapshots[0].payload,
+            Some(crate::protocol::enoki::v1::snapshot::Payload::HostProfile(
+                _
+            ))
+        ));
+        assert!(matches!(
+            observation_reports[1].snapshots[0].payload,
+            Some(crate::protocol::enoki::v1::snapshot::Payload::HostProfile(
+                _
+            ))
+        ));
+        assert!(observation_reports[2].snapshots[0].payload.is_none());
+        assert!(observation_reports[3].snapshots[0].payload.is_none());
+        assert!(observation_reports[4].snapshots[0].payload.is_none());
+        assert_eq!(
+            observation_reports[0].snapshots[0].snapshot_hash,
+            observation_reports[1].snapshots[0].snapshot_hash
+        );
+        assert_eq!(
+            observation_reports[1].snapshots[0].snapshot_hash,
+            observation_reports[2].snapshots[0].snapshot_hash
+        );
+        assert_ne!(
+            observation_reports[2].snapshots[0].snapshot_hash,
+            observation_reports[3].snapshots[0].snapshot_hash
+        );
+        assert_eq!(
+            observation_reports[3].snapshots[0].snapshot_hash,
+            observation_reports[4].snapshots[0].snapshot_hash
+        );
+    }
+
+    #[test]
+    fn restarted_probe_hands_off_local_upgrade_status_without_relaunching_operation() {
+        struct MustNotRun;
+        impl ProbeOperationRunner for MustNotRun {
+            fn run_probe_upgrade(
+                &mut self,
+                _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                panic!("terminal handoff must not reacquire or relaunch Upgrade")
+            }
+
+            fn run_probe_uninstall(
+                &mut self,
+                _input: ProbeUninstallRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                panic!("terminal handoff must not launch another operation")
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        let status_path = temporary.path().join("probe-operation-status.toml");
+        fs::write(
+            &status_path,
+            "operation_id = \"41\"\ntarget_probe_version = \"1.2.4\"\nstatus = \"running\"\n",
+        )
+        .expect("operation status");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                &format!("operation_status_path = {:?}", status_path),
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+        let pending_operation = crate::protocol::enoki::v1::ProbeOperation {
+            id: "41".to_string(),
+            operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                current_probe_version: "1.2.3".to_string(),
+                host_id: "7".to_string(),
+                operation_token: "must-not-run".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                target_manifest_sha256: "b".repeat(64),
+                target_probe_version: "1.2.4".to_string(),
+            })),
+        };
+        let mut transport = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses: VecDeque::from([
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: Some(pending_operation.clone()),
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec()),
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 2,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: Some(pending_operation),
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 2,
+                }
+                .encode_to_vec()),
+            ]),
+        };
+
+        run_probe_with_loop_control_and_runner_factory(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+            |_config, _path| MustNotRun,
+        )
+        .expect("startup handoff succeeds");
+
+        let report = ProbeReportRequest::decode(transport.report_attempts[0].as_slice())
+            .expect("startup report decodes");
+        assert!(matches!(
+            report.operation_statuses.as_slice(),
+            [ProbeOperationStatus {
+                operation_id,
+                status: Some(Status::Running(_)),
+            }] if operation_id == "41"
+        ));
+        assert_eq!(transport.report_attempts.len(), 2);
     }
 
     #[test]
@@ -2010,7 +3341,10 @@ mod tests {
                 id: "operation-01".to_string(),
                 operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                     current_probe_version: "0.1.0".to_string(),
+                    host_id: "7".to_string(),
                     operation_token: "operation-token-01".to_string(),
+                    target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                    target_manifest_sha256: "a".repeat(64),
                     target_probe_version: "0.2.0".to_string(),
                 })),
             }),
@@ -2021,6 +3355,10 @@ mod tests {
         queue.observe_response(&response, &mut runner);
 
         assert_eq!(runner.observed_stdin.as_deref(), Some("operation-token-01"));
+        assert_eq!(
+            runner.observed_target_asset_set_digest.as_deref(),
+            Some(&*format!("sha256:{}", "a".repeat(64)))
+        );
         assert_eq!(
             runner.observed_operation_id.as_deref(),
             Some("operation-01")
@@ -2042,6 +3380,7 @@ mod tests {
             outcome: Some(ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "insufficient_privilege".to_string(),
                 message: "sudoers rule is missing".to_string(),
+                ..ProbeOperationFailed::default()
             })),
             ..RecordingOperationRunner::default()
         };
@@ -2052,7 +3391,10 @@ mod tests {
                 id: "operation-01".to_string(),
                 operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                     current_probe_version: "0.1.0".to_string(),
+                    host_id: "7".to_string(),
                     operation_token: "operation-token-01".to_string(),
+                    target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                    target_manifest_sha256: "a".repeat(64),
                     target_probe_version: "0.2.0".to_string(),
                 })),
             }),
@@ -2075,7 +3417,7 @@ mod tests {
     }
 
     #[test]
-    fn install_config_registration_then_operation_uses_preserved_fake_launch_metadata() {
+    fn registration_then_operation_reports_without_lifecycle_launch_metadata() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         fs::write(
@@ -2084,8 +3426,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"",
                 "enrollment_token = \"enk_enroll_secret\"",
                 "state_dir = \"/var/lib/enoki-probe\"",
-                "install_path = \"/usr/local/bin/enoki-probe\"",
-                "upgrader_launch = \"systemd\"",
                 "log_level = \"info\"",
                 "",
             ]
@@ -2100,6 +3440,7 @@ mod tests {
             registration_response: ProbeRegistrationResponse {
                 installation_inspection: None,
                 enrollment_id: String::new(),
+                host_id: "7".to_string(),
                 initial_configuration: Some(ProbeConfigurationResponse {
                     enabled_collector_ids: Vec::new(),
                     metrics_collection_interval_seconds: 1,
@@ -2118,7 +3459,10 @@ mod tests {
                         id: "operation-01".to_string(),
                         operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                             current_probe_version: "0.1.0".to_string(),
+                            host_id: "7".to_string(),
                             operation_token: "operation-token-01".to_string(),
+                            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                            target_manifest_sha256: "a".repeat(64),
                             target_probe_version: "0.2.0".to_string(),
                         })),
                     }),
@@ -2139,8 +3483,6 @@ mod tests {
         let observed_launches = Rc::new(RefCell::new(Vec::new()));
         let observed_launches_for_factory = Rc::clone(&observed_launches);
         let mut sleeper = NoopSleeper;
-        let mut host_profile_provider = LocalHostProfileProvider;
-
         run_probe_with_loop_control_and_runner_factory(
             ProbeRunInput {
                 bootstrap_config_path: bootstrap_config_path.clone(),
@@ -2150,16 +3492,8 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(2),
             },
-            &mut host_profile_provider,
-            move |bootstrap_config, _bootstrap_config_path| {
-                assert_eq!(
-                    bootstrap_config.install_path.as_deref(),
-                    Some("/usr/local/bin/enoki-probe"),
-                );
-                assert_eq!(bootstrap_config.upgrader_launch.as_deref(), Some("systemd"));
-                SharedFakeOperationRunner {
-                    observed_launches: Rc::clone(&observed_launches_for_factory),
-                }
+            move |_bootstrap_config, _bootstrap_config_path| SharedFakeOperationRunner {
+                observed_launches: Rc::clone(&observed_launches_for_factory),
             },
         )
         .expect("registration then operation reporting succeeds");
@@ -2174,8 +3508,7 @@ mod tests {
         );
         let bootstrap_config =
             fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
-        assert!(bootstrap_config.contains("install_path = \"/usr/local/bin/enoki-probe\""));
-        assert!(bootstrap_config.contains("upgrader_launch = \"systemd\""));
+        assert!(!bootstrap_config.contains("upgrader_launch"));
 
         let reports = transport
             .observed_report_bodies
@@ -2280,6 +3613,7 @@ mod tests {
             ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "probe_upgrader_noop".to_string(),
                 message: "fake no-op launch".to_string(),
+                ..ProbeOperationFailed::default()
             })
         }
 
@@ -2295,6 +3629,7 @@ mod tests {
             ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "probe_uninstaller_noop".to_string(),
                 message: "fake no-op launch".to_string(),
+                ..ProbeOperationFailed::default()
             })
         }
     }

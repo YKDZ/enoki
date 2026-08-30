@@ -126,14 +126,17 @@ function optionalMigrationAuthorization(options) {
   }
   if (!authorizationEnvironment || !signatureEnvironment) {
     throw new Error(
-      "Trust Epoch Migration Authorization and signature environments must be configured together",
+      "Trust Epoch Migration Authorization public material must be configured together",
     );
   }
   const authorization = process.env[authorizationEnvironment];
   const signature = process.env[signatureEnvironment];
+  if (!authorization && !signature) {
+    return {};
+  }
   if (!authorization || !signature) {
     throw new Error(
-      "Trust Epoch Migration Authorization public material is empty",
+      "Trust Epoch Migration Authorization public material is unavailable",
     );
   }
   return {

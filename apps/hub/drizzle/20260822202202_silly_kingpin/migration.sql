@@ -1,0 +1,1 @@
+ALTER TABLE `report_observations` ADD `observation_window_failure_reason` integer;

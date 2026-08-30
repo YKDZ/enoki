@@ -76,6 +76,7 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
       isUpgradeable: false,
       nonUpgradeableReason: "probe_version_current",
     },
+    probeUpgradeProblem: null,
     probeUpgradeStatus: null,
     probeVersion: "0.1.33",
     reportedProbeConfigurationVersion: "fixture-v1",

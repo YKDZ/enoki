@@ -41,6 +41,7 @@ export function applyHostLiveSummary(
       latestMetrics: summary.latestMetrics
         ? mergeLatestMetrics(host.latestMetrics, summary.latestMetrics)
         : null,
+      probeUpgradeProblem: summary.probeUpgradeProblem,
       status: summary.status,
     };
   });
@@ -257,12 +258,22 @@ export function useLiveUpdates(options: {
       return;
     }
 
+    const recoversOpenProbeUpgradeProblem =
+      detailHostId === message.host.id &&
+      options.hosts.value.some(
+        (host) =>
+          host.id === message.host.id &&
+          host.probeUpgradeProblem?.status === "failed",
+      ) &&
+      message.host.probeUpgradeProblem === null;
     const result = applyHostLiveSummary(options.hosts.value, message.host);
     options.hosts.value = result.hosts;
     options.onSummary?.(message.host);
 
     if (result.needsReload) {
       await options.loadHosts();
+    } else if (recoversOpenProbeUpgradeProblem) {
+      await options.recoverDetail?.();
     }
   }
 

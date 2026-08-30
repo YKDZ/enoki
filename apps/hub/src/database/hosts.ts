@@ -145,12 +145,14 @@ export type HostRepository = {
   exists: (id: number) => boolean;
   findActiveById: (id: number) => HostRow | null;
   findByProbeId: (probeId: string) => HostRow | null;
+  findByProbeIdIncludingDeleted: (probeId: string) => HostRow | null;
   insertProbeRequestNonce: (input: {
     probeId: string;
     nonce: string;
     expiresAtMs: number;
     nowMs: number;
   }) => boolean;
+  listActive: () => HostRow[];
   listSummaries: (options?: HostSummaryOptions) => HostSummary[];
   recordReport: (
     id: number,
@@ -175,6 +177,9 @@ export type HostRepository = {
         reportedAtMs: number;
       } | null;
       probeVersion?: string | null;
+      probeAssetBundleVersion?: string | null;
+      probeAssetBundleBootId?: string | null;
+      probeAssetBundleProbeId?: string | null;
     },
   ) => HostRow;
   softDelete: (id: number, deletedAtMs: number) => HostRow | null;
@@ -226,6 +231,12 @@ export function createHostRepository(database: HostDatabase): HostRepository {
           .get() ?? null
       );
     },
+    findByProbeIdIncludingDeleted(probeId) {
+      return (
+        database.select().from(hosts).where(eq(hosts.probeId, probeId)).get() ??
+        null
+      );
+    },
     insertProbeRequestNonce(input) {
       database
         .delete(probeRequestNonces)
@@ -245,6 +256,13 @@ export function createHostRepository(database: HostDatabase): HostRepository {
       } catch {
         return false;
       }
+    },
+    listActive() {
+      return database
+        .select()
+        .from(hosts)
+        .where(isNull(hosts.deletedAtMs))
+        .all();
     },
     listSummaries(options = {}) {
       const nowMs = options.nowMs ?? Date.now();
@@ -377,6 +395,9 @@ export function createHostRepository(database: HostDatabase): HostRepository {
             ? null
             : input.probeConfigurationError?.reportedAtMs,
         probeVersion: input.probeVersion,
+        probeAssetBundleVersion: input.probeAssetBundleVersion,
+        probeAssetBundleBootId: input.probeAssetBundleBootId,
+        probeAssetBundleProbeId: input.probeAssetBundleProbeId,
       };
       const row = database
         .update(hosts)

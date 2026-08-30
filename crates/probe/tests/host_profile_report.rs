@@ -1,5 +1,8 @@
 use enoki_probe::{
-    host_profile::{collect_local_host_profile, host_profile_hash, stable_host_profile},
+    host_profile::{
+        collect_local_host_profile_resource_facts_with_memory_total,
+        host_profile_from_resource_facts, host_profile_hash, stable_host_profile,
+    },
     protocol::enoki::v1::{
         CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
         FilesystemProfile, HostProfileSnapshot, MetricSample, NetworkInterfaceProfile,
@@ -13,31 +16,34 @@ use enoki_probe::{
 };
 use prost::Message;
 
+fn collect_local_host_profile() -> HostProfileSnapshot {
+    host_profile_from_resource_facts(collect_local_host_profile_resource_facts_with_memory_total(
+        1,
+    ))
+}
+
 #[test]
-fn probe_report_startup_sends_full_host_profile_and_regular_reports_send_hash_only() {
+fn boot_report_is_observation_free_and_regular_reports_send_hash_only() {
     let host_profile = sample_host_profile();
     let expected_hash = host_profile_hash(&host_profile);
 
     let startup = startup_report(StartupReportInput {
         boot_id: "boot_01",
         enrollment_id: "",
-        host_profile: host_profile.clone(),
         operation_progress: OperationReportProgress::default(),
         probe_configuration_version: "default-v1",
         probe_id: "probe_01",
     });
 
-    assert_eq!(startup.snapshots[0].snapshot_hash, expected_hash);
-    let startup_host_profile = match startup.snapshots[0].payload.as_ref() {
-        Some(snapshot::Payload::HostProfile(host_profile)) => host_profile,
-        None => panic!("startup report includes full Host Profile"),
-    };
-    assert_eq!(startup_host_profile.hostname, "managed-host-01");
+    assert!(startup.snapshots.is_empty());
+    assert!(!startup.probe_asset_bundle_version.is_empty());
     assert!(startup.metrics.is_empty());
 
     let regular = observation_batch_report(ObservationBatchInput {
         boot_id: "boot_01",
-        host_profile: &host_profile,
+        enrollment_id: "",
+        host_profile: Some(&host_profile),
+        host_profile_is_full: false,
         metrics: vec![MetricSample {
             cpu_percent: Some(12.5),
             collected_at_ms: 1_725_000_000_000,
@@ -45,6 +51,8 @@ fn probe_report_startup_sends_full_host_profile_and_regular_reports_send_hash_on
             sequence: 2,
             ..MetricSample::default()
         }],
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
         probe_configuration_error: None,
         probe_configuration_version: "default-v1",
@@ -59,11 +67,10 @@ fn probe_report_startup_sends_full_host_profile_and_regular_reports_send_hash_on
 }
 
 #[test]
-fn startup_report_is_sequence_one_metric_free_full_profile_with_deduplicated_local_operations() {
+fn startup_report_is_sequence_one_metric_and_observation_free_with_deduplicated_operations() {
     let startup = startup_report(StartupReportInput {
         boot_id: "boot_01",
         enrollment_id: "enrollment-01",
-        host_profile: sample_host_profile(),
         operation_progress: OperationReportProgress::from_statuses(vec![
             ProbeOperationStatus {
                 operation_id: "operation-01".to_string(),
@@ -80,11 +87,7 @@ fn startup_report_is_sequence_one_metric_free_full_profile_with_deduplicated_loc
 
     assert_eq!((startup.sequence_start, startup.sequence_end), (1, 1));
     assert!(startup.metrics.is_empty());
-    assert_eq!(startup.snapshots.len(), 1);
-    assert!(matches!(
-        startup.snapshots[0].payload,
-        Some(snapshot::Payload::HostProfile(_))
-    ));
+    assert!(startup.snapshots.is_empty());
     assert_eq!(startup.operation_acknowledgements.len(), 1);
     assert_eq!(startup.operation_statuses.len(), 1);
     assert_eq!(
@@ -101,7 +104,9 @@ fn observation_batch_sends_host_profile_snapshot_hash_without_payload() {
 
     let report = observation_batch_report(ObservationBatchInput {
         boot_id: "boot_01",
-        host_profile: &host_profile,
+        enrollment_id: "",
+        host_profile: Some(&host_profile),
+        host_profile_is_full: false,
         metrics: vec![MetricSample {
             cpu_percent: Some(12.5),
             collected_at_ms: 1_725_000_000_000,
@@ -109,6 +114,8 @@ fn observation_batch_sends_host_profile_snapshot_hash_without_payload() {
             sequence: 2,
             ..MetricSample::default()
         }],
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
         probe_configuration_error: None,
         probe_configuration_version: "default-v1",
@@ -150,13 +157,17 @@ fn observation_batch_keeps_metrics_and_incremental_state_compact() {
     let host_profile = sample_host_profile();
     let observation = observation_batch_report(ObservationBatchInput {
         boot_id: "boot_01",
-        host_profile: &host_profile,
+        enrollment_id: "",
+        host_profile: Some(&host_profile),
+        host_profile_is_full: false,
         metrics: vec![MetricSample {
             collected_at_ms: 1_725_000_000_000,
             cpu_percent: Some(12.5),
             sequence: 2,
             ..MetricSample::default()
         }],
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         operation_progress: OperationReportProgress::from_statuses(vec![
             ProbeOperationStatus {
                 operation_id: "operation-01".to_string(),
@@ -195,7 +206,6 @@ fn recurring_observation_payload_is_materially_smaller_than_lifecycle_frames() {
     let startup = startup_report(StartupReportInput {
         boot_id: "boot_01",
         enrollment_id: "enrollment-01",
-        host_profile: host_profile.clone(),
         operation_progress: OperationReportProgress::default(),
         probe_configuration_version: "default-v1",
         probe_id: "probe_01",
@@ -209,7 +219,9 @@ fn recurring_observation_payload_is_materially_smaller_than_lifecycle_frames() {
     });
     let observation = observation_batch_report(ObservationBatchInput {
         boot_id: "boot_01",
-        host_profile: &host_profile,
+        enrollment_id: "",
+        host_profile: Some(&host_profile),
+        host_profile_is_full: false,
         metrics: vec![MetricSample {
             collected_at_ms: 1_725_000_000_000,
             cpu_percent: Some(12.5),
@@ -217,6 +229,8 @@ fn recurring_observation_payload_is_materially_smaller_than_lifecycle_frames() {
             sequence: 2,
             ..MetricSample::default()
         }],
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
         probe_configuration_error: None,
         probe_configuration_version: "default-v1",
@@ -227,7 +241,7 @@ fn recurring_observation_payload_is_materially_smaller_than_lifecycle_frames() {
 
     let observation_bytes = observation.encode_to_vec().len();
     assert!(observation.snapshots[0].payload.is_none());
-    assert!(observation_bytes * 2 < startup.encode_to_vec().len());
+    assert!(startup.encode_to_vec().len() < replay.encode_to_vec().len());
     assert!(observation_bytes * 2 < replay.encode_to_vec().len());
 }
 
@@ -283,13 +297,24 @@ fn collector_capability_changes_are_host_profile_changes_not_metric_samples() {
         host_profile_hash(&unavailable_host_profile)
     );
 
-    let report = startup_report(StartupReportInput {
+    let report = observation_batch_report(ObservationBatchInput {
         boot_id: "boot_01",
         enrollment_id: "",
-        host_profile: unavailable_host_profile,
+        host_profile: Some(&unavailable_host_profile),
+        host_profile_is_full: true,
+        metrics: vec![MetricSample {
+            collected_at_ms: 1,
+            sequence: 2,
+            ..Default::default()
+        }],
+        cpu_resource_collection_outcomes: Vec::new(),
+        observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
+        probe_configuration_error: None,
         probe_configuration_version: "default-v1",
         probe_id: "probe_01",
+        sequence_end: 2,
+        sequence_start: 2,
     });
 
     assert_eq!(
@@ -308,7 +333,7 @@ fn collector_capability_changes_are_host_profile_changes_not_metric_samples() {
             .status(),
         DiskHealthCollectorCapabilityStatus::UnsupportedSmartData
     );
-    assert!(report.metrics.is_empty());
+    assert_eq!(report.metrics.len(), 1);
 }
 
 #[test]
@@ -444,6 +469,7 @@ fn sample_host_profile() -> HostProfileSnapshot {
         os: "linux".to_string(),
         process_count: 123,
         probe_version: "0.1.0".to_string(),
+        probe_asset_bundle_version: "0.1.0".to_string(),
         thread_count: 456,
     }
 }

@@ -32,4 +32,32 @@ message MetricSample {
   optional uint32 battery_percent = 22;
   optional string battery_state = 23;
   repeated DiskHealthMetric disk_health = 24;
+  repeated CollectorOutcome collector_outcomes = 25;
+}
+
+message CollectorOutcome {
+  string collector_id = 1;
+  CollectorOutcomeState state = 2;
+  CollectorFailure failure = 3;
+}
+
+enum CollectorOutcomeState {
+  COLLECTOR_OUTCOME_STATE_UNSPECIFIED = 0;
+  COLLECTOR_OUTCOME_STATE_PRODUCED = 1;
+  COLLECTOR_OUTCOME_STATE_NO_DATA = 2;
+  COLLECTOR_OUTCOME_STATE_FAILED = 3;
+}
+
+message CollectorFailure {
+  CollectorFailurePhase phase = 1;
+  // 冻结的旧 wire 兼容槽；不得新增数值或用于新 Collector。
+  uint32 legacy_code = 2;
+  // Collector 自有、namespaced 的稳定失败码。
+  string code = 3;
+}
+
+enum CollectorFailurePhase {
+  COLLECTOR_FAILURE_PHASE_UNSPECIFIED = 0;
+  COLLECTOR_FAILURE_PHASE_RESOURCE = 1;
+  COLLECTOR_FAILURE_PHASE_CALCULATION = 2;
 }

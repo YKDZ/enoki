@@ -8,6 +8,20 @@ import type { EnrollmentResponse } from "../types";
 import EnrollmentDialog from "./EnrollmentDialog.vue";
 
 const pendingEnrollment: EnrollmentResponse = {
+  bootstrapRecipe: {
+    bundleVersion: "1.2.3",
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: "enoki-probe-bootstrap.py",
+      sha256: "a".repeat(64),
+      size: 123,
+      version: "v1",
+    },
+    rootFingerprint: "b".repeat(64),
+    schemaVersion: 1,
+    targets: ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl"],
+  },
   createdAtMs: 1_725_000_000_000,
   enrollmentId: "enr_1234567890abcdef",
   enrollmentToken: "enk_enroll_component_test",
@@ -93,6 +107,41 @@ describe("Enrollment dialog command control", () => {
     expect(command.readOnly).toBe(true);
     expect(command.value).toBe(initialValue);
     wrapper.unmount();
+  });
+
+  it("shows every exact supported target as a readable verification list", async () => {
+    const wrapper = mount(EnrollmentDialog, {
+      attachTo: document.body,
+      props: dialogProps({ enrollment: pendingEnrollment }),
+    });
+    await flushRender();
+
+    const targets = document.querySelector('[aria-label="支持的目标平台"]');
+    expect(
+      Array.from(targets?.querySelectorAll("li") ?? []).map((item) =>
+        item.textContent?.trim(),
+      ),
+    ).toEqual(pendingEnrollment.bootstrapRecipe.targets);
+    wrapper.unmount();
+  });
+
+  it("explains the manual replacement commit boundary without treating a snapshot as a Hub gate", async () => {
+    const wrapper = mount(EnrollmentDialog, {
+      attachTo: document.body,
+      props: dialogProps({
+        enrollment: {
+          ...pendingEnrollment,
+          replacementMigration: "waiting_host",
+          target: { hostId: 7, kind: "manual_reinstall" },
+        },
+      }),
+    });
+    await flushRender();
+
+    expect(document.body.textContent).toContain("提交边界前");
+    expect(document.body.textContent).toContain("可选的迁移前恢复点");
+    expect(document.body.textContent).toContain("提交后不会恢复旧探针身份");
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
   });
 });
 

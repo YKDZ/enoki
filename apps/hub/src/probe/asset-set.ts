@@ -7,6 +7,9 @@ export type ProbeUpgradeNonUpgradeableReason =
   | "probe_version_missing"
   | "probe_version_malformed"
   | "probe_version_development"
+  | "probe_release_transition_missing"
+  | "probe_release_transition_mismatch"
+  | "probe_release_transition_replacement_required"
   | "probe_version_current"
   | "probe_version_newer";
 
@@ -14,6 +17,12 @@ export type ProbeUpgradeEligibility = {
   currentProbeAssetSetVersion: string | null;
   currentProbeVersion: string | null;
   isUpgradeable: boolean;
+  manualReinstall?: {
+    sourceProbeVersion: string;
+    sourceProbeSha256: string[];
+    targetAssetSetDigest: string;
+    targetProbeVersion: string;
+  };
   nonUpgradeableReason: ProbeUpgradeNonUpgradeableReason | null;
 };
 
@@ -25,6 +34,20 @@ type ProbeAssetSetVersionNonUpgradeableReason = Extract<
 export type ProbeAssetSetVersionResult = {
   version: string | null;
   nonUpgradeableReason: ProbeAssetSetVersionNonUpgradeableReason | null;
+};
+
+export type VerifiedReleaseTransition = {
+  classification: "compatible" | "replacement-required";
+  sourceProbeVersion: string;
+  sourceAssetSetDigest: string;
+  sourceProbeSha256: string[];
+  targetProbeSha256: string[];
+  targetAssetSetDigest: string;
+  targetBundles?: ReadonlyArray<{
+    bundleManifestSha256: string;
+    target: string;
+  }>;
+  targetProbeVersion: string;
 };
 
 type SemVer = {
@@ -106,6 +129,7 @@ export function evaluateProbeUpgradeEligibility(input: {
   probeAssetSetVersionNonUpgradeableReason?: ProbeAssetSetVersionNonUpgradeableReason | null;
   probeAssetSetVersion: string | null | undefined;
   probeVersion: string | null | undefined;
+  releaseTransition?: VerifiedReleaseTransition | null;
 }): ProbeUpgradeEligibility {
   const assetSetVersion = normalizeSemVer(input.probeAssetSetVersion);
   const probeVersion = normalizeSemVer(input.probeVersion);
@@ -161,6 +185,44 @@ export function evaluateProbeUpgradeEligibility(input: {
 
   const comparison = compareSemVer(probeVersion, assetSetVersion);
   if (comparison < 0) {
+    if (!input.releaseTransition) {
+      return notUpgradeable({
+        currentProbeAssetSetVersion: assetSetVersion,
+        currentProbeVersion: probeVersion,
+        reason: "probe_release_transition_missing",
+      });
+    }
+    if (
+      input.releaseTransition.sourceProbeVersion !== probeVersion ||
+      input.releaseTransition.targetProbeVersion !== assetSetVersion
+    ) {
+      return notUpgradeable({
+        currentProbeAssetSetVersion: assetSetVersion,
+        currentProbeVersion: probeVersion,
+        reason: "probe_release_transition_mismatch",
+      });
+    }
+    if (input.releaseTransition.classification === "replacement-required") {
+      if (input.releaseTransition.sourceProbeSha256.length === 0) {
+        return notUpgradeable({
+          currentProbeAssetSetVersion: assetSetVersion,
+          currentProbeVersion: probeVersion,
+          reason: "probe_release_transition_mismatch",
+        });
+      }
+      return {
+        currentProbeAssetSetVersion: assetSetVersion,
+        currentProbeVersion: probeVersion,
+        isUpgradeable: false,
+        manualReinstall: {
+          sourceProbeVersion: input.releaseTransition.sourceProbeVersion,
+          sourceProbeSha256: input.releaseTransition.sourceProbeSha256,
+          targetAssetSetDigest: input.releaseTransition.targetAssetSetDigest,
+          targetProbeVersion: input.releaseTransition.targetProbeVersion,
+        },
+        nonUpgradeableReason: "probe_release_transition_replacement_required",
+      };
+    }
     return {
       currentProbeAssetSetVersion: assetSetVersion,
       currentProbeVersion: probeVersion,

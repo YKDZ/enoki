@@ -84,6 +84,10 @@ overrides:
 importers:
 
   .:
+    dependencies:
+      '@enoki/probe-release':
+        specifier: workspace:*
+        version: file:packages/probe-release
     devDependencies:
       '@playwright/test':
         specifier: 'catalog:'
@@ -143,6 +147,9 @@ importers:
         specifier: ^8.21.0
         version: 8.21.1
     devDependencies:
+      '@enoki/probe-release':
+        specifier: workspace:*
+        version: file:packages/probe-release
       '@tsconfig/node24':
         specifier: ^24.0.4
         version: 24.0.4
@@ -257,6 +264,18 @@ importers:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@26.1.1)(happy-dom@17.6.3)(jiti@2.7.0)
 
+  packages/probe-release:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@24.13.3)(happy-dom@17.6.3)(jiti@2.7.0)
+
   packages/proto:
     dependencies:
       protobufjs:
@@ -306,6 +325,9 @@ packages:
 
   '@enoki/api-client@file:packages/api-client':
     resolution: {directory: packages/api-client, type: directory}
+
+  '@enoki/probe-release@file:packages/probe-release':
+    resolution: {directory: packages/probe-release, type: directory}
 
   '@enoki/proto@file:packages/proto':
     resolution: {directory: packages/proto, type: directory}
@@ -2407,6 +2429,8 @@ snapshots:
       valibot: 1.4.2(typescript@6.0.3)
     transitivePeerDependencies:
       - typescript
+
+  '@enoki/probe-release@file:packages/probe-release': {}
 
   '@enoki/proto@file:packages/proto':
     dependencies:

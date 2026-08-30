@@ -5,7 +5,6 @@ import {
   createPublicKey,
   randomUUID,
   sign,
-  verify,
 } from "node:crypto";
 import {
   chmod,
@@ -26,37 +25,151 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import {
-  inspectProbeBootstrapArtifact,
+  canonicalPublicKeyPem,
+  createProbeTrustDelegation,
+  inspectHistoricalProbeBundleArchiveBytes,
+  inspectLegacyProbeAssetSet,
+  inspectProbeBundleArchiveBytes,
+  inspectProbeElf,
+  inspectRuntimeProbeBundleArchiveBytes,
+  probeBundleComponentProfiles,
+  probeBundledBootstrapAssets,
+  probeTargets,
+  readRegularFileSnapshot,
+  verifyReleaseTransitionContract,
+  verifyProbeTrustDelegation,
+} from "@enoki/probe-release";
+
+import {
+  inspectProbeBootstrapBinary,
+  probeBootstrapArchiveMaximumBytes,
   probeBootstrapTargets,
+  withVerifiedProbeBootstrapArtifactBytes,
 } from "./probe-bootstrap-artifact.mjs";
+import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 
 const execFileAsync = promisify(execFile);
 const commitPattern = /^[0-9a-f]{40}$/;
 const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const probeTrustDelegationDomain = Buffer.from(
-  "enoki/probe-trust-delegation/v1\0",
-  "utf8",
-);
-const dynamicLoaderByProbeTarget = Object.freeze({
-  "aarch64-unknown-linux-gnu": "/lib/ld-linux-aarch64.so.1",
-  "aarch64-unknown-linux-musl": "/lib/ld-musl-aarch64.so.1",
-  "x86_64-unknown-linux-gnu": "/lib64/ld-linux-x86-64.so.2",
-  "x86_64-unknown-linux-musl": "/lib/ld-musl-x86_64.so.1",
-});
-const probeBundleComponentProfiles = Object.freeze({
-  probe: Object.freeze({
-    path: "enoki-probe",
-    permissionProfile: "probe-v1",
-  }),
-});
+const MAX_PROBE_ARCHIVE_BYTES = 1024 * 1024 * 1024;
+const bootstrapRecipeFile = "enoki-probe-bootstrap.py";
+const bootstrapRecipeRecordFile = "enoki-probe-bootstrap-recipe.json";
+const verifiedCandidateReleaseTransitions = new WeakMap();
+const verifiedProbeAssetSetArchiveSnapshots = new WeakMap();
+export function releaseTransitionForValidatedCandidate(manifest) {
+  if (!verifiedCandidateReleaseTransitions.has(manifest)) {
+    throw new Error("Candidate Manifest has not passed release verification");
+  }
+  return verifiedCandidateReleaseTransitions.get(manifest);
+}
 
-export const probeTargets = Object.freeze([
-  "aarch64-unknown-linux-gnu",
-  "aarch64-unknown-linux-musl",
-  "x86_64-unknown-linux-gnu",
-  "x86_64-unknown-linux-musl",
-]);
+export function createReleaseCandidateManifest({
+  bootstrapRecipe,
+  candidate,
+  hub,
+  probeAssetSet,
+  releaseBaseline,
+}) {
+  return {
+    bootstrapRecipe,
+    candidate,
+    hub,
+    kind: "enoki-release-candidate",
+    probeAssetSet,
+    releaseBaseline,
+    schemaVersion: 4,
+  };
+}
+
+export async function createProbeBootstrapPublication({
+  bundleVersion,
+  sourceDir,
+  trustedRootPublicKeyPem,
+}) {
+  const rootFingerprint = sha256(
+    canonicalPublicKeyPem(trustedRootPublicKeyPem),
+  );
+  const recipeTemplate = await readFile(
+    path.join(sourceDir, "scripts/probe-bootstrap-recipe.py"),
+    "utf8",
+  );
+  const recipeRoles = {
+    components: Object.fromEntries(
+      Object.entries(probeBundleComponentProfiles).map(([role, profile]) => [
+        role,
+        {
+          path: profile.path,
+          permissionProfile: profile.permissionProfile,
+          resourceContract: profile.resourceContract,
+        },
+      ]),
+    ),
+    bootstrapAssets: Object.fromEntries(
+      probeBundledBootstrapAssets.map((asset) => [
+        asset.role,
+        {
+          path: asset.archivePath,
+          permissionProfile: asset.permissionProfile,
+        },
+      ]),
+    ),
+  };
+  const recipeBytes = Buffer.from(
+    recipeTemplate
+      .replaceAll("__ENOKI_DISTRIBUTION__", "enoki")
+      .replaceAll("__ENOKI_ROOT_FINGERPRINT__", rootFingerprint)
+      .replaceAll("__ENOKI_BUNDLE_VERSION__", bundleVersion)
+      .replaceAll("__ENOKI_BUNDLE_ROLES__", JSON.stringify(recipeRoles)),
+  );
+  if (recipeBytes.includes("__ENOKI_")) {
+    throw new Error("Probe Bootstrap recipe record is incomplete");
+  }
+  const record = {
+    bundleVersion,
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: bootstrapRecipeFile,
+      sha256: sha256(recipeBytes),
+      size: recipeBytes.byteLength,
+      version: "v1",
+    },
+    rootFingerprint,
+    schemaVersion: 1,
+    targets: [...probeTargets],
+  };
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+  return { recipeBytes, record, recordBytes };
+}
+
+export async function writeProbeBootstrapPublication({
+  bundleVersion,
+  outputDir,
+  sourceDir,
+  trustedRootPublicKeyPem,
+}) {
+  const publication = await createProbeBootstrapPublication({
+    bundleVersion,
+    sourceDir,
+    trustedRootPublicKeyPem,
+  });
+  await mkdir(outputDir, { recursive: true });
+  await Promise.all([
+    writeFile(
+      path.join(outputDir, bootstrapRecipeFile),
+      publication.recipeBytes,
+      {
+        mode: 0o755,
+      },
+    ),
+    writeFile(
+      path.join(outputDir, bootstrapRecipeRecordFile),
+      publication.recordBytes,
+    ),
+  ]);
+  return publication.record;
+}
 
 export function validateCandidateIdentity({ commit, version }) {
   if (!commitPattern.test(commit ?? "")) {
@@ -79,124 +192,12 @@ export function validateProbeSigningIdentity({ privateKeyPem, publicKeyPem }) {
   }
 
   assertSigningKeyPair(privateKeyPem, publicKeyPem);
-  assertRsa4096PublicKey(publicKeyPem, "Probe asset signing public key");
   const publicKeyText = Buffer.from(publicKeyPem).toString("utf8");
   const normalizedPublicKey = Buffer.from(
     publicKeyText.endsWith("\n") ? publicKeyText : `${publicKeyText}\n`,
   );
 
   return { publicKeySha256: sha256(normalizedPublicKey) };
-}
-
-export function createProbeTrustDelegation({
-  distribution,
-  generation,
-  purpose = "probe-asset-signing",
-  releasePublicKeyPem,
-  rootPrivateKey,
-  rootPrivateKeyPem,
-}) {
-  const hasKeyObject = rootPrivateKey !== undefined;
-  const hasPem = rootPrivateKeyPem !== undefined;
-  if (hasKeyObject === hasPem) {
-    throw new Error("exactly one root private key representation is required");
-  }
-  if (hasKeyObject && rootPrivateKey?.type !== "private") {
-    throw new Error("root private key must be a KeyObject");
-  }
-  const signingKey = hasKeyObject
-    ? rootPrivateKey
-    : createPrivateKey(rootPrivateKeyPem);
-  assertRsa4096PrivateKey(signingKey, "Probe Distribution Trust Root");
-  const rootPublicKeyPem = canonicalPublicKeyPem(
-    createPublicKey(signingKey).export({ format: "pem", type: "spki" }),
-  );
-  const releasePublicKey = canonicalRsa4096PublicKeyPem(
-    releasePublicKeyPem,
-    "Probe asset signing public key",
-  );
-  const delegation = validateProbeTrustDelegationDocument({
-    distribution,
-    generation,
-    kind: "enoki-probe-trust-delegation",
-    purpose,
-    rootKeyId: sha256(rootPublicKeyPem),
-    schemaVersion: 1,
-    signingIdentity: {
-      algorithm: "rsa-sha256",
-      keyId: sha256(releasePublicKey),
-      publicKeyPem: releasePublicKey.toString("utf8"),
-    },
-  });
-  const bytes = canonicalProbeTrustDelegationBytes(delegation);
-  return {
-    bytes,
-    delegation,
-    signature: sign(
-      "RSA-SHA256",
-      trustDelegationSigningInput(bytes),
-      signingKey,
-    ),
-  };
-}
-
-export function verifyProbeTrustDelegation({
-  bytes,
-  expectedDistribution,
-  expectedPurpose = "probe-asset-signing",
-  highestAcceptedGeneration = 0,
-  rootPublicKeyPem,
-  signature,
-}) {
-  if (
-    !Number.isSafeInteger(highestAcceptedGeneration) ||
-    highestAcceptedGeneration < 0
-  ) {
-    throw new Error(
-      "highest accepted Probe Trust Delegation generation is invalid",
-    );
-  }
-  const rootPublicKey = canonicalRsa4096PublicKeyPem(
-    rootPublicKeyPem,
-    "Probe Distribution Trust Root public key",
-  );
-  let parsed;
-  try {
-    parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
-  } catch {
-    throw new Error("Probe Trust Delegation is malformed");
-  }
-  const delegation = validateProbeTrustDelegationDocument(parsed);
-  const canonicalBytes = canonicalProbeTrustDelegationBytes(delegation);
-  if (!Buffer.from(bytes).equals(canonicalBytes)) {
-    throw new Error("Probe Trust Delegation must use canonical encoding");
-  }
-  if (
-    delegation.distribution !== expectedDistribution ||
-    delegation.purpose !== expectedPurpose ||
-    delegation.rootKeyId !== sha256(rootPublicKey)
-  ) {
-    throw new Error("Probe Trust Delegation binding is invalid");
-  }
-  if (delegation.generation < highestAcceptedGeneration) {
-    throw new Error(
-      "Probe Trust Delegation generation is not newer than installed trust",
-    );
-  }
-  let valid = false;
-  try {
-    valid = verify(
-      "RSA-SHA256",
-      trustDelegationSigningInput(canonicalBytes),
-      rootPublicKey,
-      signature,
-    );
-  } catch {
-    valid = false;
-  }
-  if (!valid)
-    throw new Error("Probe Trust Delegation root signature is invalid");
-  return delegation;
 }
 
 export function validateDelegatedProbeSigningIdentity({
@@ -225,113 +226,6 @@ export function validateDelegatedProbeSigningIdentity({
     );
   }
   return { ...identity, delegation };
-}
-
-function validateProbeTrustDelegationDocument(value) {
-  assertPlainObject(value, "Probe Trust Delegation");
-  assertExactKeys(value, [
-    "distribution",
-    "generation",
-    "kind",
-    "purpose",
-    "rootKeyId",
-    "schemaVersion",
-    "signingIdentity",
-  ]);
-  if (
-    value.kind !== "enoki-probe-trust-delegation" ||
-    value.schemaVersion !== 1 ||
-    typeof value.distribution !== "string" ||
-    !/^[a-z][a-z0-9-]{0,63}$/.test(value.distribution) ||
-    value.purpose !== "probe-asset-signing" ||
-    !Number.isSafeInteger(value.generation) ||
-    value.generation < 1 ||
-    !/^[0-9a-f]{64}$/.test(value.rootKeyId)
-  ) {
-    throw new Error("Probe Trust Delegation fields are invalid");
-  }
-  assertPlainObject(
-    value.signingIdentity,
-    "Probe Trust Delegation signing identity",
-  );
-  assertExactKeys(value.signingIdentity, [
-    "algorithm",
-    "keyId",
-    "publicKeyPem",
-  ]);
-  const publicKey = canonicalRsa4096PublicKeyPem(
-    value.signingIdentity.publicKeyPem,
-    "Probe Trust Delegation signing identity",
-  );
-  if (
-    value.signingIdentity.algorithm !== "rsa-sha256" ||
-    !/^[0-9a-f]{64}$/.test(value.signingIdentity.keyId) ||
-    value.signingIdentity.keyId !== sha256(publicKey)
-  ) {
-    throw new Error("Probe Trust Delegation signing identity is invalid");
-  }
-  return {
-    distribution: value.distribution,
-    generation: value.generation,
-    kind: value.kind,
-    purpose: value.purpose,
-    rootKeyId: value.rootKeyId,
-    schemaVersion: value.schemaVersion,
-    signingIdentity: {
-      algorithm: value.signingIdentity.algorithm,
-      keyId: value.signingIdentity.keyId,
-      publicKeyPem: publicKey.toString("utf8"),
-    },
-  };
-}
-
-function canonicalProbeTrustDelegationBytes(delegation) {
-  return Buffer.from(`${JSON.stringify(delegation)}\n`, "utf8");
-}
-
-function trustDelegationSigningInput(bytes) {
-  return Buffer.concat([probeTrustDelegationDomain, bytes]);
-}
-
-function canonicalPublicKeyPem(publicKeyPem) {
-  try {
-    return Buffer.from(
-      createPublicKey(publicKeyPem).export({ format: "pem", type: "spki" }),
-      "utf8",
-    );
-  } catch {
-    throw new Error("Probe Trust Delegation public key is malformed");
-  }
-}
-
-function canonicalRsa4096PublicKeyPem(publicKeyPem, description) {
-  assertRsa4096PublicKey(publicKeyPem, description);
-  return canonicalPublicKeyPem(publicKeyPem);
-}
-
-function assertRsa4096PublicKey(publicKeyPem, description) {
-  let key;
-  try {
-    key = createPublicKey(publicKeyPem);
-  } catch {
-    throw new Error(`${description} is malformed`);
-  }
-  if (
-    key.asymmetricKeyType !== "rsa" ||
-    key.asymmetricKeyDetails?.modulusLength !== 4096
-  ) {
-    throw new Error(`${description} must be RSA-4096`);
-  }
-}
-
-function assertRsa4096PrivateKey(privateKey, description) {
-  if (
-    privateKey?.type !== "private" ||
-    privateKey.asymmetricKeyType !== "rsa" ||
-    privateKey.asymmetricKeyDetails?.modulusLength !== 4096
-  ) {
-    throw new Error(`${description} must be an RSA-4096 private key`);
-  }
 }
 
 export function parseCommandLine(arguments_) {
@@ -395,17 +289,27 @@ export async function packageProbeArchive({
   const archivePath = path.join(outputDir, file);
   try {
     await mkdir(outputDir, { recursive: true });
-    const stagedBinary = path.join(stagingDir, "enoki-probe");
-    await copyFile(binaryPath, stagedBinary);
-    await chmod(stagedBinary, 0o755);
-    const binarySha256 = sha256(binary);
+    for (const profile of Object.values(probeBundleComponentProfiles)) {
+      const source =
+        profile.path === "enoki-probe"
+          ? binaryPath
+          : path.join(path.dirname(binaryPath), profile.path);
+      const component = await readFile(source);
+      inspectProbeElf(component, { target, version: stableVersion });
+      const staged = path.join(stagingDir, profile.path);
+      await copyFile(source, staged);
+      await chmod(staged, 0o755);
+    }
+    const componentDetails = await readProbeBundleComponentDetails(
+      stagingDir,
+      probeBundleComponentProfiles,
+    );
     await writeFile(
       path.join(stagingDir, "bundle-manifest.json"),
       `${JSON.stringify(
         {
-          components: renderProbeBundleComponents({
-            binarySha256,
-            binarySize: binary.byteLength,
+          components: renderProbeBundleComponentsFromDetails({
+            componentDetails,
             version: stableVersion.slice(1),
           }),
           kind: "enoki-probe-bundle",
@@ -433,17 +337,138 @@ export async function packageProbeArchive({
         "--directory",
         stagingDir,
         "bundle-manifest.json",
-        "enoki-probe",
+        ...Object.values(probeBundleComponentProfiles).map(({ path }) => path),
       ],
       { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
     );
-    await inspectProbeArchive(archivePath, {
+    const archiveSize = (await stat(archivePath)).size;
+    const archive = await readProbeArchiveSnapshot(archivePath, archiveSize);
+    await inspectProbeArchiveBytes(archive.bytes, file, {
+      bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
       target,
       version: stableVersion,
     });
-    const archiveSha256 = await fileSha256(archivePath);
+    const archiveSha256 = sha256(archive.bytes);
     await writeFile(`${archivePath}.sha256`, `${archiveSha256}  ${file}\n`);
     return { archivePath, archiveSha256, file };
+  } finally {
+    await rm(stagingDir, { force: true, recursive: true });
+  }
+}
+
+// Bootstrap 的受限 producer 与普通 Probe producer 在此合成唯一公开归档。
+// Bootstrap 输入先绑定精确 size+sha256 快照，再从该私有快照提取固定角色；
+// compose 之后不存在第二个可发布 Bootstrap archive。
+async function composeProbeArchive({
+  bootstrapArchive,
+  bootstrapExpectedArchive,
+  distribution,
+  outputPath,
+  rootKeyId,
+  runtimeArchive,
+  runtimeArchiveFile,
+  sourceDateEpoch,
+  target,
+  version,
+}) {
+  await inspectProbeArchiveBytes(runtimeArchive, runtimeArchiveFile, {
+    bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
+    target,
+    version,
+  });
+  const stagingDir = await mkdtemp(
+    path.join(tmpdir(), "enoki-probe-bundle-compose-"),
+  );
+  try {
+    await withPrivateArchiveSnapshot(runtimeArchive, async (archivePath) => {
+      await execFileAsync(
+        "tar",
+        [
+          "--extract",
+          "--gzip",
+          "--file",
+          archivePath,
+          "--directory",
+          stagingDir,
+          "--no-same-owner",
+        ],
+        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
+      );
+    });
+    await mkdir(path.join(stagingDir, "bootstrap"), { recursive: true });
+    await withVerifiedProbeBootstrapArtifactBytes(
+      {
+        archive: bootstrapArchive,
+        distribution,
+        expectedArchive: bootstrapExpectedArchive,
+        rootKeyId,
+        target,
+        version,
+      },
+      async ({ extractedRoles }) => {
+        for (const asset of probeBundledBootstrapAssets) {
+          const destination = path.join(stagingDir, asset.archivePath);
+          await copyFile(extractedRoles[asset.key].binaryPath, destination);
+          await chmod(destination, 0o755);
+        }
+      },
+    );
+    const componentDetails = await readProbeBundleComponentDetails(
+      stagingDir,
+      probeBundleComponentProfiles,
+    );
+    const bootstrapDetails = await readProbeBundleComponentDetails(
+      stagingDir,
+      Object.fromEntries(
+        probeBundledBootstrapAssets.map((asset) => [
+          asset.role,
+          { path: asset.archivePath },
+        ]),
+      ),
+    );
+    await writeFile(
+      path.join(stagingDir, "bundle-manifest.json"),
+      `${JSON.stringify(
+        {
+          bootstrapAssets: renderBundledBootstrapAssets({
+            componentDetails: bootstrapDetails,
+            version: version.slice(1),
+          }),
+          components: renderProbeBundleComponentsFromDetails({
+            componentDetails,
+            version: version.slice(1),
+          }),
+          kind: "enoki-probe-bundle",
+          target,
+          version: version.slice(1),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await mkdir(path.dirname(outputPath), { recursive: true });
+    await execFileAsync(
+      "tar",
+      [
+        "--create",
+        "--gzip",
+        "--sort=name",
+        "--owner=0",
+        "--group=0",
+        "--numeric-owner",
+        "--blocking-factor=1",
+        `--mtime=@${sourceDateEpoch}`,
+        "--format=gnu",
+        "--file",
+        outputPath,
+        "--directory",
+        stagingDir,
+        "bundle-manifest.json",
+        ...Object.values(probeBundleComponentProfiles).map(({ path }) => path),
+        ...probeBundledBootstrapAssets.map(({ archivePath }) => archivePath),
+      ],
+      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
+    );
   } finally {
     await rm(stagingDir, { force: true, recursive: true });
   }
@@ -497,6 +522,7 @@ export async function assertCheckedOutCommit(sourceDir, expectedCommit) {
 
 export async function prepareProbeAssetSet({
   archivesDir,
+  bootstrapArchivesDir,
   delegationSignature,
   delegationBytes,
   distribution,
@@ -510,6 +536,7 @@ export async function prepareProbeAssetSet({
   try {
     await prepareUnsignedProbeAssetSet({
       archivesDir,
+      bootstrapArchivesDir,
       delegationSignature,
       delegationBytes,
       distribution,
@@ -533,6 +560,7 @@ export async function prepareProbeAssetSet({
 
 export async function prepareUnsignedProbeAssetSet({
   archivesDir,
+  bootstrapArchivesDir,
   delegationSignature,
   delegationBytes,
   distribution,
@@ -569,10 +597,36 @@ export async function prepareUnsignedProbeAssetSet({
     "Probe build artifact directory",
   );
 
+  if (!bootstrapArchivesDir) {
+    throw new Error("Probe Bootstrap build artifact directory is required");
+  }
+  const expectedBootstrapInputs = probeBootstrapTargets
+    .flatMap((target) => {
+      const archive = `enoki-probe-bootstrap-${target}.tar.gz`;
+      return [archive, `${archive}.sha256`];
+    })
+    .sort();
+  assertSameFileNames(
+    (await readdir(bootstrapArchivesDir)).sort(),
+    expectedBootstrapInputs,
+    "Probe Bootstrap build artifact directory",
+  );
+
+  const rootPublicKey = canonicalPublicKeyPem(rootPublicKeyPem);
+  const rootKeyId = sha256(rootPublicKey);
+  const bundledArchivesDir = await mkdtemp(
+    path.join(tmpdir(), "enoki-probe-bundled-archives-"),
+  );
+
   const assets = [];
   for (const target of probeTargets) {
     const file = `enoki-probe-${target}.tar.gz`;
-    const archive = await readFile(path.join(archivesDir, file));
+    const runtimeArchivePath = path.join(archivesDir, file);
+    const runtimeExpectedSize = (await stat(runtimeArchivePath)).size;
+    const { bytes: archive } = await readProbeArchiveSnapshot(
+      runtimeArchivePath,
+      runtimeExpectedSize,
+    );
     const archiveSha256 = sha256(archive);
     const checksum = await readFile(
       path.join(archivesDir, `${file}.sha256`),
@@ -581,9 +635,54 @@ export async function prepareUnsignedProbeAssetSet({
     if (checksum !== `${archiveSha256}  ${file}\n`) {
       throw new Error(`Probe checksum sidecar does not match ${file}`);
     }
-    const inspectedArchive = await inspectProbeArchive(
-      path.join(archivesDir, file),
+    const bootstrapFile = `enoki-probe-bootstrap-${target}.tar.gz`;
+    const bootstrapArchivePath = path.join(bootstrapArchivesDir, bootstrapFile);
+    const bootstrapExpectedSize = (await stat(bootstrapArchivePath)).size;
+    const { bytes: bootstrapArchive } = await readRegularFileSnapshot(
+      bootstrapArchivePath,
+      "Probe Bootstrap archive",
       {
+        expectedSize: bootstrapExpectedSize,
+        maximumSize: probeBootstrapArchiveMaximumBytes,
+      },
+    );
+    const bootstrapChecksum = await readFile(
+      `${bootstrapArchivePath}.sha256`,
+      "utf8",
+    );
+    const bootstrapSha256 = sha256(bootstrapArchive);
+    if (bootstrapChecksum !== `${bootstrapSha256}  ${bootstrapFile}\n`) {
+      throw new Error(
+        `Probe Bootstrap checksum sidecar does not match ${bootstrapFile}`,
+      );
+    }
+    const bundledArchivePath = path.join(bundledArchivesDir, file);
+    await composeProbeArchive({
+      bootstrapArchive,
+      bootstrapExpectedArchive: {
+        sha256: bootstrapSha256,
+        size: bootstrapArchive.byteLength,
+      },
+      distribution,
+      outputPath: bundledArchivePath,
+      rootKeyId,
+      runtimeArchive: archive,
+      runtimeArchiveFile: file,
+      sourceDateEpoch: "0",
+      target,
+      version: stableVersion,
+    });
+    const bundledArchive = await readFile(bundledArchivePath);
+    const bundledArchiveSha256 = sha256(bundledArchive);
+    await writeFile(
+      `${bundledArchivePath}.sha256`,
+      `${bundledArchiveSha256}  ${file}\n`,
+    );
+    const inspectedArchive = await inspectProbeArchiveBytes(
+      bundledArchive,
+      file,
+      {
+        bundledBootstrap: { distribution, rootKeyId },
         target,
         version: stableVersion,
       },
@@ -591,8 +690,8 @@ export async function prepareUnsignedProbeAssetSet({
     assets.push({
       bundleManifestSha256: inspectedArchive.bundleManifestSha256,
       file,
-      sha256: archiveSha256,
-      size: archive.byteLength,
+      sha256: bundledArchiveSha256,
+      size: bundledArchive.byteLength,
       target,
     });
   }
@@ -607,10 +706,6 @@ export async function prepareUnsignedProbeAssetSet({
       "Probe asset signing identity is not authorized by the Probe Trust Delegation",
     );
   }
-  const rootPublicKey = canonicalRsa4096PublicKeyPem(
-    rootPublicKeyPem,
-    "Probe Distribution Trust Root public key",
-  );
   const manifest = `${JSON.stringify(
     {
       assets,
@@ -633,7 +728,10 @@ export async function prepareUnsignedProbeAssetSet({
   try {
     await mkdir(stagingDir, { recursive: false });
     for (const file of expectedInputs) {
-      await copyFile(path.join(archivesDir, file), path.join(stagingDir, file));
+      await copyFile(
+        path.join(bundledArchivesDir, file),
+        path.join(stagingDir, file),
+      );
     }
     await writeFile(path.join(stagingDir, "manifest.json"), manifestBytes);
     await writeFile(path.join(stagingDir, "root-key.pem"), rootPublicKey);
@@ -650,6 +748,8 @@ export async function prepareUnsignedProbeAssetSet({
   } catch (error) {
     await rm(stagingDir, { force: true, recursive: true });
     throw error;
+  } finally {
+    await rm(bundledArchivesDir, { force: true, recursive: true });
   }
 
   return { outputDir, publicKeySha256, version: stableVersion };
@@ -693,7 +793,11 @@ export async function signProbeAssetSet({
   const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
 
   try {
-    await cp(unsignedAssetDir, stagingDir, { recursive: true });
+    await materializeVerifiedProbeAssetSet({
+      inspected,
+      outputDir: stagingDir,
+      sourceDir: unsignedAssetDir,
+    });
     await writeFile(path.join(stagingDir, "manifest.json.sig"), signature);
     await inspectProbeAssetSet(stagingDir, {
       expectedDelegationBytes,
@@ -715,7 +819,6 @@ export async function signProbeAssetSet({
 }
 
 export async function assembleReleaseCandidate({
-  bootstrapArtifactDir,
   commit,
   hubOciPath,
   outputDir,
@@ -731,17 +834,6 @@ export async function assembleReleaseCandidate({
     expectedVersion: version.slice(1),
     trustedRootPublicKeyPem,
   });
-  const rootKeyId = sha256(
-    canonicalRsa4096PublicKeyPem(
-      trustedRootPublicKeyPem,
-      "Probe Distribution Trust Root public key",
-    ),
-  );
-  const bootstrap = await inspectProbeBootstrapArtifacts(bootstrapArtifactDir, {
-    distribution: "enoki",
-    rootKeyId,
-    version,
-  });
   const hubOci = await inspectHubOciArchive({
     archivePath: hubOciPath,
     probeFiles: probeAssetSet.files,
@@ -755,6 +847,23 @@ export async function assembleReleaseCandidate({
       trustedRootPublicKeyPem,
     },
   );
+  const baselineProbeClosure =
+    releaseBaseline.kind === "enoki-release-baseline"
+      ? await inspectHistoricalProbeAssetSet(
+          path.join(releaseBaselineDir, "probe-assets"),
+          {
+            expectedVersion: releaseBaseline.probeAssetSet.version,
+            requireEmbeddedProbeIdentity: false,
+            trustedRootPublicKeyPem,
+          },
+        )
+      : null;
+  assertMigrationCandidateJoin({
+    baselineProbeClosure,
+    identity,
+    releaseBaseline,
+    releaseTransition: probeAssetSet.releaseTransition ?? null,
+  });
   const hubArchiveFile = `enoki-hub-${version}.oci.tar`;
   const hubArchive = {
     archive: `hub/${hubArchiveFile}`,
@@ -763,17 +872,31 @@ export async function assembleReleaseCandidate({
     embeddedProbeVersion: probeAssetSet.version,
     size: (await stat(hubOciPath)).size,
   };
-  const manifest = {
-    bootstrap: {
-      directory: "probe-bootstrap",
-      distribution: "enoki",
-      files: bootstrap.files,
-      rootKeyId,
-      version: version.slice(1),
-    },
+  const { recipeBytes, record, recordBytes } =
+    await createProbeBootstrapPublication({
+      bundleVersion: version.slice(1),
+      sourceDir,
+      trustedRootPublicKeyPem,
+    });
+  const bootstrapRecipe = {
+    bundleVersion: record.bundleVersion,
+    distribution: record.distribution,
+    file: bootstrapRecipeFile,
+    kind: record.kind,
+    recordFile: bootstrapRecipeRecordFile,
+    recordSha256: sha256(recordBytes),
+    recordSize: recordBytes.byteLength,
+    rootFingerprint: record.rootFingerprint,
+    schemaVersion: record.schemaVersion,
+    sha256: sha256(recipeBytes),
+    size: recipeBytes.byteLength,
+    targets: record.targets,
+    version: "v1",
+  };
+  const manifest = createReleaseCandidateManifest({
+    bootstrapRecipe,
     candidate: identity,
     hub: hubArchive,
-    kind: "enoki-release-candidate",
     probeAssetSet: {
       directory: "probe-assets",
       files: probeAssetSet.files,
@@ -781,26 +904,30 @@ export async function assembleReleaseCandidate({
       version: probeAssetSet.version,
     },
     releaseBaseline,
-    schemaVersion: 3,
-  };
+  });
   const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
 
   try {
     await mkdir(path.join(stagingDir, "hub"), { recursive: true });
-    await mkdir(path.join(stagingDir, "probe-bootstrap"), { recursive: true });
-    await cp(probeAssetSetDir, path.join(stagingDir, "probe-assets"), {
-      recursive: true,
+    await mkdir(path.join(stagingDir, "recipe"), { recursive: true });
+    await materializeVerifiedProbeAssetSet({
+      inspected: probeAssetSet,
+      outputDir: path.join(stagingDir, "probe-assets"),
+      sourceDir: probeAssetSetDir,
     });
-    for (const { file } of bootstrap.files) {
-      await copyFile(
-        path.join(bootstrapArtifactDir, file),
-        path.join(stagingDir, "probe-bootstrap", file),
-      );
-    }
     await cp(releaseBaselineDir, path.join(stagingDir, "release-baseline"), {
       recursive: true,
     });
     await copyFile(hubOciPath, path.join(stagingDir, "hub", hubArchiveFile));
+    await writeFile(
+      path.join(stagingDir, "recipe", bootstrapRecipeFile),
+      recipeBytes,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      path.join(stagingDir, "recipe", bootstrapRecipeRecordFile),
+      recordBytes,
+    );
     await writeFile(
       path.join(stagingDir, "candidate-manifest.json"),
       `${JSON.stringify(manifest, null, 2)}\n`,
@@ -851,7 +978,7 @@ export async function validateReleaseCandidate(
   );
   const identity = validateCandidateIdentity(manifest.candidate);
   assertExactKeys(manifest, [
-    "bootstrap",
+    "bootstrapRecipe",
     "candidate",
     "hub",
     "kind",
@@ -861,7 +988,7 @@ export async function validateReleaseCandidate(
   ]);
   assertExactKeys(manifest.candidate, ["commit", "version"]);
   if (
-    manifest.schemaVersion !== 3 ||
+    manifest.schemaVersion !== 4 ||
     manifest.kind !== "enoki-release-candidate"
   ) {
     throw new Error("Candidate Manifest schema or kind is unsupported");
@@ -871,8 +998,8 @@ export async function validateReleaseCandidate(
   const expectedCandidateFiles = [
     "candidate-manifest.json",
     "hub",
-    "probe-bootstrap",
     "probe-assets",
+    "recipe",
     "release-baseline",
   ];
   if (
@@ -907,47 +1034,101 @@ export async function validateReleaseCandidate(
     "Enoki Release Candidate directory",
   );
 
-  const bootstrap = manifest.bootstrap;
-  assertPlainObject(bootstrap, "Candidate Manifest Probe Bootstrap");
-  assertExactKeys(bootstrap, [
-    "directory",
+  const bootstrapRecipe = manifest.bootstrapRecipe;
+  assertPlainObject(
+    bootstrapRecipe,
+    "Candidate Manifest Probe Bootstrap recipe",
+  );
+  assertExactKeys(bootstrapRecipe, [
+    "bundleVersion",
     "distribution",
-    "files",
-    "rootKeyId",
+    "file",
+    "kind",
+    "recordFile",
+    "recordSha256",
+    "recordSize",
+    "rootFingerprint",
+    "schemaVersion",
+    "sha256",
+    "size",
+    "targets",
     "version",
   ]);
   if (
-    bootstrap.directory !== "probe-bootstrap" ||
-    bootstrap.distribution !== "enoki" ||
-    bootstrap.version !== identity.version.slice(1) ||
-    !/^[0-9a-f]{64}$/.test(bootstrap.rootKeyId)
+    bootstrapRecipe.bundleVersion !== identity.version.slice(1) ||
+    bootstrapRecipe.distribution !== "enoki" ||
+    bootstrapRecipe.file !== bootstrapRecipeFile ||
+    bootstrapRecipe.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    bootstrapRecipe.recordFile !== bootstrapRecipeRecordFile ||
+    !/^[0-9a-f]{64}$/.test(bootstrapRecipe.recordSha256 ?? "") ||
+    !Number.isSafeInteger(bootstrapRecipe.recordSize) ||
+    bootstrapRecipe.recordSize < 1 ||
+    bootstrapRecipe.schemaVersion !== 1 ||
+    JSON.stringify(bootstrapRecipe.targets) !== JSON.stringify(probeTargets) ||
+    bootstrapRecipe.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(bootstrapRecipe.rootFingerprint ?? "") ||
+    !/^[0-9a-f]{64}$/.test(bootstrapRecipe.sha256 ?? "") ||
+    !Number.isSafeInteger(bootstrapRecipe.size) ||
+    bootstrapRecipe.size < 1
   ) {
-    throw new Error("Candidate Manifest Probe Bootstrap is malformed");
+    throw new Error("Candidate Manifest Probe Bootstrap recipe is invalid");
   }
-  const expectedRootKeyId = sha256(
-    canonicalRsa4096PublicKeyPem(
-      trustedRootPublicKeyPem,
-      "Probe Distribution Trust Root public key",
-    ),
+  const expectedRootFingerprint = sha256(
+    canonicalPublicKeyPem(trustedRootPublicKeyPem),
   );
-  if (bootstrap.rootKeyId !== expectedRootKeyId) {
-    throw new Error(
-      "Candidate Manifest Probe Bootstrap root key does not match trusted root",
-    );
+  if (bootstrapRecipe.rootFingerprint !== expectedRootFingerprint) {
+    throw new Error("Probe Bootstrap recipe root does not match trusted root");
   }
-  const inspectedBootstrap = await inspectProbeBootstrapCandidateDirectory(
-    path.join(candidateDir, bootstrap.directory),
-    {
-      distribution: bootstrap.distribution,
-      rootKeyId: bootstrap.rootKeyId,
-      version: identity.version,
+  assertSameFileNames(
+    (await readdir(path.join(candidateDir, "recipe"))).sort(),
+    [bootstrapRecipeRecordFile, bootstrapRecipeFile].sort(),
+    "Candidate Probe Bootstrap recipe directory",
+  );
+  const recipePath = path.join(candidateDir, "recipe", bootstrapRecipe.file);
+  const recipeDetails = await stat(recipePath);
+  const recipeBytes = await readFile(recipePath);
+  const recordPath = path.join(
+    candidateDir,
+    "recipe",
+    bootstrapRecipe.recordFile,
+  );
+  const recordDetails = await stat(recordPath);
+  const recordBytes = await readFile(recordPath);
+  const expectedRecord = {
+    bundleVersion: bootstrapRecipe.bundleVersion,
+    distribution: bootstrapRecipe.distribution,
+    kind: bootstrapRecipe.kind,
+    recipe: {
+      file: bootstrapRecipe.file,
+      sha256: bootstrapRecipe.sha256,
+      size: bootstrapRecipe.size,
+      version: bootstrapRecipe.version,
     },
-  );
+    rootFingerprint: bootstrapRecipe.rootFingerprint,
+    schemaVersion: bootstrapRecipe.schemaVersion,
+    targets: bootstrapRecipe.targets,
+  };
   if (
-    JSON.stringify(inspectedBootstrap.files) !== JSON.stringify(bootstrap.files)
+    !recipeDetails.isFile() ||
+    recipeDetails.size !== bootstrapRecipe.size ||
+    sha256(recipeBytes) !== bootstrapRecipe.sha256 ||
+    !recipeBytes.includes(
+      `ROOT_FINGERPRINT = "${bootstrapRecipe.rootFingerprint}"`,
+    ) ||
+    !recipeBytes.includes(
+      `BUNDLE_VERSION = "${bootstrapRecipe.bundleVersion}"`,
+    ) ||
+    !recipeBytes.includes(`DISTRIBUTION = "${bootstrapRecipe.distribution}"`) ||
+    !recipeBytes.includes(`RECIPE_VERSION = "${bootstrapRecipe.version}"`) ||
+    !recordDetails.isFile() ||
+    recordDetails.size !== bootstrapRecipe.recordSize ||
+    sha256(recordBytes) !== bootstrapRecipe.recordSha256 ||
+    !recordBytes.equals(
+      Buffer.from(`${JSON.stringify(expectedRecord, null, 2)}\n`),
+    )
   ) {
     throw new Error(
-      "Candidate Manifest Probe Bootstrap file identities do not match content",
+      "Candidate Probe Bootstrap recipe does not match its record",
     );
   }
 
@@ -966,6 +1147,23 @@ export async function validateReleaseCandidate(
     path.join(candidateDir, "probe-assets"),
     { expectedVersion: probe.version, trustedRootPublicKeyPem },
   );
+  const baselineProbeClosure =
+    releaseBaseline.kind === "enoki-release-baseline"
+      ? await inspectHistoricalProbeAssetSet(
+          path.join(candidateDir, "release-baseline", "probe-assets"),
+          {
+            expectedVersion: releaseBaseline.probeAssetSet.version,
+            requireEmbeddedProbeIdentity: false,
+            trustedRootPublicKeyPem,
+          },
+        )
+      : null;
+  assertMigrationCandidateJoin({
+    baselineProbeClosure,
+    identity,
+    releaseBaseline,
+    releaseTransition: inspectedProbe.releaseTransition ?? null,
+  });
   if (JSON.stringify(inspectedProbe.files) !== JSON.stringify(probe.files)) {
     throw new Error(
       "Candidate Manifest Probe file identities do not match content",
@@ -1022,86 +1220,30 @@ export async function validateReleaseCandidate(
     throw new Error("Candidate Hub OCI digest does not match");
   }
 
+  verifiedCandidateReleaseTransitions.set(
+    manifest,
+    inspectedProbe.releaseTransition ?? null,
+  );
   return manifest;
 }
 
-async function inspectProbeBootstrapArtifacts(
-  artifactDir,
-  { distribution, rootKeyId, version },
-) {
-  if (typeof artifactDir !== "string") {
-    throw new Error("Probe Bootstrap artifact directory is required");
-  }
-  const expectedInputs = probeBootstrapTargets
-    .flatMap((target) => {
-      const archive = `enoki-probe-bootstrap-${target}.tar.gz`;
-      return [archive, `${archive}.sha256`];
-    })
-    .sort();
-  assertSameFileNames(
-    (await readdir(artifactDir)).sort(),
-    expectedInputs,
-    "Probe Bootstrap build artifact directory",
+export async function inspectProbeAssetSet(assetDir, options = {}) {
+  return inspectProbeAssetSetWithBundleInspector(
+    assetDir,
+    options,
+    inspectProbeBundleArchiveBytes,
   );
-  const files = [];
-  for (const target of probeBootstrapTargets) {
-    const file = `enoki-probe-bootstrap-${target}.tar.gz`;
-    const archivePath = path.join(artifactDir, file);
-    const archive = await readFile(archivePath);
-    const checksum = await readFile(`${archivePath}.sha256`, "utf8");
-    const digest = sha256(archive);
-    if (checksum !== `${digest}  ${file}\n`) {
-      throw new Error(
-        `Probe Bootstrap checksum sidecar does not match ${file}`,
-      );
-    }
-    await inspectProbeBootstrapArtifact({
-      archivePath,
-      distribution,
-      rootKeyId,
-      target,
-      version,
-    });
-    files.push({ file, sha256: digest, size: archive.byteLength, target });
-  }
-  return { files };
 }
 
-async function inspectProbeBootstrapCandidateDirectory(
-  candidateDir,
-  { distribution, rootKeyId, version },
-) {
-  const expectedFiles = probeBootstrapTargets
-    .map((target) => `enoki-probe-bootstrap-${target}.tar.gz`)
-    .sort();
-  assertSameFileNames(
-    (await readdir(candidateDir)).sort(),
-    expectedFiles,
-    "Candidate Probe Bootstrap directory",
+export async function inspectHistoricalProbeAssetSet(assetDir, options = {}) {
+  return inspectProbeAssetSetWithBundleInspector(
+    assetDir,
+    options,
+    inspectHistoricalProbeBundleArchiveBytes,
   );
-  const files = [];
-  for (const target of probeBootstrapTargets) {
-    const file = `enoki-probe-bootstrap-${target}.tar.gz`;
-    const archivePath = path.join(candidateDir, file);
-    const archive = await readFile(archivePath);
-    await inspectProbeBootstrapArtifact({
-      archivePath,
-      distribution,
-      rootKeyId,
-      target,
-      version,
-    });
-    files.push({
-      file,
-      sha256: sha256(archive),
-      size: archive.byteLength,
-      target,
-    });
-  }
-  return { files };
 }
 
-export async function inspectProbeAssetSet(
+async function inspectProbeAssetSetWithBundleInspector(
   assetDir,
   {
     expectedDelegationBytes,
@@ -1113,7 +1255,38 @@ export async function inspectProbeAssetSet(
     trustedRootPublicKeySha256,
     unsigned = false,
   } = {},
+  bundleInspector,
 ) {
+  const transitionFileNames = [
+    "release-transition-contract.json",
+    "release-transition-contract.json.sig",
+  ];
+  const migrationAuthorizationFileNames = [
+    "trust-epoch-migration-authorization.json",
+    "trust-epoch-migration-authorization.json.sig",
+  ];
+  const actualFiles = (await readdir(assetDir)).sort();
+  const transitionFileCount = transitionFileNames.filter((file) =>
+    actualFiles.includes(file),
+  ).length;
+  const migrationAuthorizationFileCount =
+    migrationAuthorizationFileNames.filter((file) =>
+      actualFiles.includes(file),
+    ).length;
+  if (
+    (transitionFileCount !== 0 && transitionFileCount !== 2) ||
+    (migrationAuthorizationFileCount !== 0 &&
+      migrationAuthorizationFileCount !== 2) ||
+    (migrationAuthorizationFileCount === 2 && transitionFileCount !== 2)
+  ) {
+    throw new Error("Probe Asset Set transition closure is incomplete");
+  }
+  if (
+    unsigned &&
+    (transitionFileCount !== 0 || migrationAuthorizationFileCount !== 0)
+  ) {
+    throw new Error("Unsigned Probe Asset Set cannot declare a transition");
+  }
   const expectedFiles = [
     ...probeTargets.flatMap((target) => {
       const archive = `enoki-probe-${target}.tar.gz`;
@@ -1125,12 +1298,12 @@ export async function inspectProbeAssetSet(
     "signing-key.pem",
     "trust-delegation.json",
     "trust-delegation.json.sig",
+    ...(transitionFileCount === 2 ? transitionFileNames : []),
+    ...(migrationAuthorizationFileCount === 2
+      ? migrationAuthorizationFileNames
+      : []),
   ].sort();
-  assertSameFileNames(
-    (await readdir(assetDir)).sort(),
-    expectedFiles,
-    "Probe Asset Set",
-  );
+  assertSameFileNames(actualFiles, expectedFiles, "Probe Asset Set");
 
   const manifestBytes = await readFile(path.join(assetDir, "manifest.json"));
   let manifest;
@@ -1173,6 +1346,34 @@ export async function inspectProbeAssetSet(
     throw new Error("Probe Asset Set does not contain every supported target");
   }
 
+  const packagedRootPublicKey = canonicalPublicKeyPem(
+    await readFile(path.join(assetDir, "root-key.pem")),
+  );
+  if (
+    trustedRootPublicKeyPem !== undefined &&
+    !packagedRootPublicKey.equals(
+      canonicalPublicKeyPem(trustedRootPublicKeyPem),
+    )
+  ) {
+    throw new Error(
+      "Probe Asset Set root key does not match the trusted Probe Distribution Trust Root",
+    );
+  }
+  if (
+    trustedRootPublicKeySha256 !== undefined &&
+    sha256(packagedRootPublicKey) !== trustedRootPublicKeySha256
+  ) {
+    throw new Error(
+      "Probe Asset Set root key does not match the trusted Probe Distribution Trust Root",
+    );
+  }
+  const bundledBootstrap = {
+    distribution: "enoki",
+    rootKeyId: sha256(packagedRootPublicKey),
+  };
+  const targetProbeComponents = [];
+  const archiveSnapshots = new Map();
+
   for (let index = 0; index < probeTargets.length; index += 1) {
     const target = probeTargets[index];
     const asset = manifest.assets[index];
@@ -1191,16 +1392,28 @@ export async function inspectProbeAssetSet(
       !/^[0-9a-f]{64}$/.test(asset.bundleManifestSha256) ||
       !/^[0-9a-f]{64}$/.test(asset.sha256) ||
       !Number.isSafeInteger(asset.size) ||
-      asset.size < 0
+      asset.size < 0 ||
+      asset.size > MAX_PROBE_ARCHIVE_BYTES
     ) {
       throw new Error(`Probe Asset Set target ${target} is malformed`);
     }
     const archivePath = path.join(assetDir, asset.file);
-    const archiveDetails = await stat(archivePath);
-    if (
-      archiveDetails.size !== asset.size ||
-      (await fileSha256(archivePath)) !== asset.sha256
-    ) {
+    const archive = await readProbeArchiveSnapshot(
+      archivePath,
+      asset.size,
+    ).catch((error) => {
+      if (
+        error instanceof Error &&
+        (error.message.endsWith("size does not match") ||
+          error.message.endsWith("changed while reading"))
+      ) {
+        throw new Error(
+          `Probe Asset Set checksum does not match ${asset.file}`,
+        );
+      }
+      throw error;
+    });
+    if (sha256(archive.bytes) !== asset.sha256) {
       throw new Error(`Probe Asset Set checksum does not match ${asset.file}`);
     }
     const sidecar = await readFile(`${archivePath}.sha256`, "utf8");
@@ -1209,24 +1422,31 @@ export async function inspectProbeAssetSet(
         `Probe Asset Set checksum sidecar does not match ${asset.file}`,
       );
     }
-    const inspectedArchive = await inspectProbeArchive(archivePath, {
-      requireEmbeddedProbeIdentity,
-      target,
-      version: `v${manifest.version}`,
-    });
+    const inspectedArchive = await inspectProbeArchiveBytes(
+      archive.bytes,
+      asset.file,
+      {
+        bundleInspector,
+        bundledBootstrap,
+        requireEmbeddedProbeIdentity,
+        target,
+        version: `v${manifest.version}`,
+      },
+    );
     if (inspectedArchive.bundleManifestSha256 !== asset.bundleManifestSha256) {
       throw new Error(
         `Probe Asset Set bundle manifest does not match ${asset.file}`,
       );
     }
+    targetProbeComponents.push({
+      sha256: inspectedArchive.probeSha256,
+      target,
+    });
+    archiveSnapshots.set(asset.file, archive.bytes);
   }
 
   const publicKey = await readFile(path.join(assetDir, "signing-key.pem"));
-  const rootPublicKey = await readFile(path.join(assetDir, "root-key.pem"));
-  const canonicalRootPublicKey = canonicalRsa4096PublicKeyPem(
-    rootPublicKey,
-    "Probe Asset Set root public key",
-  );
+  const canonicalRootPublicKey = packagedRootPublicKey;
   if (
     trustedRootPublicKeyPem === undefined &&
     trustedRootPublicKeySha256 === undefined
@@ -1236,10 +1456,7 @@ export async function inspectProbeAssetSet(
     );
   }
   const trustedRootPublicKey = trustedRootPublicKeyPem
-    ? canonicalRsa4096PublicKeyPem(
-        trustedRootPublicKeyPem,
-        "Probe Distribution Trust Root public key",
-      )
+    ? canonicalPublicKeyPem(trustedRootPublicKeyPem)
     : undefined;
   if (
     trustedRootPublicKey !== undefined &&
@@ -1324,19 +1541,90 @@ export async function inspectProbeAssetSet(
       throw new Error("Probe Asset Set manifest signature is invalid");
     }
   }
+  let releaseTransition = null;
+  if (transitionFileCount === 2) {
+    const contractBytes = await readFile(
+      path.join(assetDir, "release-transition-contract.json"),
+    );
+    let contract;
+    try {
+      contract = JSON.parse(contractBytes.toString("utf8"));
+    } catch {
+      throw new Error("Release Transition Contract is malformed");
+    }
+    releaseTransition = verifyReleaseTransitionContract({
+      ...(migrationAuthorizationFileCount === 2
+        ? {
+            authorizationBytes: await readFile(
+              path.join(assetDir, "trust-epoch-migration-authorization.json"),
+            ),
+            authorizationSignature: await readFile(
+              path.join(
+                assetDir,
+                "trust-epoch-migration-authorization.json.sig",
+              ),
+            ),
+          }
+        : {}),
+      contractBytes,
+      contractSignature: await readFile(
+        path.join(assetDir, "release-transition-contract.json.sig"),
+      ),
+      expected: {
+        classification: contract.transition,
+        delegationGeneration: manifest.signature.delegationGeneration,
+        sourceCommit: contract.source?.commit,
+        sourceTag: contract.source?.tag,
+        sourceVersion: contract.source?.version,
+        targetAssetClosure: manifest.assets,
+        targetAssetSetManifestSha256: sha256(manifestBytes),
+        targetVersion: manifest.version,
+      },
+      rootPublicKeyPem: trustedRootPublicKey ?? canonicalRootPublicKey,
+    });
+    if (
+      !Array.isArray(releaseTransition.target?.probeComponents) ||
+      releaseTransition.target.probeComponents.length !==
+        targetProbeComponents.length ||
+      releaseTransition.target.probeComponents.some(
+        (component, index) =>
+          component?.file !== "enoki-probe" ||
+          component?.role !== "probe" ||
+          component?.target !== targetProbeComponents[index]?.target ||
+          component?.sha256 !== targetProbeComponents[index]?.sha256,
+      )
+    ) {
+      throw new Error(
+        "Release Transition Contract target Probe closure does not match verified bundles",
+      );
+    }
+  }
   const publicKeySha256 = sha256(publicKey);
   const files = [];
   for (const file of expectedFiles) {
     const filePath = path.join(assetDir, file);
-    const details = await stat(filePath);
+    const archive = archiveSnapshots.get(file);
+    const details = archive
+      ? { size: archive.byteLength }
+      : await stat(filePath);
     files.push({
       file,
-      sha256: await fileSha256(filePath),
+      sha256: archive ? sha256(archive) : await fileSha256(filePath),
       size: details.size,
     });
   }
-  return {
+  const result = {
+    assetSetManifestSha256: sha256(manifestBytes),
     files,
+    ...(releaseTransition ? { releaseTransition } : {}),
+    probeComponents: targetProbeComponents.map(
+      ({ sha256: digest, target }) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: digest,
+        target,
+      }),
+    ),
     signingIdentity: {
       algorithm: "rsa-sha256",
       publicKeyFile: "signing-key.pem",
@@ -1344,105 +1632,110 @@ export async function inspectProbeAssetSet(
     },
     version: manifest.version,
   };
+  verifiedProbeAssetSetArchiveSnapshots.set(result, archiveSnapshots);
+  return result;
 }
 
 function assertSigningPublicKey(publicKeyPem) {
-  assertRsa4096PublicKey(publicKeyPem, "Probe asset signing public key");
+  try {
+    createPublicKey(publicKeyPem);
+  } catch {
+    throw new Error("Probe asset signing public key is malformed");
+  }
 }
 
-async function inspectProbeArchive(
-  archivePath,
-  { requireEmbeddedProbeIdentity = true, target, version },
-) {
-  const extractionDir = await mkdtemp(
-    path.join(tmpdir(), "enoki-probe-archive-"),
-  );
-
+async function readProbeArchiveSnapshot(archivePath, expectedSize) {
   try {
-    let listing;
-    try {
-      ({ stdout: listing } = await execFileAsync(
-        "tar",
-        ["--list", "--gzip", "--file", archivePath],
-        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-      ));
-    } catch {
+    return await readRegularFileSnapshot(archivePath, "Probe archive", {
+      expectedSize,
+      maximumSize: MAX_PROBE_ARCHIVE_BYTES,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("must be a regular")) {
       throw new Error(
-        `Probe archive ${path.basename(archivePath)} is not a valid gzip/tar archive`,
+        `Probe archive ${path.basename(archivePath)} must be a regular single-link file`,
       );
     }
-    const expectedListing = [
-      "bundle-manifest.json",
-      ...Object.values(probeBundleComponentProfiles).map(
-        ({ path: componentPath }) => componentPath,
-      ),
-    ]
-      .sort()
-      .join("\n");
-    if (listing !== `${expectedListing}\n`) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} must contain exactly its bundle manifest and enoki-probe payload`,
-      );
-    }
+    throw error;
+  }
+}
 
-    try {
-      await execFileAsync(
-        "tar",
-        [
-          "--extract",
-          "--gzip",
-          "--file",
-          archivePath,
-          "--directory",
-          extractionDir,
-          "--no-same-owner",
-        ],
-        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-      );
-    } catch {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} is not a valid gzip/tar archive`,
-      );
-    }
+async function withPrivateArchiveSnapshot(archive, callback) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(tmpdir(), "enoki-probe-runtime-snapshot-"),
+  );
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    const archivePath = path.join(temporaryDirectory, "probe-runtime.tar.gz");
+    await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 });
+    return await callback(archivePath);
+  } finally {
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
+}
 
-    const binaryPath = path.join(extractionDir, "enoki-probe");
-    const details = await lstat(binaryPath);
-    if (!details.isFile()) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} payload must be a regular file`,
-      );
+async function materializeVerifiedProbeAssetSet({
+  inspected,
+  outputDir,
+  sourceDir,
+}) {
+  const archiveSnapshots = verifiedProbeAssetSetArchiveSnapshots.get(inspected);
+  if (!archiveSnapshots) {
+    throw new Error("Probe Asset Set has not passed archive verification");
+  }
+  await mkdir(outputDir, { recursive: false });
+  for (const { file } of inspected.files) {
+    const archive = archiveSnapshots.get(file);
+    if (archive) {
+      await writeFile(path.join(outputDir, file), archive, {
+        flag: "wx",
+        mode: 0o644,
+      });
+    } else {
+      await copyFile(path.join(sourceDir, file), path.join(outputDir, file));
     }
-    if ((details.mode & 0o111) === 0) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} payload must be executable`,
-      );
-    }
+  }
+}
 
-    const manifestPath = path.join(extractionDir, "bundle-manifest.json");
-    const manifestDetails = await lstat(manifestPath);
-    if (!manifestDetails.isFile()) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} bundle manifest must be a regular file`,
-      );
-    }
-    inspectProbeElf(await readFile(binaryPath), {
+async function inspectProbeArchiveBytes(
+  archiveBytes,
+  archive,
+  {
+    bundleInspector = inspectProbeBundleArchiveBytes,
+    bundledBootstrap,
+    requireEmbeddedProbeIdentity = true,
+    target,
+    version,
+  },
+) {
+  try {
+    return await bundleInspector(archiveBytes, {
+      bundledBootstrap,
       requireEmbeddedProbeIdentity,
       target,
       version,
     });
-    const componentDetails = await readProbeBundleComponentDetails(
-      extractionDir,
-      probeBundleComponentProfiles,
-    );
-    const bundleManifest = await readFile(manifestPath);
-    validateProbeBundleManifest(bundleManifest, {
-      componentDetails,
-      target,
-      version: version.slice(1),
-    });
-    return { bundleManifestSha256: sha256(bundleManifest) };
-  } finally {
-    await rm(extractionDir, { force: true, recursive: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "Probe bundle archive is invalid") {
+      throw new Error(
+        `Probe archive ${archive} is not a valid gzip/tar archive`,
+      );
+    }
+    if (message === "Probe bundle archive closure is invalid") {
+      throw new Error(
+        `Probe archive ${archive} must contain exactly its bundle manifest and enoki-probe payload`,
+      );
+    }
+    if (message === "Probe bundle manifest is invalid") {
+      throw new Error(
+        `Probe archive ${archive} bundle manifest must be a regular file`,
+      );
+    }
+    if (message === "Probe bundle component is invalid") {
+      throw new Error(`Probe archive ${archive} payload must be executable`);
+    }
+    throw error;
   }
 }
 
@@ -1462,163 +1755,29 @@ async function readProbeBundleComponentDetails(extractionDir, profiles) {
   return detailsByPath;
 }
 
-function validateProbeBundleManifest(
-  bytes,
-  { componentDetails, target, version },
-) {
-  let manifest;
-  try {
-    manifest = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new Error("Probe bundle manifest is malformed");
-  }
-  assertPlainObject(manifest, "Probe bundle manifest");
-  assertExactKeys(manifest, ["components", "kind", "target", "version"]);
-  if (
-    manifest.kind !== "enoki-probe-bundle" ||
-    manifest.target !== target ||
-    manifest.version !== version ||
-    !Array.isArray(manifest.components) ||
-    manifest.components.length !==
-      Object.keys(probeBundleComponentProfiles).length
-  ) {
-    throw new Error("Probe bundle manifest is incoherent");
-  }
-  const expectedRoles = Object.keys(probeBundleComponentProfiles);
-  const byRole = new Map();
-  for (const component of manifest.components) {
-    assertPlainObject(component, "Probe bundle component");
-    assertExactKeys(component, [
-      "path",
-      "permissionProfile",
-      "role",
-      "sha256",
-      "size",
-      "version",
-    ]);
-    if (typeof component.role !== "string" || byRole.has(component.role)) {
-      throw new Error("Probe bundle component is incoherent");
-    }
-    byRole.set(component.role, component);
-  }
-  for (const role of expectedRoles) {
-    const component = byRole.get(role);
-    const profile = probeBundleComponentProfiles[role];
-    if (
-      !component ||
-      component.path !== profile.path ||
-      component.permissionProfile !== profile.permissionProfile ||
-      component.sha256 !== componentDetails.get(profile.path)?.sha256 ||
-      !Number.isSafeInteger(component.size) ||
-      component.size <= 0 ||
-      component.size !== componentDetails.get(profile.path)?.size ||
-      component.version !== version
-    ) {
-      throw new Error("Probe bundle component is incoherent");
-    }
-  }
-}
-
-function renderProbeBundleComponents({ binarySha256, binarySize, version }) {
+function renderProbeBundleComponentsFromDetails({ componentDetails, version }) {
   return Object.entries(probeBundleComponentProfiles).map(
     ([role, profile]) => ({
       ...profile,
       role,
-      sha256: binarySha256,
-      size: binarySize,
+      sha256: componentDetails.get(profile.path).sha256,
+      size: componentDetails.get(profile.path).size,
       version,
     }),
   );
 }
 
-function inspectProbeElf(
-  binary,
-  { requireEmbeddedProbeIdentity = true, target, version },
-) {
-  const archiveTarget = `enoki-probe-${target}.tar.gz`;
-  if (
-    binary.length < 64 ||
-    !binary.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) ||
-    binary[4] !== 2 ||
-    binary[5] !== 1
-  ) {
-    throw new Error(
-      `${archiveTarget} payload must be a 64-bit little-endian ELF`,
-    );
-  }
-
-  const expectedMachine = target.startsWith("x86_64-") ? 62 : 183;
-  if (binary.readUInt16LE(18) !== expectedMachine) {
-    throw new Error(
-      `${archiveTarget} ELF architecture does not match ${target}`,
-    );
-  }
-
-  const contents = binary.toString("latin1");
-  if (
-    requireEmbeddedProbeIdentity &&
-    !contents.includes(`ENOKI_PROBE_TARGET=${target}\0`)
-  ) {
-    throw new Error(
-      `${archiveTarget} embedded target does not match ${target}`,
-    );
-  }
-  if (
-    requireEmbeddedProbeIdentity &&
-    !contents.includes(`ENOKI_PROBE_VERSION=${version}\0`)
-  ) {
-    throw new Error(
-      `${archiveTarget} embedded Probe version does not match ${version}`,
-    );
-  }
-
-  const interpreter = elfInterpreter(binary);
-  const expectedLoader = dynamicLoaderByProbeTarget[target];
-  const staticMuslBinary = target.endsWith("-musl") && !interpreter;
-  if (!staticMuslBinary && interpreter !== expectedLoader) {
-    throw new Error(`${archiveTarget} ELF ABI does not match ${target}`);
-  }
-}
-
-function elfInterpreter(binary) {
-  const programHeaderOffset = Number(binary.readBigUInt64LE(32));
-  const programHeaderSize = binary.readUInt16LE(54);
-  const programHeaderCount = binary.readUInt16LE(56);
-  if (
-    !Number.isSafeInteger(programHeaderOffset) ||
-    programHeaderSize < 56 ||
-    programHeaderOffset + programHeaderSize * programHeaderCount > binary.length
-  ) {
-    throw new Error("Probe ELF program headers are malformed");
-  }
-
-  for (let index = 0; index < programHeaderCount; index += 1) {
-    const offset = programHeaderOffset + index * programHeaderSize;
-    if (binary.readUInt32LE(offset) !== 3) {
-      continue;
-    }
-    const stringOffset = Number(binary.readBigUInt64LE(offset + 8));
-    const stringSize = Number(binary.readBigUInt64LE(offset + 32));
-    if (
-      !Number.isSafeInteger(stringOffset) ||
-      !Number.isSafeInteger(stringSize) ||
-      stringSize < 2 ||
-      stringOffset + stringSize > binary.length
-    ) {
-      throw new Error("Probe ELF interpreter is malformed");
-    }
-    const interpreter = binary
-      .subarray(stringOffset, stringOffset + stringSize)
-      .toString("utf8");
-    if (
-      !interpreter.endsWith("\0") ||
-      interpreter.slice(0, -1).includes("\0")
-    ) {
-      throw new Error("Probe ELF interpreter is malformed");
-    }
-    return interpreter.slice(0, -1);
-  }
-  return undefined;
+function renderBundledBootstrapAssets({ componentDetails, version }) {
+  return probeBundledBootstrapAssets.map(
+    ({ archivePath, permissionProfile, role }) => ({
+      path: archivePath,
+      permissionProfile,
+      role,
+      sha256: componentDetails.get(archivePath).sha256,
+      size: componentDetails.get(archivePath).size,
+      version,
+    }),
+  );
 }
 
 function untrustedToolEnvironment() {
@@ -1645,7 +1804,12 @@ function assertSigningKeyPair(privateKeyPem, publicKeyPem) {
   } catch {
     throw new Error("Probe asset signing key material is malformed");
   }
-  assertRsa4096PrivateKey(privateKey, "Probe asset signing key");
+  if (
+    privateKey.asymmetricKeyType !== "rsa" ||
+    privateKey.asymmetricKeyDetails?.modulusLength !== 4096
+  ) {
+    throw new Error("Probe asset signing key must be an RSA-4096 private key");
+  }
 
   if (!derivedPublicKey.equals(declaredPublicKey)) {
     throw new Error(

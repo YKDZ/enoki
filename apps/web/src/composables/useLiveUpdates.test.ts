@@ -28,6 +28,7 @@ const existingHost: HostSummary = {
     mode: "inherit",
     version: "default-v1",
   },
+  probeUpgradeProblem: null,
   probeVersion: "0.1.0",
   status: "offline",
   system: "linux",
@@ -87,6 +88,7 @@ describe("live Host summaries", () => {
       id: 2,
       lastSeenAtMs: 1_725_000_010_000,
       latestMetrics: null,
+      probeUpgradeProblem: null,
       status: "online",
       warningFlags: {
         clockSkew: false,
@@ -124,6 +126,7 @@ describe("live Host summaries", () => {
       id: 1,
       lastSeenAtMs: 1_725_000_010_000,
       latestMetrics: null,
+      probeUpgradeProblem: null,
       status: "online",
       warningFlags: {
         clockSkew: false,
@@ -138,6 +141,33 @@ describe("live Host summaries", () => {
           status: 6,
         },
       },
+    });
+    expect(result.needsReload).toBe(false);
+  });
+
+  it("replaces the overview Probe Upgrade problem from the authoritative live summary", () => {
+    const result = applyHostLiveSummary(
+      [
+        {
+          ...existingHost,
+          probeUpgradeProblem: { status: "in_progress" },
+        } as HostSummary,
+      ],
+      {
+        id: 1,
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: null,
+        probeUpgradeProblem: { status: "failed" },
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+    );
+
+    expect(result.hosts[0]?.probeUpgradeProblem).toEqual({
+      status: "failed",
     });
     expect(result.needsReload).toBe(false);
   });
@@ -245,6 +275,7 @@ describe("live Host summaries", () => {
           receivedAtMs: 1_725_000_005_500,
           uptimeSeconds: 10_005,
         },
+        probeUpgradeProblem: null,
         status: "online",
         warningFlags: {
           clockSkew: false,
@@ -295,6 +326,7 @@ describe("live Host summaries", () => {
           id: 2,
           lastSeenAtMs: 1_725_000_010_000,
           latestMetrics: null,
+          probeUpgradeProblem: null,
           status: "online",
           warningFlags: {
             clockSkew: false,
@@ -307,6 +339,61 @@ describe("live Host summaries", () => {
 
     expect(reloadCount).toBe(1);
     expect(hosts.value.map((host) => host.id)).toEqual([1, 2]);
+  });
+
+  it("reloads an open Host detail once when its failed Probe Upgrade problem recovers", async () => {
+    const hosts = ref<HostSummary[]>([
+      {
+        ...existingHost,
+        probeUpgradeProblem: { status: "failed" },
+      },
+    ]);
+    let detailReloadCount = 0;
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {},
+      async recoverDetail() {
+        detailReloadCount += 1;
+      },
+    });
+    liveUpdates.subscribeHostDetail(existingHost.id);
+    const recoveredSummary = JSON.stringify({
+      host: {
+        id: existingHost.id,
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: null,
+        probeUpgradeProblem: null,
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+      type: "host_summary",
+    });
+
+    await liveUpdates.handleLiveUpdate(recoveredSummary);
+    await liveUpdates.handleLiveUpdate(recoveredSummary);
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        host: {
+          id: 2,
+          lastSeenAtMs: 1_725_000_010_000,
+          latestMetrics: null,
+          probeUpgradeProblem: null,
+          status: "online",
+          warningFlags: {
+            clockSkew: false,
+            probeConfigurationError: false,
+          },
+        },
+        type: "host_summary",
+      }),
+    );
+
+    expect(detailReloadCount).toBe(1);
+    expect(hosts.value[0]?.probeUpgradeProblem).toBeNull();
   });
 
   it("passes subscribed detail samples to the detail handler", async () => {

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,15 +9,42 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
-import { permitsLegacyFullHostProfileObservation } from "../src/probe/legacy-report-compatibility";
 import {
+  createForwardTransitions,
+  type AuthenticatedForwardEvidence,
+  type ForwardTransitions,
+} from "../src/probe/forward-transitions";
+import {
+  canonicalLifecycleUpgradeAuthority,
+  deriveLifecycleAuthorityKey,
+  type LifecycleUpgradeAuthority,
+} from "../src/probe/lifecycle-authority";
+import {
+  acknowledgeProbeUpgradeRequest,
+  createProbeRepairRequest,
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
+  startProbeUpgradeRequest,
+  succeedProbeUpgradeRequestFromHostProfile,
 } from "../src/probe/operation";
-import { validateProbeOperationToken } from "../src/probe/operation-token";
+import {
+  issueProbeOperationToken,
+  validateProbeOperationToken,
+} from "../src/probe/operation-token";
+import {
+  canonicalInstalledBundleFailureEvidence,
+  canonicalProbeRepairEligibility,
+  canonicalProbeRepairEvidence,
+  signInstalledBundleFailureEvidence,
+  signProbeRepairEligibility,
+  signProbeRepairEvidence,
+  type ProbeRepairEligibility,
+} from "../src/probe/repair-authority";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import {
   createTestProbeIdentity,
   signedProbeHeaders,
+  signedJsonProbeHeaders,
   signedJsonProbeRequest,
   signedProbeRequest,
 } from "./probe-test-auth";
@@ -107,6 +134,7 @@ async function registerProbe(
   const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  expect(registration.hostId).toMatch(/^[1-9][0-9]*$/);
 
   return {
     ...registration,
@@ -222,8 +250,9 @@ function hashStableHostProfile(
 function stableHostProfile<T extends root.enoki.v1.IHostProfileSnapshot>(
   hostProfile: T,
 ): T {
+  const { probeAssetBundleVersion: _bundleVersion, ...stable } = hostProfile;
   return {
-    ...hostProfile,
+    ...stable,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
         compareProtoStrings(left.mountPoint, right.mountPoint) ||
@@ -268,68 +297,989 @@ describe("Probe report API", () => {
     );
   });
 
-  it.each([
-    {
-      expected: true,
-      name: "accepts the exact published legacy wire version",
-      reportedProbeVersion: "0.1.72",
-      storedProbeVersion: "0.1.72",
-    },
-    {
-      expected: true,
-      name: "accepts trimmed v-prefixed representations of the published legacy version",
-      reportedProbeVersion: " v0.1.72 ",
-      storedProbeVersion: "0.1.72",
-    },
-    {
-      expected: false,
-      name: "rejects a current stored Host version with a downgraded report",
-      reportedProbeVersion: "0.1.72",
-      storedProbeVersion: "0.1.73",
-    },
-    {
-      expected: false,
-      name: "rejects a missing stored Host version",
-      reportedProbeVersion: "0.1.72",
-      storedProbeVersion: undefined,
-    },
-    {
-      expected: false,
-      name: "rejects a malformed stored Host version",
-      reportedProbeVersion: "0.1.72",
-      storedProbeVersion: "legacy",
-    },
-    {
-      expected: false,
-      name: "rejects a current report version",
-      reportedProbeVersion: "0.1.73",
-      storedProbeVersion: "0.1.73",
-    },
-    {
-      expected: false,
-      name: "rejects another legacy version",
-      reportedProbeVersion: "0.1.71",
-      storedProbeVersion: "0.1.71",
-    },
-    {
-      expected: false,
-      name: "rejects prerelease versions",
-      reportedProbeVersion: "0.1.72-rc.1",
-      storedProbeVersion: "0.1.72-rc.1",
-    },
-    {
-      expected: false,
-      name: "rejects leading-zero version components",
-      reportedProbeVersion: "0.01.72",
-      storedProbeVersion: "0.01.72",
-    },
-  ])("$name", ({ expected, reportedProbeVersion, storedProbeVersion }) => {
-    expect(
-      permitsLegacyFullHostProfileObservation({
-        reportedProbeVersion,
-        storedProbeVersion,
+  it("persists one idempotent Observation Window Failure without Metrics", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-window-failure",
+        observationWindowFailure: {
+          reason:
+            root.enoki.v1.ObservationWindowFailureReason
+              .OBSERVATION_RUNTIME_UNAVAILABLE,
+        },
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
       }),
-    ).toBe(expected);
+    ).finish();
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    expect(
+      database.metrics.findObservation({
+        bootId: "boot-window-failure",
+        probeId: registration.probeId,
+        sequence: 2,
+      }),
+    ).toEqual({
+      cpuResourceCollectionOutcomeReason: null,
+      observationWindowFailureReason: 1,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select count(*) as count from report_observations where probe_id = ? and boot_id = ? and sequence = ?",
+        )
+        .get(registration.probeId, "boot-window-failure", 2),
+    ).toEqual({ count: 1 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select count(*) as count from metric_samples where boot_id = ?",
+        )
+        .get("boot-window-failure"),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
+  it("rejects unknown Observation Window Failure reasons", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-window-failure-invalid",
+        observationWindowFailure: {
+          reason: 99 as root.enoki.v1.ObservationWindowFailureReason,
+        },
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+    database.close();
+  });
+
+  it("persists one idempotent CPU resource acquisition outcome without Metrics", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-cpu-acquisition-outcome",
+        cpuResourceCollectionOutcomes: [
+          {
+            sequence: 2,
+            reason:
+              root.enoki.v1.CpuResourceCollectionOutcomeReason
+                .CPU_RESOURCE_UNAVAILABLE,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    expect(
+      database.metrics.findObservation({
+        bootId: "boot-cpu-acquisition-outcome",
+        probeId: registration.probeId,
+        sequence: 2,
+      }),
+    ).toEqual({
+      cpuResourceCollectionOutcomeReason: 1,
+      observationWindowFailureReason: null,
+    });
+    database.close();
+  });
+
+  it("binds CPU acquisition outcomes to their exact sequence and rejects unknown reasons", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const report = (reason: number) =>
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-cpu-sequence-outcome",
+          cpuResourceCollectionOutcomes: [{ sequence: 2, reason }],
+          metrics: [1, 2, 3].map((sequence) => ({
+            collectedAtMs: sequence * 1_000,
+            memoryUsedBytes: sequence,
+            sequence,
+          })),
+          probeId: registration.probeId,
+          sequenceEnd: 3,
+          sequenceStart: 1,
+        }),
+      ).finish();
+
+    for (let retry = 0; retry < 2; retry += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "/api/probe/report",
+          report(
+            root.enoki.v1.CpuResourceCollectionOutcomeReason
+              .CPU_RESOURCE_UNAVAILABLE,
+          ),
+        ),
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(
+      database.sqlite
+        .prepare(
+          "select sequence, cpu_resource_collection_outcome_reason as reason from report_observations order by sequence",
+        )
+        .all(),
+    ).toEqual([
+      { reason: null, sequence: 1 },
+      { reason: 1, sequence: 2 },
+      { reason: null, sequence: 3 },
+    ]);
+
+    const unknown = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", report(99)),
+    );
+    expect(unknown.status).toBe(400);
+    database.close();
+  });
+
+  it("persists typed collector outcomes idempotently with their exact sample", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const runtimeProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "1.2.3",
+    });
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-collector-outcomes",
+        metrics: [],
+        probeAssetBundleVersion: "1.2.3",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceStart: 1,
+        sequenceEnd: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-collector-outcomes",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            networkInterfaces: [{ name: "eth0", rxBytes: 10, txBytes: 20 }],
+            disks: [
+              {
+                mountPoint: "/",
+                filesystemType: "ext4",
+                totalBytes: 100,
+                usedBytes: 40,
+                availableBytes: 50,
+              },
+            ],
+            temperatureCelsius: 42,
+            batteryPercent: 80,
+            batteryState: "Discharging",
+            diskHealth: [
+              { deviceName: "/dev/sda", model: "Example", passed: true },
+            ],
+            collectorOutcomes: [
+              {
+                collectorId: "official.memory",
+                state: 3,
+                failure: { phase: 2, code: "official.memory.future-code" },
+              },
+              { collectorId: "official.network", state: 1 },
+              { collectorId: "official.disk", state: 1 },
+              { collectorId: "official.temperature", state: 1 },
+              { collectorId: "official.battery", state: 1 },
+              { collectorId: "official.disk-health", state: 1 },
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceStart: 2,
+        sequenceEnd: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: runtimeProfile,
+            snapshotHash: hashStableHostProfile(runtimeProfile),
+          },
+        ],
+      }),
+    ).finish();
+    for (let retry = 0; retry < 2; retry += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(
+      database.sqlite
+        .prepare(
+          "select collector_id, state, failure_phase, failure_code from metric_collector_outcomes order by collector_id",
+        )
+        .all(),
+    ).toEqual([
+      {
+        collector_id: "official.battery",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.disk",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.disk-health",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.host-profile",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.memory",
+        state: 3,
+        failure_phase: 2,
+        failure_code: "official.memory.future-code",
+      },
+      {
+        collector_id: "official.network",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.temperature",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+    ]);
+    expect(
+      database.sqlite
+        .prepare(
+          "select name, rx_bytes, tx_bytes from metric_network_interfaces",
+        )
+        .get(),
+    ).toEqual({ name: "eth0", rx_bytes: 10, tx_bytes: 20 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select mount_point, total_bytes, used_bytes from metric_disks",
+        )
+        .get(),
+    ).toEqual({ mount_point: "/", total_bytes: 100, used_bytes: 40 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select temperature_celsius, battery_percent, battery_state from official_metric_thermal_power",
+        )
+        .get(),
+    ).toEqual({
+      battery_percent: 80,
+      battery_state: "Discharging",
+      temperature_celsius: 42,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select device_name, model, passed from official_metric_disk_health",
+        )
+        .get(),
+    ).toEqual({ device_name: "/dev/sda", model: "Example", passed: 1 });
+    database.close();
+  });
+
+  it("bounds collector-owned failure codes while keeping unknown valid codes inert", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+
+    for (const [index, code] of [
+      "x",
+      "Official.memory.bad",
+      "official.cpu.wrong-owner",
+      `official.memory.${"x".repeat(81)}`,
+    ].entries()) {
+      const bootId = `boot-invalid-outcome-${index}`;
+      const boot = ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          metrics: [],
+          probeAssetBundleVersion: "1.2.3",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceStart: 1,
+          sequenceEnd: 1,
+        }),
+      ).finish();
+      expect(
+        (
+          await app.request(
+            "/api/probe/report",
+            signedProbeRequest(registration, "/api/probe/report", boot),
+          )
+        ).status,
+      ).toBe(200);
+      const malformed = ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_000,
+              collectorOutcomes: [
+                {
+                  collectorId: "official.memory",
+                  state: 3,
+                  failure: { phase: 2, code },
+                },
+              ],
+              sequence: 2,
+            },
+          ],
+          probeId: registration.probeId,
+          sequenceStart: 2,
+          sequenceEnd: 2,
+        }),
+      ).finish();
+      expect(
+        (
+          await app.request(
+            "/api/probe/report",
+            signedProbeRequest(registration, "/api/probe/report", malformed),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    database.close();
+  });
+
+  it("normalizes the frozen N-1 numeric failure slot without extending it", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-legacy-outcome",
+        metrics: [],
+        probeAssetBundleVersion: "1.2.3",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceStart: 1,
+        sequenceEnd: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+    const legacy = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-legacy-outcome",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            collectorOutcomes: [
+              {
+                collectorId: "official.memory",
+                state: 3,
+                failure: { phase: 2, legacyCode: 6 },
+              },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceStart: 2,
+        sequenceEnd: 2,
+      }),
+    ).finish();
+
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", legacy),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      database.sqlite
+        .prepare("select failure_code from metric_collector_outcomes")
+        .get(),
+    ).toEqual({
+      failure_code: "official.memory.facts-malformed",
+    });
+    database.close();
+  });
+
+  it("requests replay for an unknown Host Profile hash without satisfying readiness", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-hash-only-readiness",
+        metrics: [],
+        probeAssetBundleVersion: "1.2.3",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceStart: 1,
+        sequenceEnd: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      database.sqlite.prepare("select status from enrollment_tokens").get(),
+    ).toEqual({ status: "verifying" });
+    const snapshotHash = hashStableHostProfile(sampleHostProfileSnapshot());
+    const hashOnly = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-hash-only-readiness",
+        enrollmentId: registration.enrollmentId,
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            collectorOutcomes: [
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceStart: 2,
+        sequenceEnd: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            snapshotHash,
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", hashOnly),
+    );
+    expect(response.status).toBe(200);
+    expect(
+      root.enoki.v1.ProbeReportResponse.decode(
+        new Uint8Array(await response.arrayBuffer()),
+      ).requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+    expect(
+      database.sqlite.prepare("select status from enrollment_tokens").get(),
+    ).toEqual({ status: "verifying" });
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-hash-only-readiness",
+      fulfilled_at_ms: null,
+      sequence: 2,
+      snapshot_hash: snapshotHash,
+    });
+    database.close();
+  });
+
+  it("accepts known compact Host Profiles and requests replay for an unknown current-identity hash", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const bootId = "boot-known-produced-compact";
+    const hostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.1.0",
+    });
+    const snapshotHash = hashStableHostProfile(hostProfile);
+    const send = (sequence: number, full: boolean) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_000 + sequence,
+              collectorOutcomes: [
+                { collectorId: "official.host-profile", state: 1 },
+              ],
+              sequence,
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              ...(full ? { hostProfile } : {}),
+              snapshotHash,
+            },
+          ],
+        }),
+      ).finish();
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    };
+
+    const startup = ReportRequest.encode(
+      ReportRequest.create({
+        bootId,
+        probeAssetBundleVersion: "0.1.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", startup),
+        )
+      ).status,
+    ).toBe(200);
+    expect((await send(2, true)).status).toBe(200);
+    expect((await send(3, false)).status).toBe(200);
+    expect((await send(4, false)).status).toBe(200);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) throw new Error("registered Host is missing");
+    database.sqlite
+      .prepare("delete from enrollment_tokens where managed_host_id = ?")
+      .run(host.id);
+    expect((await send(5, false)).status).toBe(200);
+
+    const otherRegistration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const otherProfile = sampleHostProfileSnapshot({
+      hostname: "other-host",
+      probeAssetBundleVersion: "0.1.0",
+    });
+    const otherHash = hashStableHostProfile(otherProfile);
+    const sendOther = (
+      sequence: number,
+      snapshotHash: string,
+      full: boolean,
+    ) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-other-host-compact",
+          enrollmentId: otherRegistration.enrollmentId,
+          metrics:
+            sequence === 1
+              ? []
+              : [
+                  {
+                    collectedAtMs: 1_725_000_000_000 + sequence,
+                    collectorOutcomes: [
+                      { collectorId: "official.host-profile", state: 1 },
+                    ],
+                    sequence,
+                  },
+                ],
+          probeAssetBundleVersion: sequence === 1 ? "0.1.0" : undefined,
+          probeConfigurationVersion: "default-v1",
+          probeId: otherRegistration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots:
+            sequence === 1
+              ? []
+              : [
+                  {
+                    collectorId: "official.host-profile",
+                    ...(full ? { hostProfile: otherProfile } : {}),
+                    snapshotHash,
+                  },
+                ],
+        }),
+      ).finish();
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(otherRegistration, "/api/probe/report", body),
+      );
+    };
+    expect((await sendOther(1, "", false)).status).toBe(200);
+    expect((await sendOther(2, otherHash, true)).status).toBe(200);
+    const unknownCompact = await sendOther(3, snapshotHash, false);
+    expect(unknownCompact.status).toBe(200);
+    expect(
+      root.enoki.v1.ProbeReportResponse.decode(
+        new Uint8Array(await unknownCompact.arrayBuffer()),
+      ).requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-other-host-compact",
+      fulfilled_at_ms: null,
+      sequence: 3,
+      snapshot_hash: snapshotHash,
+    });
+
+    database.close();
+  });
+
+  it("rejects an old-identity Host Profile hash until the current identity sends the full snapshot", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const firstRegistration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const host = database.hosts.findByProbeId(firstRegistration.probeId);
+    if (!host) throw new Error("registered Host is missing");
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const hostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.1.0",
+    });
+    const snapshotHash = hashStableHostProfile(hostProfile);
+    const send = (
+      registration: {
+        enrollmentId?: string;
+        privateKeyPem: string;
+        probeId: string;
+      },
+      sequence: number,
+      full: boolean,
+      produced: boolean,
+    ) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: `boot-${registration.probeId}`,
+          enrollmentId: registration.enrollmentId,
+          metrics: produced
+            ? [
+                {
+                  collectedAtMs: nowMs,
+                  collectorOutcomes: [
+                    { collectorId: "official.host-profile", state: 1 },
+                  ],
+                  sequence,
+                },
+              ]
+            : [],
+          probeAssetBundleVersion: sequence === 1 ? "0.1.0" : undefined,
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots:
+            sequence === 1
+              ? []
+              : [
+                  {
+                    collectorId: "official.host-profile",
+                    ...(full ? { hostProfile } : {}),
+                    snapshotHash,
+                  },
+                ],
+        }),
+      ).finish();
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    };
+
+    expect((await send(firstRegistration, 1, false, false)).status).toBe(200);
+    expect((await send(firstRegistration, 2, true, true)).status).toBe(200);
+
+    const currentIdentity = createTestProbeIdentity();
+    const currentRegistration = {
+      enrollmentId: "enr_current_identity_profile",
+      privateKeyPem: currentIdentity.privateKeyPem,
+      probeId: "probe_current_identity_profile",
+    };
+    database.sqlite
+      .prepare("delete from probe_request_nonces where probe_id = ?")
+      .run(firstRegistration.probeId);
+    database.sqlite
+      .prepare(
+        "update managed_hosts set probe_id = ?, probe_public_key_pem = ?, last_report_at_ms = null where id = ?",
+      )
+      .run(currentRegistration.probeId, currentIdentity.publicKeyPem, host.id);
+    database.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+          target_kind, target_host_id, expected_hub_origin, expected_probe_id,
+          expected_probe_version, source_probe_sha256_json,
+          target_asset_set_digest, target_probe_version, status,
+          managed_host_id, verification_deadline_at_ms
+        ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, '0.1.0', ?, ?,
+          '0.1.0', 'verifying', ?, ?)`,
+      )
+      .run(
+        currentRegistration.enrollmentId,
+        "current-identity-token-hash",
+        nowMs,
+        nowMs + 600_000,
+        nowMs,
+        host.id,
+        "http://localhost",
+        firstRegistration.probeId,
+        JSON.stringify(["a".repeat(64)]),
+        `sha256:${"b".repeat(64)}`,
+        host.id,
+        nowMs + 600_000,
+      );
+    expect(currentRegistration.probeId).not.toBe(firstRegistration.probeId);
+    expect(
+      database.snapshotCollectors.hostProfile.hasSnapshot(
+        host.id,
+        snapshotHash,
+      ),
+    ).toBe(true);
+    expect((await send(currentRegistration, 1, false, false)).status).toBe(200);
+
+    const oldIdentityCompact = await send(firstRegistration, 3, false, true);
+    expect(oldIdentityCompact.status).toBe(401);
+    const beforeWrongEnrollment = database.sqlite
+      .prepare(
+        `select
+          (select status from enrollment_tokens where enrollment_id = ?) as status,
+          (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
+          (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
+          (select count(*) from report_observations) as observationCount,
+          (select count(*) from metric_samples) as metricCount,
+          (select count(*) from audit_log) as auditCount`,
+      )
+      .get(
+        currentRegistration.enrollmentId,
+        currentRegistration.enrollmentId,
+        host.id,
+      );
+    expect(
+      (
+        await send(
+          {
+            ...currentRegistration,
+            enrollmentId: firstRegistration.enrollmentId,
+          },
+          2,
+          true,
+          true,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      database.sqlite
+        .prepare(
+          `select
+            (select status from enrollment_tokens where enrollment_id = ?) as status,
+            (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
+            (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
+            (select count(*) from report_observations) as observationCount,
+            (select count(*) from metric_samples) as metricCount,
+            (select count(*) from audit_log) as auditCount`,
+        )
+        .get(
+          currentRegistration.enrollmentId,
+          currentRegistration.enrollmentId,
+          host.id,
+        ),
+    ).toEqual(beforeWrongEnrollment);
+    expect((await send(currentRegistration, 2, false, true)).status).toBe(400);
+    expect((await send(currentRegistration, 2, true, true)).status).toBe(200);
+    expect((await send(currentRegistration, 3, false, true)).status).toBe(200);
+
+    database.close();
   });
 
   it("rejects the next authentic Probe report after Hub-only Host deletion", async () => {
@@ -341,6 +1291,7 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      probeOperationTokenSecret: "hub-only-delete-token-secret",
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -349,6 +1300,19 @@ describe("Probe report API", () => {
     if (!host) {
       throw new Error("registered Probe Host is missing");
     }
+    const uninstall = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: Date.now(),
+      }).operation,
+    );
+    const uninstallToken = issueProbeOperationToken({
+      expiresAtMs: Date.now() + 60_000,
+      operation: uninstall,
+      probeId: registration.probeId,
+      secret: "hub-only-delete-token-secret",
+    });
     const deletion = await app.request(
       `/api/web/hosts/${host.id}?mode=hub-only`,
       {
@@ -358,6 +1322,16 @@ describe("Probe report API", () => {
     );
     expect(deletion.status).toBe(200);
     expect(database.hosts.findActiveById(host.id)).toBeNull();
+
+    const activeUninstallStatus = await app.request(
+      `/api/probe/operations/${uninstall.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${uninstall.id}/status`,
+        JSON.stringify({ status: "succeeded", token: uninstallToken }),
+      ),
+    );
+    expect(activeUninstallStatus.status).toBe(401);
 
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const reportBody = ReportRequest.encode(
@@ -514,6 +1488,145 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it.each([
+    [
+      "rejects",
+      "a full Host Profile snapshot",
+      "1.2.3",
+      () => {
+        const hostProfile = sampleHostProfileSnapshot({
+          hostname: "malicious-current-boot-profile",
+        });
+        return {
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile,
+              snapshotHash: hashStableHostProfile(hostProfile),
+            },
+          ],
+        };
+      },
+      400,
+      0,
+      0,
+    ],
+    [
+      "rejects",
+      "a CPU resource collection outcome",
+      "1.2.3",
+      () => ({
+        cpuResourceCollectionOutcomes: [
+          {
+            reason:
+              root.enoki.v1.CpuResourceCollectionOutcomeReason
+                .CPU_RESOURCE_UNAVAILABLE,
+            sequence: 1,
+          },
+        ],
+      }),
+      400,
+      0,
+      0,
+    ],
+    [
+      "accepts",
+      "an observation-free current Boot",
+      "1.2.3",
+      () => ({}),
+      200,
+      1,
+      0,
+    ],
+  ])(
+    "%s %s at the Probe report admission seam",
+    async (
+      _disposition,
+      _shape,
+      probeAssetBundleVersion,
+      payload,
+      expectedStatus,
+      expectedObservations,
+      expectedMetrics,
+    ) => {
+      const database = await createTemporaryDatabase();
+      const app = createHubApp({
+        auth: {
+          failureDelayMs: 0,
+          ownerPassword: "correct horse battery staple",
+          sessionCookieName: "enoki_owner_session",
+        },
+        database,
+      });
+      const ownerSession = await loginOwner(app);
+      const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+      const registration = await registerProbe(app, enrollmentToken);
+      const host = database.hosts.findByProbeId(registration.probeId);
+      if (!host) throw new Error("registered Host is missing");
+      const hostProfileBefore = database.snapshotCollectors.hostProfile.read(
+        host.id,
+      );
+      const ReportRequest = root.enoki.v1.ProbeReportRequest;
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: `boot-current-observation-${_shape}`,
+          probeAssetBundleVersion,
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+          ...payload(),
+        }),
+      ).finish();
+
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+      expect(response.status).toBe(expectedStatus);
+      if (expectedStatus === 400) {
+        await expect(response.json()).resolves.toEqual({
+          error: "malformed_probe_report",
+        });
+      }
+      expect(
+        database.sqlite
+          .prepare("select count(*) as count from report_observations")
+          .get(),
+      ).toEqual({ count: expectedObservations });
+      expect(
+        database.sqlite
+          .prepare("select count(*) as count from metric_samples")
+          .get(),
+      ).toEqual({ count: expectedMetrics });
+      expect(
+        database.sqlite
+          .prepare("select count(*) as count from metric_collector_outcomes")
+          .get(),
+      ).toEqual({ count: 0 });
+      expect(database.snapshotCollectors.hostProfile.read(host.id)).toEqual(
+        hostProfileBefore,
+      );
+      const enrollment = await app.request(
+        `/api/web/enrollments/${registration.enrollmentId}`,
+        { headers: { cookie: ownerSession } },
+      );
+      await expect(enrollment.json()).resolves.toEqual(
+        expect.objectContaining({ readyAtMs: null, status: "verifying" }),
+      );
+      if (expectedStatus === 400) {
+        expect(
+          database.sqlite
+            .prepare("select last_report_at_ms from managed_hosts where id = ?")
+            .get(host.id),
+        ).toEqual({ last_report_at_ms: null });
+      }
+
+      database.close();
+    },
+  );
+
   it("rejects an unsolicited full Host Profile outside the Startup Report", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -658,972 +1771,6 @@ describe("Probe report API", () => {
     await expect(response.json()).resolves.toEqual({
       error: "malformed_probe_report",
     });
-
-    database.close();
-  });
-
-  it("rejects a current Probe successor full observation when the old wire-shape replay is pending", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const registration = await registerProbe(
-      app,
-      await createEnrollmentToken(app, ownerSession),
-    );
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const currentProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.73",
-    });
-    const changedCurrentProfile = sampleHostProfileSnapshot({
-      hostname: "current-probe-successor-full-observation",
-      probeVersion: "0.1.73",
-    });
-    const changedHash = hashStableHostProfile(changedCurrentProfile);
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-current-successor-full-observation",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: currentProfile,
-                  snapshotHash: hashStableHostProfile(currentProfile),
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-current-successor-full-observation",
-              metrics: [
-                {
-                  collectedAtMs: 1_725_000_000_001,
-                  cpuPercent: 12.5,
-                  sequence: 2,
-                },
-              ],
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 2,
-              sequenceStart: 2,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  snapshotHash: changedHash,
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    const host = database.hosts.findByProbeId(registration.probeId);
-    if (!host) {
-      throw new Error("registered Probe Host is missing");
-    }
-    const operation = database.probeOperations.createProbeUpgradeRequest(
-      createProbeUpgradeRequest({
-        activeOperation: null,
-        currentProbeVersion: "0.1.73",
-        hostId: host.id,
-        nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
-      }).operation,
-    );
-
-    const successor = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-current-successor-full-observation",
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          operationStatuses: [
-            { operationId: String(operation.id), running: {} },
-          ],
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: "default-v1",
-            message: "report request failed: 503 Service Unavailable",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 3,
-          sequenceStart: 3,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: changedCurrentProfile,
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-
-    expect(successor.status).toBe(400);
-    expect(
-      database.snapshotCollectors.snapshotReplayRequestStatus({
-        bootId: "boot-current-successor-full-observation",
-        collectorId: "official.host-profile",
-        hostId: host.id,
-        sequence: 2,
-        snapshotHash: changedHash,
-      }),
-    ).toBe("pending");
-    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
-      expect.objectContaining({ state: "pending" }),
-    );
-
-    database.close();
-  });
-
-  it("accepts a duplicate Startup report with local operation evidence as a normal idempotent report", async () => {
-    const database = await createTemporaryDatabase();
-    const nowMs = 1_725_000_000_000;
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => nowMs,
-    });
-    const ownerSession = await loginOwner(app);
-    const registration = await registerProbe(
-      app,
-      await createEnrollmentToken(app, ownerSession),
-    );
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const startupProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.73",
-    });
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-    const startup = ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-startup-operation-retry",
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: 1,
-        sequenceStart: 1,
-        snapshots: [
-          {
-            collectorId: "official.host-profile",
-            hostProfile: startupProfile,
-            snapshotHash: hashStableHostProfile(startupProfile),
-          },
-        ],
-      }),
-    ).finish();
-    expect((await send(startup)).status).toBe(200);
-
-    const host = database.hosts.findByProbeId(registration.probeId);
-    if (!host) {
-      throw new Error("registered Probe Host is missing");
-    }
-    const operation = database.probeOperations.createProbeUpgradeRequest(
-      createProbeUpgradeRequest({
-        activeOperation: null,
-        currentProbeVersion: "0.1.73",
-        hostId: host.id,
-        nowMs,
-        targetProbeVersion: "0.2.0",
-      }).operation,
-    );
-
-    const retry = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-startup-operation-retry",
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          operationStatuses: [
-            { operationId: String(operation.id), running: {} },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: startupProfile,
-              snapshotHash: hashStableHostProfile(startupProfile),
-            },
-          ],
-        }),
-      ).finish(),
-    );
-
-    expect(retry.status).toBe(200);
-    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
-      expect.objectContaining({ state: "running" }),
-    );
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from report_observations")
-        .get(),
-    ).toEqual({ count: 1 });
-
-    database.close();
-  });
-
-  it("rejects a legacy full observation that conflicts with an exact pending current replay", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const registration = await registerProbe(
-      app,
-      await createEnrollmentToken(app, ownerSession),
-    );
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const legacyProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.72",
-    });
-    const changedLegacyProfile = sampleHostProfileSnapshot({
-      hostname: "legacy-pending-current-replay-conflict",
-      probeVersion: "0.1.72",
-    });
-    const changedHash = hashStableHostProfile(changedLegacyProfile);
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-legacy-pending-current-replay-conflict",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: legacyProfile,
-                  snapshotHash: hashStableHostProfile(legacyProfile),
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-    const host = database.hosts.findByProbeId(registration.probeId);
-    if (!host) {
-      throw new Error("registered Probe Host is missing");
-    }
-    database.snapshotCollectors.requestSnapshotReplay({
-      bootId: "boot-legacy-pending-current-replay-conflict",
-      collectorId: "official.host-profile",
-      hostId: host.id,
-      requestedAtMs: 1_725_000_000_000,
-      sequence: 2,
-      snapshotHash: changedHash,
-    });
-
-    const conflicting = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-legacy-pending-current-replay-conflict",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_001,
-              cpuPercent: 12.5,
-              sequence: 2,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: changedLegacyProfile,
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-
-    expect(conflicting.status).toBe(400);
-    expect(
-      database.snapshotCollectors.snapshotReplayRequestStatus({
-        bootId: "boot-legacy-pending-current-replay-conflict",
-        collectorId: "official.host-profile",
-        hostId: host.id,
-        sequence: 2,
-        snapshotHash: changedHash,
-      }),
-    ).toBe("pending");
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from report_observations")
-        .get(),
-    ).toEqual({ count: 1 });
-
-    database.close();
-  });
-
-  it("accepts a v0.1.72 full Host Profile-only Observation without a Snapshot Replay receipt", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const registration = await registerProbe(
-      app,
-      await createEnrollmentToken(app, ownerSession),
-    );
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const startupProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.72",
-    });
-    const changedProfile = sampleHostProfileSnapshot({
-      hostname: "v0.1.72-full-only-observation",
-      probeVersion: "0.1.72",
-    });
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-v0-1-72-full-only-observation",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: startupProfile,
-                  snapshotHash: hashStableHostProfile(startupProfile),
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    const fullOnlyObservation = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-full-only-observation",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: changedProfile,
-              snapshotHash: hashStableHostProfile(changedProfile),
-            },
-          ],
-        }),
-      ).finish(),
-    );
-
-    expect(fullOnlyObservation.status).toBe(200);
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({ hostname: "v0.1.72-full-only-observation" }),
-    );
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from report_observations")
-        .get(),
-    ).toEqual({ count: 2 });
-
-    database.close();
-  });
-
-  it("does not let an old boot pending replay block a new boot v0.1.72 full Observation", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const registration = await registerProbe(
-      app,
-      await createEnrollmentToken(app, ownerSession),
-    );
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const startupProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.72",
-    });
-    const oldBootUnknownProfile = sampleHostProfileSnapshot({
-      hostname: "old-boot-unknown-profile",
-      probeVersion: "0.1.72",
-    });
-    const oldBootUnknownHash = hashStableHostProfile(oldBootUnknownProfile);
-    const newBootProfile = sampleHostProfileSnapshot({
-      hostname: "new-boot-startup-profile",
-      probeVersion: "0.1.72",
-    });
-    const newBootObservationProfile = sampleHostProfileSnapshot({
-      hostname: "new-boot-full-observation",
-      probeVersion: "0.1.72",
-    });
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-    const fullProfileFrame = (
-      bootId: string,
-      sequence: number,
-      profile: root.enoki.v1.IHostProfileSnapshot,
-    ) =>
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId,
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: sequence,
-          sequenceStart: sequence,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: profile,
-              snapshotHash: hashStableHostProfile(profile),
-            },
-          ],
-        }),
-      ).finish();
-
-    expect(
-      (await send(fullProfileFrame("boot-v0-1-72-old", 1, startupProfile)))
-        .status,
-    ).toBe(200);
-    const compact = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-old",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_000,
-              cpuPercent: 12.5,
-              sequence: 2,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              snapshotHash: oldBootUnknownHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(compact.status).toBe(200);
-    expect(
-      ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
-        .requestedSnapshotCollectorIds,
-    ).toEqual(["official.host-profile"]);
-
-    expect(
-      (await send(fullProfileFrame("boot-v0-1-72-new", 1, newBootProfile)))
-        .status,
-    ).toBe(200);
-    const newBootObservation = await send(
-      fullProfileFrame("boot-v0-1-72-new", 2, newBootObservationProfile),
-    );
-
-    expect(newBootObservation.status).toBe(200);
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({ hostname: "new-boot-full-observation" }),
-    );
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from report_observations")
-        .get(),
-    ).toEqual({ count: 4 });
-    expect(
-      database.sqlite
-        .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
-        )
-        .get(),
-    ).toEqual({
-      boot_id: "boot-v0-1-72-old",
-      fulfilled_at_ms: null,
-      fulfilled_sequence: null,
-      fulfilled_wire_shape: null,
-      sequence: 2,
-      snapshot_hash: oldBootUnknownHash,
-    });
-
-    database.close();
-  });
-
-  it("accepts the v0.1.72 collector-capability full observation without weakening current Probe replay", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const legacyStartupProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.72",
-    });
-    const changedLegacyProfile = sampleHostProfileSnapshot({
-      collectorCapabilities: {
-        official: {
-          diskHealth: { diagnostic: "smartctl unavailable", status: 2 },
-        },
-      },
-      probeVersion: "0.1.72",
-    });
-    const initialHash = hashStableHostProfile(legacyStartupProfile);
-    const changedHash = hashStableHostProfile(changedLegacyProfile);
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-v0-1-72-collector-capability",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: legacyStartupProfile,
-                  snapshotHash: initialHash,
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    const host = database.hosts.findByProbeId(registration.probeId);
-    expect(host).toEqual(expect.objectContaining({ probeVersion: "0.1.72" }));
-    const operation = database.probeOperations.createProbeUpgradeRequest(
-      createProbeUpgradeRequest({
-        activeOperation: null,
-        currentProbeVersion: "0.1.72",
-        hostId: host?.id ?? -1,
-        nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
-      }).operation,
-    );
-    const configurationResponse = await app.request(
-      `/api/web/hosts/${host?.id}/probe-configuration`,
-      {
-        body: JSON.stringify({
-          configuration: {
-            enabledCollectorIds: ["official.cpu", "official.memory"],
-            metricsCollectionIntervalSeconds: 3,
-          },
-          mode: "override",
-        }),
-        headers: {
-          "content-type": "application/json",
-          cookie: ownerSession,
-        },
-        method: "PUT",
-      },
-    );
-    expect(configurationResponse.status).toBe(200);
-    const configuration = (await configurationResponse.json()) as {
-      configuration: { version: string };
-    };
-
-    const compact = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-collector-capability",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_001,
-              cpuPercent: 12.5,
-              sequence: 2,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              snapshotHash: initialHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(compact.status).toBe(200);
-    expect(
-      ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
-        .currentProbeConfigurationVersion,
-    ).toBe(configuration.configuration.version);
-    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
-      expect.objectContaining({ state: "pending" }),
-    );
-
-    // This is v0.1.72's normal observation wire shape when its collector
-    // capability projection changes. It is neither a Snapshot Replay nor a
-    // current-Probe compact snapshot contract exception.
-    const capabilityChange = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-collector-capability",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_002,
-              cpuPercent: 13.5,
-              sequence: 3,
-            },
-          ],
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          operationStatuses: [
-            { operationId: String(operation.id), running: {} },
-          ],
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: configuration.configuration.version,
-            message: "report request failed: 503 Service Unavailable",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 3,
-          sequenceStart: 3,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: changedLegacyProfile,
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-
-    expect(capabilityChange.status).toBe(200);
-    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
-      expect.objectContaining({ state: "running" }),
-    );
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        probeConfigurationErrorCode: "probe_configuration_fetch_failed",
-        probeConfigurationErrorFailedVersion:
-          configuration.configuration.version,
-      }),
-    );
-
-    const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
-    const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
-    const configurationFetch = await app.request(
-      "/api/probe/config",
-      signedProbeRequest(
-        registration,
-        "/api/probe/config",
-        ConfigurationRequest.encode(
-          ConfigurationRequest.create({
-            currentVersion: "default-v1",
-            probeId: registration.probeId,
-          }),
-        ).finish(),
-      ),
-    );
-    expect(configurationFetch.status).toBe(200);
-    expect(
-      ConfigurationResponse.decode(
-        new Uint8Array(await configurationFetch.arrayBuffer()),
-      ).version,
-    ).toBe(configuration.configuration.version);
-
-    const recovered = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-collector-capability",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_003,
-              cpuPercent: 14.5,
-              sequence: 4,
-            },
-          ],
-          probeConfigurationVersion: configuration.configuration.version,
-          probeId: registration.probeId,
-          sequenceEnd: 4,
-          sequenceStart: 4,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(recovered.status).toBe(200);
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        probeConfigurationErrorCode: null,
-        probeConfigurationErrorFailedVersion: null,
-        probeConfigurationVersion: configuration.configuration.version,
-      }),
-    );
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from metric_samples")
-        .get(),
-    ).toEqual({ count: 3 });
-
-    // The stored Host identity is part of the compatibility boundary. A
-    // signed report cannot opt into the v0.1.72 contract merely by sending a
-    // full Profile with a newer version in this one payload.
-    const newerProfile = sampleHostProfileSnapshot({
-      collectorCapabilities: changedLegacyProfile.collectorCapabilities,
-      probeVersion: "0.1.73",
-    });
-    const newerFullObservation = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-collector-capability",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_004,
-              cpuPercent: 15.5,
-              sequence: 5,
-            },
-          ],
-          probeConfigurationVersion: configuration.configuration.version,
-          probeId: registration.probeId,
-          sequenceEnd: 5,
-          sequenceStart: 5,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: newerProfile,
-              snapshotHash: hashStableHostProfile(newerProfile),
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(newerFullObservation.status).toBe(400);
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from metric_samples")
-        .get(),
-    ).toEqual({ count: 3 });
-
-    database.close();
-  });
-
-  it("rejects a full legacy observation that tries to downgrade a current stored Host without side effects", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const currentProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.73",
-    });
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-current-host-rejects-legacy-full-observation",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: currentProfile,
-                  snapshotHash: hashStableHostProfile(currentProfile),
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    const host = database.hosts.findByProbeId(registration.probeId);
-    if (!host) {
-      throw new Error("registered Probe Host is missing");
-    }
-    expect(host).toEqual(expect.objectContaining({ probeVersion: "0.1.73" }));
-    const operation = database.probeOperations.createProbeUpgradeRequest(
-      createProbeUpgradeRequest({
-        activeOperation: null,
-        currentProbeVersion: "0.1.73",
-        hostId: host.id,
-        nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
-      }).operation,
-    );
-    const downgradedProfile = sampleHostProfileSnapshot({
-      collectorCapabilities: {
-        official: {
-          diskHealth: { diagnostic: "smartctl unavailable", status: 2 },
-        },
-      },
-      probeVersion: "0.1.72",
-    });
-
-    const rejected = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-current-host-rejects-legacy-full-observation",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_001,
-              cpuPercent: 15.5,
-              sequence: 2,
-            },
-          ],
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          operationStatuses: [
-            { operationId: String(operation.id), running: {} },
-          ],
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: "default-v1",
-            message: "report request failed: 503 Service Unavailable",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: downgradedProfile,
-              snapshotHash: hashStableHostProfile(downgradedProfile),
-            },
-          ],
-        }),
-      ).finish(),
-    );
-
-    expect(rejected.status).toBe(400);
-    await expect(rejected.json()).resolves.toEqual({
-      error: "malformed_probe_report",
-    });
-    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
-      expect.objectContaining({ state: "pending" }),
-    );
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        probeConfigurationErrorCode: null,
-        probeConfigurationErrorFailedVersion: null,
-        probeVersion: "0.1.73",
-      }),
-    );
-    expect(
-      database.sqlite
-        .prepare("select count(*) as count from metric_samples")
-        .get(),
-    ).toEqual({ count: 0 });
 
     database.close();
   });
@@ -2304,91 +2451,15 @@ describe("Probe report API", () => {
     expect(
       database.sqlite
         .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
         )
         .get(),
     ).toEqual({
       boot_id: "boot-snapshot-full-replay",
       fulfilled_at_ms: 1_725_000_000_000,
-      fulfilled_sequence: 2,
-      fulfilled_wire_shape: "current_sequence",
       sequence: 2,
       snapshot_hash: changedHash,
     });
-
-    // A current Probe may legitimately continue with an ordinary Observation
-    // at the next sequence. A full Host Profile appended to that observation
-    // was never requested and must not be mistaken for the v0.1.72 +1
-    // follow-up shape.
-    const ordinarySequenceThree = ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-snapshot-full-replay",
-        metrics: [
-          {
-            collectedAtMs: 1_725_000_000_001,
-            cpuPercent: 13,
-            sequence: 3,
-          },
-        ],
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: 3,
-        sequenceStart: 3,
-        snapshots: [
-          {
-            collectorId: "official.host-profile",
-            snapshotHash: changedHash,
-          },
-        ],
-      }),
-    ).finish();
-    expect(
-      (
-        await app.request(
-          "/api/probe/report",
-          signedProbeRequest(
-            registration,
-            "/api/probe/report",
-            ordinarySequenceThree,
-          ),
-        )
-      ).status,
-    ).toBe(200);
-    const unsolicitedFullSequenceThree = ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-snapshot-full-replay",
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: 3,
-        sequenceStart: 3,
-        snapshots: [
-          {
-            collectorId: "official.host-profile",
-            hostProfile: changedHostProfile,
-            snapshotHash: changedHash,
-          },
-        ],
-      }),
-    ).finish();
-    expect(
-      (
-        await app.request(
-          "/api/probe/report",
-          signedProbeRequest(
-            registration,
-            "/api/probe/report",
-            unsolicitedFullSequenceThree,
-          ),
-        )
-      ).status,
-    ).toBe(400);
-    expect(
-      database.sqlite
-        .prepare(
-          "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
-        )
-        .get(),
-    ).toEqual({ observations: 3, samples: 2 });
 
     const storedHost = database.sqlite
       .prepare(
@@ -2433,501 +2504,6 @@ describe("Probe report API", () => {
         }),
       ],
     });
-
-    database.close();
-  });
-
-  it("accepts a v0.1.72 successor Snapshot Replay after recollection changes the Host Profile hash", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const startupHostProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.72",
-    });
-    const requestedHostProfile = sampleHostProfileSnapshot({
-      hostname: "host-profile-at-sequence-8",
-      probeVersion: "0.1.72",
-    });
-    const replayedHostProfile = sampleHostProfileSnapshot({
-      hostname: "host-profile-recollected-at-sequence-9",
-      probeVersion: "0.1.72",
-    });
-    const requestedHash = hashStableHostProfile(requestedHostProfile);
-    const replayedHash = hashStableHostProfile(replayedHostProfile);
-    expect(replayedHash).not.toBe(requestedHash);
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-v0-1-72-recollected-replay",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: startupHostProfile,
-                  snapshotHash: hashStableHostProfile(startupHostProfile),
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    const compactResponse = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-recollected-replay",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_000,
-              cpuPercent: 12.5,
-              sequence: 8,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 8,
-          sequenceStart: 8,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              snapshotHash: requestedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(compactResponse.status).toBe(200);
-    expect(
-      ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
-        .requestedSnapshotCollectorIds,
-    ).toEqual(["official.host-profile"]);
-
-    const host = database.hosts.findByProbeId(registration.probeId);
-    expect(host).not.toBeNull();
-    const replayBody = ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-v0-1-72-recollected-replay",
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: 9,
-        sequenceStart: 9,
-        snapshots: [
-          {
-            collectorId: "official.host-profile",
-            hostProfile: replayedHostProfile,
-            snapshotHash: replayedHash,
-          },
-        ],
-      }),
-    ).finish();
-    const replayResponse = await send(replayBody);
-
-    expect(replayResponse.status).toBe(200);
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        hostname: "host-profile-recollected-at-sequence-9",
-      }),
-    );
-    expect(
-      database.snapshotCollectors.snapshotReplayRequestStatus({
-        bootId: "boot-v0-1-72-recollected-replay",
-        collectorId: "official.host-profile",
-        hostId: host?.id ?? -1,
-        sequence: 8,
-        snapshotHash: requestedHash,
-      }),
-    ).toBe("fulfilled");
-    expect(
-      database.sqlite
-        .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_snapshot_hash, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
-        )
-        .get(),
-    ).toEqual({
-      boot_id: "boot-v0-1-72-recollected-replay",
-      fulfilled_sequence: 9,
-      fulfilled_snapshot_hash: replayedHash,
-      fulfilled_wire_shape: "legacy_successor",
-      sequence: 8,
-      snapshot_hash: requestedHash,
-    });
-    const beforeRetry = database.sqlite
-      .prepare(
-        "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
-      )
-      .get();
-    expect((await send(replayBody)).status).toBe(200);
-    expect(
-      database.sqlite
-        .prepare(
-          "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
-        )
-        .get(),
-    ).toEqual(beforeRetry);
-    const conflictingReplayHostProfile = sampleHostProfileSnapshot({
-      hostname: "conflicting-host-profile-at-sequence-9",
-      probeVersion: "0.1.72",
-    });
-    const conflictingReplay = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-recollected-replay",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 9,
-          sequenceStart: 9,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: conflictingReplayHostProfile,
-              snapshotHash: hashStableHostProfile(conflictingReplayHostProfile),
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(conflictingReplay.status).toBe(400);
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        hostname: "host-profile-recollected-at-sequence-9",
-      }),
-    );
-
-    database.close();
-  });
-
-  it("accepts the v0.1.72 next-sequence Host Profile follow-up and lets it report a Hub configuration update", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
-    const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const startupHostProfile = sampleHostProfileSnapshot({
-      probeVersion: "0.1.72",
-    });
-    const changedHostProfile = sampleHostProfileSnapshot({
-      hostname: "v0.1.72-follow-up-host",
-      probeVersion: "0.1.72",
-    });
-    const changedHash = hashStableHostProfile(changedHostProfile);
-    const wrongVersionHostProfile = sampleHostProfileSnapshot({
-      hostname: "v0.1.72-wrong-version-host",
-      probeVersion: "0.1.71",
-    });
-    const wrongVersionHash = hashStableHostProfile(wrongVersionHostProfile);
-    const send = (body: Uint8Array) =>
-      app.request(
-        "/api/probe/report",
-        signedProbeRequest(registration, "/api/probe/report", body),
-      );
-
-    // v0.1.72 did not populate later-added Enrollment fields. Its Startup
-    // and compact Observation frames are otherwise wire-compatible.
-    expect(
-      (
-        await send(
-          ReportRequest.encode(
-            ReportRequest.create({
-              bootId: "boot-v0-1-72-follow-up",
-              probeConfigurationVersion: "default-v1",
-              probeId: registration.probeId,
-              sequenceEnd: 1,
-              sequenceStart: 1,
-              snapshots: [
-                {
-                  collectorId: "official.host-profile",
-                  hostProfile: startupHostProfile,
-                  snapshotHash: hashStableHostProfile(startupHostProfile),
-                },
-              ],
-            }),
-          ).finish(),
-        )
-      ).status,
-    ).toBe(200);
-
-    const compactResponse = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-follow-up",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_000,
-              cpuPercent: 12.5,
-              sequence: 2,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(compactResponse.status).toBe(200);
-    expect(
-      ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
-        .requestedSnapshotCollectorIds,
-    ).toEqual(["official.host-profile"]);
-
-    const host = database.hosts.findByProbeId(registration.probeId);
-    expect(host).not.toBeNull();
-    const operation = database.probeOperations.createProbeUpgradeRequest(
-      createProbeUpgradeRequest({
-        activeOperation: null,
-        currentProbeVersion: host?.probeVersion ?? "0.1.0",
-        hostId: host?.id ?? -1,
-        nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
-      }).operation,
-    );
-    const configurationResponse = await app.request(
-      `/api/web/hosts/${host?.id}/probe-configuration`,
-      {
-        body: JSON.stringify({
-          configuration: {
-            enabledCollectorIds: ["official.cpu", "official.memory"],
-            metricsCollectionIntervalSeconds: 3,
-          },
-          mode: "override",
-        }),
-        headers: {
-          "content-type": "application/json",
-          cookie: ownerSession,
-        },
-        method: "PUT",
-      },
-    );
-    expect(configurationResponse.status).toBe(200);
-    const configuration = (await configurationResponse.json()) as {
-      configuration: { version: string };
-    };
-
-    // v0.1.72 follows a requested compact snapshot with a full snapshot in
-    // the next sequence. Current Probes replay the accepted compact sequence;
-    // the Hub must support both established wire contracts.
-    const wrongBootLegacyFollowUp = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-follow-up-wrong",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 3,
-          sequenceStart: 3,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: changedHostProfile,
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(wrongBootLegacyFollowUp.status).toBe(400);
-    const wrongVersionLegacyFollowUp = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-follow-up",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 3,
-          sequenceStart: 3,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: wrongVersionHostProfile,
-              snapshotHash: wrongVersionHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(wrongVersionLegacyFollowUp.status).toBe(400);
-    const skippedSequence = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-follow-up",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 4,
-          sequenceStart: 4,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              hostProfile: changedHostProfile,
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(skippedSequence.status).toBe(400);
-
-    const legacyFollowUpBody = ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-v0-1-72-follow-up",
-        operationAcknowledgements: [{ operationId: String(operation.id) }],
-        operationStatuses: [{ operationId: String(operation.id), running: {} }],
-        probeConfigurationError: {
-          errorCode: "probe_configuration_fetch_failed",
-          failedVersion: configuration.configuration.version,
-          message: "report request failed: 503 Service Unavailable",
-        },
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: 3,
-        sequenceStart: 3,
-        snapshots: [
-          {
-            collectorId: "official.host-profile",
-            hostProfile: changedHostProfile,
-            snapshotHash: changedHash,
-          },
-        ],
-      }),
-    ).finish();
-    const legacyFollowUp = await send(legacyFollowUpBody);
-    expect(legacyFollowUp.status).toBe(200);
-    expect(
-      ReportResponse.decode(new Uint8Array(await legacyFollowUp.arrayBuffer()))
-        .currentProbeConfigurationVersion,
-    ).toBe(configuration.configuration.version);
-    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
-      expect.objectContaining({ state: "running" }),
-    );
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        probeConfigurationErrorCode: "probe_configuration_fetch_failed",
-        probeConfigurationErrorFailedVersion:
-          configuration.configuration.version,
-      }),
-    );
-    expect(
-      database.sqlite
-        .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
-        )
-        .get(),
-    ).toEqual({
-      boot_id: "boot-v0-1-72-follow-up",
-      fulfilled_at_ms: 1_725_000_000_000,
-      fulfilled_sequence: 3,
-      fulfilled_wire_shape: "legacy_successor",
-      sequence: 2,
-      snapshot_hash: changedHash,
-    });
-    const beforeLegacyRetry = database.sqlite
-      .prepare(
-        "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
-      )
-      .get();
-    expect((await send(legacyFollowUpBody)).status).toBe(200);
-    expect(
-      database.sqlite
-        .prepare(
-          "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
-        )
-        .get(),
-    ).toEqual(beforeLegacyRetry);
-
-    const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
-    const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
-    const configurationFetch = await app.request(
-      "/api/probe/config",
-      signedProbeRequest(
-        registration,
-        "/api/probe/config",
-        ConfigurationRequest.encode(
-          ConfigurationRequest.create({
-            currentVersion: "default-v1",
-            probeId: registration.probeId,
-          }),
-        ).finish(),
-      ),
-    );
-    expect(configurationFetch.status).toBe(200);
-    expect(
-      ConfigurationResponse.decode(
-        new Uint8Array(await configurationFetch.arrayBuffer()),
-      ),
-    ).toEqual(
-      expect.objectContaining({
-        metricsCollectionIntervalSeconds: 3,
-        version: configuration.configuration.version,
-      }),
-    );
-
-    const updatedReport = await send(
-      ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-v0-1-72-follow-up",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_003,
-              cpuPercent: 15,
-              sequence: 4,
-            },
-          ],
-          probeConfigurationVersion: configuration.configuration.version,
-          probeId: registration.probeId,
-          sequenceEnd: 4,
-          sequenceStart: 4,
-          snapshots: [
-            {
-              collectorId: "official.host-profile",
-              snapshotHash: changedHash,
-            },
-          ],
-        }),
-      ).finish(),
-    );
-    expect(updatedReport.status).toBe(200);
-    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
-      expect.objectContaining({
-        probeConfigurationVersion: configuration.configuration.version,
-      }),
-    );
 
     database.close();
   });
@@ -3162,14 +2738,12 @@ describe("Probe report API", () => {
     expect(
       database.sqlite
         .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
         )
         .get(),
     ).toEqual({
       boot_id: "boot-replay-request-replacement",
       fulfilled_at_ms: null,
-      fulfilled_sequence: null,
-      fulfilled_wire_shape: null,
       sequence: 3,
       snapshot_hash: newReplayHash,
     });
@@ -3281,7 +2855,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_010_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       acceptedAtMs: 1_725_000_015_000,
       runningAtMs: 1_725_000_020_000,
@@ -3289,16 +2866,36 @@ describe("Probe report API", () => {
     });
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const changedHostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.2.0",
       probeVersion: "v0.2.0",
     });
     const changedHash = hashStableHostProfile(changedHostProfile);
-    const body = ReportRequest.encode(
+    const boot = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-upgrade-host-profile",
+        probeAssetBundleVersion: "0.2.0",
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 1,
         sequenceStart: 1,
+      }),
+    ).finish();
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-upgrade-host-profile",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_030_000,
+            collectorOutcomes: [
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
         snapshots: [
           {
             collectorId: "official.host-profile",
@@ -3308,6 +2905,15 @@ describe("Probe report API", () => {
         ],
       }),
     ).finish();
+
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
 
     const response = await app.request(
       "/api/probe/report",
@@ -3348,6 +2954,9 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
     const hostProfile = hostProfileCrossRuntimeCanonicalFixture();
+    expect(hashStableHostProfile(hostProfile)).toBe(
+      hostProfileCrossRuntimeCanonicalHash,
+    );
     const body = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-cross-runtime-host-profile",
@@ -3542,7 +3151,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -3577,7 +3189,10 @@ describe("Probe report API", () => {
       expect(response.pendingOperation?.probeUpgrade).toEqual(
         expect.objectContaining({
           currentProbeVersion: "0.1.0",
+          hostId: String(host.id),
           operationToken: expect.any(String),
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetManifestSha256: "",
           targetProbeVersion: "0.2.0",
         }),
       );
@@ -3585,6 +3200,95 @@ describe("Probe report API", () => {
         "",
       );
     }
+  });
+
+  it("keeps legacy Probe Upgrade Requests without an Asset Set target closed to report progress", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest({
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
+      }).operation,
+      targetAssetSetDigest: null,
+    });
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const report = (payload: object) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "/api/probe/report",
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-legacy-upgrade-target",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              ...payload,
+            }),
+          ).finish(),
+        ),
+      );
+
+    const acknowledgement = await report({
+      operationAcknowledgements: [{ operationId: String(operation.id) }],
+    });
+    expect(acknowledgement.status).toBe(400);
+    await expect(acknowledgement.json()).resolves.toEqual({
+      error: "malformed_probe_operation_acknowledgement",
+    });
+
+    const status = await report({
+      operationStatuses: [{ operationId: String(operation.id), running: {} }],
+    });
+    expect(status.status).toBe(400);
+    await expect(status.json()).resolves.toEqual({
+      error: "malformed_probe_operation_status",
+    });
+
+    const hostProfile = sampleHostProfileSnapshot({ probeVersion: "0.2.0" });
+    const observation = await report({
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile,
+          snapshotHash: hashStableHostProfile(hostProfile),
+        },
+      ],
+    });
+    expect(observation.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await observation.arrayBuffer()))
+        .pendingOperation,
+    ).toBeNull();
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "pending" }),
+    );
+
+    database.close();
   });
 
   it("authenticates signed Probe report requests and rejects nonce replay", async () => {
@@ -3848,7 +3552,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -3881,6 +3588,7 @@ describe("Probe report API", () => {
         operation,
         probeId: registration.probeId,
         secret: "configured-token-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
         token: token ?? "",
       }),
@@ -3892,6 +3600,7 @@ describe("Probe report API", () => {
         registration,
         `/api/probe/operations/${operation.id}/token/validate`,
         JSON.stringify({
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),
@@ -3943,6 +3652,7 @@ describe("Probe report API", () => {
         otherRegistration,
         `/api/probe/operations/${operation.id}/token/validate`,
         JSON.stringify({
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),
@@ -3981,6 +3691,7 @@ describe("Probe report API", () => {
         registration,
         `/api/probe/operations/${operation.id}/token/validate`,
         JSON.stringify({
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),
@@ -3990,6 +3701,787 @@ describe("Probe report API", () => {
     await expect(canceled.json()).resolves.toEqual({
       error: "probe_operation_token_operation_closed",
     });
+  });
+
+  it("routes authenticated Upgrade and Repair failures through ForwardTransitions while Uninstall remains independent", async () => {
+    const database = await createTemporaryDatabase();
+    const reconciledEvidence: AuthenticatedForwardEvidence[][] = [];
+    const module = createForwardTransitions({
+      probeOperations: database.probeOperations,
+    });
+    const forwardTransitions: ForwardTransitions = {
+      ...module,
+      reconcileAuthenticatedEvidence(input) {
+        reconciledEvidence.push(input.evidence);
+        return module.reconcileAuthenticatedEvidence(input);
+      },
+    };
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      forwardTransitions,
+      now: () => 1_725_000_010_000,
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) throw new Error("registered Probe Host is missing");
+
+    const createdUpgrade = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_008_000,
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
+      }).operation,
+    );
+    const acceptedUpgrade = acknowledgeProbeUpgradeRequest({
+      nowMs: 1_725_000_009_000,
+      operation: createdUpgrade,
+    }).acknowledged;
+    database.probeOperations.updateProbeUpgradeRequest(acceptedUpgrade);
+    database.sqlite.exec(`
+      CREATE TEMP TABLE operation_update_log (operation_id integer not null);
+      CREATE TEMP TRIGGER record_operation_update
+      AFTER UPDATE ON probe_operations
+      BEGIN
+        INSERT INTO operation_update_log (operation_id) VALUES (NEW.id);
+      END;
+    `);
+
+    const upgradeToken = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation: acceptedUpgrade,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const upgradePath = `/api/probe/operations/${acceptedUpgrade.id}/status`;
+    const upgradeBody = JSON.stringify({
+      errorCode: "upgrade_failed",
+      message: "upgrade stopped",
+      status: "failed",
+      targetAssetSetDigest: acceptedUpgrade.targetAssetSetDigest,
+      targetProbeVersion: acceptedUpgrade.targetProbeVersion,
+      token: upgradeToken,
+    });
+    const upgradeResponse = await app.request(
+      upgradePath,
+      signedJsonProbeRequest(registration, upgradePath, upgradeBody),
+    );
+    expect(upgradeResponse.status).toBe(200);
+    const failedUpgrade = database.probeOperations.findById(
+      acceptedUpgrade.id!,
+    );
+    expect(failedUpgrade).toMatchObject({
+      failureCode: "upgrade_failed",
+      state: "failed",
+    });
+    if (!failedUpgrade) throw new Error("failed Upgrade is missing");
+
+    const repair = database.probeOperations.createProbeUpgradeRequest(
+      createProbeRepairRequest({
+        authorityExpiresAtMs: 1_725_000_020_000,
+        evidenceSha256: "b".repeat(64),
+        failedOperation: failedUpgrade,
+        nonce: "repair-nonce",
+        nowMs: 1_725_000_009_500,
+        targetManifestSha256: "c".repeat(64),
+        verifiedStageSha256: "d".repeat(64),
+      })!,
+    );
+    const repairToken = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation: repair,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const repairPath = `/api/probe/operations/${repair.id}/status`;
+    const repairBody = JSON.stringify({
+      errorCode: "repair_failed",
+      message: "repair stopped",
+      status: "failed",
+      token: repairToken,
+    });
+    const repairResponse = await app.request(
+      repairPath,
+      signedJsonProbeRequest(registration, repairPath, repairBody),
+    );
+    expect(repairResponse.status).toBe(200);
+    expect(database.probeOperations.findById(repair.id!)).toMatchObject({
+      failureCode: "repair_failed",
+      state: "failed",
+    });
+    expect(reconciledEvidence).toEqual([
+      [
+        expect.objectContaining({
+          kind: "operation_failed",
+          operationId: acceptedUpgrade.id,
+        }),
+      ],
+      [
+        expect.objectContaining({
+          kind: "operation_failed",
+          operationId: repair.id,
+        }),
+      ],
+    ]);
+    expect(
+      database.sqlite
+        .prepare("select operation_id from operation_update_log order by rowid")
+        .all(),
+    ).toEqual([
+      { operation_id: acceptedUpgrade.id },
+      { operation_id: repair.id },
+    ]);
+
+    const uninstall = database.probeOperations.createProbeUpgradeRequest({
+      ...createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: 1_725_000_009_700,
+      }).operation,
+      acceptedAtMs: 1_725_000_009_800,
+      state: "accepted",
+    });
+    const uninstallToken = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation: uninstall,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const uninstallPath = `/api/probe/operations/${uninstall.id}/status`;
+    const uninstallBody = JSON.stringify({
+      errorCode: "uninstall_failed",
+      message: "uninstall stopped",
+      status: "failed",
+      token: uninstallToken,
+    });
+    const uninstallResponse = await app.request(
+      uninstallPath,
+      signedJsonProbeRequest(registration, uninstallPath, uninstallBody),
+    );
+    expect(uninstallResponse.status).toBe(200);
+    expect(database.probeOperations.findById(uninstall.id!)).toMatchObject({
+      failureCode: "uninstall_failed",
+      state: "failed",
+    });
+    expect(reconciledEvidence).toHaveLength(2);
+
+    database.close();
+  });
+
+  it("admits one verified upgrade stage and signs an offline root authority", async () => {
+    const database = await createTemporaryDatabase();
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-upgrade-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+      probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "1.3.0",
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+        target: {
+          assetSetDigest: release.targetAssetSetDigest,
+          version: "1.4.0",
+        },
+      }).operation,
+    );
+    const token = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const requestPath = `/api/probe/operations/${operation.id}/upgrade-stage/admit`;
+    const requestBody = JSON.stringify({
+      sourceBundleVersion: "1.3.0",
+      sourceInstallStateSha256: "a".repeat(64),
+      sourceManifestSha256: "b".repeat(64),
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetBundleVersion: "1.4.0",
+      targetManifestSha256: "3".repeat(64),
+      token,
+      verifiedStageSha256: "c".repeat(64),
+    });
+
+    const response = await app.request(requestPath, {
+      body: requestBody,
+      headers: signedJsonProbeHeaders({
+        body: requestBody,
+        pathAndQuery: `https://hub.example${requestPath}`,
+        privateKeyPem: registration.privateKeyPem,
+        probeId: registration.probeId,
+      }),
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      authority: LifecycleUpgradeAuthority;
+      signature: string;
+    };
+    expect(body.authority).toEqual({
+      schemaVersion: 1,
+      hubOrigin: "https://hub.example",
+      hostId: String(host.id),
+      probeId: registration.probeId,
+      operationId: String(operation.id),
+      sourceBundleVersion: "1.3.0",
+      sourceInstallStateSha256: "a".repeat(64),
+      sourceManifestSha256: "b".repeat(64),
+      targetBundleVersion: "1.4.0",
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetManifestSha256: "3".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+      expiresAtMs: 1_725_000_310_000,
+    });
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    expect(body.signature).toBe(
+      createHmac("sha256", installKey)
+        .update("enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0")
+        .update(canonicalLifecycleUpgradeAuthority(body.authority))
+        .digest("hex"),
+    );
+    expect(database.probeOperations.findById(operation.id ?? 0)).toMatchObject({
+      acceptedAtMs: 1_725_000_010_000,
+      runningAtMs: 1_725_000_010_000,
+      state: "running",
+    });
+
+    database.close();
+  });
+
+  it("persists an Installed Bundle Failure Repair without synthesizing a failed Upgrade", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-installed-repair-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.0.9",
+      targetVersion: "0.1.0",
+      transition: "compatible",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+      probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const evidence = {
+      kind: "installed_bundle_failure" as const,
+      schemaVersion: 1 as const,
+      hubOrigin: "https://hub.example",
+      hostId: String(host.id),
+      probeId: registration.probeId,
+      generation: "a".repeat(64),
+      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+      unit: "enoki-observation-runtime.service" as const,
+      unitSha256: "b".repeat(64),
+      identityReceiptSha256: "c".repeat(64),
+      installStateSha256: "d".repeat(64),
+      manifestSha256: release.targetBundles[0]!.bundleManifestSha256,
+      bundleVersion: "0.1.0",
+      issuedAtMs: nowMs,
+      expiresAtMs: nowMs + 60_000,
+      requestNonce: "request_nonce_01",
+    };
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const repairPath = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
+    const wrongHostEvidence = { ...evidence, hostId: String(host.id + 1) };
+    const wrongHost = await app.request(repairPath, {
+      body: JSON.stringify({
+        evidence: wrongHostEvidence,
+        evidenceSignature: signInstalledBundleFailureEvidence(
+          canonicalInstalledBundleFailureEvidence(wrongHostEvidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(wrongHost.status).toBe(409);
+    const missingHost = await app.request(repairPath, {
+      body: JSON.stringify({
+        evidence: Object.fromEntries(
+          Object.entries(evidence).filter(([key]) => key !== "hostId"),
+        ),
+        evidenceSignature: "a".repeat(64),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(missingHost.status).toBe(409);
+    const response = await app.request(repairPath, {
+      body: JSON.stringify({
+        evidence,
+        evidenceSignature: signInstalledBundleFailureEvidence(
+          canonicalInstalledBundleFailureEvidence(evidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      authority: { repairOperationId: string; probeId: string };
+      targetAssetSetDigest: string;
+    };
+    expect(body.authority).not.toHaveProperty("failedOperationId");
+    expect(body.authority.probeId).toBe(registration.probeId);
+    expect(body.targetAssetSetDigest).toBe(release.targetAssetSetDigest);
+    expect(
+      database.probeOperations.findById(
+        Number(body.authority.repairOperationId),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        hostId: host.id,
+        repairEligibilityKind: "installed_bundle_failure",
+        repairFailedOperationId: null,
+        repairFailureGeneration: evidence.generation,
+        state: "accepted",
+      }),
+    );
+    database.close();
+  });
+
+  it("creates one typed Repair operation only from signed postactivation evidence for the exact failed Upgrade", async () => {
+    const database = await createTemporaryDatabase();
+    let repairNowMs = 1_725_000_010_000;
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-repair-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => repairNowMs,
+      probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const failedUpgrade = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "1.3.0",
+        hostId: host.id,
+        nowMs: 1_725_000_000_000,
+        target: {
+          assetSetDigest: release.targetAssetSetDigest,
+          version: "1.4.0",
+        },
+      }).operation,
+    );
+    let failed = database.probeOperations.updateProbeUpgradeRequest({
+      ...failedUpgrade,
+      acceptedAtMs: 1_725_000_000_100,
+      completedAtMs: 1_725_000_001_000,
+      failureCode: "lifecycle.upgrade_repair_required",
+      failureMessage: "private diagnostic",
+      runningAtMs: 1_725_000_000_200,
+      state: "failed",
+      targetManifestSha256: "3".repeat(64),
+      updatedAtMs: 1_725_000_001_000,
+      upgradeAuthoritySha256: "a".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+    });
+    const evidence = {
+      schemaVersion: 1 as const,
+      hubOrigin: "https://hub.example",
+      hostId: String(host.id),
+      probeId: registration.probeId,
+      failedOperationId: String(failed.id),
+      failedAuthoritySha256: "a".repeat(64),
+      journalSha256: "b".repeat(64),
+      journalPhase: "repair-required" as const,
+      activatedTargets: 3,
+      finalizedTargets: 0,
+      issuedAtMs: 1_725_000_010_000,
+      expiresAtMs: 1_725_000_070_000,
+      requestNonce: "request_nonce_01",
+      targetBundleVersion: "1.4.0",
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetManifestSha256: "3".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+    };
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const eligibilityEvidence: ProbeRepairEligibility = {
+      activatedTargets: evidence.activatedTargets,
+      failedAuthoritySha256: evidence.failedAuthoritySha256,
+      failedOperationId: evidence.failedOperationId,
+      finalizedTargets: evidence.finalizedTargets,
+      hostId: evidence.hostId,
+      hubOrigin: evidence.hubOrigin,
+      journalPhase: evidence.journalPhase,
+      journalSha256: evidence.journalSha256,
+      probeId: evidence.probeId,
+      schemaVersion: 1,
+      targetAssetSetDigest: evidence.targetAssetSetDigest,
+      targetBundleVersion: evidence.targetBundleVersion,
+      targetManifestSha256: evidence.targetManifestSha256,
+      verifiedStageSha256: evidence.verifiedStageSha256,
+    };
+    const canonicalEligibility =
+      canonicalProbeRepairEligibility(eligibilityEvidence);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const eligibilityReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "repair-eligibility-boot",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "lifecycle.upgrade_repair_required",
+                  message: "root status",
+                  repairEligibilityEvidence:
+                    canonicalEligibility.toString("utf8"),
+                  repairEligibilitySignature: signProbeRepairEligibility(
+                    canonicalEligibility,
+                    installKey,
+                  ),
+                },
+                operationId: String(failed.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(eligibilityReport.status).toBe(200);
+    failed = database.probeOperations.findById(failed.id!)!;
+    const requestPath = `/api/probe/operations/${failed.id}/repair-authorize`;
+    const requestBody = JSON.stringify({
+      evidence,
+      evidenceSignature: signProbeRepairEvidence(
+        canonicalProbeRepairEvidence(evidence),
+        installKey,
+      ),
+    });
+    const request = () =>
+      app.request(requestPath, {
+        body: requestBody,
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+
+    const response = await request();
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      authority: { repairOperationId: string; repairNonce: string };
+      signature: string;
+    };
+    expect(body.authority).toEqual(
+      expect.objectContaining({
+        failedOperationId: String(failed.id),
+        hostId: String(host.id),
+        probeId: registration.probeId,
+        repairEvidenceSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        repairNonce: expect.stringMatching(/^[0-9a-f]{32}$/),
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetBundleVersion: "1.4.0",
+        targetManifestSha256: "3".repeat(64),
+      }),
+    );
+    expect(body.signature).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      database.probeOperations.findById(
+        Number(body.authority.repairOperationId),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        kind: "probe_repair",
+        repairNonce: body.authority.repairNonce,
+        state: "accepted",
+      }),
+    );
+
+    const replay = await request();
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual(body);
+    const blockedEvidence = {
+      ...evidence,
+      requestNonce: "request_nonce_blocked",
+    };
+    const blocked = await app.request(requestPath, {
+      body: JSON.stringify({
+        evidence: blockedEvidence,
+        evidenceSignature: signProbeRepairEvidence(
+          canonicalProbeRepairEvidence(blockedEvidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toEqual({
+      error: "probe_repair_still_unresolved",
+    });
+    repairNowMs = 1_725_000_080_000;
+    const renewedEvidence = {
+      ...evidence,
+      issuedAtMs: repairNowMs,
+      expiresAtMs: repairNowMs + 60_000,
+      requestNonce: "request_nonce_02",
+    };
+    const renewedRequestBody = JSON.stringify({
+      evidence: renewedEvidence,
+      evidenceSignature: signProbeRepairEvidence(
+        canonicalProbeRepairEvidence(renewedEvidence),
+        installKey,
+      ),
+    });
+    const [renewed, concurrentRenewed] = await Promise.all(
+      [0, 1].map(() =>
+        app.request(requestPath, {
+          body: renewedRequestBody,
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        }),
+      ),
+    );
+    if (!renewed || !concurrentRenewed) {
+      throw new Error("Expected both concurrent repair responses.");
+    }
+    expect(renewed.status).toBe(200);
+    expect(concurrentRenewed.status).toBe(200);
+    const renewedBody = (await renewed.json()) as {
+      authority: { repairOperationId: string };
+    };
+    await expect(concurrentRenewed.json()).resolves.toEqual(renewedBody);
+    expect(renewedBody.authority.repairOperationId).not.toBe(
+      body.authority.repairOperationId,
+    );
+    expect(
+      database.probeOperations.findById(
+        Number(body.authority.repairOperationId),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        failureCode: "repair_authority_expired",
+        state: "failed",
+      }),
+    );
+    const renewedOperation = database.probeOperations.findById(
+      Number(renewedBody.authority.repairOperationId),
+    )!;
+    const unresolvedReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "repair-unresolved-boot",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "lifecycle.repair_unresolved",
+                  message: "root status",
+                },
+                operationId: String(renewedOperation.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(unresolvedReport.status).toBe(200);
+    const unresolvedDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(unresolvedDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "probe_repair" },
+          kind: "probe_repair",
+          state: "failed",
+        }),
+      }),
+    });
+    const freshEvidence = {
+      ...renewedEvidence,
+      requestNonce: "request_nonce_03",
+    };
+    const freshRequestBody = JSON.stringify({
+      evidence: freshEvidence,
+      evidenceSignature: signProbeRepairEvidence(
+        canonicalProbeRepairEvidence(freshEvidence),
+        installKey,
+      ),
+    });
+    const fresh = await app.request(requestPath, {
+      body: freshRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(fresh.status).toBe(200);
+    const freshBody = (await fresh.json()) as {
+      authority: { repairOperationId: string };
+    };
+    expect(freshBody.authority.repairOperationId).not.toBe(
+      renewedBody.authority.repairOperationId,
+    );
+    const terminalReplay = await app.request(requestPath, {
+      body: renewedRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(terminalReplay.status).toBe(409);
+    await expect(terminalReplay.json()).resolves.toEqual({
+      error: "probe_repair_operation_terminal",
+    });
+    expect(database.probeOperations.findById(failed.id!)).toEqual(failed);
+    for (let index = 0; index < 2; index += 1) {
+      expect(
+        await app.request(requestPath, {
+          body: freshRequestBody,
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        }),
+      ).toMatchObject({ status: 200 });
+    }
+    const rateLimited = await app.request(requestPath, {
+      body: freshRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(rateLimited.status).toBe(429);
+    expect(rateLimited.headers.get("retry-after")).toMatch(/^\d+$/);
+    const freshOperation = database.probeOperations.findById(
+      Number(freshBody.authority.repairOperationId),
+    )!;
+    const running = startProbeUpgradeRequest({
+      nowMs: repairNowMs + 1,
+      operation: freshOperation,
+    }).operation;
+    database.probeOperations.updateProbeUpgradeRequest(running);
+    repairNowMs += 10_000;
+    const runningReplay = await app.request(requestPath, {
+      body: freshRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(runningReplay.status).toBe(409);
+    await expect(runningReplay.json()).resolves.toEqual({
+      error: "probe_repair_still_unresolved",
+    });
+    const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+      authenticatedProbeId: registration.probeId,
+      bootEvidenceBootId: "repair-boot-01",
+      bootEvidenceProbeId: registration.probeId,
+      bootProbeAssetBundleVersion: "1.4.0",
+      hostProfile: {
+        probeAssetBundleVersion: "1.4.0",
+        probeVersion: "1.4.0",
+      },
+      nowMs: repairNowMs + 2,
+      operation: running,
+      profileReportBootId: "repair-boot-01",
+    })!;
+    database.probeOperations.updateProbeUpgradeRequest(succeeded);
+    expect(succeeded.state).toBe("succeeded");
+    expect(
+      startProbeUpgradeRequest({
+        nowMs: repairNowMs + 3,
+        operation: succeeded,
+      }),
+    ).toEqual({ error: null, operation: succeeded });
+    database.close();
   });
 
   it("accepts Probe Operation acknowledgements and status reports idempotently", async () => {
@@ -4015,7 +4507,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -4145,7 +4640,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: nowMs - 1_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -4203,6 +4701,123 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it("persists only root-signed postactivation Repair eligibility with the failed Upgrade", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+      probeApiOrigin: "https://hub.example",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.hosts.findByProbeId(registration.probeId)!;
+    const targetAssetSetDigest = `sha256:${"a".repeat(64)}`;
+    const targetManifestSha256 = "b".repeat(64);
+    const upgradeAuthoritySha256 = "c".repeat(64);
+    const verifiedStageSha256 = "d".repeat(64);
+    const pending = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: nowMs - 1_000,
+        target: { assetSetDigest: targetAssetSetDigest, version: "0.2.0" },
+      }).operation,
+    );
+    const operation = database.probeOperations.admitPendingProbeUpgradeRequest(
+      pending.id!,
+      nowMs - 500,
+      targetManifestSha256,
+      upgradeAuthoritySha256,
+      verifiedStageSha256,
+    )!;
+    const evidence: ProbeRepairEligibility = {
+      activatedTargets: 3,
+      failedAuthoritySha256: upgradeAuthoritySha256,
+      failedOperationId: String(operation.id),
+      finalizedTargets: 0,
+      hostId: String(host.id),
+      hubOrigin: "https://hub.example",
+      journalPhase: "repair-required",
+      journalSha256: "e".repeat(64),
+      probeId: registration.probeId,
+      schemaVersion: 1,
+      targetAssetSetDigest,
+      targetBundleVersion: "0.2.0",
+      targetManifestSha256,
+      verifiedStageSha256,
+    };
+    const canonicalEvidence = canonicalProbeRepairEligibility(evidence);
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-postactivation-failure",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "lifecycle.upgrade_repair_required",
+                  message: "untrusted diagnostic",
+                  repairEligibilityEvidence: canonicalEvidence.toString("utf8"),
+                  repairEligibilitySignature: signProbeRepairEligibility(
+                    canonicalEvidence,
+                    installKey,
+                  ),
+                },
+                operationId: String(operation.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id!)).toEqual(
+      expect.objectContaining({
+        failureCode: "lifecycle.upgrade_repair_required",
+        repairEligibilityEvidenceJson: canonicalEvidence.toString("utf8"),
+        repairEligibilityEvidenceSha256: createHash("sha256")
+          .update(canonicalEvidence)
+          .digest("hex"),
+        state: "failed",
+      }),
+    );
+    const detail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "probe_repair" },
+          kind: "probe_upgrade",
+          state: "failed",
+        }),
+      }),
+    });
+    database.close();
+  });
+
   it("marks a Probe Upgrade Request succeeded from a Host Profile snapshot", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -4226,15 +4841,23 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const startupHostProfile = sampleHostProfileSnapshot();
     const upgradedHostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.2.0",
       probeVersion: "0.2.0",
     });
     const upgradedHostProfileHash = hashStableHostProfile(upgradedHostProfile);
+    const crossBootHostProfile = sampleHostProfileSnapshot({
+      hostname: "cross-boot-host",
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "0.2.0",
+    });
 
     const running = await app.request(
       "/api/probe/report",
@@ -4244,6 +4867,7 @@ describe("Probe report API", () => {
         ReportRequest.encode(
           ReportRequest.create({
             bootId: "boot-after-upgrade",
+            probeAssetBundleVersion: "0.2.0",
             operationAcknowledgements: [{ operationId: String(operation.id) }],
             operationStatuses: [
               {
@@ -4255,13 +4879,6 @@ describe("Probe report API", () => {
             probeId: registration.probeId,
             sequenceEnd: 1,
             sequenceStart: 1,
-            snapshots: [
-              {
-                collectorId: "official.host-profile",
-                hostProfile: startupHostProfile,
-                snapshotHash: hashStableHostProfile(startupHostProfile),
-              },
-            ],
           }),
         ).finish(),
       ),
@@ -4271,6 +4888,34 @@ describe("Probe report API", () => {
       expect.objectContaining({
         state: "running",
       }),
+    );
+
+    const crossBootProfile = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "different-boot",
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+            snapshots: [
+              {
+                collectorId: "official.host-profile",
+                hostProfile: crossBootHostProfile,
+                snapshotHash: hashStableHostProfile(crossBootHostProfile),
+              },
+            ],
+          }),
+        ).finish(),
+      ),
+    );
+    expect(crossBootProfile.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "running" }),
     );
 
     const compactObservation = await app.request(
@@ -4326,6 +4971,219 @@ describe("Probe report API", () => {
         completedAtMs: 1_725_000_010_000,
         state: "succeeded",
       }),
+    );
+
+    database.close();
+  });
+
+  it("advances Host Profile freshness from validated same-hash full and compact reports", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_001_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const hostProfile = {
+      architecture: "x86_64",
+      cpuCount: 2,
+      hostname: "managed-host-01",
+      kernel: "6.8.0",
+      memoryTotalBytes: 2_147_483_648,
+      os: "linux",
+      probeAssetBundleVersion: "0.1.0",
+      probeVersion: "0.1.0",
+    } satisfies root.enoki.v1.IHostProfileSnapshot;
+    const snapshotHash = hashStableHostProfile(hostProfile);
+    const send = (
+      sequence: number,
+      snapshot: root.enoki.v1.ISnapshot,
+      options: {
+        bootId?: string;
+        probeAssetBundleVersion?: string;
+      } = {},
+    ) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: options.bootId ?? "boot-same-hash-observation",
+          metrics:
+            sequence > 1
+              ? [
+                  {
+                    collectedAtMs: nowMs,
+                    collectorOutcomes: [
+                      { collectorId: "official.host-profile", state: 1 },
+                    ],
+                    sequence,
+                  },
+                ]
+              : [],
+          probeAssetBundleVersion: options.probeAssetBundleVersion,
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots: [snapshot],
+        }),
+      ).finish();
+
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    };
+
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-same-hash-observation",
+        probeAssetBundleVersion: "0.1.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+
+    nowMs = 1_725_000_001_100;
+    const full = await send(2, {
+      collectorId: "official.host-profile",
+      hostProfile,
+      snapshotHash,
+    });
+    expect(full.status).toBe(200);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(nowMs);
+
+    nowMs = 1_725_000_001_200;
+    const compact = await send(3, {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    });
+    expect(compact.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
+        .requestedSnapshotCollectorIds,
+    ).toEqual([]);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(nowMs);
+
+    const failed = database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: 1_725_000_001_210,
+      canceledAtMs: null,
+      completedAtMs: 1_725_000_001_250,
+      createdAtMs: 1_725_000_001_200,
+      currentProbeVersion: "0.0.9",
+      failureCode: "post_replacement_restart_failure",
+      failureMessage: "local restart failed",
+      hostId: host.id,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: 1_725_000_001_220,
+      state: "failed",
+      supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      targetProbeVersion: "0.1.0",
+      updatedAtMs: 1_725_000_001_250,
+    });
+
+    nowMs = 1_725_000_001_300;
+    const duplicateCompact = await send(3, {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    });
+    expect(duplicateCompact.status).toBe(200);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(1_725_000_001_200);
+    const duplicateDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(duplicateDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
+      }),
+    });
+
+    nowMs = 1_725_000_001_350;
+    const wrongHash = await send(4, {
+      collectorId: "official.host-profile",
+      snapshotHash: "unknown-host-profile-hash",
+    });
+    expect(wrongHash.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await wrongHash.arrayBuffer()))
+        .requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(1_725_000_001_200);
+
+    nowMs = 1_725_000_001_375;
+    const wrongBootProfile = await send(
+      1,
+      {
+        collectorId: "official.host-profile",
+        hostProfile,
+        snapshotHash,
+      },
+      { bootId: "wrong-recovery-boot" },
+    );
+    expect(wrongBootProfile.status).toBe(200);
+    const wrongBootDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(wrongBootDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
+      }),
+    });
+
+    nowMs = 1_725_000_001_400;
+    const newCompact = await send(5, {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    });
+    expect(newCompact.status).toBe(200);
+    const recoveredDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(recoveredDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+    expect(database.probeOperations.findById(failed.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "failed" }),
     );
 
     database.close();
@@ -4415,7 +5273,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -4474,7 +5335,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       acceptedAtMs: 1_725_000_009_500,
       state: "accepted",
@@ -4541,7 +5405,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       state: "superseded",
       supersededAtMs: 1_725_000_009_500,
@@ -4632,6 +5499,14 @@ describe("Probe report API", () => {
                     mountPoint: "/",
                     totalBytes: 2_048,
                     usedBytes: 1_536,
+                  },
+                ],
+                diskHealth: [
+                  {
+                    deviceName: "/dev/sda",
+                    model: "Example SSD",
+                    passed: true,
+                    temperatureCelsius: 31,
                   },
                 ],
                 load_1: 0.12,
@@ -4775,6 +5650,18 @@ describe("Probe report API", () => {
     ).toEqual({
       network_rx_bytes_delta: 4_000,
       network_tx_bytes_delta: 2_000,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select device_name, model, passed, temperature_celsius from official_metric_disk_health where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      device_name: "/dev/sda",
+      model: "Example SSD",
+      passed: 1,
+      temperature_celsius: 31,
     });
 
     expect(
@@ -5991,6 +6878,35 @@ describe("Probe report API", () => {
     expect(status.status).toBe(200);
     expect(removedHostIds).toEqual([host.id]);
 
+    const repeatedStatus = await app.request(
+      `/api/probe/operations/${operation.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/status`,
+        JSON.stringify({
+          status: "succeeded",
+          token,
+        }),
+      ),
+    );
+    expect(repeatedStatus.status).toBe(200);
+    expect(removedHostIds).toEqual([host.id]);
+
+    const failedReplay = await app.request(
+      `/api/probe/operations/${operation.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/status`,
+        JSON.stringify({
+          errorCode: "probe_uninstall_failed",
+          message: "",
+          status: "failed",
+          token,
+        }),
+      ),
+    );
+    expect(failedReplay.status).toBe(401);
+
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
@@ -6066,6 +6982,86 @@ describe("Probe report API", () => {
       samples: 0,
     });
 
+    database.close();
+  });
+
+  it("accepts only the published v0.1.72 full Host Profile observation contract", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, await loginOwner(app)),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const startupProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
+    const changedProfile = sampleHostProfileSnapshot({
+      hostname: "v0.1.72-full-only-observation",
+      probeVersion: "0.1.72",
+    });
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    const startup = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-full-only-observation",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: startupProfile,
+              snapshotHash: hashStableHostProfile(startupProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(startup.status).toBe(200);
+
+    const observation = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-full-only-observation",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: changedProfile,
+              snapshotHash: hashStableHostProfile(changedProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(observation.status).toBe(200);
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({ hostname: "v0.1.72-full-only-observation" }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 2 });
     database.close();
   });
 });
