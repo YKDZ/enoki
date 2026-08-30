@@ -42,6 +42,34 @@ describe("Trust Epoch release transition", () => {
     ).rejects.toThrow("source Probe asset closure is required");
   });
 
+  it.each([
+    ["missing", (source) => delete source.assetSetManifestSha256],
+    ["malformed", (source) => (source.assetSetManifestSha256 = "not-a-digest")],
+  ])(
+    "rejects a root-signed contract with a %s source asset-set closure",
+    async (_name, mutate) => {
+      const signed = await createReleaseTransitionContract(fixture.createInput);
+      const contract = structuredClone(signed.contract);
+      mutate(contract.source);
+      const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
+
+      expect(() =>
+        verifyReleaseTransitionContract({
+          authorizationBytes: fixture.createInput.authorizationBytes,
+          authorizationSignature: fixture.createInput.authorizationSignature,
+          contractBytes: bytes,
+          contractSignature: sign(
+            "RSA-SHA256",
+            releaseTransitionContractSigningInput(bytes),
+            fixture.root.privateKey,
+          ),
+          expected: fixture.expected,
+          rootPublicKeyPem: fixture.root.publicKey,
+        }),
+      ).toThrow("fields are invalid");
+    },
+  );
+
   it("binds the authorized legacy baseline to one replacement-required candidate", async () => {
     const signed = await createReleaseTransitionContract(fixture.createInput);
 

@@ -4,10 +4,63 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { terminalReplacementRecovery } from "../src/enrollment/routes.js";
 import { readVerifiedReleaseTransitionFromDirectory } from "../src/probe/release-transition.js";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture.js";
 
 describe("verified Probe release transition", () => {
+  it("selects terminal recovery components only from the exact verified asset closure", () => {
+    const transition = {
+      sourceAssetSetDigest: `sha256:${"1".repeat(64)}`,
+      sourceProbeSha256: ["a", "b", "c", "d"].map((value) => value.repeat(64)),
+      sourceProbeVersion: "1.3.0",
+      targetAssetSetDigest: `sha256:${"2".repeat(64)}`,
+      targetProbeSha256: ["e", "f", "0", "9"].map((value) => value.repeat(64)),
+      targetProbeVersion: "1.4.0",
+    } as never;
+    const predecessor = {
+      enrollmentId: "enr_terminal",
+      targetAssetSetDigest: `sha256:${"2".repeat(64)}`,
+      targetProbeVersion: "1.4.0",
+    } as never;
+
+    expect(
+      terminalReplacementRecovery({
+        predecessor,
+        releaseTransition: transition,
+      }),
+    ).toMatchObject({ sourceProbeSha256: transition.targetProbeSha256 });
+    expect(
+      terminalReplacementRecovery({
+        predecessor: {
+          ...predecessor,
+          targetAssetSetDigest: transition.sourceAssetSetDigest,
+          targetProbeVersion: transition.sourceProbeVersion,
+        },
+        releaseTransition: transition,
+      }),
+    ).toMatchObject({ sourceProbeSha256: transition.sourceProbeSha256 });
+    expect(
+      terminalReplacementRecovery({
+        predecessor: {
+          ...predecessor,
+          targetAssetSetDigest: `sha256:${"3".repeat(64)}`,
+        },
+        releaseTransition: transition,
+      }),
+    ).toBeNull();
+    expect(
+      terminalReplacementRecovery({
+        predecessor: {
+          ...predecessor,
+          targetAssetSetDigest: `sha256:${"4".repeat(64)}`,
+          targetProbeVersion: transition.sourceProbeVersion,
+        },
+        releaseTransition: transition,
+      }),
+    ).toBeNull();
+  });
+
   it("reads the exact Trust Epoch migration closure as replacement-required", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
     const fixture = await writeSignedProbeAssetSet(assetDir, {

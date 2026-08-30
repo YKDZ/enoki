@@ -111,11 +111,13 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
         kind: "manual_reinstall",
         replacementPredecessorAssetSetDigest:
           terminalRecovery.predecessor.targetAssetSetDigest,
-        replacementPredecessorEnrollmentId: terminalRecovery.predecessor.enrollmentId,
+        replacementPredecessorEnrollmentId:
+          terminalRecovery.predecessor.enrollmentId,
         sourceProbeSha256: terminalRecovery.sourceProbeSha256,
-        targetAssetSetDigest: releaseContext.releaseTransition!
-          .targetAssetSetDigest,
-        targetProbeVersion: releaseContext.releaseTransition!.targetProbeVersion,
+        targetAssetSetDigest:
+          releaseContext.releaseTransition!.targetAssetSetDigest,
+        targetProbeVersion:
+          releaseContext.releaseTransition!.targetProbeVersion,
       });
     }
     if (!policy) {
@@ -284,7 +286,7 @@ function positiveInteger(value: string) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function terminalReplacementRecovery(input: {
+export function terminalReplacementRecovery(input: {
   predecessor: ReturnType<
     EnrollmentRepository["terminalReplacementPredecessorForHost"]
   >;
