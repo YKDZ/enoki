@@ -2811,6 +2811,7 @@ export function createHubLifecycleClient({
 }
 
 export function createProbeHostHarness({
+  cleanupPreparedInstall,
   execute,
   ownershipToken = randomUUID(),
   prepareInstall,
@@ -2830,6 +2831,12 @@ export function createProbeHostHarness({
   let sharedDependenciesBefore = null;
   if (prepareInstall !== undefined && typeof prepareInstall !== "function") {
     throw new Error("Probe Host Harness install preparation is invalid");
+  }
+  if (
+    cleanupPreparedInstall !== undefined &&
+    typeof cleanupPreparedInstall !== "function"
+  ) {
+    throw new Error("Probe Host Harness install cleanup is invalid");
   }
   const installedBundleFailureRepair =
     createInstalledBundleFailureRepairHostDriver({
@@ -2890,6 +2897,14 @@ export function createProbeHostHarness({
       : null;
     const workingDirectory = prepared?.workingDirectory;
     if (
+      prepared?.complete !== undefined &&
+      typeof prepared.complete !== "function"
+    ) {
+      throw new Error(
+        "Probe Host Harness install ownership completion is invalid",
+      );
+    }
+    if (
       workingDirectory !== undefined &&
       !/^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/.test(workingDirectory)
     ) {
@@ -2908,6 +2923,7 @@ export function createProbeHostHarness({
     }
     return {
       bootstrapRecipeProvenance: prepared?.evidence ?? null,
+      complete: prepared?.complete ?? null,
       installContract,
       workingDirectory,
     };
@@ -2946,6 +2962,7 @@ export function createProbeHostHarness({
     }
     const {
       bootstrapRecipeProvenance,
+      complete,
       workingDirectory: installWorkingDirectory,
     } = await prepareEnrollmentInstall(enrollment, runId);
     const result = await execute(
@@ -2969,6 +2986,7 @@ export function createProbeHostHarness({
       error.installerEvidence = commandEvidence(result);
       throw error;
     }
+    await complete?.();
     if (result.code !== 0) {
       const error = new Error(
         `Probe installation failed (${result.code}); redacted installer evidence was retained`,
@@ -3187,6 +3205,7 @@ export function createProbeHostHarness({
         "/etc/systemd/system/enoki-probe.service",
         "/var/lib/enoki-probe",
         "/etc/sudoers.d/enoki-probe-operations",
+        "/etc/sudoers.d/enoki-probe-collector-helpers",
         "enoki-probe.service",
       ];
       const missing = required.filter((entry) => !residue.includes(entry));
@@ -3232,8 +3251,7 @@ export function createProbeHostHarness({
       }
       if (
         sudoersResult.code !== 0 ||
-        !sudoersResult.stdout.includes("enoki-probe-uninstaller") ||
-        !sudoersResult.stdout.includes("internal-uninstaller")
+        sudoersResult.stdout.trim() !== "verified"
       ) {
         throw new Error(
           "Legacy Probe v0.1.74 operation sudoers boundary is missing or invalid",
@@ -3667,6 +3685,10 @@ export function createProbeHostHarness({
         claimOwned = true;
       });
 
+      if (claimOwned && cleanupPreparedInstall) {
+        await attempt(() => cleanupPreparedInstall({ ownershipToken, runId }));
+      }
+
       if (postReplacementFaultArmed) {
         await attempt(async () => {
           const removed = await execute(
@@ -4001,10 +4023,32 @@ done
 function legacySudoersBoundaryScript() {
   return String.raw`# enoki-release-e2e:legacy-sudoers-boundary
 set -eu
-cat /etc/sudoers.d/enoki-probe-operations
-if [ -e /etc/sudoers.d/enoki-probe-collector-helpers ]; then
-  cat /etc/sudoers.d/enoki-probe-collector-helpers
-fi
+operation=/etc/sudoers.d/enoki-probe-operations
+collector=/etc/sudoers.d/enoki-probe-collector-helpers
+expected_operation=$(mktemp /tmp/enoki-release-e2e-legacy-operation.XXXXXX)
+expected_collector=$(mktemp /tmp/enoki-release-e2e-legacy-collector.XXXXXX)
+trap 'rm -f -- "$expected_operation" "$expected_collector"' EXIT HUP INT TERM
+cat >"$expected_operation" <<'ENOKI_OPERATION_EOF'
+# Managed by Enoki Probe installer.
+enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /var/lib/enoki-probe/identity/probe-bootstrap.toml
+enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /var/lib/enoki-probe/identity/probe-bootstrap.toml
+ENOKI_OPERATION_EOF
+cat >"$expected_collector" <<'ENOKI_COLLECTOR_EOF'
+# Managed by Enoki Probe installer.
+enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes /usr/local/bin/enoki-probe internal-privileged-collector-helper --helper disk-health.smartctl
+ENOKI_COLLECTOR_EOF
+for candidate in "$operation" "$collector"; do
+  [ -f "$candidate" ] && [ ! -L "$candidate" ]
+  [ "$(stat -c %h "$candidate")" = 1 ]
+  [ "$(stat -c %u "$candidate")" = 0 ]
+  [ "$(stat -c %g "$candidate")" = 0 ]
+  [ "$(stat -c %a "$candidate")" = 440 ]
+  ! grep -Fq 'NOPASSWD: ALL' "$candidate"
+  /usr/sbin/visudo -cf "$candidate" >/dev/null
+done
+cmp --silent "$expected_operation" "$operation"
+cmp --silent "$expected_collector" "$collector"
+printf 'verified\n'
 `;
 }
 
@@ -4015,8 +4059,13 @@ metadata=/etc/enoki/probe-install.toml
 identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
 [ -f "$metadata" ] && [ ! -L "$metadata" ]
 [ "$(stat -c %u "$metadata")" = 0 ]
+[ "$(stat -c %g "$metadata")" = 0 ]
 [ "$(stat -c %a "$metadata")" = 600 ]
 [ -f "$identity" ] && [ ! -L "$identity" ]
+[ "$(stat -c %h "$identity")" = 1 ]
+[ "$(stat -c %u "$identity")" = "$(id -u "enoki-probe")" ]
+[ "$(stat -c %g "$identity")" = "$(id -g "enoki-probe")" ]
+[ "$(stat -c %a "$identity")" = 600 ]
 require_metadata_key() { [ "$(grep -Ec "^$1 = " "$metadata")" -eq 1 ]; }
 require_metadata_line() {
   expected=$1
@@ -4727,21 +4776,31 @@ function assertInstallCommand(command) {
     throw new Error("Hub returned an invalid Probe install command");
   }
   const recipe = command.match(
-    /^printf '%s\\n' '(enk_enroll_[A-Za-z0-9_-]+)' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin '(https?:\/\/[^'\s]+)'$/,
+    /^printf '%s\\n' '((?:[^'\r\n]|'"'"')*)' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin '(https?:\/\/[^'\s]+)'$/,
   );
   if (recipe) {
     assertInstallHubOrigin(recipe[2]);
-    return { hubUrl: recipe[2], kind: "bootstrap-recipe", token: recipe[1] };
+    return {
+      ...parseBootstrapEnrollmentAuthority(
+        decodeShellSingleQuoted(recipe[1]),
+        recipe[2],
+      ),
+      hubUrl: recipe[2],
+      kind: "bootstrap-recipe",
+    };
   }
   const production = command.match(
-    /^ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='([^'\s]+)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/,
+    /^ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='((?:[^'\r\n]|'"'"')*)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/,
   );
   if (production) {
     assertInstallHubOrigin(production[1]);
     return {
+      ...parseBootstrapEnrollmentAuthority(
+        decodeShellSingleQuoted(production[2]),
+        production[1],
+      ),
       hubUrl: production[1],
       kind: "production-bootstrap",
-      token: productionBootstrapEnrollmentToken(production[2]),
     };
   }
   const legacy = command.match(
@@ -4757,26 +4816,74 @@ function assertInstallCommand(command) {
   throw new Error("Hub returned an invalid Probe install command");
 }
 
-function productionBootstrapEnrollmentToken(authority) {
-  if (/^enk_enroll_[A-Za-z0-9_-]+$/.test(authority)) return authority;
-  let replacement;
+function decodeShellSingleQuoted(value) {
+  return value.replaceAll(`'"'"'`, "'");
+}
+
+function parseBootstrapEnrollmentAuthority(authority, commandHubOrigin) {
+  if (/^enk_enroll_[A-Za-z0-9_-]+$/.test(authority)) {
+    return { replacementMigration: null, token: authority };
+  }
+  let parsed;
   try {
-    replacement = JSON.parse(authority);
+    parsed = JSON.parse(authority);
   } catch {
     throw new Error("Hub returned an invalid Probe install command");
   }
+  const migration = parsed?.replacementMigration;
   if (
-    JSON.stringify(Object.keys(replacement).sort()) !==
-      JSON.stringify(["enrollmentToken", "hostId", "migration"].sort()) ||
-    !/^enk_enroll_[A-Za-z0-9_-]+$/.test(replacement.enrollmentToken ?? "") ||
-    !Number.isSafeInteger(replacement.hostId) ||
-    replacement.hostId < 1 ||
-    replacement.migration !== "trust_epoch_replacement" ||
-    JSON.stringify(replacement) !== authority
+    !parsed ||
+    Array.isArray(parsed) ||
+    JSON.stringify(Object.keys(parsed).sort()) !==
+      JSON.stringify(
+        [
+          "enrollmentToken",
+          "hubOrigin",
+          "replacementMigration",
+          "schemaVersion",
+        ].sort(),
+      ) ||
+    parsed.schemaVersion !== 1 ||
+    parsed.hubOrigin !== commandHubOrigin ||
+    !/^enk_enroll_[A-Za-z0-9_-]+$/.test(parsed.enrollmentToken ?? "") ||
+    !migration ||
+    Array.isArray(migration) ||
+    JSON.stringify(Object.keys(migration).sort()) !==
+      JSON.stringify(
+        [
+          "enrollmentId",
+          "expectedProbeId",
+          "sourceProbeSha256",
+          "sourceProbeVersion",
+          "targetAssetSetDigest",
+          "targetHostId",
+          "targetProbeVersion",
+        ].sort(),
+      ) ||
+    !/^enr_[A-Za-z0-9_-]{16,}$/.test(migration.enrollmentId ?? "") ||
+    !/^[A-Za-z0-9_-]+$/.test(migration.expectedProbeId ?? "") ||
+    !Array.isArray(migration.sourceProbeSha256) ||
+    migration.sourceProbeSha256.length < 1 ||
+    migration.sourceProbeSha256.some(
+      (digest) => !/^[0-9a-f]{64}$/.test(digest ?? ""),
+    ) ||
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+      migration.sourceProbeVersion ?? "",
+    ) ||
+    !/^sha256:[0-9a-f]{64}$/.test(migration.targetAssetSetDigest ?? "") ||
+    !/^[1-9]\d*$/.test(migration.targetHostId ?? "") ||
+    !Number.isSafeInteger(Number(migration.targetHostId)) ||
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+      migration.targetProbeVersion ?? "",
+    ) ||
+    JSON.stringify(parsed) !== authority
   ) {
     throw new Error("Hub returned an invalid Probe install command");
   }
-  return replacement.enrollmentToken;
+  return {
+    replacementMigration: migration,
+    token: parsed.enrollmentToken,
+  };
 }
 
 function assertInstallHubOrigin(value) {
@@ -4792,18 +4899,34 @@ function assertInstallHubOrigin(value) {
 }
 
 function assertEnrollmentInstallContract(enrollment) {
-  const contract = assertInstallCommand(enrollment?.installCommand);
+  const parsed = assertInstallCommand(enrollment?.installCommand);
   if (
-    enrollment?.enrollmentToken !== contract.token ||
-    enrollment?.hubUrl !== contract.hubUrl
+    enrollment?.enrollmentToken !== parsed.token ||
+    enrollment?.hubUrl !== parsed.hubUrl
   ) {
     throw new Error(
       "Hub Enrollment install command is not bound to its token and origin",
     );
   }
+  if (parsed.replacementMigration) {
+    if (
+      enrollment?.enrollmentId !== parsed.replacementMigration.enrollmentId ||
+      enrollment?.target?.kind !== "manual_reinstall" ||
+      String(enrollment.target.hostId) !==
+        parsed.replacementMigration.targetHostId
+    ) {
+      throw new Error(
+        "Hub Enrollment install command is not bound to its Replacement target",
+      );
+    }
+  } else if (enrollment?.target?.kind === "manual_reinstall") {
+    throw new Error(
+      "Hub manual Probe reinstall Enrollment has no Replacement authority",
+    );
+  }
   if (
-    contract.kind === "bootstrap-recipe" ||
-    contract.kind === "production-bootstrap"
+    parsed.kind === "bootstrap-recipe" ||
+    parsed.kind === "production-bootstrap"
   ) {
     assertBootstrapRecipeRecord(enrollment.bootstrapRecipe);
   } else if (enrollment.bootstrapRecipe !== undefined) {
@@ -4811,7 +4934,14 @@ function assertEnrollmentInstallContract(enrollment) {
       "Legacy Enrollment unexpectedly supplied a Probe Bootstrap recipe",
     );
   }
-  return contract;
+  return {
+    hubUrl: parsed.hubUrl,
+    kind: parsed.kind,
+    ...(parsed.replacementMigration
+      ? { replacementMigration: parsed.replacementMigration }
+      : {}),
+    token: parsed.token,
+  };
 }
 
 function assertBootstrapRecipeRecord(record) {
