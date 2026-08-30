@@ -42,6 +42,7 @@ import {
   createProbeBootstrapPublication,
   inspectProbeAssetSet,
   releaseTransitionForValidatedCandidate,
+  signProbeAssetSet,
   validateReleaseCandidate,
   validateDelegatedProbeSigningIdentity,
   validateProbeSigningIdentity,
@@ -983,6 +984,44 @@ with open(os.devnull, "rb") as input_stream:
       expect(validation.stdout).toBe(
         `Probe Asset Set is valid: 1.2.3 ${publicKeySha256}\n`,
       );
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it("does not sign or materialize a Probe Asset Set with an archive size mismatch", async () => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-bounded-archive-"),
+    );
+    try {
+      const { outputDir, privateKey, root } =
+        await createProbeAssetSetFixture(workDir);
+      const unsignedDir = path.join(workDir, "unsigned-probe-assets");
+      const rejectedOutput = path.join(workDir, "rejected-probe-assets");
+      await cp(outputDir, unsignedDir, { recursive: true });
+      await rm(path.join(unsignedDir, "manifest.json.sig"));
+      const manifestPath = path.join(unsignedDir, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.assets[0].size += 1;
+      await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+
+      await expect(
+        signProbeAssetSet({
+          expectedDelegationBytes: await readFile(
+            path.join(unsignedDir, "trust-delegation.json"),
+          ),
+          expectedDelegationSignature: await readFile(
+            path.join(unsignedDir, "trust-delegation.json.sig"),
+          ),
+          outputDir: rejectedOutput,
+          privateKeyPem: privateKey,
+          trustedRootPublicKeyPem: root.publicKey,
+          unsignedAssetDir: unsignedDir,
+        }),
+      ).rejects.toThrow(/Probe Asset Set checksum does not match enoki-probe-/);
+      await expect(readdir(rejectedOutput)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await rm(workDir, { force: true, recursive: true });
     }

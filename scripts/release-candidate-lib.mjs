@@ -51,6 +51,7 @@ import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 const execFileAsync = promisify(execFile);
 const commitPattern = /^[0-9a-f]{40}$/;
 const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const MAX_PROBE_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const bootstrapRecipeFile = "enoki-probe-bootstrap.py";
 const bootstrapRecipeRecordFile = "enoki-probe-bootstrap-recipe.json";
 const verifiedCandidateReleaseTransitions = new WeakMap();
@@ -339,7 +340,8 @@ export async function packageProbeArchive({
       ],
       { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
     );
-    const archive = await readProbeArchiveSnapshot(archivePath);
+    const archiveSize = (await stat(archivePath)).size;
+    const archive = await readProbeArchiveSnapshot(archivePath, archiveSize);
     await inspectProbeArchiveBytes(archive.bytes, file, {
       bundleInspector: inspectRuntimeProbeBundleArchiveBytes,
       target,
@@ -363,11 +365,15 @@ async function composeProbeArchive({
   outputPath,
   rootKeyId,
   runtimeArchivePath,
+  runtimeExpectedSize,
   sourceDateEpoch,
   target,
   version,
 }) {
-  const runtimeArchive = await readProbeArchiveSnapshot(runtimeArchivePath);
+  const runtimeArchive = await readProbeArchiveSnapshot(
+    runtimeArchivePath,
+    runtimeExpectedSize,
+  );
   await inspectProbeArchiveBytes(
     runtimeArchive.bytes,
     path.basename(runtimeArchivePath),
@@ -653,6 +659,7 @@ export async function prepareUnsignedProbeAssetSet({
       outputPath: bundledArchivePath,
       rootKeyId,
       runtimeArchivePath: path.join(archivesDir, file),
+      runtimeExpectedSize: archive.byteLength,
       sourceDateEpoch: "0",
       target,
       version: stableVersion,
@@ -1377,13 +1384,28 @@ async function inspectProbeAssetSetWithBundleInspector(
       !/^[0-9a-f]{64}$/.test(asset.bundleManifestSha256) ||
       !/^[0-9a-f]{64}$/.test(asset.sha256) ||
       !Number.isSafeInteger(asset.size) ||
-      asset.size < 0
+      asset.size < 0 ||
+      asset.size > MAX_PROBE_ARCHIVE_BYTES
     ) {
       throw new Error(`Probe Asset Set target ${target} is malformed`);
     }
     const archivePath = path.join(assetDir, asset.file);
-    const archive = await readProbeArchiveSnapshot(archivePath);
-    if (archive.size !== asset.size || sha256(archive.bytes) !== asset.sha256) {
+    const archive = await readProbeArchiveSnapshot(
+      archivePath,
+      asset.size,
+    ).catch((error) => {
+      if (
+        error instanceof Error &&
+        (error.message.endsWith("size does not match") ||
+          error.message.endsWith("changed while reading"))
+      ) {
+        throw new Error(
+          `Probe Asset Set checksum does not match ${asset.file}`,
+        );
+      }
+      throw error;
+    });
+    if (sha256(archive.bytes) !== asset.sha256) {
       throw new Error(`Probe Asset Set checksum does not match ${asset.file}`);
     }
     const sidecar = await readFile(`${archivePath}.sha256`, "utf8");
@@ -1614,13 +1636,19 @@ function assertSigningPublicKey(publicKeyPem) {
   }
 }
 
-async function readProbeArchiveSnapshot(archivePath) {
+async function readProbeArchiveSnapshot(archivePath, expectedSize) {
   try {
-    return await readRegularFileSnapshot(archivePath, "Probe archive");
-  } catch {
-    throw new Error(
-      `Probe archive ${path.basename(archivePath)} must be a regular single-link file`,
-    );
+    return await readRegularFileSnapshot(archivePath, "Probe archive", {
+      expectedSize,
+      maximumSize: MAX_PROBE_ARCHIVE_BYTES,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("must be a regular")) {
+      throw new Error(
+        `Probe archive ${path.basename(archivePath)} must be a regular single-link file`,
+      );
+    }
+    throw error;
   }
 }
 

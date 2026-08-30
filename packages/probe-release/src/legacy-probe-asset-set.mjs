@@ -17,6 +17,7 @@ import { probeTargets } from "./probe-asset-bundle.mjs";
 import { readRegularFileSnapshot } from "./regular-file-snapshot.mjs";
 
 const execFileAsync = promisify(execFile);
+const MAX_LEGACY_PROBE_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const dynamicLoaderByProbeTarget = Object.freeze({
   "aarch64-unknown-linux-gnu": "/lib/ld-linux-aarch64.so.1",
   "aarch64-unknown-linux-musl": "/lib/ld-musl-aarch64.so.1",
@@ -41,7 +42,8 @@ export async function inspectLegacyProbeAssetSet(
         !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(asset.name) ||
         !/^[0-9a-f]{64}$/.test(asset.sha256) ||
         !Number.isSafeInteger(asset.size) ||
-        asset.size < 1
+        asset.size < 1 ||
+        asset.size > MAX_LEGACY_PROBE_ARCHIVE_BYTES
       ) {
         throw new Error("legacy Probe Asset Set authorization is invalid");
       }
@@ -136,25 +138,30 @@ export async function inspectLegacyProbeAssetSet(
       asset.target !== target ||
       !/^[0-9a-f]{64}$/.test(asset.sha256) ||
       !Number.isSafeInteger(asset.size) ||
-      asset.size < 1
+      asset.size < 1 ||
+      asset.size > MAX_LEGACY_PROBE_ARCHIVE_BYTES
     ) {
       throw new Error(`legacy Probe Asset Set target ${target} is invalid`);
     }
     const archivePath = path.join(assetDir, file);
-    const archive = await readRegularFileSnapshot(
-      archivePath,
-      "legacy Probe Asset Set archive",
-    ).catch(() => {
-      throw new Error("legacy Probe Asset Set archive does not match");
-    });
     const authorizedAsset = expectedAssets.find(
       (expected) => expected.name === file,
     );
+    if (!authorizedAsset || asset.size !== authorizedAsset.size) {
+      throw new Error(`legacy Probe Asset Set archive does not match ${file}`);
+    }
+    const archive = await readRegularFileSnapshot(
+      archivePath,
+      "legacy Probe Asset Set archive",
+      {
+        expectedSize: asset.size,
+        maximumSize: MAX_LEGACY_PROBE_ARCHIVE_BYTES,
+      },
+    ).catch(() => {
+      throw new Error("legacy Probe Asset Set archive does not match");
+    });
     if (
-      archive.size !== asset.size ||
       sha256(archive.bytes) !== asset.sha256 ||
-      !authorizedAsset ||
-      archive.size !== authorizedAsset.size ||
       sha256(archive.bytes) !== authorizedAsset.sha256
     ) {
       throw new Error(`legacy Probe Asset Set archive does not match ${file}`);

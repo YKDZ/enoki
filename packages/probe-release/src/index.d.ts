@@ -67,6 +67,7 @@ export function inspectRuntimeProbeBundleArchiveBytes(
 export function readRegularFileSnapshot(
   filePath: string,
   label: string,
+  bounds: { expectedSize: number; maximumSize: number },
 ): Promise<{ bytes: Buffer; size: number }>;
 
 export function canonicalPublicKeyPem(value: string | Buffer): Buffer;

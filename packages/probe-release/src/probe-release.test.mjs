@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
-import { appendFileSync, renameSync } from "node:fs";
+import { appendFileSync, renameSync, truncateSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -80,7 +80,14 @@ describe("Probe release primitives", () => {
         if (openedPath === filePath) renameSync(replacementPath, filePath);
       };
 
-      const snapshot = await readRegularFileSnapshot(filePath, "Probe archive");
+      const snapshot = await readRegularFileSnapshot(
+        filePath,
+        "Probe archive",
+        {
+          expectedSize: original.byteLength,
+          maximumSize: original.byteLength,
+        },
+      );
       expect(snapshot).toEqual({ bytes: original, size: original.byteLength });
       expect(await readFile(filePath)).toEqual(replacement);
     } finally {
@@ -99,10 +106,53 @@ describe("Probe release primitives", () => {
       };
 
       await expect(
-        readRegularFileSnapshot(filePath, "Probe archive"),
+        readRegularFileSnapshot(filePath, "Probe archive", {
+          expectedSize: Buffer.byteLength("verified archive"),
+          maximumSize: Buffer.byteLength("verified archive"),
+        }),
       ).rejects.toThrow("Probe archive changed while reading");
     } finally {
       regularFileSnapshotMutation.afterStat = null;
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects early EOF from the opened archive descriptor", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "enoki-snapshot-"));
+    const filePath = path.join(directory, "archive.tar.gz");
+    const archive = Buffer.from("verified archive snapshot");
+    try {
+      await writeFile(filePath, archive);
+      regularFileSnapshotMutation.afterStat = (openedPath) => {
+        if (openedPath === filePath) truncateSync(filePath, 1);
+      };
+
+      await expect(
+        readRegularFileSnapshot(filePath, "Probe archive", {
+          expectedSize: archive.byteLength,
+          maximumSize: archive.byteLength,
+        }),
+      ).rejects.toThrow("Probe archive changed while reading");
+    } finally {
+      regularFileSnapshotMutation.afterStat = null;
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a large archive that disagrees with its declared size before reading", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "enoki-snapshot-"));
+    const filePath = path.join(directory, "archive.tar.gz");
+    try {
+      await writeFile(filePath, "archive");
+      truncateSync(filePath, 64 * 1024 * 1024);
+
+      await expect(
+        readRegularFileSnapshot(filePath, "Probe archive", {
+          expectedSize: 7,
+          maximumSize: 1024,
+        }),
+      ).rejects.toThrow("Probe archive size does not match");
+    } finally {
       await rm(directory, { force: true, recursive: true });
     }
   });

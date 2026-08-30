@@ -205,6 +205,10 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
     const archive = await readRegularFileSnapshot(
       archivePath,
       "Release Transition Contract target Probe archive",
+      {
+        expectedSize: asset.size,
+        maximumSize: MAX_TARGET_BUNDLE_BYTES,
+      },
     ).catch(() => {
       throw new Error(
         "Release Transition Contract target Probe asset closure is invalid",
