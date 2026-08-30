@@ -413,6 +413,12 @@ function signedContractFixture(rootPublicKeyPem) {
       })),
       assetSetManifestSha256: "b".repeat(64),
       delegationGeneration: 1,
+      probeComponents: targets.map((target) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: "a".repeat(64),
+        target,
+      })),
       signingKeyId: "f".repeat(64),
       version: "1.2.3",
     },

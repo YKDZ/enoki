@@ -40,6 +40,7 @@ export type VerifiedReleaseTransition = {
   classification: "compatible" | "replacement-required";
   sourceProbeVersion: string;
   sourceProbeSha256: string[];
+  targetProbeSha256: string[];
   targetAssetSetDigest: string;
   targetBundles?: ReadonlyArray<{
     bundleManifestSha256: string;

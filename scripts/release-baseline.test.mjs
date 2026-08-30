@@ -600,6 +600,12 @@ async function createResolverFixture(options = {}) {
       rootPrivateKeyPem: probe.root.privateKey,
       rootPublicKeyPem: probe.root.publicKey,
       sourceAssetDir: source.assetDir,
+      targetProbeComponents: probeTargets.map((target) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: "a".repeat(64),
+        target,
+      })),
       targetManifestBytes: await readFile(
         path.join(probe.outputDir, "manifest.json"),
       ),

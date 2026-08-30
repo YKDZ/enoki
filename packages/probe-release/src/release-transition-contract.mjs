@@ -42,6 +42,10 @@ export async function createReleaseTransitionContract(input) {
     signature: input.delegationSignature,
   });
   const target = parseTargetManifest(input.targetManifestBytes);
+  const targetProbeComponents = validateProbeComponents(
+    input.targetProbeComponents,
+    "target",
+  );
   if (
     target.version !== input.targetVersion ||
     target.delegationGeneration !== delegation.generation ||
@@ -97,6 +101,7 @@ export async function createReleaseTransitionContract(input) {
       assetClosure: target.assets,
       assetSetManifestSha256: sha256(input.targetManifestBytes),
       delegationGeneration: delegation.generation,
+      probeComponents: targetProbeComponents,
       signingKeyId: delegation.signingIdentity.keyId,
       version: input.targetVersion,
     },
@@ -348,6 +353,7 @@ function validateContract(value) {
     "assetClosure",
     "assetSetManifestSha256",
     "delegationGeneration",
+    "probeComponents",
     "signingKeyId",
     "version",
   ]);
@@ -365,6 +371,7 @@ function validateContract(value) {
     !/^sha256:[0-9a-f]{64}$/.test(value.source.hubDigest ?? "") ||
     !Array.isArray(value.source.assets) ||
     !Array.isArray(value.source.probeComponents) ||
+    !Array.isArray(value.target.probeComponents) ||
     !semverPattern.test(value.target.version ?? "") ||
     !digestPattern.test(value.target.assetSetManifestSha256 ?? "") ||
     !Number.isSafeInteger(value.target.delegationGeneration) ||
@@ -375,7 +382,8 @@ function validateContract(value) {
     throw new Error("Release Transition Contract fields are invalid");
   }
   validateAssetClosure(value.target.assetClosure);
-  validateSourceProbeComponents(value.source.probeComponents);
+  validateProbeComponents(value.source.probeComponents, "source");
+  validateProbeComponents(value.target.probeComponents, "target");
   return JSON.parse(JSON.stringify(value));
 }
 
@@ -398,6 +406,7 @@ function validateGenericContract(value) {
     "assetClosure",
     "assetSetManifestSha256",
     "delegationGeneration",
+    "probeComponents",
     "signingKeyId",
     "version",
   ]);
@@ -417,7 +426,8 @@ function validateGenericContract(value) {
   ) {
     throw new Error("Release Transition Contract fields are invalid");
   }
-  validateSourceProbeComponents(value.source.probeComponents);
+  validateProbeComponents(value.source.probeComponents, "source");
+  validateProbeComponents(value.target.probeComponents, "target");
   validateAssetClosure(value.target.assetClosure);
   return JSON.parse(JSON.stringify(value));
 }
@@ -426,15 +436,15 @@ function isMigrationContract(value) {
   return Object.hasOwn(value ?? {}, "migrationAuthorizationSha256");
 }
 
-function validateSourceProbeComponents(value) {
+function validateProbeComponents(value, side) {
   if (!Array.isArray(value) || value.length !== probeTargets.length) {
     throw new Error(
-      "Release Transition Contract source Probe closure is invalid",
+      `Release Transition Contract ${side} Probe closure is invalid`,
     );
   }
   return value.map((component, index) => {
     const target = probeTargets[index];
-    assertPlainObject(component, "Release Transition Contract source Probe");
+    assertPlainObject(component, `Release Transition Contract ${side} Probe`);
     assertExactKeys(component, ["file", "role", "sha256", "target"]);
     if (
       component.file !== "enoki-probe" ||
@@ -443,7 +453,7 @@ function validateSourceProbeComponents(value) {
       component.target !== target
     ) {
       throw new Error(
-        "Release Transition Contract source Probe closure is invalid",
+        `Release Transition Contract ${side} Probe closure is invalid`,
       );
     }
     return {

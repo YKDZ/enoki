@@ -1,5 +1,6 @@
 import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
+import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
 import { createAuditRepository } from "./audit.js";
@@ -26,6 +27,7 @@ export type EnrollmentTarget =
       hostId: number;
       kind: "manual_reinstall";
       sourceProbeSha256: string[];
+      replacementPredecessorEnrollmentId?: string;
       targetAssetSetDigest: string;
       targetProbeVersion: string;
     };
@@ -94,6 +96,14 @@ export type EnrollmentRepository = {
     signedAttemptSha256: string;
     tokenHash: string;
   }) => Buffer | null;
+  terminalReplacementPredecessorForHost: (input: {
+    currentProbeId: string;
+    hostId: number;
+  }) => {
+    enrollmentId: string;
+    targetAssetSetDigest: string;
+    targetProbeVersion: string;
+  } | null;
   lifecycleAuthorityTokenHashForHost: (hostId: number) => string | null;
   inspectPending: (input: {
     nowMs: number;
@@ -155,6 +165,51 @@ export function createEnrollmentRepository(
         .get();
       return replay?.outcome ? Buffer.from(replay.outcome) : null;
     },
+    terminalReplacementPredecessorForHost(input) {
+      const predecessor = database
+        .select()
+        .from(enrollmentTokens)
+        .where(
+          and(
+            eq(enrollmentTokens.targetKind, "manual_reinstall"),
+            eq(enrollmentTokens.hostId, input.hostId),
+            eq(enrollmentTokens.status, "rejected"),
+            eq(enrollmentTokens.rejectionCode, "probe_startup_timeout"),
+          ),
+        )
+        .orderBy(
+          desc(enrollmentTokens.rejectedAtMs),
+          desc(enrollmentTokens.id),
+        )
+        .limit(1)
+        .get();
+      if (
+        !predecessor?.enrollmentId ||
+        !predecessor.targetProbeVersion ||
+        !predecessor.targetAssetSetDigest ||
+        !predecessor.registrationOutcome
+      ) {
+        return null;
+      }
+      return terminalReplacementPredecessorMatches(database, {
+        currentProbeId: input.currentProbeId,
+        hostId: input.hostId,
+        pending: {
+          expectedProbeId: input.currentProbeId,
+          expectedProbeVersion: predecessor.targetProbeVersion,
+          replacementPredecessorEnrollmentId: predecessor.enrollmentId,
+          targetAssetSetDigest: predecessor.targetAssetSetDigest,
+          targetHostId: input.hostId,
+          targetProbeVersion: predecessor.targetProbeVersion,
+        },
+      })
+        ? {
+            enrollmentId: predecessor.enrollmentId,
+            targetAssetSetDigest: predecessor.targetAssetSetDigest,
+            targetProbeVersion: predecessor.targetProbeVersion,
+          }
+        : null;
+    },
     lifecycleAuthorityTokenHashForHost(hostId) {
       return (
         database
@@ -182,6 +237,8 @@ export function createEnrollmentRepository(
           targetHostId: enrollmentTokens.targetHostId,
           targetKind: enrollmentTokens.targetKind,
           targetProbeVersion: enrollmentTokens.targetProbeVersion,
+          replacementPredecessorEnrollmentId:
+            enrollmentTokens.replacementPredecessorEnrollmentId,
         })
         .from(enrollmentTokens)
         .where(
@@ -226,7 +283,14 @@ export function createEnrollmentRepository(
         if (
           !host ||
           host.probeId !== pending.expectedProbeId ||
-          host.probeVersion !== pending.expectedProbeVersion
+          (!pending.replacementPredecessorEnrollmentId &&
+            host.probeVersion !== pending.expectedProbeVersion) ||
+          (pending.replacementPredecessorEnrollmentId &&
+            !terminalReplacementPredecessorMatches(database, {
+              currentProbeId: host.probeId,
+              hostId: host.id,
+              pending,
+            }))
         ) {
           return null;
         }
@@ -566,7 +630,22 @@ export function createEnrollmentRepository(
           if (
             !target ||
             target.probeId !== input.target.expectedProbeId ||
-            target.probeVersion !== input.target.expectedProbeVersion
+            (!input.target.replacementPredecessorEnrollmentId &&
+              target.probeVersion !== input.target.expectedProbeVersion) ||
+            (input.target.replacementPredecessorEnrollmentId &&
+              !terminalReplacementPredecessorMatches(transaction, {
+                currentProbeId: target.probeId,
+                hostId: target.id,
+                pending: {
+                  expectedProbeId: input.target.expectedProbeId,
+                  expectedProbeVersion: input.target.expectedProbeVersion,
+                  replacementPredecessorEnrollmentId:
+                    input.target.replacementPredecessorEnrollmentId,
+                  targetAssetSetDigest: input.target.targetAssetSetDigest,
+                  targetHostId: input.target.hostId,
+                  targetProbeVersion: input.target.targetProbeVersion,
+                },
+              }))
           ) {
             return { kind: "existing_host_unavailable" };
           }
@@ -642,6 +721,10 @@ export function createEnrollmentRepository(
             targetProbeVersion:
               input.target.kind === "manual_reinstall"
                 ? input.target.targetProbeVersion
+                : null,
+            replacementPredecessorEnrollmentId:
+              input.target.kind === "manual_reinstall"
+                ? input.target.replacementPredecessorEnrollmentId ?? null
                 : null,
             targetKind: input.target.kind,
             tokenHash: input.tokenHash,
@@ -767,7 +850,14 @@ export function createEnrollmentRepository(
               !pending.targetAssetSetDigest ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
-              existingHost.probeVersion !== pending.expectedProbeVersion)
+              (!pending.replacementPredecessorEnrollmentId &&
+                existingHost.probeVersion !== pending.expectedProbeVersion) ||
+              (pending.replacementPredecessorEnrollmentId &&
+                !terminalReplacementPredecessorMatches(transaction, {
+                  currentProbeId: existingHost.probeId,
+                  hostId: existingHost.id,
+                  pending,
+                })))
           ) {
             return null;
           }
@@ -969,6 +1059,60 @@ function validSourceProbeSha256(value: unknown): value is string[] {
       (digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
     )
   );
+}
+
+/**
+ * 终态 replacement recovery 只承认 pending 行显式指向的那一条已消费
+ * Enrollment；不能以“最近一条”历史代替这项关联。这里故意在每个事务
+ * seam 重读 predecessor 与其 canonical registration outcome。
+ */
+function terminalReplacementPredecessorMatches(
+  database: EnrollmentDatabase,
+  input: {
+    currentProbeId: string;
+    hostId: number;
+    pending: {
+      expectedProbeId: string | null;
+      expectedProbeVersion: string | null;
+      replacementPredecessorEnrollmentId: string | null;
+      targetAssetSetDigest: string | null;
+      targetHostId: number | null;
+      targetProbeVersion: string | null;
+    };
+  },
+) {
+  const predecessorId = input.pending.replacementPredecessorEnrollmentId;
+  if (!predecessorId || input.pending.targetHostId !== input.hostId) {
+    return false;
+  }
+  const predecessor = database
+    .select()
+    .from(enrollmentTokens)
+    .where(eq(enrollmentTokens.enrollmentId, predecessorId))
+    .get();
+  if (
+    !predecessor ||
+    predecessor.targetKind !== "manual_reinstall" ||
+    predecessor.status !== "rejected" ||
+    predecessor.rejectionCode !== "probe_startup_timeout" ||
+    predecessor.hostId !== input.hostId ||
+    predecessor.targetProbeVersion !== input.pending.expectedProbeVersion ||
+    !predecessor.registrationOutcome
+  ) {
+    return false;
+  }
+  try {
+    const outcome = (enoki.v1.ProbeRegistrationResponse as any).decode(
+      predecessor.registrationOutcome,
+    ) as { hostId?: string; probeId?: string };
+    return (
+      outcome.hostId === String(input.hostId) &&
+      outcome.probeId === input.currentProbeId &&
+      input.pending.expectedProbeId === input.currentProbeId
+    );
+  } catch {
+    return false;
+  }
 }
 
 function createNewHostForEnrollment(

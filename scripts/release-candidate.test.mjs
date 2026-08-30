@@ -1025,6 +1025,12 @@ with open(os.devnull, "rb") as input_stream:
         rootPrivateKeyPem: fixture.root.privateKey,
         rootPublicKeyPem: fixture.root.publicKey,
         sourceAssetDir: source.assetDir,
+        targetProbeComponents: probeTargets.map((target) => ({
+          file: "enoki-probe",
+          role: "probe",
+          sha256: "a".repeat(64),
+          target,
+        })),
         targetManifestBytes,
         targetVersion: "1.2.3",
       });
@@ -2672,6 +2678,12 @@ async function writeOrdinaryTransitionContract({
       assetClosure: manifest.assets,
       assetSetManifestSha256: sha256(manifestBytes),
       delegationGeneration: manifest.signature.delegationGeneration,
+      probeComponents: probeTargets.map((target) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: "d".repeat(64),
+        target,
+      })),
       signingKeyId: manifest.signature.delegationKeyId,
       version: manifest.version,
     },

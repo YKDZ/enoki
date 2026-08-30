@@ -99,6 +99,12 @@ export function createGenericReleaseTransitionContractFixture({
   sourceVersion,
   transition,
   sourceProbeComponents,
+  targetProbeComponents = probeTargets.map((target, index) => ({
+    file: "enoki-probe",
+    role: "probe",
+    sha256: ["1", "2", "3", "4"][index].repeat(64),
+    target,
+  })),
 }) {
   const value = JSON.parse(manifest.toString("utf8"));
   const rootPublicKey = Buffer.from(
@@ -121,6 +127,7 @@ export function createGenericReleaseTransitionContractFixture({
         assetClosure: value.assets,
         assetSetManifestSha256: sha256(manifest),
         delegationGeneration: value.signature.delegationGeneration,
+        probeComponents: targetProbeComponents,
         signingKeyId: value.signature.delegationKeyId,
         version: value.version,
       },

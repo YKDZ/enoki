@@ -37,6 +37,12 @@ export async function writeSignedProbeAssetSet(
       : component,
   );
   const authority = input.authority ?? testKeyPair();
+  const targetProbeComponents = probeTargets.map((target, index) => ({
+    file: "enoki-probe",
+    role: "probe",
+    sha256: ["a", "b", "c", "d"][index]!.repeat(64),
+    target,
+  }));
   const release = testKeyPair();
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",
@@ -82,6 +88,7 @@ export async function writeSignedProbeAssetSet(
         delegation,
         manifest,
         targetVersion: input.targetVersion,
+        targetProbeComponents,
       })
     : null;
   const contract =
@@ -92,6 +99,7 @@ export async function writeSignedProbeAssetSet(
       sourceVersion: input.sourceVersion,
       transition: input.transition,
       sourceProbeComponents,
+      targetProbeComponents,
     });
 
   await Promise.all([
@@ -148,6 +156,7 @@ export async function writeSignedProbeAssetSet(
     sourceProbeSha256: (
       trustEpoch?.sourceProbeComponents ?? sourceProbeComponents
     ).map(({ sha256 }: { sha256: string }) => sha256),
+    targetProbeSha256: targetProbeComponents.map(({ sha256 }) => sha256),
   };
 }
 
@@ -156,11 +165,18 @@ async function createTrustEpochMigrationFixture({
   delegation,
   manifest,
   targetVersion,
+  targetProbeComponents,
 }: {
   authority: TestProbeReleaseAuthority;
   delegation: ReturnType<typeof createProbeTrustDelegation>;
   manifest: Buffer;
   targetVersion: string;
+  targetProbeComponents: Array<{
+    file: string;
+    role: string;
+    sha256: string;
+    target: string;
+  }>;
 }) {
   const sourceRelease = testKeyPair();
   const source = await createSignedLegacyProbeAssetSetFixture({
@@ -202,6 +218,7 @@ async function createTrustEpochMigrationFixture({
         rootPrivateKeyPem: authority.privateKey,
         rootPublicKeyPem: authority.publicKey,
         sourceAssetDir: source.assetDir,
+        targetProbeComponents,
         targetManifestBytes: manifest,
         targetVersion,
       }),

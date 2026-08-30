@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
@@ -202,8 +203,13 @@ describe("Hub database", () => {
     tempRoots.push(dataRoot);
     const stagedMigrations = path.join(dataRoot, "core-migrations");
     const currentMigration = "20260823112609_silent_serpent_society";
+    const successorMigration = "20260830034007_volatile_joshua_kane";
     await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
     await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    await rm(path.join(stagedMigrations, successorMigration), {
       force: true,
       recursive: true,
     });
@@ -253,6 +259,11 @@ describe("Hub database", () => {
     await cp(
       path.resolve("drizzle", currentMigration),
       path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+    await cp(
+      path.resolve("drizzle", successorMigration),
+      path.join(stagedMigrations, successorMigration),
       { recursive: true },
     );
 
@@ -1377,6 +1388,88 @@ describe("Hub database", () => {
         .get(),
     ).toEqual({ name: "enrollment_tokens_one_active_existing_host_idx" });
 
+    database.close();
+  });
+
+  it("creates and inspects an independent terminal replacement recovery without Host version truth", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 7, probeId: "probe-current" });
+    const outcome = Buffer.from(
+      (enoki.v1.ProbeRegistrationResponse as any).encode(
+        (enoki.v1.ProbeRegistrationResponse as any).create({
+          hostId: "7",
+          probeId: "probe-current",
+        }),
+      ).finish(),
+    );
+    database.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+          target_kind, target_host_id, expected_hub_origin, expected_probe_id,
+          expected_probe_version, source_probe_sha256_json, target_asset_set_digest,
+          target_probe_version, status, managed_host_id, rejected_at_ms,
+          rejection_code, registration_outcome
+        ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, 'rejected', ?, ?, 'probe_startup_timeout', ?)`,
+      )
+      .run(
+        "enr_terminal_predecessor_0001",
+        "terminal-token",
+        1_725_000_000_000,
+        1_725_000_060_000,
+        1_725_000_001_000,
+        7,
+        "https://hub.example.test",
+        "probe-before-replacement",
+        "1.2.3",
+        JSON.stringify(["a".repeat(64)]),
+        `sha256:${"b".repeat(64)}`,
+        "1.2.3",
+        7,
+        1_725_000_062_000,
+        outcome,
+      );
+    const predecessor = database.enrollments.terminalReplacementPredecessorForHost({
+      currentProbeId: "probe-current",
+      hostId: 7,
+    });
+    expect(predecessor).toEqual({
+      enrollmentId: "enr_terminal_predecessor_0001",
+      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+      targetProbeVersion: "1.2.3",
+    });
+    const created = database.enrollments.createPending({
+      createdAtMs: 1_725_000_063_000,
+      enrollmentId: "enr_terminal_successor_0002",
+      expiresAtMs: 1_725_000_123_000,
+      target: {
+        expectedHubOrigin: "https://hub.example.test",
+        expectedProbeId: "probe-current",
+        expectedProbeVersion: "1.2.3",
+        hostId: 7,
+        kind: "manual_reinstall",
+        replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
+        sourceProbeSha256: ["c".repeat(64)],
+        targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetProbeVersion: "1.2.4",
+      },
+      tokenHash: "successor-token",
+    });
+    expect(created.kind).toBe("created");
+    expect(
+      database.enrollments.inspectPending({
+        nowMs: 1_725_000_064_000,
+        tokenHash: "successor-token",
+      }),
+    ).toMatchObject({
+      sourceProbeVersion: "1.2.3",
+      targetKind: "manual_reinstall",
+    });
     database.close();
   });
 });

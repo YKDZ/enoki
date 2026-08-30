@@ -107,6 +107,7 @@ describe("Trust Epoch release transition", () => {
             fixture.createInput.targetManifestBytes,
           ),
           delegationGeneration: 1,
+          probeComponents: fixture.targetProbeComponents,
           signingKeyId: targetManifest.signature.delegationKeyId,
           version: "1.2.3",
         },
@@ -392,6 +393,12 @@ async function transitionFixture() {
       version: "1.2.3",
     })}\n`,
   );
+  const targetProbeComponents = assets.map((asset, index) => ({
+    file: "enoki-probe",
+    role: "probe",
+    sha256: ["a", "b", "c", "d"][index].repeat(64),
+    target: asset.target,
+  }));
   const candidateCommit = "a".repeat(40);
   return {
     createInput: {
@@ -404,6 +411,7 @@ async function transitionFixture() {
       rootPrivateKeyPem: root.privateKey,
       rootPublicKeyPem: root.publicKey,
       sourceAssetDir: source.assetDir,
+      targetProbeComponents,
       targetManifestBytes,
       targetVersion: "1.2.3",
     },
@@ -418,6 +426,7 @@ async function transitionFixture() {
     root,
     cleanup: source.cleanup,
     sourceProbeComponents: source.probeComponents,
+    targetProbeComponents,
   };
 }
 
