@@ -3440,6 +3440,114 @@ mod tests {
     }
 
     #[test]
+    fn completed_predecessor_correlation_rejects_unrelated_current_enrollment_before_finalizer() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.identity_dir()).unwrap();
+        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(paths.identity_dir(), fs::Permissions::from_mode(0o700)).unwrap();
+
+        let bundle = bundle().with_test_complete_receipts(5);
+        let predecessor = ReplacementCommitFact::for_test(
+            crate::replacement::ReplacementIntent {
+                enrollment_id: "enrollment_01".to_owned(),
+                enrollment_token_sha256: "1".repeat(64),
+                host_id: "7".to_owned(),
+                hub_origin: "https://hub.example".to_owned(),
+                old_probe_id: "probe-old".to_owned(),
+                source_probe_version: "1.2.2".to_owned(),
+                source_probe_sha256: "2".repeat(64),
+                target_bundle_target: bundle.target.clone(),
+                target_probe_version: bundle.version.clone(),
+                target_asset_set_digest: format!("sha256:{}", bundle.asset_set_manifest_sha256),
+                target_manifest_sha256: bundle.manifest_sha256.clone(),
+            },
+            true,
+            true,
+        );
+        let binding = predecessor.registration_binding().unwrap();
+        fs::write(
+            paths.identity(),
+            format!(
+                "hub_url = \"https://hub.example\"\nenrollment_id = \"enrollment_01\"\nhost_id = \"7\"\nprobe_id = \"probe-current\"\nprobe_private_key_pem = {:?}\n",
+                valid_probe_private_key_pem()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+
+        let current_probe_sha256 = bundle.component_receipt("probe").unwrap().0;
+        let exact_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_successor\",\"replacementMigration\":{{\"enrollmentId\":\"enr_fedcba9876543210\",\"expectedProbeId\":\"probe-current\",\"sourceProbeSha256\":[\"{current_probe_sha256}\"],\"sourceProbeVersion\":\"{}\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"{}\"}},\"schemaVersion\":1}}",
+            bundle.version, bundle.asset_set_manifest_sha256, bundle.version,
+        );
+        let exact = Enrollment::from_install_input("https://hub.example", exact_input.as_bytes())
+            .unwrap();
+        assert!(completed_replacement_predecessor_matches_current_enrollment(
+            &paths, &binding, &exact, &bundle,
+        ));
+
+        for (name, input) in [
+            ("new-host", None),
+            ("other-host", Some(exact_input.replace("\"targetHostId\":\"7\"", "\"targetHostId\":\"8\""))),
+            ("other-current-probe", Some(exact_input.replace("\"expectedProbeId\":\"probe-current\"", "\"expectedProbeId\":\"probe-other\""))),
+            ("wrong-source", Some(exact_input.replace(current_probe_sha256, &"f".repeat(64)))),
+            ("wrong-target-version", Some(exact_input.replace(&format!("\"targetProbeVersion\":\"{}\"", bundle.version), "\"targetProbeVersion\":\"1.2.4\""))),
+            ("wrong-asset-set", Some(exact_input.replace(&bundle.asset_set_manifest_sha256, &"e".repeat(64)))),
+        ] {
+            let enrollment = match input {
+                Some(input) => Enrollment::from_install_input("https://hub.example", input.as_bytes()).unwrap(),
+                None => Enrollment::new("https://hub.example", "enk_enroll_new_host").unwrap(),
+            };
+            assert!(
+                !completed_replacement_predecessor_matches_current_enrollment(
+                    &paths, &binding, &enrollment, &bundle,
+                ),
+                "{name} must retain predecessor custody before the finalizer"
+            );
+        }
+
+        for (name, bundle) in [
+            ("wrong-bundle-target", {
+                let mut bundle = bundle.clone();
+                bundle.target = "aarch64-unknown-linux-gnu".to_owned();
+                bundle
+            }),
+            ("wrong-bundle-manifest", {
+                let mut bundle = bundle.clone();
+                bundle.manifest_sha256 = "d".repeat(64);
+                bundle
+            }),
+            ("wrong-bundle-asset-set", {
+                let mut bundle = bundle.clone();
+                bundle.asset_set_manifest_sha256 = "e".repeat(64);
+                bundle
+            }),
+        ] {
+            assert!(
+                !completed_replacement_predecessor_matches_current_enrollment(
+                    &paths, &binding, &exact, &bundle,
+                ),
+                "{name} must retain predecessor custody before the finalizer"
+            );
+        }
+
+        let canonical_identity = fs::read_to_string(paths.identity()).unwrap();
+        fs::write(
+            paths.identity(),
+            canonical_identity.replace("probe-current", "probe-tampered"),
+        )
+        .unwrap();
+        assert!(
+            !completed_replacement_predecessor_matches_current_enrollment(
+                &paths, &binding, &exact, &bundle,
+            ),
+            "a tampered canonical identity must retain predecessor custody"
+        );
+        fs::write(paths.identity(), canonical_identity).unwrap();
+    }
+
+    #[test]
     fn replacement_registration_production_recovery_windows() {
         if let Some(root) = std::env::var_os("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ROOT") {
             run_replacement_lifecycle_recovery_child(Path::new(&root));

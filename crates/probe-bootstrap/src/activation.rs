@@ -132,6 +132,17 @@ impl ReceivedRootHandoff {
         if let ReplacementActivation::CompletePredecessor(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
             let resume_binding = commit.resume_binding();
+            let registration_binding = commit
+                .registration_binding()
+                .ok_or(ActivationError::Replacement)?;
+            if !crate::install::completed_replacement_predecessor_matches_current_enrollment(
+                &paths,
+                &registration_binding,
+                &self.enrollment,
+                &self.bundle,
+            ) {
+                return Err(ActivationError::Replacement);
+            }
             let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
             crate::install::finalize_and_retire_complete_replacement_current_probe(
                 &paths,
@@ -374,9 +385,45 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
     if !fact.cleanup_complete || fact.intent.hub_origin != enrollment.hub_origin() {
         return Err(ActivationError::Replacement);
     }
+    if !complete_predecessor_current_enrollment_matches(&fact, enrollment, bundle) {
+        return Err(ActivationError::Replacement);
+    }
     Ok(Some(MatchingReplacementCommit::CompletePredecessor(
         Box::new(fact),
     )))
+}
+
+/// A completed retained commit can only be retired ahead of a new activation
+/// when the incoming authority is the terminal-recovery successor of its
+/// already-installed target. The canonical Probe identity itself is checked
+/// at the fixed-path finalizer boundary immediately before retirement.
+fn complete_predecessor_current_enrollment_matches(
+    predecessor: &crate::replacement::ReplacementCommitFact,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> bool {
+    let Some(current) = enrollment.replacement_migration() else {
+        return false;
+    };
+    let Some((current_probe_sha256, _)) = bundle.component_receipt("probe") else {
+        return false;
+    };
+    predecessor.has_valid_binding()
+        && enrollment.hub_origin() == predecessor.intent.hub_origin
+        && current.target_host_id() == predecessor.intent.host_id
+        && current.expected_probe_id() != predecessor.intent.old_probe_id
+        && current.source_probe_version() == predecessor.intent.target_probe_version
+        && current
+            .source_probe_sha256()
+            .iter()
+            .any(|digest| digest == current_probe_sha256)
+        && current.target_probe_version() == predecessor.intent.target_probe_version
+        && current.target_asset_set_digest() == predecessor.intent.target_asset_set_digest
+        && bundle.target == predecessor.intent.target_bundle_target
+        && bundle.version == predecessor.intent.target_probe_version
+        && format!("sha256:{}", bundle.asset_set_manifest_sha256)
+            == predecessor.intent.target_asset_set_digest
+        && bundle.manifest_sha256 == predecessor.intent.target_manifest_sha256
 }
 
 fn replacement_request_for_installed_state(
@@ -1207,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_exact_replacement_is_idempotent_before_a_new_enrollment_can_start() {
+    fn completed_predecessor_requires_a_terminal_recovery_successor_before_retirement() {
         struct Store(Option<crate::replacement::ReplacementCommitFact>);
         impl crate::replacement::ReplacementCommitStore for Store {
             type Error = ();
@@ -1285,15 +1332,37 @@ mod tests {
 
         let other_enrollment =
             Enrollment::new(received.enrollment.hub_origin(), "enk_enroll_other").unwrap();
+        assert!(matches!(
+            matching_replacement_commit_in(
+                &mut Store(Some(fact.clone())),
+                &other_enrollment,
+                &received.bundle,
+            ),
+            Err(ActivationError::Replacement)
+        ));
+
+        let current_probe_sha256 = received.bundle.component_receipt("probe").unwrap().0;
+        let successor_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_other\",\"replacementMigration\":{{\"enrollmentId\":\"enr_fedcba9876543210\",\"expectedProbeId\":\"probe-current\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"{}\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"{}\"}},\"schemaVersion\":1}}",
+            current_probe_sha256,
+            received.bundle.version,
+            received.bundle.asset_set_manifest_sha256,
+            received.bundle.version,
+        );
+        let terminal_recovery = Enrollment::from_install_input(
+            received.enrollment.hub_origin(),
+            successor_input.as_bytes(),
+        )
+        .unwrap();
         let predecessor = matching_replacement_commit_in(
             &mut Store(Some(fact.clone())),
-            &other_enrollment,
+            &terminal_recovery,
             &received.bundle,
         )
         .unwrap()
         .unwrap();
         let MatchingReplacementCommit::CompletePredecessor(predecessor) = predecessor else {
-            panic!("完整 predecessor 必须先由 finalizer 退休")
+            panic!("only a terminal-recovery successor may retire a complete predecessor")
         };
         assert_eq!(*predecessor, fact);
         let mut incomplete = fact;
@@ -1301,7 +1370,7 @@ mod tests {
         assert!(matches!(
             matching_replacement_commit_in(
                 &mut Store(Some(incomplete)),
-                &other_enrollment,
+                &terminal_recovery,
                 &received.bundle,
             ),
             Err(ActivationError::Replacement)

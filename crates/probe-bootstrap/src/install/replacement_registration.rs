@@ -8,9 +8,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::replacement::ReplacementRegistrationBinding;
 use crate::secure_file::{
     SystemdProbeDirectory, open_systemd_probe_state_projection_for_finalization,
+};
+use crate::{
+    handoff::Enrollment, replacement::ReplacementRegistrationBinding, verifier::VerifiedBundle,
 };
 
 use super::{FixedInstallPaths, InstallError, installed_layout, upgrade};
@@ -134,6 +136,48 @@ pub(super) fn converge_registered_identity_to_canonical(
         .ok_or(InstallError::ExistingResidue)
 }
 
+/// Projects only the already-canonical registered identity and correlates it
+/// with the independent terminal-recovery Enrollment. This is intentionally a
+/// read-only guard: the caller must reject before finalizer cleanup can retire
+/// the predecessor's commit or attempt capsule.
+pub(super) fn completed_predecessor_matches_current_enrollment(
+    paths: &FixedInstallPaths,
+    predecessor: &ReplacementRegistrationBinding,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> bool {
+    let Some(current) = enrollment.replacement_migration() else {
+        return false;
+    };
+    let Some((current_probe_sha256, _)) = bundle.component_receipt("probe") else {
+        return false;
+    };
+    if enrollment.hub_origin() != predecessor.hub_origin
+        || current.target_host_id() != predecessor.host_id
+        || current.source_probe_version() != predecessor.target_probe_version
+        || !current
+            .source_probe_sha256()
+            .iter()
+            .any(|digest| digest == current_probe_sha256)
+        || current.target_probe_version() != predecessor.target_probe_version
+        || current.target_asset_set_digest() != predecessor.target_asset_set_digest
+        || bundle.target != predecessor.target_bundle_target
+        || bundle.version != predecessor.target_probe_version
+        || format!("sha256:{}", bundle.asset_set_manifest_sha256)
+            != predecessor.target_asset_set_digest
+        || bundle.manifest_sha256 != predecessor.target_manifest_sha256
+    {
+        return false;
+    }
+    let Ok((identity, _)) = read_identity(paths) else {
+        return false;
+    };
+    if !canonical_identity_matches_contents(paths, &identity, predecessor) {
+        return false;
+    }
+    upgrade::metadata_string(&identity, "probe_id").as_deref() == Some(current.expected_probe_id())
+}
+
 pub(super) fn registered_identity_matches(
     paths: &FixedInstallPaths,
     binding: &ReplacementRegistrationBinding,
@@ -226,10 +270,18 @@ fn canonical_identity_matches(
     let Ok((identity, _)) = read_identity(paths) else {
         return false;
     };
-    if registration_identity_shape(&identity) != Ok(RegistrationIdentityShape::Canonical) {
+    canonical_identity_matches_contents(paths, &identity, binding)
+}
+
+fn canonical_identity_matches_contents(
+    paths: &FixedInstallPaths,
+    identity: &str,
+    binding: &ReplacementRegistrationBinding,
+) -> bool {
+    if registration_identity_shape(identity) != Ok(RegistrationIdentityShape::Canonical) {
         return false;
     }
-    let value = |key| upgrade::metadata_string(&identity, key);
+    let value = |key| upgrade::metadata_string(identity, key);
     let Some(private_key) = value("probe_private_key_pem") else {
         return false;
     };

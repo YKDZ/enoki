@@ -906,6 +906,24 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
         .map_err(|_| InstallError::ExistingResidue)
 }
 
+/// Read-only predecessor/successor correlation at the root finalizer boundary.
+/// A retained commit is not authority for a different Enrollment: only the
+/// terminal-recovery Enrollment bound to the canonical Probe identity produced
+/// by that commit may retire it before beginning its own activation.
+pub(crate) fn completed_replacement_predecessor_matches_current_enrollment(
+    paths: &FixedInstallPaths,
+    predecessor: &ReplacementRegistrationBinding,
+    enrollment: &crate::handoff::Enrollment,
+    bundle: &VerifiedBundle,
+) -> bool {
+    replacement_registration::completed_predecessor_matches_current_enrollment(
+        paths,
+        predecessor,
+        enrollment,
+        bundle,
+    )
+}
+
 struct BootstrapRolePath {
     path: PathBuf,
     rollback: RollbackStep,
