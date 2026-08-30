@@ -90,7 +90,7 @@ export async function runCandidateUiContract(options, dependencies = {}) {
     throw new Error("candidate UI Contract runtime identity is required");
   }
 
-  const baseUrl = `http://127.0.0.1:${options.hubPort}/`;
+  const baseUrl = `http://127.0.0.1:${options.hubPort}`;
   const controller = createHubController({
     containerEngine: options.containerEngine,
   });

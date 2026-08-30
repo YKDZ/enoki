@@ -92,9 +92,17 @@ export async function validateMigrationBaselineContents({
       "Trust Epoch Migration Release Baseline assets do not match",
     );
   }
+  const githubRelease = descriptor.githubRelease;
+  assertExactKeys(githubRelease, [
+    "id",
+    "peeledCommitSha",
+    "repository",
+    "tagRefSha",
+    "targetCommitish",
+  ]);
   const expectedLegacyRelease = {
     assets: assets.files,
-    githubRelease: descriptor.githubRelease,
+    githubRelease: { ...githubRelease, tag: descriptor.tag },
     hub: { digest: descriptor.hub?.digest, image: descriptor.hub?.image },
     legacySigningKeySha256: readLegacySigningKeyFingerprint(authorizationBytes),
   };
