@@ -1,5 +1,6 @@
 use std::fs;
-use std::process::Command;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding;
 
@@ -361,7 +362,7 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
     let swap_signal = temporary.path().join("swap-scanned");
     let swap_resume = temporary.path().join("swap-resume");
     let mut swap_child = spawn_root_capsule_race(&swapped, false, &swap_signal, &swap_resume);
-    wait_for_test_signal(&swap_signal);
+    wait_for_test_signal(&mut swap_child, &swap_signal);
     let swapped_original = temporary.path().join("swapped-original");
     fs::rename(swapped.parent().unwrap(), &swapped_original).unwrap();
     fs::create_dir(swapped.parent().unwrap()).unwrap();
@@ -397,7 +398,7 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
         &post_publish_signal,
         &post_publish_resume,
     );
-    wait_for_test_signal(&post_publish_signal);
+    wait_for_test_signal(&mut post_publish_child, &post_publish_signal);
     let post_publish_original = temporary.path().join("post-publish-original");
     fs::rename(post_publish.parent().unwrap(), &post_publish_original).unwrap();
     fs::create_dir(post_publish.parent().unwrap()).unwrap();
@@ -430,7 +431,7 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
     let after_scan_resume = temporary.path().join("after-scan-resume");
     let mut after_scan_child =
         spawn_root_capsule_race(&after_scan, true, &after_scan_signal, &after_scan_resume);
-    wait_for_test_signal(&after_scan_signal);
+    wait_for_test_signal(&mut after_scan_child, &after_scan_signal);
     let after_scan_residue = after_scan
         .parent()
         .unwrap()
@@ -463,7 +464,7 @@ fn spawn_root_capsule_race(
     replacement: bool,
     signal: &std::path::Path,
     resume: &std::path::Path,
-) -> std::process::Child {
+) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("current test executable"));
     command
         .arg("--exact")
@@ -485,7 +486,7 @@ fn spawn_root_capsule_post_publish_race(
     path: &std::path::Path,
     signal: &std::path::Path,
     resume: &std::path::Path,
-) -> std::process::Child {
+) -> Child {
     Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--exact")
         .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
@@ -498,14 +499,26 @@ fn spawn_root_capsule_post_publish_race(
         .expect("spawn synchronized post-publish capsule operation")
 }
 
-fn wait_for_test_signal(path: &std::path::Path) {
-    for _ in 0..2_000 {
+fn wait_for_test_signal(child: &mut Child, path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
         if path.exists() {
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        if let Some(status) = child
+            .try_wait()
+            .expect("observe synchronized capsule operation")
+        {
+            panic!("private atomic race child exited before signal: {status}");
+        }
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for private atomic race signal; child remained running");
+        }
+
+        std::thread::sleep(Duration::from_millis(5));
     }
-    panic!("timed out waiting for private atomic race signal");
 }
 
 fn run_root_capsule_publisher(
