@@ -19,8 +19,8 @@ mod transaction;
 mod upgrade;
 
 use crate::replacement::{
-    FileReplacementCommitStore, ReplacementCommitFact, ReplacementRegistrationBinding,
-    ReplacementResumeBinding,
+    FileReplacementCommitStore, ReplacementCommitFact, ReplacementCommitStore,
+    ReplacementRegistrationBinding, ReplacementResumeBinding,
 };
 use crate::{
     bundle_role::{
@@ -890,7 +890,16 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
     commit_store: &mut FileReplacementCommitStore,
     systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
-    finalize_complete_replacement_current_probe(paths, resume_binding, bundle, commit)?;
+    if !commit.has_valid_binding()
+        || commit.resume_binding() != *resume_binding
+        || commit_store
+            .load()
+            .map_err(|_| InstallError::ExistingResidue)?
+            .as_ref()
+            != Some(commit)
+    {
+        return Err(InstallError::ExistingResidue);
+    }
     let registration_binding = commit
         .registration_binding()
         .ok_or(InstallError::ExistingResidue)?;
@@ -913,6 +922,18 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
             .persist_identity_binding_exact(commit, &retained_commit)
             .map_err(|_| InstallError::ExistingResidue)?;
     }
+    if commit_store
+        .load()
+        .map_err(|_| InstallError::ExistingResidue)?
+        .as_ref()
+        != Some(&retained_commit)
+        || replacement_registration::canonical_identity_sha256(paths, &registration_binding, false)?
+            != identity_sha256
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
+    finalize_complete_replacement_current_probe(paths, resume_binding, bundle, &retained_commit)?;
     retire_replacement_registration_attempt_source(paths)?;
     if replacement_registration::canonical_identity_sha256(paths, &registration_binding, false)?
         != identity_sha256

@@ -6,7 +6,7 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::ffi::OsStrExt,
     },
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -23,6 +23,155 @@ pub fn atomic_write(
     let (parent, target) = open_parent(path)
         .map_err(|error| io::Error::new(error.kind(), format!("受管父目录打开失败: {error}")))?;
     atomic_write_at(&parent, &target, path, contents, mode, owner)
+}
+
+/// One private atomic file namespace held by descriptor for the whole
+/// read/compare/publish operation. Residue classification and target effects
+/// never re-resolve the managed parent pathname.
+pub struct PrivateAtomicFileCustody {
+    container: DirectoryFd,
+    parent: DirectoryFd,
+    parent_name: CString,
+    target: CString,
+    path: PathBuf,
+    mode: u32,
+    owner: (u32, u32),
+}
+
+impl PrivateAtomicFileCustody {
+    pub fn open(
+        path: &Path,
+        mode: u32,
+        owner: (u32, u32),
+        expected_parent_uid: u32,
+    ) -> io::Result<Self> {
+        let (container, parent, parent_name, target) = open_parent_with_container(path)?;
+        let metadata = stat_fd(parent.raw())?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
+            || metadata.st_mode & 0o022 != 0
+            || metadata.st_uid != expected_parent_uid
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private atomic file parent custody does not match",
+            ));
+        }
+        Ok(Self {
+            container,
+            parent,
+            parent_name,
+            target,
+            path: path.to_owned(),
+            mode,
+            owner,
+        })
+    }
+
+    /// Reads the target only after classifying all sibling publish residue in
+    /// the same held namespace. Absence is distinct from unsafe custody.
+    pub fn read_bounded(&self, maximum_bytes: usize) -> io::Result<Option<Vec<u8>>> {
+        self.guard_residue()?;
+        let fd = unsafe {
+            libc::openat(
+                self.parent.raw(),
+                self.target.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let stat = stat_fd(file.as_raw_fd())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG
+            || stat.st_mode & 0o777 != self.mode
+            || stat.st_uid != self.owner.0
+            || stat.st_gid != self.owner.1
+            || stat.st_nlink != 1
+            || stat.st_size < 0
+            || stat.st_size as usize > maximum_bytes
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private atomic file attributes do not match",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(stat.st_size as usize);
+        Read::by_ref(&mut file)
+            .take(maximum_bytes as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > maximum_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "private atomic file is too large",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Publishes through the same held namespace used to classify residue.
+    pub fn publish(&self, contents: &[u8]) -> io::Result<()> {
+        self.guard_residue()?;
+        atomic_write_at(
+            &self.parent,
+            &self.target,
+            &self.path,
+            contents,
+            self.mode,
+            Some(self.owner),
+        )
+    }
+
+    /// Removes only the exact private target in this held namespace.
+    pub(crate) fn remove(&self) -> io::Result<()> {
+        self.guard_residue()?;
+        match stat_at(self.parent.raw(), &self.target) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        verify_file(self.parent.raw(), &self.target, self.mode, Some(self.owner))?;
+        secure_file_effect_crash(&self.path, "before-unlink");
+        unlink_at(self.parent.raw(), &self.target)?;
+        sync_directory(self.parent.raw())?;
+        secure_file_effect_crash(&self.path, "after-unlink");
+        Ok(())
+    }
+
+    /// Removes the now-empty held parent only if its original namespace entry
+    /// still resolves to the exact held directory inode.
+    pub(crate) fn remove_empty_parent(&self) -> io::Result<()> {
+        let held = stat_fd(self.parent.raw())?;
+        let named = stat_at(self.container.raw(), &self.parent_name)?;
+        if held.st_dev != named.st_dev || held.st_ino != named.st_ino {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private atomic parent namespace changed before retirement",
+            ));
+        }
+        if unsafe {
+            libc::unlinkat(
+                self.container.raw(),
+                self.parent_name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        sync_directory(self.container.raw())
+    }
+
+    fn guard_residue(&self) -> io::Result<()> {
+        reject_atomic_write_residue_at(self.parent.raw(), &self.target)?;
+        private_atomic_after_scan_for_test(&self.path)?;
+        reject_atomic_write_residue_at(self.parent.raw(), &self.target)
+    }
 }
 
 /// 在 systemd `DynamicUser` 管理的固定 Probe state directory 中原子替换 bootstrap config。
@@ -390,9 +539,11 @@ fn secure_file_effect_crash(path: &Path, point: &str) {
 #[cfg(not(any(test, feature = "deterministic-test-seams")))]
 fn secure_file_effect_crash(_path: &Path, _point: &str) {}
 
-/// 通过持有的禁止跟随符号链接目录描述符，删除指定的 root 私有普通文件，
-/// 并对命名空间更新执行 fsync。
-pub fn remove_private_regular_file(path: &Path, mode: u32, owner: (u32, u32)) -> io::Result<()> {
+pub(crate) fn remove_transient_private_file(
+    path: &Path,
+    mode: u32,
+    owner: (u32, u32),
+) -> io::Result<()> {
     let (parent, target) = open_parent(path)?;
     verify_private_directory(parent.raw())?;
     verify_file(parent.raw(), &target, mode, Some(owner))?;
@@ -403,7 +554,7 @@ pub fn remove_private_regular_file(path: &Path, mode: u32, owner: (u32, u32)) ->
     Ok(())
 }
 
-pub(crate) fn retire_replacement_atomic_write_residue(
+pub(crate) fn retire_transient_atomic_write_residue(
     path: &Path,
     mode: u32,
     owner: (u32, u32),
@@ -433,7 +584,7 @@ pub(crate) fn retire_replacement_atomic_write_residue(
             };
         }
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        if !is_atomic_write_residue(name.to_bytes(), target.as_bytes()) {
+        if !is_exact_atomic_write_residue(name.to_bytes(), target.as_bytes()) {
             continue;
         }
         let metadata = stat_at(parent.raw(), name)?;
@@ -445,7 +596,7 @@ pub(crate) fn retire_replacement_atomic_write_residue(
         {
             break Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "atomic write residue attributes do not match",
+                "transient atomic write residue attributes do not match",
             ));
         }
         unlink_at(parent.raw(), name)?;
@@ -461,7 +612,54 @@ pub(crate) fn retire_replacement_atomic_write_residue(
     Ok(())
 }
 
-fn is_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
+fn reject_atomic_write_residue_at(parent: RawFd, target: &CStr) -> io::Result<()> {
+    let current = c".";
+    let duplicate = unsafe {
+        libc::openat(
+            parent,
+            current.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    let mut prefix = Vec::with_capacity(target.to_bytes().len() + 14);
+    prefix.push(b'.');
+    prefix.extend_from_slice(target.to_bytes());
+    prefix.extend_from_slice(b"-enoki-write-");
+    let result = loop {
+        unsafe { *libc::__errno_location() = 0 };
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break if error.raw_os_error() == Some(0) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes().starts_with(&prefix) {
+            break Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unresolved private atomic write residue",
+            ));
+        }
+    };
+    if unsafe { libc::closedir(directory) } != 0 && result.is_ok() {
+        return Err(io::Error::last_os_error());
+    }
+    result
+}
+
+fn is_exact_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
     let mut prefix = Vec::with_capacity(target.len() + 14);
     prefix.push(b'.');
     prefix.extend_from_slice(target);
@@ -479,6 +677,35 @@ fn is_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
         && sequence.iter().all(u8::is_ascii_digit)
 }
 
+#[cfg(any(test, feature = "deterministic-test-seams"))]
+fn private_atomic_after_scan_for_test(path: &Path) -> io::Result<()> {
+    if std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_PATH").as_deref() != Some(path.as_os_str()) {
+        return Ok(());
+    }
+    let Some(signal) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL") else {
+        return Ok(());
+    };
+    let Some(resume) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_RESUME") else {
+        return Ok(());
+    };
+    std::fs::write(&signal, b"scanned")?;
+    for _ in 0..2_000 {
+        if Path::new(&resume).exists() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "private atomic test race did not resume",
+    ))
+}
+
+#[cfg(not(any(test, feature = "deterministic-test-seams")))]
+fn private_atomic_after_scan_for_test(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn open_parent(path: &Path) -> io::Result<(DirectoryFd, CString)> {
     let components = absolute_components(path)?;
     let (target, parents) = components
@@ -494,6 +721,33 @@ fn open_parent(path: &Path) -> io::Result<(DirectoryFd, CString)> {
         })?;
     }
     Ok((directory, component_name(target)?))
+}
+
+fn open_parent_with_container(
+    path: &Path,
+) -> io::Result<(DirectoryFd, DirectoryFd, CString, CString)> {
+    let components = absolute_components(path)?;
+    let (target, parents) = components
+        .split_last()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "受管路径缺少文件名"))?;
+    let (parent_name, ancestors) = parents.split_last().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private atomic file cannot use the root directory",
+        )
+    })?;
+    let mut container = DirectoryFd::root()?;
+    for component in ancestors {
+        container = container.open_child(component).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("目录分量 {:?} 打开失败: {error}", component),
+            )
+        })?;
+    }
+    let parent_name = component_name(parent_name)?;
+    let parent = container.open_child(OsStr::from_bytes(parent_name.to_bytes()))?;
+    Ok((container, parent, parent_name, component_name(target)?))
 }
 
 fn absolute_components(path: &Path) -> io::Result<Vec<&OsStr>> {

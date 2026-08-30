@@ -1,4 +1,5 @@
 use enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding as BootstrapReplacementRegistrationBinding;
+use enoki_probe_bootstrap::secure_file::PrivateAtomicFileCustody;
 use prost::Message;
 use rsa::{
     RsaPrivateKey,
@@ -14,10 +15,7 @@ use std::path::Path;
 use crate::{
     hub_url,
     protocol::enoki::v1::{ProbeRegistrationAttempt, ProbeRegistrationRequest},
-    secure_file::{
-        atomic_write, ensure_directory, read_private_regular_file,
-        read_registration_attempt_credential_bytes, reject_atomic_write_residue,
-    },
+    secure_file::{ensure_directory, read_registration_attempt_credential_bytes},
 };
 
 use super::{
@@ -340,19 +338,21 @@ pub fn prepare_root_replacement_registration_attempt(
         "invalid replacement registration capsule path",
     ))?;
     ensure_directory(parent, 0o700, Some(ROOT_CAPSULE_OWNER))?;
+    let custody =
+        PrivateAtomicFileCustody::open(path, 0o600, ROOT_CAPSULE_OWNER, ROOT_CAPSULE_OWNER.0)?;
     let binding = ReplacementRegistrationBinding::from(input.binding);
     let registration_input = ProbeRegistrationInput {
         bootstrap_config_path: Default::default(),
         enrollment_token: input.enrollment_token,
         hub_url: binding.hub_origin.clone(),
     };
-    match read_registration_attempt_capsule(path) {
+    match read_registration_attempt_capsule(&custody) {
         Ok(Some(capsule)) => {
             validate_registration_attempt_capsule(&capsule, &registration_input, &binding)
         }
         Ok(None) => {
             let capsule = create_registration_attempt(&registration_input, &binding)?;
-            persist_registration_attempt_capsule(path, &capsule)
+            persist_registration_attempt_capsule(&custody, &capsule)
         }
         Err(error) => Err(RegistrationError::Io(error)),
     }
@@ -365,7 +365,9 @@ pub(crate) fn validate_root_replacement_registration_attempt(
     input: RootReplacementRegistrationAttemptInput,
 ) -> Result<(), RegistrationError> {
     let binding = ReplacementRegistrationBinding::from(input.binding);
-    let capsule = read_registration_attempt_capsule(path)?.ok_or(
+    let custody =
+        PrivateAtomicFileCustody::open(path, 0o600, ROOT_CAPSULE_OWNER, ROOT_CAPSULE_OWNER.0)?;
+    let capsule = read_registration_attempt_capsule(&custody)?.ok_or(
         RegistrationError::InvalidResponse("missing replacement registration capsule"),
     )?;
     validate_registration_attempt_capsule(
@@ -386,7 +388,9 @@ pub fn replace_stale_root_replacement_registration_attempt(
     input: RootReplacementRegistrationAttemptInput,
 ) -> Result<(), RegistrationError> {
     let binding = ReplacementRegistrationBinding::from(input.binding.clone());
-    let capsule = read_registration_attempt_capsule(path)?.ok_or(
+    let custody =
+        PrivateAtomicFileCustody::open(path, 0o600, ROOT_CAPSULE_OWNER, ROOT_CAPSULE_OWNER.0)?;
+    let capsule = read_registration_attempt_capsule(&custody)?.ok_or(
         RegistrationError::InvalidResponse("missing replacement registration capsule"),
     )?;
     let stale_binding = validate_self_bound_registration_attempt_capsule(&capsule)?;
@@ -406,7 +410,7 @@ pub fn replace_stale_root_replacement_registration_attempt(
         hub_url: binding.hub_origin.clone(),
     };
     let replacement = create_registration_attempt(&registration_input, &binding)?;
-    persist_registration_attempt_capsule(path, &replacement)
+    persist_registration_attempt_capsule(&custody, &replacement)
 }
 
 fn create_registration_attempt(
@@ -453,7 +457,7 @@ fn create_registration_attempt(
 }
 
 fn persist_registration_attempt_capsule(
-    path: &Path,
+    custody: &PrivateAtomicFileCustody,
     capsule: &ProbeRegistrationAttemptCapsule,
 ) -> Result<(), RegistrationError> {
     let bytes = serde_json::to_vec(capsule)
@@ -463,24 +467,15 @@ fn persist_registration_attempt_capsule(
             "registration attempt capsule is too large",
         ));
     }
-    reject_atomic_write_residue(path)?;
-    atomic_write(path, &bytes, 0o600, Some(ROOT_CAPSULE_OWNER))?;
+    custody.publish(&bytes)?;
     Ok(())
 }
 
 fn read_registration_attempt_capsule(
-    path: &Path,
+    custody: &PrivateAtomicFileCustody,
 ) -> Result<Option<ProbeRegistrationAttemptCapsule>, std::io::Error> {
-    reject_atomic_write_residue(path)?;
-    let bytes = match read_private_regular_file(
-        path,
-        0o600,
-        ROOT_CAPSULE_OWNER,
-        MAX_REGISTRATION_ATTEMPT_CAPSULE_BYTES,
-    ) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(bytes) = custody.read_bounded(MAX_REGISTRATION_ATTEMPT_CAPSULE_BYTES)? else {
+        return Ok(None);
     };
     serde_json::from_slice(&bytes).map(Some).map_err(|_| {
         std::io::Error::new(

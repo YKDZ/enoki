@@ -3587,12 +3587,16 @@ mod tests {
             .persist(&replacement_commit)
             .unwrap();
 
+        let capsule_before_rename = tempdir().unwrap();
+        fs::create_dir_all(capsule_before_rename.path().join("var/lib")).unwrap();
+        let interrupted_source = FixedInstallPaths::under(capsule_before_rename.path())
+            .replacement_registration_attempt_source();
         assert!(!run_replacement_lifecycle_child(
-            temporary.path(),
+            capsule_before_rename.path(),
             "publish-source",
-            Some((&source, "before-rename")),
+            Some((&interrupted_source, "before-rename")),
         ));
-        assert!(!source.exists());
+        assert!(!interrupted_source.exists());
         assert!(run_replacement_lifecycle_child(
             temporary.path(),
             "publish-source",
@@ -3675,6 +3679,14 @@ mod tests {
 
         let exact_identity = fs::read(paths.identity()).unwrap();
         let exact_commit = fs::read(&commit_path).unwrap();
+        let exact_journal_path = paths.bootstrap_state().join("activation-journal.json");
+        let exact_journal = fs::read(&exact_journal_path).unwrap();
+        let exact_staging = TransactionJournal::load(&paths.bootstrap_state())
+            .unwrap()
+            .unwrap()
+            .staging_directory()
+            .to_owned();
+        let exact_staging_present = exact_staging.exists();
         for mutation in [
             "token-hash",
             "raw-token",
@@ -3699,9 +3711,44 @@ mod tests {
             assert_eq!(fs::read(&source).unwrap(), corrupted);
             assert_eq!(fs::read(&commit_path).unwrap(), exact_commit);
             assert_eq!(fs::read(paths.identity()).unwrap(), exact_identity);
+            assert_eq!(fs::read(&exact_journal_path).unwrap(), exact_journal);
+            assert_eq!(
+                exact_staging.exists(),
+                exact_staging_present,
+                "{mutation} preserves the staging custody state"
+            );
             assert!(runtime_credential.exists(), "{mutation} has zero restart effect");
         }
         fs::write(&source, &capsule_bytes).unwrap();
+
+        let missing_capsule = replacement_recovery_ready_fixture();
+        let missing_paths = FixedInstallPaths::under(missing_capsule.path());
+        let missing_source = missing_paths.replacement_registration_attempt_source();
+        let missing_commit = missing_paths
+            .bootstrap_state()
+            .join("replacement-migration.json");
+        let missing_journal = missing_paths
+            .bootstrap_state()
+            .join("activation-journal.json");
+        let missing_commit_bytes = fs::read(&missing_commit).unwrap();
+        let missing_journal_bytes = fs::read(&missing_journal).unwrap();
+        let missing_identity = fs::read(missing_paths.identity()).unwrap();
+        let missing_staging = TransactionJournal::load(&missing_paths.bootstrap_state())
+            .unwrap()
+            .unwrap()
+            .staging_directory()
+            .to_owned();
+        let missing_staging_present = missing_staging.exists();
+        fs::remove_file(&missing_source).unwrap();
+        assert!(run_replacement_lifecycle_child(
+            missing_capsule.path(),
+            "reject-retirement",
+            None,
+        ));
+        assert_eq!(fs::read(&missing_commit).unwrap(), missing_commit_bytes);
+        assert_eq!(fs::read(&missing_journal).unwrap(), missing_journal_bytes);
+        assert_eq!(fs::read(missing_paths.identity()).unwrap(), missing_identity);
+        assert_eq!(missing_staging.exists(), missing_staging_present);
 
         for tampered in [
             registered_identity
@@ -3789,16 +3836,57 @@ mod tests {
         fs::remove_file(&drop_in).unwrap();
         fs::remove_dir(drop_in.parent().unwrap()).unwrap();
 
-        for point in ["before-rename", "after-rename"] {
-            assert!(!run_replacement_lifecycle_child(
+        let pre_binding_crash = replacement_recovery_ready_fixture();
+        let blocked_paths = FixedInstallPaths::under(pre_binding_crash.path());
+        let blocked_commit = blocked_paths
+            .bootstrap_state()
+            .join("replacement-migration.json");
+        let blocked_source = blocked_paths.replacement_registration_attempt_source();
+        let blocked_identity = fs::read(blocked_paths.identity()).unwrap();
+        let blocked_commit_bytes = fs::read(&blocked_commit).unwrap();
+        let blocked_source_bytes = fs::read(&blocked_source).unwrap();
+        let blocked_journal_path = blocked_paths
+            .bootstrap_state()
+            .join("activation-journal.json");
+        let blocked_journal_bytes = fs::read(&blocked_journal_path).unwrap();
+        let blocked_journal = TransactionJournal::load(&blocked_paths.bootstrap_state())
+            .unwrap()
+            .unwrap();
+        let blocked_staging = blocked_journal.staging_directory().to_owned();
+        let blocked_staging_present = blocked_staging.exists();
+        assert!(!run_replacement_lifecycle_child(
+            pre_binding_crash.path(),
+            "retire-source",
+            Some((&blocked_commit, "before-rename")),
+        ));
+        assert_eq!(fs::read(&blocked_commit).unwrap(), blocked_commit_bytes);
+        assert_eq!(fs::read(&blocked_source).unwrap(), blocked_source_bytes);
+        assert_eq!(fs::read(&blocked_journal_path).unwrap(), blocked_journal_bytes);
+        assert_eq!(blocked_staging.exists(), blocked_staging_present);
+        assert!(blocked_paths.identity().exists());
+        assert!(!run_replacement_lifecycle_child(
+            pre_binding_crash.path(),
+            "retire-source",
+            None,
+        ));
+        assert_eq!(fs::read(&blocked_commit).unwrap(), blocked_commit_bytes);
+        assert_eq!(fs::read(&blocked_source).unwrap(), blocked_source_bytes);
+        assert_eq!(fs::read(&blocked_journal_path).unwrap(), blocked_journal_bytes);
+        assert_eq!(blocked_staging.exists(), blocked_staging_present);
+        assert_ne!(
+            fs::read(blocked_paths.identity()).unwrap(),
+            blocked_identity,
+            "proof-backed convergence may precede the interrupted CAS"
+        );
+
+        assert!(!run_replacement_lifecycle_child(
                 temporary.path(),
                 "retire-source",
-                Some((&commit_path, point)),
+                Some((&commit_path, "after-rename")),
             ));
-            assert!(source.exists(), "identity binding must precede capsule retirement");
-            assert!(commit_path.exists());
-            assert!(runtime_credential.exists());
-        }
+        assert!(source.exists(), "identity binding must precede capsule retirement");
+        assert!(commit_path.exists());
+        assert!(runtime_credential.exists());
         let bound_commit: serde_json::Value =
             serde_json::from_slice(&fs::read(&commit_path).unwrap()).unwrap();
         assert_eq!(bound_commit["schemaVersion"], 2);
@@ -3939,6 +4027,45 @@ mod tests {
                 .env("ENOKI_TEST_SECURE_FILE_CRASH_POINT", point);
         }
         command.status().unwrap().success()
+    }
+
+    fn replacement_recovery_ready_fixture() -> tempfile::TempDir {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::set_permissions(
+            paths.bootstrap_state(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let replacement_bundle = bundle().with_test_complete_receipts(5);
+        let commit_path = paths
+            .bootstrap_state()
+            .join("replacement-migration.json");
+        let mut replacement_commit = replacement_commit(&replacement_bundle);
+        replacement_commit.schema_version = 1;
+        FileReplacementCommitStore::at(&commit_path, unsafe { libc::geteuid() })
+            .persist(&replacement_commit)
+            .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "publish-source",
+            None,
+        ));
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "activate",
+            None,
+        ));
+        temporary
     }
 
     fn run_replacement_lifecycle_recovery_child(root: &Path) {

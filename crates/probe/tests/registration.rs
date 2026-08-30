@@ -357,6 +357,54 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
         assert_eq!(fs::read(&path).unwrap(), old, "{name} retains old capsule");
     }
 
+    let swapped = temporary.path().join("swapped/attempt.json");
+    let swap_signal = temporary.path().join("swap-scanned");
+    let swap_resume = temporary.path().join("swap-resume");
+    let mut swap_child = spawn_root_capsule_race(&swapped, false, &swap_signal, &swap_resume);
+    wait_for_test_signal(&swap_signal);
+    let swapped_original = temporary.path().join("swapped-original");
+    fs::rename(swapped.parent().unwrap(), &swapped_original).unwrap();
+    fs::create_dir(swapped.parent().unwrap()).unwrap();
+    fs::set_permissions(swapped.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    let new_namespace_residue = swapped
+        .parent()
+        .unwrap()
+        .join(".attempt.json-enoki-write-new-namespace");
+    fs::write(&new_namespace_residue, b"new namespace custody").unwrap();
+    fs::write(&swap_resume, b"resume").unwrap();
+    assert!(swap_child.wait().unwrap().success());
+    assert!(swapped_original.join("attempt.json").exists());
+    assert!(
+        !swapped.exists(),
+        "held FD never publishes into replacement namespace"
+    );
+    assert_eq!(
+        fs::read(&new_namespace_residue).unwrap(),
+        b"new namespace custody"
+    );
+
+    let after_scan = temporary.path().join("after-scan/attempt.json");
+    assert!(run_root_capsule_publisher(&after_scan, None).success());
+    let after_scan_old = fs::read(&after_scan).unwrap();
+    let after_scan_signal = temporary.path().join("after-scan-scanned");
+    let after_scan_resume = temporary.path().join("after-scan-resume");
+    let mut after_scan_child =
+        spawn_root_capsule_race(&after_scan, true, &after_scan_signal, &after_scan_resume);
+    wait_for_test_signal(&after_scan_signal);
+    let after_scan_residue = after_scan
+        .parent()
+        .unwrap()
+        .join(".attempt.json-enoki-write-777-1");
+    fs::write(&after_scan_residue, b"arrived after first scan").unwrap();
+    fs::set_permissions(&after_scan_residue, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&after_scan_resume, b"resume").unwrap();
+    assert!(!after_scan_child.wait().unwrap().success());
+    assert_eq!(fs::read(&after_scan).unwrap(), after_scan_old);
+    assert_eq!(
+        fs::read(&after_scan_residue).unwrap(),
+        b"arrived after first scan"
+    );
+
     for path in [&after, &stale] {
         let parent = fs::symlink_metadata(path.parent().unwrap()).unwrap();
         let source = fs::symlink_metadata(path).unwrap();
@@ -368,6 +416,39 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
         assert_eq!(source.mode() & 0o777, 0o600);
         assert_eq!(source.nlink(), 1);
     }
+}
+
+fn spawn_root_capsule_race(
+    path: &std::path::Path,
+    replacement: bool,
+    signal: &std::path::Path,
+    resume: &std::path::Path,
+) -> std::process::Child {
+    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
+    command
+        .arg("--exact")
+        .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
+        .arg("--nocapture")
+        .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path)
+        .env("ENOKI_TEST_PRIVATE_ATOMIC_PATH", path)
+        .env("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL", signal)
+        .env("ENOKI_TEST_PRIVATE_ATOMIC_RESUME", resume);
+    if replacement {
+        command.env("ENOKI_TEST_ROOT_CAPSULE_REPLACE", "1");
+    }
+    command
+        .spawn()
+        .expect("spawn synchronized capsule operation")
+}
+
+fn wait_for_test_signal(path: &std::path::Path) {
+    for _ in 0..2_000 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("timed out waiting for private atomic race signal");
 }
 
 fn run_root_capsule_publisher(

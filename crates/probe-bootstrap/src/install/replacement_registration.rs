@@ -9,7 +9,8 @@ use std::{
 };
 
 use crate::secure_file::{
-    SystemdProbeDirectory, open_systemd_probe_state_projection_for_finalization,
+    PrivateAtomicFileCustody, SystemdProbeDirectory,
+    open_systemd_probe_state_projection_for_finalization,
 };
 use crate::{
     handoff::Enrollment,
@@ -93,7 +94,7 @@ pub(super) fn publish_drop_in(paths: &FixedInstallPaths) -> Result<(), InstallEr
 }
 
 pub(super) fn retire_drop_in(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    retire_private_file(
+    retire_transient_file(
         &paths.replacement_registration_drop_in(),
         paths.expected_root_uid(),
         paths.expected_root_gid(),
@@ -101,7 +102,7 @@ pub(super) fn retire_drop_in(paths: &FixedInstallPaths) -> Result<(), InstallErr
 }
 
 pub(crate) fn retire_attempt_source(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    retire_private_file(
+    retire_custodied_file(
         &paths.replacement_registration_attempt_source(),
         paths.expected_root_uid(),
         paths.expected_root_gid(),
@@ -460,13 +461,25 @@ pub(super) fn append_bootstrap_config(
     ));
 }
 
-fn retire_private_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallError> {
-    match crate::secure_file::remove_private_regular_file(path, 0o600, (uid, gid)) {
+fn retire_custodied_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallError> {
+    let custody = match PrivateAtomicFileCustody::open(path, 0o600, (uid, gid), uid) {
+        Ok(custody) => custody,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(InstallError::ExistingResidue),
+    };
+    custody
+        .remove()
+        .and_then(|()| custody.remove_empty_parent())
+        .map_err(|_| InstallError::ExistingResidue)
+}
+
+fn retire_transient_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallError> {
+    match crate::secure_file::remove_transient_private_file(path, 0o600, (uid, gid)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(InstallError::ExistingResidue),
     }
-    match crate::secure_file::retire_replacement_atomic_write_residue(path, 0o600, (uid, gid)) {
+    match crate::secure_file::retire_transient_atomic_write_residue(path, 0o600, (uid, gid)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(InstallError::ExistingResidue),

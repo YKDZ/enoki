@@ -1,11 +1,8 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    fs::{self, OpenOptions},
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
+
+use crate::secure_file::PrivateAtomicFileCustody;
 
 mod registration_attempt;
 #[cfg(test)]
@@ -208,6 +205,7 @@ where
 }
 
 pub struct FileReplacementCommitStore {
+    custody: Option<PrivateAtomicFileCustody>,
     path: PathBuf,
     expected_owner_gid: u32,
     expected_owner_uid: u32,
@@ -216,6 +214,7 @@ pub struct FileReplacementCommitStore {
 impl FileReplacementCommitStore {
     pub fn at(path: impl Into<PathBuf>, expected_owner_uid: u32) -> Self {
         Self {
+            custody: None,
             path: path.into(),
             expected_owner_gid: unsafe { libc::getegid() },
             expected_owner_uid,
@@ -226,18 +225,15 @@ impl FileReplacementCommitStore {
     /// 删除与目录 fsync 之间的中断可由相同 finalizer 幂等重放。
     #[cfg(feature = "activator")]
     pub(crate) fn retire_exact(&mut self, expected: &ReplacementCommitFact) -> std::io::Result<()> {
-        let actual = self.load()?;
+        let custody = self.custody()?;
+        let actual = load_commit_fact(custody)?;
         match actual {
             Some(actual)
                 if actual == *expected
                     && actual.cleanup_complete
                     && actual.candidate_layout_complete => {}
             None => {
-                return crate::secure_file::retire_replacement_atomic_write_residue(
-                    &self.path,
-                    0o600,
-                    (self.expected_owner_uid, self.expected_owner_gid),
-                );
+                return Ok(());
             }
             Some(_) => {
                 return Err(std::io::Error::new(
@@ -247,20 +243,7 @@ impl FileReplacementCommitStore {
             }
         }
 
-        match crate::secure_file::remove_private_regular_file(
-            &self.path,
-            0o600,
-            (self.expected_owner_uid, self.expected_owner_gid),
-        ) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        crate::secure_file::retire_replacement_atomic_write_residue(
-            &self.path,
-            0o600,
-            (self.expected_owner_uid, self.expected_owner_gid),
-        )
+        custody.remove()
     }
 
     /// Deepens only the exact retained commit; a caller cannot overwrite a
@@ -271,7 +254,8 @@ impl FileReplacementCommitStore {
         expected: &ReplacementCommitFact,
         bound: &ReplacementCommitFact,
     ) -> std::io::Result<()> {
-        if self.load()?.as_ref() != Some(expected)
+        let custody = self.custody()?;
+        if load_commit_fact(custody)?.as_ref() != Some(expected)
             || expected.schema_version != 1
             || expected.canonical_identity_sha256.is_some()
             || !expected.has_valid_binding()
@@ -288,7 +272,19 @@ impl FileReplacementCommitStore {
                 "replacement commit changed before identity custody persisted",
             ));
         }
-        self.persist(bound)
+        persist_commit_fact(custody, bound)
+    }
+
+    fn custody(&mut self) -> std::io::Result<&PrivateAtomicFileCustody> {
+        if self.custody.is_none() {
+            self.custody = Some(PrivateAtomicFileCustody::open(
+                &self.path,
+                0o600,
+                (self.expected_owner_uid, self.expected_owner_gid),
+                self.expected_owner_uid,
+            )?);
+        }
+        Ok(self.custody.as_ref().expect("commit custody initialized"))
     }
 }
 
@@ -296,84 +292,47 @@ impl ReplacementCommitStore for FileReplacementCommitStore {
     type Error = std::io::Error;
 
     fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&self.path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != self.expected_owner_uid
-            || metadata.mode() & 0o777 != 0o600
-            || metadata.len() > MAX_COMMIT_FACT_BYTES
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid replacement commit fact",
-            ));
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_COMMIT_FACT_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "replacement commit fact is too large",
-            ));
-        }
-        let fact: ReplacementCommitFact = serde_json::from_slice(&bytes).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid replacement commit fact",
-            )
-        })?;
-        if !fact.has_valid_binding() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid replacement commit binding",
-            ));
-        }
-        Ok(Some(fact))
+        load_commit_fact(self.custody()?)
     }
 
     fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
-        let parent = self.path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing commit parent")
-        })?;
-        validate_private_parent(parent, self.expected_owner_uid)?;
-        crate::secure_file::retire_replacement_atomic_write_residue(
-            &self.path,
-            0o600,
-            (self.expected_owner_uid, self.expected_owner_gid),
-        )?;
-        let bytes = serde_json::to_vec(fact).map_err(std::io::Error::other)?;
-        if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "replacement commit fact is too large",
-            ));
-        }
-        crate::secure_file::atomic_write(&self.path, &bytes, 0o600, None)
+        persist_commit_fact(self.custody()?, fact)
     }
 }
 
-fn validate_private_parent(path: &Path, expected_owner_uid: u32) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.uid() != expected_owner_uid
-        || metadata.mode() & 0o077 != 0
-    {
+fn load_commit_fact(
+    custody: &PrivateAtomicFileCustody,
+) -> std::io::Result<Option<ReplacementCommitFact>> {
+    let Some(bytes) = custody.read_bounded(MAX_COMMIT_FACT_BYTES as usize)? else {
+        return Ok(None);
+    };
+    let fact: ReplacementCommitFact = serde_json::from_slice(&bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid replacement commit fact",
+        )
+    })?;
+    if !fact.has_valid_binding() {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "replacement commit parent is not root-private",
+            std::io::ErrorKind::InvalidData,
+            "invalid replacement commit binding",
         ));
     }
-    Ok(())
+    Ok(Some(fact))
+}
+
+fn persist_commit_fact(
+    custody: &PrivateAtomicFileCustody,
+    fact: &ReplacementCommitFact,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(fact).map_err(std::io::Error::other)?;
+    if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "replacement commit fact is too large",
+        ));
+    }
+    custody.publish(&bytes)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -463,7 +422,10 @@ fn valid_lower_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::{
+        fs,
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+    };
 
     #[derive(Default)]
     struct Store {
@@ -636,6 +598,65 @@ mod tests {
                 .collect::<Vec<_>>(),
             [std::ffi::OsString::from("replacement-migration.json")]
         );
+    }
+
+    #[cfg(feature = "activator")]
+    #[test]
+    fn commit_residue_never_authorizes_publish_or_cleanup() {
+        for residue in ["exact", "different", "malformed", "wrong-mode", "symlink"] {
+            let temporary = tempfile::tempdir().unwrap();
+            fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let path = temporary.path().join("replacement-migration.json");
+            let residue_path = temporary
+                .path()
+                .join(".replacement-migration.json-enoki-write-123-1");
+            let expected = ReplacementCommitFact::for_test(intent(), false, false);
+            let residue_bytes = match residue {
+                "exact" => serde_json::to_vec(&expected).unwrap(),
+                "different" => serde_json::to_vec(&ReplacementCommitFact::for_test(
+                    {
+                        let mut intent = intent();
+                        intent.enrollment_id.push_str("_other");
+                        intent
+                    },
+                    false,
+                    false,
+                ))
+                .unwrap(),
+                "malformed" | "wrong-mode" => b"not a commit fact".to_vec(),
+                "symlink" => Vec::new(),
+                _ => unreachable!(),
+            };
+            if residue == "symlink" {
+                symlink(&path, &residue_path).unwrap();
+            } else {
+                fs::write(&residue_path, &residue_bytes).unwrap();
+                fs::set_permissions(
+                    &residue_path,
+                    fs::Permissions::from_mode(if residue == "wrong-mode" {
+                        0o644
+                    } else {
+                        0o600
+                    }),
+                )
+                .unwrap();
+            }
+            let mut store = FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() });
+            let mut cleanup = Cleanup::default();
+
+            assert!(
+                matches!(
+                    commit_and_cleanup_replacement(intent(), &mut store, &mut cleanup),
+                    Err(ReplacementCommitError::Store(_))
+                ),
+                "{residue} residue must fail before commit or cleanup"
+            );
+            assert_eq!(cleanup.calls, 0, "{residue} has zero cleanup effect");
+            assert!(!path.exists(), "{residue} cannot publish a commit");
+            if residue != "symlink" {
+                assert_eq!(fs::read(&residue_path).unwrap(), residue_bytes);
+            }
+        }
     }
 
     #[cfg(feature = "activator")]

@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, CString, OsStr},
+    ffi::{CString, OsStr},
     fs::File,
     io::{self, Read},
     os::{
@@ -144,99 +144,6 @@ pub fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
     Ok(contents)
-}
-
-/// 读取私有持久化注册尝试材料，并通过持有的目录文件描述符校验其所有者、模式、大小、
-/// 普通文件类型与单硬链接保管约束。
-pub fn read_private_regular_file(
-    path: &Path,
-    mode: u32,
-    owner: (u32, u32),
-    maximum_bytes: usize,
-) -> io::Result<Vec<u8>> {
-    let (parent, target) = open_parent(path, false)?;
-    verify_private_directory(parent.raw())?;
-    let fd = unsafe {
-        libc::openat(
-            parent.raw(),
-            target.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    let stat = stat_fd(file.as_raw_fd())?;
-    if file_type(stat.st_mode) != libc::S_IFREG
-        || stat.st_mode & 0o777 != mode
-        || stat.st_uid != owner.0
-        || stat.st_gid != owner.1
-        || stat.st_nlink != 1
-        || stat.st_size < 0
-        || stat.st_size as usize > maximum_bytes
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "managed private file attributes do not match",
-        ));
-    }
-    let mut contents = Vec::with_capacity(stat.st_size as usize);
-    Read::by_ref(&mut file)
-        .take(maximum_bytes as u64 + 1)
-        .read_to_end(&mut contents)?;
-    if contents.len() > maximum_bytes {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "managed private file is too large",
-        ));
-    }
-    Ok(contents)
-}
-
-/// Rejects any unresolved atomic-write sibling for the managed target while
-/// holding its verified parent directory. A prior publisher may have crashed
-/// before rename; callers must not guess whether those bytes can be discarded.
-pub fn reject_atomic_write_residue(path: &Path) -> io::Result<()> {
-    let (parent, target) = open_parent(path, false)?;
-    verify_private_directory(parent.raw())?;
-    let duplicate = unsafe { libc::fcntl(parent.raw(), libc::F_DUPFD_CLOEXEC, 0) };
-    if duplicate < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let directory = unsafe { libc::fdopendir(duplicate) };
-    if directory.is_null() {
-        let error = io::Error::last_os_error();
-        unsafe { libc::close(duplicate) };
-        return Err(error);
-    }
-    let mut prefix = Vec::with_capacity(target.as_bytes().len() + 14);
-    prefix.push(b'.');
-    prefix.extend_from_slice(target.as_bytes());
-    prefix.extend_from_slice(b"-enoki-write-");
-    let result = loop {
-        unsafe { *libc::__errno_location() = 0 };
-        let entry = unsafe { libc::readdir(directory) };
-        if entry.is_null() {
-            let error = io::Error::last_os_error();
-            break if error.raw_os_error() == Some(0) {
-                Ok(())
-            } else {
-                Err(error)
-            };
-        }
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        if name.to_bytes().starts_with(&prefix) {
-            break Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unresolved registration capsule atomic-write residue",
-            ));
-        }
-    };
-    if unsafe { libc::closedir(directory) } != 0 && result.is_ok() {
-        return Err(io::Error::last_os_error());
-    }
-    result
 }
 
 /// 读取大小受限的一次性 systemd 凭据。该凭据可归 root 或 DynamicUser
