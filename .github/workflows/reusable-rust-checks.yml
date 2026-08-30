@@ -38,5 +38,6 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
+          export RUSTUP_HOME="${RUSTUP_HOME:-"$HOME/.rustup"}"
           cargo="$(command -v cargo)"
           sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME "$cargo" test --workspace

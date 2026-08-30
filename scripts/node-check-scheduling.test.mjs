@@ -8,7 +8,7 @@ describe("Node check resource scheduling", () => {
 
     expect(turbo.tasks["//#test:ci"].dependsOn).toEqual([
       "@enoki/api-client#test",
-      "@enoki/hub#test:built",
+      "@enoki/hub#test",
       "@enoki/proto#test",
       "@enoki/web#test",
     ]);
