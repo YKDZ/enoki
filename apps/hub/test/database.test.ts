@@ -1707,6 +1707,22 @@ describe("Hub database", () => {
       tokenHash: "successor-token",
     });
     expect(created.kind).toBe("created");
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set target_bundles_json = null where token_hash = ?",
+      )
+      .run("successor-token");
+    expect(
+      database.enrollments.installationInspectionDecision({
+        nowMs: 1_725_000_064_000,
+        tokenHash: "successor-token",
+      }),
+    ).toEqual({ kind: "invalid" });
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set target_bundles_json = ? where token_hash = ?",
+      )
+      .run(JSON.stringify(targetBundles()), "successor-token");
     expect(
       database.enrollments.inspectPending({
         nowMs: 1_725_000_064_000,

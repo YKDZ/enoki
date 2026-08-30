@@ -47,6 +47,7 @@ function app(
       },
       inspectPending: () => null,
       hydrateLegacyOrdinaryPendingClosure: () => {},
+      installationInspectionDecision: () => ({ kind: "invalid" }),
       lifecycleAuthorityTokenHashForHost: () => null,
       replayRegistrationOutcome: () => null,
       readStatus: () => null,

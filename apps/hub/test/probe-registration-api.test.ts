@@ -1107,6 +1107,14 @@ describe("Probe registration API", () => {
           method: "POST",
         });
 
+      // 模拟 20260830050322 之前已存在的 ordinary pending：真实迁移保留
+      // null allowlist，首次 production inspection 必须以已验证 release
+      // closure 进行一次封闭 hydration。
+      database.sqlite
+        .prepare(
+          "update enrollment_tokens set target_bundles_json = null where enrollment_id = ?",
+        )
+        .run(enrollmentId);
       const inspection = await app.request("/api/probe/register", {
         body: RegistrationRequest.encode(
           RegistrationRequest.create({
@@ -1118,6 +1126,13 @@ describe("Probe registration API", () => {
         method: "POST",
       });
       expect(inspection.status).toBe(200);
+      expect(
+        database.sqlite
+          .prepare(
+            "select target_bundles_json as targetBundlesJson from enrollment_tokens where enrollment_id = ?",
+          )
+          .get(enrollmentId),
+      ).toEqual({ targetBundlesJson: JSON.stringify(release.targetBundles) });
       // Pending authority is frozen by the Owner transaction; registration must
       // not reread a release directory that may already have advanced or gone.
       if (releaseChange === "deletes the release directory") {
@@ -1319,6 +1334,128 @@ describe("Probe registration API", () => {
           root.enoki.v1.ProbeRegistrationResponse.decode(committedBody).probeId,
       });
 
+      database.close();
+    },
+  );
+
+  it.each(["deletes the release directory", "advances the release closure"])(
+    "inspects a terminal Owner recovery without rereading release state when it %s before first inspection",
+    async (releaseChange) => {
+      const database = await createTemporaryDatabase();
+      const assetDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-terminal-inspection-"),
+      );
+      tempRoots.push(assetDir);
+      const release = await writeSignedProbeAssetSet(assetDir, {
+        sourceVersion: "0.1.0",
+        targetVersion: "0.2.0",
+        transition: "replacement-required",
+      });
+      const app = createHubApp({
+        auth: {
+          failureDelayMs: 0,
+          ownerPassword: "correct horse battery staple",
+          sessionCookieName: "enoki_owner_session",
+        },
+        database,
+        installation: {
+          bootstrapRecipe,
+          probeApiOrigin: "https://hub.example",
+        },
+        probeAssets: {
+          assetDir,
+          trustedRootPublicKeyPem: release.rootPublicKeyPem,
+        },
+      });
+      const ownerSession = await loginOwner(app);
+      database.sqlite
+        .prepare(
+          `insert into managed_hosts (
+             id, probe_id, probe_secret_hash, display_name, display_name_edited,
+             connect_address, created_at_ms, clock_skew_detected,
+             probe_configuration_version, probe_version
+           ) values (?, ?, ?, ?, 0, ?, ?, 0, ?, ?)`,
+        )
+        .run(
+          77,
+          "probe-terminal-current",
+          "terminal-secret",
+          "Terminal Host",
+          "10.0.0.77",
+          1_725_000_000_000,
+          "default-v1",
+          "0.1.0",
+        );
+      const outcome = Buffer.from(
+        (root.enoki.v1.ProbeRegistrationResponse as any)
+          .encode(
+            (root.enoki.v1.ProbeRegistrationResponse as any).create({
+              hostId: "77",
+              probeId: "probe-terminal-current",
+            }),
+          )
+          .finish(),
+      );
+      database.sqlite
+        .prepare(
+          `insert into enrollment_tokens (
+            enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+            target_kind, target_host_id, expected_hub_origin, expected_probe_id,
+            expected_probe_version, source_probe_sha256_json, target_asset_set_digest,
+            target_probe_version, target_bundles_json, status, managed_host_id,
+            rejected_at_ms, rejection_code, registration_outcome
+          ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, ?, 'rejected', ?, ?, 'probe_startup_timeout', ?)`,
+        )
+        .run(
+          "enr_terminal_predecessor_0077",
+          "terminal-predecessor-token",
+          1_725_000_000_000,
+          1_725_000_060_000,
+          1_725_000_001_000,
+          77,
+          "https://hub.example",
+          "probe-before-terminal",
+          "0.1.0",
+          JSON.stringify(release.sourceProbeSha256),
+          release.targetAssetSetDigest,
+          "0.2.0",
+          JSON.stringify(release.targetBundles),
+          77,
+          1_725_000_062_000,
+          outcome,
+        );
+      const created = await app.request(
+        "/api/web/enrollments/manual-reinstall/77",
+        { headers: { cookie: ownerSession }, method: "POST" },
+      );
+      expect(created.status).toBe(201);
+      const { enrollmentToken } = (await created.json()) as {
+        enrollmentToken: string;
+      };
+
+      if (releaseChange === "deletes the release directory") {
+        await rm(assetDir, { force: true, recursive: true });
+      } else {
+        await writeSignedProbeAssetSet(assetDir, {
+          authority: release.authority,
+          sourceVersion: "0.2.0",
+          targetVersion: "0.2.1",
+          transition: "replacement-required",
+        });
+      }
+      const inspection = await app.request("/api/probe/register", {
+        body: (root.enoki.v1.ProbeRegistrationRequest as any)
+          .encode(
+            (root.enoki.v1.ProbeRegistrationRequest as any).create({
+              enrollmentToken,
+              installationInspection: {},
+            }),
+          )
+          .finish(),
+        headers: { "content-type": "application/x-protobuf" },
+        method: "POST",
+      });
+      expect(inspection.status).toBe(200);
       database.close();
     },
   );

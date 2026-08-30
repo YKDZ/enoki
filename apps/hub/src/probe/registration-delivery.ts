@@ -87,35 +87,45 @@ export function createProbeRegistrationRoutes(
       return probeJsonError("malformed_probe_registration", 400);
     }
     if (installationInspection) {
-      if (
-        services.probeAssetDir &&
-        services.probeDistributionRootPublicKeyPem
-      ) {
+      const tokenHash = hashSecret(request.enrollmentToken);
+      let decision = services.enrollments.installationInspectionDecision({
+        nowMs: now(),
+        tokenHash,
+      });
+      if (decision.kind === "legacy_ordinary_hydration_required") {
+        if (
+          !services.probeAssetDir ||
+          !services.probeDistributionRootPublicKeyPem
+        ) {
+          return probeJsonError("invalid_enrollment_token", 401);
+        }
         const releaseContext = await readProbeReleaseContextFromDirectory({
           assetDir: services.probeAssetDir,
           trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
         });
         const transition = releaseContext.releaseTransition;
-        if (transition) {
-          services.enrollments.hydrateLegacyOrdinaryPendingClosure({
-            closure: {
-              sourceProbeSha256: transition.sourceProbeSha256,
-              targetAssetSetDigest: transition.targetAssetSetDigest,
-              targetBundles: transition.targetBundles ?? [],
-              targetProbeVersion: transition.targetProbeVersion,
-            },
-            nowMs: now(),
-            tokenHash: hashSecret(request.enrollmentToken),
-          });
+        if (!transition) {
+          return probeJsonError("invalid_enrollment_token", 401);
         }
+        services.enrollments.hydrateLegacyOrdinaryPendingClosure({
+          closure: {
+            sourceProbeSha256: transition.sourceProbeSha256,
+            targetAssetSetDigest: transition.targetAssetSetDigest,
+            targetBundles: transition.targetBundles ?? [],
+            targetProbeVersion: transition.targetProbeVersion,
+          },
+          nowMs: now(),
+          tokenHash,
+        });
+        decision = services.enrollments.installationInspectionDecision({
+          nowMs: now(),
+          tokenHash,
+        });
       }
-      const enrollment = services.enrollments.inspectPending({
-        nowMs: now(),
-        tokenHash: hashSecret(request.enrollmentToken),
-      });
-      if (!enrollment) {
+      if (decision.kind !== "ready") {
         return probeJsonError("invalid_enrollment_token", 401);
       }
+      const enrollment = decision.enrollment;
       const body = RegistrationResponse.encode(
         RegistrationResponse.create({
           installationInspection: {

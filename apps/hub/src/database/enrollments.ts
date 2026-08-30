@@ -65,6 +65,11 @@ export type PendingEnrollmentInspection =
       targetProbeVersion: string;
     };
 
+export type PendingInstallationInspectionDecision =
+  | { enrollment: PendingEnrollmentInspection; kind: "ready" }
+  | { kind: "legacy_ordinary_hydration_required" }
+  | { kind: "invalid" };
+
 export type InstallationRejectionResult = {
   enrollment: EnrollmentTokenRow;
   outcome: "confirmed" | "rejected";
@@ -131,6 +136,10 @@ export type EnrollmentRepository = {
     nowMs: number;
     tokenHash: string;
   }) => void;
+  installationInspectionDecision: (input: {
+    nowMs: number;
+    tokenHash: string;
+  }) => PendingInstallationInspectionDecision;
   rejectInstallation: (input: {
     code: string;
     message: string;
@@ -264,6 +273,22 @@ export function createEnrollmentRepository(
         const sourceProbeSha256 = parseSourceProbeSha256(
           pending?.sourceProbeSha256Json ?? "",
         );
+        const host =
+          pending?.targetHostId === null || pending?.targetHostId === undefined
+            ? null
+            : transaction
+                .select({
+                  probeId: hosts.probeId,
+                  probeVersion: hosts.probeVersion,
+                })
+                .from(hosts)
+                .where(
+                  and(
+                    eq(hosts.id, pending.targetHostId),
+                    isNull(hosts.deletedAtMs),
+                  ),
+                )
+                .get();
         if (
           !pending ||
           pending.targetKind !== "manual_reinstall" ||
@@ -271,6 +296,9 @@ export function createEnrollmentRepository(
           pending.replacementPredecessorAssetSetDigest !== null ||
           pending.targetBundlesJson !== null ||
           !sourceProbeSha256 ||
+          !host ||
+          host.probeId !== pending.expectedProbeId ||
+          host.probeVersion !== pending.expectedProbeVersion ||
           pending.targetAssetSetDigest !== input.closure.targetAssetSetDigest ||
           pending.targetProbeVersion !== input.closure.targetProbeVersion ||
           JSON.stringify(sourceProbeSha256) !==
@@ -285,6 +313,128 @@ export function createEnrollmentRepository(
           })
           .where(eq(enrollmentTokens.id, pending.id))
           .run();
+      });
+    },
+    installationInspectionDecision(input) {
+      return database.transaction((transaction) => {
+        const pending = transaction
+          .select({
+            enrollmentId: enrollmentTokens.enrollmentId,
+            expectedHubOrigin: enrollmentTokens.expectedHubOrigin,
+            expectedProbeId: enrollmentTokens.expectedProbeId,
+            expectedProbeVersion: enrollmentTokens.expectedProbeVersion,
+            sourceProbeSha256Json: enrollmentTokens.sourceProbeSha256Json,
+            targetAssetSetDigest: enrollmentTokens.targetAssetSetDigest,
+            targetHostId: enrollmentTokens.targetHostId,
+            targetKind: enrollmentTokens.targetKind,
+            targetProbeVersion: enrollmentTokens.targetProbeVersion,
+            replacementPredecessorEnrollmentId:
+              enrollmentTokens.replacementPredecessorEnrollmentId,
+            replacementPredecessorAssetSetDigest:
+              enrollmentTokens.replacementPredecessorAssetSetDigest,
+            targetBundlesJson: enrollmentTokens.targetBundlesJson,
+          })
+          .from(enrollmentTokens)
+          .where(
+            and(
+              eq(enrollmentTokens.tokenHash, input.tokenHash),
+              isNull(enrollmentTokens.usedAtMs),
+              eq(enrollmentTokens.status, "pending"),
+              gt(enrollmentTokens.expiresAtMs, input.nowMs),
+            ),
+          )
+          .get();
+        if (!pending) return { kind: "invalid" };
+        if (pending.targetKind === "new_host") {
+          return { enrollment: { targetKind: "new_host" }, kind: "ready" };
+        }
+        if (
+          pending.targetKind === "existing_host" &&
+          pending.targetHostId !== null
+        ) {
+          const host = transaction
+            .select({ id: hosts.id })
+            .from(hosts)
+            .where(
+              and(
+                eq(hosts.id, pending.targetHostId),
+                isNull(hosts.deletedAtMs),
+              ),
+            )
+            .get();
+          return host
+            ? { enrollment: { targetKind: "existing_host" }, kind: "ready" }
+            : { kind: "invalid" };
+        }
+        if (
+          pending.targetKind !== "manual_reinstall" ||
+          !pending.enrollmentId ||
+          pending.targetHostId === null ||
+          !pending.expectedHubOrigin ||
+          !pending.expectedProbeId ||
+          !pending.expectedProbeVersion ||
+          !pending.sourceProbeSha256Json ||
+          !pending.targetAssetSetDigest ||
+          !pending.targetProbeVersion
+        ) {
+          return { kind: "invalid" };
+        }
+        const host = transaction
+          .select({
+            id: hosts.id,
+            probeId: hosts.probeId,
+            probeVersion: hosts.probeVersion,
+          })
+          .from(hosts)
+          .where(
+            and(eq(hosts.id, pending.targetHostId), isNull(hosts.deletedAtMs)),
+          )
+          .get();
+        if (
+          !host ||
+          host.probeId !== pending.expectedProbeId ||
+          (!pending.replacementPredecessorEnrollmentId &&
+            host.probeVersion !== pending.expectedProbeVersion) ||
+          (pending.replacementPredecessorEnrollmentId &&
+            !terminalReplacementPredecessorMatches(transaction, {
+              currentProbeId: host.probeId,
+              hostId: host.id,
+              pending,
+            }))
+        ) {
+          return { kind: "invalid" };
+        }
+        const sourceProbeSha256 = parseSourceProbeSha256(
+          pending.sourceProbeSha256Json,
+        );
+        if (!sourceProbeSha256) return { kind: "invalid" };
+        if (
+          pending.targetBundlesJson === null &&
+          pending.replacementPredecessorEnrollmentId === null &&
+          pending.replacementPredecessorAssetSetDigest === null
+        ) {
+          return { kind: "legacy_ordinary_hydration_required" };
+        }
+        if (
+          !pending.targetBundlesJson ||
+          !parseTargetBundles(pending.targetBundlesJson)
+        ) {
+          return { kind: "invalid" };
+        }
+        return {
+          enrollment: {
+            enrollmentId: pending.enrollmentId,
+            expectedHubOrigin: pending.expectedHubOrigin,
+            expectedProbeId: pending.expectedProbeId,
+            sourceProbeVersion: pending.expectedProbeVersion,
+            sourceProbeSha256,
+            targetAssetSetDigest: pending.targetAssetSetDigest,
+            targetHostId: pending.targetHostId,
+            targetKind: "manual_reinstall",
+            targetProbeVersion: pending.targetProbeVersion,
+          },
+          kind: "ready",
+        };
       });
     },
     inspectPending(input) {
