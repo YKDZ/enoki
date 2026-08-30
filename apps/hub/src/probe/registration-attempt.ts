@@ -9,7 +9,6 @@ import {
   validProbePublicKeyPem,
   verifyProbeRequestSignature,
 } from "./probe-identity.js";
-import { readProbeReleaseContextFromDirectory } from "./release-context.js";
 
 const RegistrationAttempt = enoki.v1.ProbeRegistrationAttempt as any;
 
@@ -58,15 +57,6 @@ export async function resolveRegistrationAttempt(input: {
   });
   if (replay) {
     return { kind: "replay", outcome: replay };
-  }
-  if (
-    !(await attemptMatchesCurrentRelease(attempt, {
-      probeAssetDir: input.probeAssetDir,
-      probeDistributionRootPublicKeyPem:
-        input.probeDistributionRootPublicKeyPem,
-    }))
-  ) {
-    return { kind: "invalid" };
   }
   return { attempt, kind: "accepted" };
 }
@@ -162,37 +152,6 @@ function decodeSignedRegistrationAttempt(
     targetBundleTarget: String(attempt.targetBundleTarget),
     targetProbeVersion: String(attempt.targetProbeVersion),
   };
-}
-
-async function attemptMatchesCurrentRelease(
-  attempt: ValidatedRegistrationAttempt,
-  releaseSource: {
-    probeAssetDir?: string;
-    probeDistributionRootPublicKeyPem?: Buffer | string;
-  },
-) {
-  if (
-    !releaseSource.probeAssetDir ||
-    !releaseSource.probeDistributionRootPublicKeyPem
-  ) {
-    return false;
-  }
-  const release = await readProbeReleaseContextFromDirectory({
-    assetDir: releaseSource.probeAssetDir,
-    trustedRootPublicKeyPem: releaseSource.probeDistributionRootPublicKeyPem,
-  });
-  const transition = release.releaseTransition;
-  return Boolean(
-    transition &&
-    release.assetSet.targetAssetSetDigest === attempt.targetAssetSetDigest &&
-    transition.targetAssetSetDigest === attempt.targetAssetSetDigest &&
-    transition.targetProbeVersion === attempt.targetProbeVersion &&
-    transition.targetBundles?.some(
-      (bundle) =>
-        bundle.target === attempt.targetBundleTarget &&
-        bundle.bundleManifestSha256 === attempt.targetManifestSha256,
-    ),
-  );
 }
 
 function registrationAttemptSignaturePayload(canonicalBytes: Uint8Array) {

@@ -139,6 +139,7 @@ export async function validateMigrationBaselineContents({
 }
 
 export function assertMigrationCandidateJoin({
+  baselineProbeClosure,
   identity,
   releaseBaseline,
   releaseTransition,
@@ -157,6 +158,10 @@ export function assertMigrationCandidateJoin({
       ) ||
         releaseTransition.source?.version !==
           releaseBaseline.probeAssetSet?.version ||
+        releaseTransition.source?.assetSetManifestSha256 !==
+          baselineProbeClosure?.assetSetManifestSha256 ||
+        JSON.stringify(releaseTransition.source?.probeComponents) !==
+          JSON.stringify(baselineProbeClosure?.probeComponents) ||
         `v${releaseTransition.target?.version}` !== identity.version)
     ) {
       throw new Error("Ordinary Release Candidate transition does not match");

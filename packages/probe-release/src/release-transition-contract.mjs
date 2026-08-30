@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   createHash,
   createPrivateKey,
@@ -5,8 +6,14 @@ import {
   sign,
   verify,
 } from "node:crypto";
+import { readFile, readdir, stat } from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
 
-import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
+import {
+  inspectLegacyProbeAssetSet,
+  inspectProbeElf,
+} from "./legacy-probe-asset-set.mjs";
 import { probeTargets } from "./probe-asset-bundle.mjs";
 import { verifyProbeTrustDelegation } from "./probe-trust-delegation.mjs";
 import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
@@ -21,13 +28,9 @@ const MAX_CONTRACT_BYTES = 64 * 1024;
 const MAX_SIGNATURE_BYTES = 1024;
 const MAX_TARGET_BUNDLE_BYTES = 1024 * 1024 * 1024;
 const MAX_TARGET_CLOSURE_BYTES = 4 * 1024 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 
 export async function createReleaseTransitionContract(input) {
-  assertBoundedBytes(
-    input.targetManifestBytes,
-    MAX_CONTRACT_BYTES,
-    "target manifest",
-  );
   const authorization = verifyTrustEpochMigrationAuthorization({
     bytes: input.authorizationBytes,
     expectedCandidateVersion: `v${input.targetVersion}`,
@@ -41,13 +44,13 @@ export async function createReleaseTransitionContract(input) {
     rootPublicKeyPem: input.rootPublicKeyPem,
     signature: input.delegationSignature,
   });
-  const target = parseTargetManifest(input.targetManifestBytes);
-  const targetProbeComponents = validateProbeComponents(
-    input.targetProbeComponents,
-    "target",
-  );
+  const target = await inspectTargetProbeAssetSet(input.targetAssetDir, {
+    delegationBytes: input.delegationBytes,
+    delegationSignature: input.delegationSignature,
+    rootPublicKeyPem: input.rootPublicKeyPem,
+    targetVersion: input.targetVersion,
+  });
   if (
-    target.version !== input.targetVersion ||
     target.delegationGeneration !== delegation.generation ||
     target.signingKeyId !== delegation.signingIdentity.keyId
   ) {
@@ -100,9 +103,9 @@ export async function createReleaseTransitionContract(input) {
     },
     target: {
       assetClosure: target.assets,
-      assetSetManifestSha256: sha256(input.targetManifestBytes),
+      assetSetManifestSha256: target.assetSetManifestSha256,
       delegationGeneration: delegation.generation,
-      probeComponents: targetProbeComponents,
+      probeComponents: target.probeComponents,
       signingKeyId: delegation.signingIdentity.keyId,
       version: input.targetVersion,
     },
@@ -119,6 +122,147 @@ export async function createReleaseTransitionContract(input) {
       rootPrivateKey,
     ),
   };
+}
+
+async function inspectTargetProbeAssetSet(assetDir, input) {
+  if (typeof assetDir !== "string" || !assetDir) {
+    throw new Error(
+      "Release Transition Contract target Probe asset closure is required",
+    );
+  }
+  const expectedFiles = [
+    ...probeTargets.flatMap((target) => {
+      const archive = `enoki-probe-${target}.tar.gz`;
+      return [archive, `${archive}.sha256`];
+    }),
+    "manifest.json",
+    "manifest.json.sig",
+    "root-key.pem",
+    "signing-key.pem",
+    "trust-delegation.json",
+    "trust-delegation.json.sig",
+  ].sort();
+  const actualFiles = (await readdir(assetDir)).sort();
+  if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+    throw new Error(
+      "Release Transition Contract target Probe asset closure is invalid",
+    );
+  }
+  const [
+    manifestBytes,
+    manifestSignature,
+    rootKey,
+    signingKey,
+    delegationBytes,
+    delegationSignature,
+  ] = await Promise.all([
+    readFile(path.join(assetDir, "manifest.json")),
+    readFile(path.join(assetDir, "manifest.json.sig")),
+    readFile(path.join(assetDir, "root-key.pem")),
+    readFile(path.join(assetDir, "signing-key.pem")),
+    readFile(path.join(assetDir, "trust-delegation.json")),
+    readFile(path.join(assetDir, "trust-delegation.json.sig")),
+  ]);
+  const root = canonicalPublicKey(createPublicKey(input.rootPublicKeyPem));
+  if (
+    !canonicalPublicKey(createPublicKey(rootKey)).equals(root) ||
+    !delegationBytes.equals(Buffer.from(input.delegationBytes)) ||
+    !delegationSignature.equals(Buffer.from(input.delegationSignature)) ||
+    !verify("RSA-SHA256", manifestBytes, signingKey, manifestSignature)
+  ) {
+    throw new Error(
+      "Release Transition Contract target Probe asset closure is invalid",
+    );
+  }
+  const target = parseTargetManifest(manifestBytes);
+  if (target.version !== input.targetVersion) {
+    throw new Error("Release Transition Contract target does not match");
+  }
+  const probeComponents = [];
+  for (let index = 0; index < probeTargets.length; index += 1) {
+    const targetName = probeTargets[index];
+    const asset = target.assets[index];
+    const file = `enoki-probe-${targetName}.tar.gz`;
+    if (asset.file !== file || asset.target !== targetName) {
+      throw new Error(
+        "Release Transition Contract target Probe asset closure is invalid",
+      );
+    }
+    const archivePath = path.join(assetDir, file);
+    const archive = await readFile(archivePath);
+    const details = await stat(archivePath);
+    if (
+      details.size !== asset.size ||
+      sha256(archive) !== asset.sha256 ||
+      (await readFile(`${archivePath}.sha256`, "utf8")) !==
+        `${asset.sha256}  ${file}\n`
+    ) {
+      throw new Error(
+        "Release Transition Contract target Probe asset closure is invalid",
+      );
+    }
+    const [probe, bundleManifest] = await Promise.all([
+      tarMember(archivePath, "enoki-probe"),
+      tarMember(archivePath, "bundle-manifest.json"),
+    ]);
+    if (sha256(bundleManifest) !== asset.bundleManifestSha256) {
+      throw new Error(
+        "Release Transition Contract target Probe asset closure is invalid",
+      );
+    }
+    inspectProbeElf(probe, {
+      target: targetName,
+      version: `v${target.version}`,
+    });
+    let inner;
+    try {
+      inner = JSON.parse(bundleManifest.toString("utf8"));
+    } catch {
+      throw new Error(
+        "Release Transition Contract target Probe asset closure is invalid",
+      );
+    }
+    const component = Array.isArray(inner?.components)
+      ? inner.components.find((entry) => entry?.role === "probe")
+      : null;
+    if (
+      !component ||
+      component.path !== "enoki-probe" ||
+      component.sha256 !== sha256(probe) ||
+      inner.target !== targetName ||
+      inner.version !== target.version
+    ) {
+      throw new Error(
+        "Release Transition Contract target Probe asset closure is invalid",
+      );
+    }
+    probeComponents.push({
+      file: "enoki-probe",
+      role: "probe",
+      sha256: sha256(probe),
+      target: targetName,
+    });
+  }
+  return {
+    ...target,
+    assetSetManifestSha256: sha256(manifestBytes),
+    probeComponents,
+  };
+}
+
+async function tarMember(archivePath, member) {
+  try {
+    const { stdout } = await execFileAsync(
+      "tar",
+      ["--extract", "--gzip", "--file", archivePath, "--to-stdout", member],
+      { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+    );
+    return Buffer.from(stdout);
+  } catch {
+    throw new Error(
+      "Release Transition Contract target Probe asset closure is invalid",
+    );
+  }
 }
 
 export function verifyReleaseTransitionContract({

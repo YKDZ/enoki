@@ -1,12 +1,12 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
   createProbeTrustDelegation,
-  createReleaseTransitionContract,
   createTrustEpochMigrationAuthorization,
   probeTargets,
+  releaseTransitionContractSigningInput,
 } from "@enoki/probe-release";
 import {
   createGenericReleaseTransitionContractFixture,
@@ -210,22 +210,56 @@ async function createTrustEpochMigrationFixture({
     rootPrivateKeyPem: authority.privateKey,
   });
   try {
+    const targetManifest = JSON.parse(manifest.toString("utf8")) as {
+      assets: unknown;
+      signature: { delegationGeneration: number; delegationKeyId: string };
+    };
+    const contract = {
+      candidateCommit: "a".repeat(40),
+      distribution: "enoki",
+      kind: "enoki-release-transition-contract",
+      migrationAuthorizationSha256: sha256(authorization.bytes),
+      migrationGeneration: 1,
+      rootKeyId: sha256(Buffer.from(authority.publicKey)),
+      schemaVersion: 1,
+      source: {
+        assetSetManifestSha256: sha256(
+          await readFile(path.join(source.assetDir, "manifest.json")),
+        ),
+        assets: legacyRelease.assets,
+        commit: legacyRelease.githubRelease.peeledCommitSha,
+        hubDigest: legacyRelease.hub.digest,
+        hubImage: legacyRelease.hub.image,
+        legacySigningKeySha256: legacyRelease.legacySigningKeySha256,
+        probeComponents: source.probeComponents,
+        releaseId: legacyRelease.githubRelease.id,
+        repository: legacyRelease.githubRelease.repository,
+        tag: legacyRelease.githubRelease.tag,
+        tagRefSha: legacyRelease.githubRelease.tagRefSha,
+        targetCommitish: legacyRelease.githubRelease.targetCommitish,
+      },
+      target: {
+        assetClosure: targetManifest.assets,
+        assetSetManifestSha256: sha256(manifest),
+        delegationGeneration: targetManifest.signature.delegationGeneration,
+        probeComponents: targetProbeComponents,
+        signingKeyId: targetManifest.signature.delegationKeyId,
+        version: targetVersion,
+      },
+      transition: "replacement-required",
+    };
+    const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
     return {
       authorization,
-      contract: await createReleaseTransitionContract({
-        authorizationBytes: authorization.bytes,
-        authorizationSignature: authorization.signature,
-        candidateCommit: "a".repeat(40),
-        delegationBytes: delegation.bytes,
-        delegationSignature: delegation.signature,
-        legacyRelease,
-        rootPrivateKeyPem: authority.privateKey,
-        rootPublicKeyPem: authority.publicKey,
-        sourceAssetDir: source.assetDir,
-        targetProbeComponents,
-        targetManifestBytes: manifest,
-        targetVersion,
-      }),
+      contract: {
+        bytes,
+        contract,
+        signature: sign(
+          "RSA-SHA256",
+          releaseTransitionContractSigningInput(bytes),
+          authority.privateKey,
+        ),
+      },
       sourceProbeComponents: source.probeComponents,
     };
   } finally {

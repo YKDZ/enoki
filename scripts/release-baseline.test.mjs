@@ -600,12 +600,7 @@ async function createResolverFixture(options = {}) {
       rootPrivateKeyPem: probe.root.privateKey,
       rootPublicKeyPem: probe.root.publicKey,
       sourceAssetDir: source.assetDir,
-      targetProbeComponents: await targetProbeComponentsFromAssetSet(
-        probe.outputDir,
-      ),
-      targetManifestBytes: await readFile(
-        path.join(probe.outputDir, "manifest.json"),
-      ),
+      targetAssetDir: probe.outputDir,
       targetVersion: version.slice(1),
     });
     await source.cleanup();

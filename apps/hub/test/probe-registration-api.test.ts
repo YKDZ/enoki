@@ -992,319 +992,332 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("replays the exact manual reinstall registration outcome after the first response is lost", async () => {
-    const database = await createTemporaryDatabase();
-    const nowMs = Date.now();
-    const assetDir = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-registration-replay-"),
-    );
-    tempRoots.push(assetDir);
-    const release = await writeSignedProbeAssetSet(assetDir, {
-      sourceVersion: "0.1.0",
-      targetVersion: "0.2.0",
-      transition: "replacement-required",
-    });
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      installation: {
-        bootstrapRecipe,
-        probeApiOrigin: "https://hub.example",
-      },
-      probeAssets: {
-        assetDir,
-        trustedRootPublicKeyPem: release.rootPublicKeyPem,
-      },
-    });
-    const ownerSession = await loginOwner(app);
-    const firstRegistration = await registerProbe(
-      app,
-      await createEnrollmentToken(app, ownerSession),
-      "response-loss-host",
-      {},
-      { probeVersion: "0.1.0" },
-    );
-    const firstIdentity = await decodeRegisteredProbe(firstRegistration);
-    const host = database.sqlite
-      .prepare("select id, probe_id as probeId from managed_hosts")
-      .get() as { id: number; probeId: string };
-    const enrollmentToken = `enk_enroll_${"r".repeat(32)}`;
-    const enrollmentId = `enr_${"r".repeat(24)}`;
-    expect(
-      database.enrollments.createPending({
-        createdAtMs: nowMs,
-        enrollmentId,
-        expiresAtMs: nowMs + 3_600_000,
-        target: {
-          expectedHubOrigin: "https://hub.example",
-          expectedProbeId: firstIdentity.probeId,
-          expectedProbeVersion: "0.1.0",
-          hostId: host.id,
-          kind: "manual_reinstall",
-          sourceProbeSha256: release.sourceProbeSha256,
-          targetAssetSetDigest: release.targetAssetSetDigest,
-          targetProbeVersion: "0.2.0",
+  it.each(["deletes the release directory", "advances the release closure"])(
+    "uses frozen manual reinstall authority after the Owner inspection when it %s",
+    async (releaseChange) => {
+      const database = await createTemporaryDatabase();
+      const assetDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-registration-replay-"),
+      );
+      tempRoots.push(assetDir);
+      const release = await writeSignedProbeAssetSet(assetDir, {
+        sourceVersion: "0.1.0",
+        targetVersion: "0.2.0",
+        transition: "replacement-required",
+      });
+      const app = createHubApp({
+        auth: {
+          failureDelayMs: 0,
+          ownerPassword: "correct horse battery staple",
+          sessionCookieName: "enoki_owner_session",
         },
-        tokenHash: hashSecret(enrollmentToken),
-      }).kind,
-    ).toBe("created");
-
-    const replacementIdentity = createTestProbeIdentity();
-    const attemptFields = {
-      candidatePublicKeyPem: replacementIdentity.publicKeyPem,
-      committedSourceProbeSha256: release.sourceProbeSha256[0]!,
-      enrollmentId,
-      hostId: String(host.id),
-      hubOrigin: "https://hub.example",
-      nonce: "a".repeat(64),
-      oldProbeId: firstIdentity.probeId,
-      replacementCommitSha256: "d".repeat(64),
-      schemaVersion: 1,
-      sourceProbeVersion: "0.1.0",
-      targetAssetSetDigest: release.targetAssetSetDigest,
-      targetBundleTarget: release.targetBundles[0]!.target,
-      targetManifestSha256: release.targetBundles[0]!.bundleManifestSha256,
-      targetProbeVersion: "0.2.0",
-    };
-    const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
-    const signedBody = ({
-      corruptSignature = false,
-      identity = replacementIdentity,
-      overrides = {},
-      token = enrollmentToken,
-    }: {
-      corruptSignature?: boolean;
-      identity?: ReturnType<typeof createTestProbeIdentity>;
-      overrides?: Partial<typeof attemptFields>;
-      token?: string;
-    } = {}) => {
-      const canonicalAttempt = root.enoki.v1.ProbeRegistrationAttempt.encode(
-        root.enoki.v1.ProbeRegistrationAttempt.create({
-          ...attemptFields,
-          candidatePublicKeyPem: identity.publicKeyPem,
-          ...overrides,
-        }),
-      ).finish();
-      const signer = createSign("RSA-SHA256");
-      signer.update(
-        `enoki.probe-registration-attempt.v1\n${createHash("sha256")
-          .update(canonicalAttempt)
-          .digest("hex")}`,
+        database,
+        installation: {
+          bootstrapRecipe,
+          probeApiOrigin: "https://hub.example",
+        },
+        probeAssets: {
+          assetDir,
+          trustedRootPublicKeyPem: release.rootPublicKeyPem,
+        },
+      });
+      const ownerSession = await loginOwner(app);
+      const firstRegistration = await registerProbe(
+        app,
+        await createEnrollmentToken(app, ownerSession),
+        "response-loss-host",
+        {},
+        { probeVersion: "0.1.0" },
       );
-      signer.end();
-      const candidateSignature = signer.sign(identity.privateKeyPem);
-      if (corruptSignature) {
-        candidateSignature[0] = candidateSignature[0]! ^ 1;
-      }
-      return RegistrationRequest.encode(
-        RegistrationRequest.create({
-          candidateSignature,
-          canonicalAttempt,
-          enrollmentToken: token,
-          probePublicKeyPem: identity.publicKeyPem,
-        }),
-      ).finish();
-    };
-    const requestBody = signedBody();
-    const request = () =>
-      app.request("/api/probe/register", {
-        body: requestBody,
+      const firstIdentity = await decodeRegisteredProbe(firstRegistration);
+      const host = database.sqlite
+        .prepare("select id, probe_id as probeId from managed_hosts")
+        .get() as { id: number; probeId: string };
+      const ownerPending = await app.request(
+        `/api/web/enrollments/manual-reinstall/${host.id}`,
+        { headers: { cookie: ownerSession }, method: "POST" },
+      );
+      expect(ownerPending.status).toBe(201);
+      const { enrollmentId, enrollmentToken } = (await ownerPending.json()) as {
+        enrollmentId: string;
+        enrollmentToken: string;
+      };
+
+      const replacementIdentity = createTestProbeIdentity();
+      const attemptFields = {
+        candidatePublicKeyPem: replacementIdentity.publicKeyPem,
+        committedSourceProbeSha256: release.sourceProbeSha256[0]!,
+        enrollmentId,
+        hostId: String(host.id),
+        hubOrigin: "https://hub.example",
+        nonce: "a".repeat(64),
+        oldProbeId: firstIdentity.probeId,
+        replacementCommitSha256: "d".repeat(64),
+        schemaVersion: 1,
+        sourceProbeVersion: "0.1.0",
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetBundleTarget: release.targetBundles[0]!.target,
+        targetManifestSha256: release.targetBundles[0]!.bundleManifestSha256,
+        targetProbeVersion: "0.2.0",
+      };
+      const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+      const signedBody = ({
+        corruptSignature = false,
+        identity = replacementIdentity,
+        overrides = {},
+        token = enrollmentToken,
+      }: {
+        corruptSignature?: boolean;
+        identity?: ReturnType<typeof createTestProbeIdentity>;
+        overrides?: Partial<typeof attemptFields>;
+        token?: string;
+      } = {}) => {
+        const canonicalAttempt = root.enoki.v1.ProbeRegistrationAttempt.encode(
+          root.enoki.v1.ProbeRegistrationAttempt.create({
+            ...attemptFields,
+            candidatePublicKeyPem: identity.publicKeyPem,
+            ...overrides,
+          }),
+        ).finish();
+        const signer = createSign("RSA-SHA256");
+        signer.update(
+          `enoki.probe-registration-attempt.v1\n${createHash("sha256")
+            .update(canonicalAttempt)
+            .digest("hex")}`,
+        );
+        signer.end();
+        const candidateSignature = signer.sign(identity.privateKeyPem);
+        if (corruptSignature) {
+          candidateSignature[0] = candidateSignature[0]! ^ 1;
+        }
+        return RegistrationRequest.encode(
+          RegistrationRequest.create({
+            candidateSignature,
+            canonicalAttempt,
+            enrollmentToken: token,
+            probePublicKeyPem: identity.publicKeyPem,
+          }),
+        ).finish();
+      };
+      const requestBody = signedBody();
+      const request = () =>
+        app.request("/api/probe/register", {
+          body: requestBody,
+          headers: { "content-type": "application/x-protobuf" },
+          method: "POST",
+        });
+
+      const inspection = await app.request("/api/probe/register", {
+        body: RegistrationRequest.encode(
+          RegistrationRequest.create({
+            enrollmentToken,
+            installationInspection: {},
+          }),
+        ).finish(),
         headers: { "content-type": "application/x-protobuf" },
         method: "POST",
       });
-
-    const committed = await request();
-    expect(committed.status).toBe(200);
-    const committedBody = new Uint8Array(await committed.arrayBuffer());
-
-    // 调用方永远看不到 `committedBody`，这等同于网络在 Hub 事务提交后
-    // 丢失了响应。
-    const replay = await request();
-    expect(replay.status).toBe(200);
-    expect(new Uint8Array(await replay.arrayBuffer())).toEqual(committedBody);
-
-    const committedOutcome =
-      root.enoki.v1.ProbeRegistrationResponse.decode(committedBody);
-    const registrationState = () => ({
-      audits: database.sqlite
-        .prepare("select * from audit_log order by id")
-        .all(),
-      enrollment: database.sqlite
-        .prepare("select * from enrollment_tokens where enrollment_id = ?")
-        .get(enrollmentId),
-      host: database.sqlite
-        .prepare("select * from managed_hosts where id = ?")
-        .get(host.id),
-    });
-    const committedState = registrationState();
-    const otherIdentity = createTestProbeIdentity();
-    const mismatchBodies = [
-      {
-        body: signedBody({ identity: otherIdentity }),
-        field: "candidateKey",
-      },
-      {
-        body: signedBody({ overrides: { nonce: "b".repeat(64) } }),
-        field: "nonce",
-      },
-      {
-        body: signedBody({
-          overrides: { enrollmentId: `enr_${"x".repeat(24)}` },
-        }),
-        field: "enrollmentId",
-      },
-      {
-        body: signedBody({ token: `enk_enroll_${"x".repeat(32)}` }),
-        field: "enrollmentToken",
-      },
-      {
-        body: signedBody({
-          overrides: { hubOrigin: "https://other.example" },
-        }),
-        field: "hubOrigin",
-      },
-      {
-        body: signedBody({ overrides: { hostId: String(host.id + 1) } }),
-        field: "hostId",
-      },
-      {
-        body: signedBody({
-          overrides: { oldProbeId: "probe_mismatched_previous_identity" },
-        }),
-        field: "oldProbeId",
-      },
-      {
-        body: signedBody({
-          overrides: { sourceProbeVersion: "0.1.1" },
-        }),
-        field: "sourceProbeVersion",
-      },
-      {
-        body: signedBody({
-          overrides: { committedSourceProbeSha256: "e".repeat(64) },
-        }),
-        field: "committedSourceProbeSha256",
-      },
-      {
-        body: signedBody({
-          overrides: { targetProbeVersion: "0.2.1" },
-        }),
-        field: "targetProbeVersion",
-      },
-      {
-        body: signedBody({
-          overrides: {
-            targetAssetSetDigest: `sha256:${"e".repeat(64)}`,
-          },
-        }),
-        field: "targetAssetSetDigest",
-      },
-      {
-        body: signedBody({
-          overrides: {
-            targetBundleTarget:
-              release.targetBundles[0]!.target === "aarch64-unknown-linux-gnu"
-                ? "x86_64-unknown-linux-gnu"
-                : "aarch64-unknown-linux-gnu",
-          },
-        }),
-        field: "targetBundleTarget",
-      },
-      {
-        body: signedBody({
-          overrides: { targetManifestSha256: "e".repeat(64) },
-        }),
-        field: "targetManifestSha256",
-      },
-      {
-        body: signedBody({
-          overrides: { replacementCommitSha256: "e".repeat(64) },
-        }),
-        field: "replacementCommitSha256",
-      },
-      {
-        body: signedBody({ corruptSignature: true }),
-        field: "candidateSignature",
-      },
-    ];
-    for (const { body, field } of mismatchBodies) {
-      const mismatch = await app.request("/api/probe/register", {
-        body,
-        headers: { "content-type": "application/x-protobuf" },
-        method: "POST",
-      });
-      expect(mismatch.status, field).toBe(401);
-      expect(mismatch.headers.get("content-type"), field).toContain(
-        "application/json",
-      );
-      const mismatchBody = await mismatch.text();
-      expect(mismatchBody, field).toBe(
-        JSON.stringify({ error: "invalid_enrollment_token" }),
-      );
-      for (const outcomeValue of [
-        firstIdentity.probeId,
-        committedOutcome.probeId,
-        committedOutcome.enrollmentId,
-        committedOutcome.hostId,
-      ]) {
-        expect(mismatchBody, field).not.toContain(outcomeValue);
+      expect(inspection.status).toBe(200);
+      // Pending authority is frozen by the Owner transaction; registration must
+      // not reread a release directory that may already have advanced or gone.
+      if (releaseChange === "deletes the release directory") {
+        await rm(assetDir, { force: true, recursive: true });
+      } else {
+        await writeSignedProbeAssetSet(assetDir, {
+          authority: release.authority,
+          sourceVersion: "0.1.0",
+          targetVersion: "0.2.1",
+          transition: "replacement-required",
+        });
       }
-      expect(new TextEncoder().encode(mismatchBody), field).not.toEqual(
-        committedBody,
-      );
-      expect(mismatchBody, field).not.toContain(
-        Buffer.from(committedBody).toString("base64"),
-      );
-      expect(mismatchBody, field).not.toContain(
-        Buffer.from(committedBody).toString("hex"),
-      );
-      expect(registrationState(), field).toEqual(committedState);
-    }
-    expect(mismatchBodies.map(({ field }) => field)).toEqual([
-      "candidateKey",
-      "nonce",
-      "enrollmentId",
-      "enrollmentToken",
-      "hubOrigin",
-      "hostId",
-      "oldProbeId",
-      "sourceProbeVersion",
-      "committedSourceProbeSha256",
-      "targetProbeVersion",
-      "targetAssetSetDigest",
-      "targetBundleTarget",
-      "targetManifestSha256",
-      "replacementCommitSha256",
-      "candidateSignature",
-    ]);
-    await rm(assetDir, { force: true, recursive: true });
-    const replayWithoutCurrentRelease = await request();
-    expect(replayWithoutCurrentRelease.status).toBe(200);
-    expect(
-      new Uint8Array(await replayWithoutCurrentRelease.arrayBuffer()),
-    ).toEqual(committedBody);
-    expect(
-      database.sqlite
-        .prepare(
-          "select count(*) as count from audit_log where action = 'probe.manual_reinstall_identity_replaced'",
-        )
-        .get(),
-    ).toEqual({ count: 1 });
-    expect(
-      database.sqlite
-        .prepare("select probe_id as probeId from managed_hosts where id = ?")
-        .get(host.id),
-    ).toEqual({
-      probeId:
-        root.enoki.v1.ProbeRegistrationResponse.decode(committedBody).probeId,
-    });
+      const committed = await request();
+      expect(committed.status).toBe(200);
+      const committedBody = new Uint8Array(await committed.arrayBuffer());
 
-    database.close();
-  });
+      // 调用方永远看不到 `committedBody`，这等同于网络在 Hub 事务提交后
+      // 丢失了响应。
+      const replay = await request();
+      expect(replay.status).toBe(200);
+      expect(new Uint8Array(await replay.arrayBuffer())).toEqual(committedBody);
+
+      const committedOutcome =
+        root.enoki.v1.ProbeRegistrationResponse.decode(committedBody);
+      const registrationState = () => ({
+        audits: database.sqlite
+          .prepare("select * from audit_log order by id")
+          .all(),
+        enrollment: database.sqlite
+          .prepare("select * from enrollment_tokens where enrollment_id = ?")
+          .get(enrollmentId),
+        host: database.sqlite
+          .prepare("select * from managed_hosts where id = ?")
+          .get(host.id),
+      });
+      const committedState = registrationState();
+      const otherIdentity = createTestProbeIdentity();
+      const mismatchBodies = [
+        {
+          body: signedBody({ identity: otherIdentity }),
+          field: "candidateKey",
+        },
+        {
+          body: signedBody({ overrides: { nonce: "b".repeat(64) } }),
+          field: "nonce",
+        },
+        {
+          body: signedBody({
+            overrides: { enrollmentId: `enr_${"x".repeat(24)}` },
+          }),
+          field: "enrollmentId",
+        },
+        {
+          body: signedBody({ token: `enk_enroll_${"x".repeat(32)}` }),
+          field: "enrollmentToken",
+        },
+        {
+          body: signedBody({
+            overrides: { hubOrigin: "https://other.example" },
+          }),
+          field: "hubOrigin",
+        },
+        {
+          body: signedBody({ overrides: { hostId: String(host.id + 1) } }),
+          field: "hostId",
+        },
+        {
+          body: signedBody({
+            overrides: { oldProbeId: "probe_mismatched_previous_identity" },
+          }),
+          field: "oldProbeId",
+        },
+        {
+          body: signedBody({
+            overrides: { sourceProbeVersion: "0.1.1" },
+          }),
+          field: "sourceProbeVersion",
+        },
+        {
+          body: signedBody({
+            overrides: { committedSourceProbeSha256: "e".repeat(64) },
+          }),
+          field: "committedSourceProbeSha256",
+        },
+        {
+          body: signedBody({
+            overrides: { targetProbeVersion: "0.2.1" },
+          }),
+          field: "targetProbeVersion",
+        },
+        {
+          body: signedBody({
+            overrides: {
+              targetAssetSetDigest: `sha256:${"e".repeat(64)}`,
+            },
+          }),
+          field: "targetAssetSetDigest",
+        },
+        {
+          body: signedBody({
+            overrides: {
+              targetBundleTarget:
+                release.targetBundles[0]!.target === "aarch64-unknown-linux-gnu"
+                  ? "x86_64-unknown-linux-gnu"
+                  : "aarch64-unknown-linux-gnu",
+            },
+          }),
+          field: "targetBundleTarget",
+        },
+        {
+          body: signedBody({
+            overrides: { targetManifestSha256: "e".repeat(64) },
+          }),
+          field: "targetManifestSha256",
+        },
+        {
+          body: signedBody({
+            overrides: { replacementCommitSha256: "e".repeat(64) },
+          }),
+          field: "replacementCommitSha256",
+        },
+        {
+          body: signedBody({ corruptSignature: true }),
+          field: "candidateSignature",
+        },
+      ];
+      for (const { body, field } of mismatchBodies) {
+        const mismatch = await app.request("/api/probe/register", {
+          body,
+          headers: { "content-type": "application/x-protobuf" },
+          method: "POST",
+        });
+        expect(mismatch.status, field).toBe(401);
+        expect(mismatch.headers.get("content-type"), field).toContain(
+          "application/json",
+        );
+        const mismatchBody = await mismatch.text();
+        expect(mismatchBody, field).toBe(
+          JSON.stringify({ error: "invalid_enrollment_token" }),
+        );
+        for (const outcomeValue of [
+          firstIdentity.probeId,
+          committedOutcome.probeId,
+          committedOutcome.enrollmentId,
+          committedOutcome.hostId,
+        ]) {
+          expect(mismatchBody, field).not.toContain(outcomeValue);
+        }
+        expect(new TextEncoder().encode(mismatchBody), field).not.toEqual(
+          committedBody,
+        );
+        expect(mismatchBody, field).not.toContain(
+          Buffer.from(committedBody).toString("base64"),
+        );
+        expect(mismatchBody, field).not.toContain(
+          Buffer.from(committedBody).toString("hex"),
+        );
+        expect(registrationState(), field).toEqual(committedState);
+      }
+      expect(mismatchBodies.map(({ field }) => field)).toEqual([
+        "candidateKey",
+        "nonce",
+        "enrollmentId",
+        "enrollmentToken",
+        "hubOrigin",
+        "hostId",
+        "oldProbeId",
+        "sourceProbeVersion",
+        "committedSourceProbeSha256",
+        "targetProbeVersion",
+        "targetAssetSetDigest",
+        "targetBundleTarget",
+        "targetManifestSha256",
+        "replacementCommitSha256",
+        "candidateSignature",
+      ]);
+      const replayWithoutCurrentRelease = await request();
+      expect(replayWithoutCurrentRelease.status).toBe(200);
+      expect(
+        new Uint8Array(await replayWithoutCurrentRelease.arrayBuffer()),
+      ).toEqual(committedBody);
+      expect(
+        database.sqlite
+          .prepare(
+            "select count(*) as count from audit_log where action = 'probe.manual_reinstall_identity_replaced'",
+          )
+          .get(),
+      ).toEqual({ count: 1 });
+      expect(
+        database.sqlite
+          .prepare("select probe_id as probeId from managed_hosts where id = ?")
+          .get(host.id),
+      ).toEqual({
+        probeId:
+          root.enoki.v1.ProbeRegistrationResponse.decode(committedBody).probeId,
+      });
+
+      database.close();
+    },
+  );
 
   it("rolls back manual token consumption and identity replacement when the replacement audit cannot be persisted", async () => {
     const database = await createTemporaryDatabase();
@@ -1357,6 +1370,7 @@ describe("Probe registration API", () => {
           hostId: host.id,
           kind: "manual_reinstall",
           sourceProbeSha256: release.sourceProbeSha256,
+          targetBundles: release.targetBundles,
           targetAssetSetDigest: release.targetAssetSetDigest,
           targetProbeVersion: "0.2.0",
         },

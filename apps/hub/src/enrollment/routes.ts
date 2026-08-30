@@ -114,6 +114,7 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
         replacementPredecessorEnrollmentId:
           terminalRecovery.predecessor.enrollmentId,
         sourceProbeSha256: terminalRecovery.sourceProbeSha256,
+        targetBundles: releaseContext.releaseTransition!.targetBundles ?? [],
         targetAssetSetDigest:
           releaseContext.releaseTransition!.targetAssetSetDigest,
         targetProbeVersion:
@@ -130,6 +131,7 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       hostId,
       kind: "manual_reinstall",
       sourceProbeSha256: policy.sourceProbeSha256,
+      targetBundles: releaseContext.releaseTransition?.targetBundles ?? [],
       targetAssetSetDigest: policy.targetAssetSetDigest,
       targetProbeVersion: policy.targetProbeVersion,
     });

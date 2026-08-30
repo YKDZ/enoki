@@ -1008,9 +1008,6 @@ with open(os.devnull, "rb") as input_stream:
         legacyRelease,
         rootPrivateKeyPem: fixture.root.privateKey,
       });
-      const targetManifestBytes = await readFile(
-        path.join(fixture.outputDir, "manifest.json"),
-      );
       const transition = await createReleaseTransitionContract({
         authorizationBytes: authorization.bytes,
         authorizationSignature: authorization.signature,
@@ -1025,10 +1022,7 @@ with open(os.devnull, "rb") as input_stream:
         rootPrivateKeyPem: fixture.root.privateKey,
         rootPublicKeyPem: fixture.root.publicKey,
         sourceAssetDir: source.assetDir,
-        targetProbeComponents: await targetProbeComponentsFromAssetSet(
-          fixture.outputDir,
-        ),
-        targetManifestBytes,
+        targetAssetDir: fixture.outputDir,
         targetVersion: "1.2.3",
       });
       await source.cleanup();
@@ -2605,18 +2599,19 @@ async function createCandidateFixture(
     publicKey,
     root,
   } = await createProbeAssetSetFixture(workDir, { version });
+  const releaseBaselineDir = await createReleaseBaselineFixture(workDir, {
+    root,
+  });
   if (transitionCandidateCommit) {
     await writeOrdinaryTransitionContract({
       candidateCommit: transitionCandidateCommit,
       probeAssetSetDir,
+      releaseBaselineDir,
       root,
     });
   }
   const oci = await createOciFixture(workDir, probeAssetSetDir);
   const candidateDir = path.join(workDir, "candidate");
-  const releaseBaselineDir = await createReleaseBaselineFixture(workDir, {
-    root,
-  });
 
   await runCandidateCli([
     "assemble",
@@ -2650,12 +2645,17 @@ async function createCandidateFixture(
 async function writeOrdinaryTransitionContract({
   candidateCommit,
   probeAssetSetDir,
+  releaseBaselineDir,
   root,
 }) {
   const manifestBytes = await readFile(
     path.join(probeAssetSetDir, "manifest.json"),
   );
   const manifest = JSON.parse(manifestBytes);
+  const baseline = await inspectProbeAssetSet(
+    path.join(releaseBaselineDir, "probe-assets"),
+    { trustedRootPublicKeyPem: root.publicKey },
+  );
   const contract = {
     candidateCommit,
     distribution: "enoki",
@@ -2663,14 +2663,9 @@ async function writeOrdinaryTransitionContract({
     rootKeyId: sha256(Buffer.from(root.publicKey)),
     schemaVersion: 1,
     source: {
-      assetSetManifestSha256: "a".repeat(64),
-      probeComponents: probeTargets.map((target) => ({
-        file: "enoki-probe",
-        role: "probe",
-        sha256: "c".repeat(64),
-        target,
-      })),
-      version: "1.2.2",
+      assetSetManifestSha256: baseline.assetSetManifestSha256,
+      probeComponents: baseline.probeComponents,
+      version: baseline.version,
     },
     target: {
       assetClosure: manifest.assets,
@@ -2861,11 +2856,13 @@ async function createReleaseBaselineFixture(workDir, { root } = {}) {
     },
     kind: "enoki-release-baseline",
     probeAssetSet: {
-      ...inspectedProbe,
       directory: "probe-assets",
+      files: inspectedProbe.files,
+      signingIdentity: inspectedProbe.signingIdentity,
       trustRoot: {
         publicKeySha256: sha256(Buffer.from(baselineRoot.publicKey)),
       },
+      version: inspectedProbe.version,
     },
     schemaVersion: 2,
     tag: "v1.2.2",

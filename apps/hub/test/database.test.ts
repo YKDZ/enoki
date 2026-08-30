@@ -1466,6 +1466,7 @@ describe("Hub database", () => {
           kind: "manual_reinstall",
           replacementPredecessorEnrollmentId: "enr_missing_predecessor_0000",
           sourceProbeSha256: ["c".repeat(64)],
+          targetBundles: targetBundles(),
           targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
           targetProbeVersion: "1.2.4",
         },
@@ -1486,6 +1487,7 @@ describe("Hub database", () => {
           replacementPredecessorAssetSetDigest: `sha256:${"f".repeat(64)}`,
           replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
           sourceProbeSha256: ["c".repeat(64)],
+          targetBundles: targetBundles(),
           targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
           targetProbeVersion: "1.2.4",
         },
@@ -1504,6 +1506,7 @@ describe("Hub database", () => {
           hostId: 7,
           kind: "manual_reinstall",
           sourceProbeSha256: ["c".repeat(64)],
+          targetBundles: targetBundles(),
           targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
           targetProbeVersion: "1.2.4",
         },
@@ -1523,6 +1526,7 @@ describe("Hub database", () => {
         replacementPredecessorAssetSetDigest: `sha256:${"b".repeat(64)}`,
         replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
         sourceProbeSha256: ["c".repeat(64)],
+        targetBundles: targetBundles(),
         targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
         targetProbeVersion: "1.2.4",
       },
@@ -1581,6 +1585,8 @@ describe("Hub database", () => {
         signedAttemptSha256: "e".repeat(64),
         sourceProbeVersion: "1.2.3",
         targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetBundleTarget: "aarch64-unknown-linux-gnu",
+        targetManifestSha256: "1".repeat(64),
         targetProbeVersion: "1.2.4",
       },
       tokenHash: "successor-token",
@@ -1627,6 +1633,18 @@ function createHost(
       1_725_000_000_000,
       "default-v1",
     );
+}
+
+function targetBundles() {
+  return [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+  ].map((target, index) => ({
+    bundleManifestSha256: String(index + 1).repeat(64),
+    target,
+  }));
 }
 
 function migrationHistoryTables(sqlite: {

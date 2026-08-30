@@ -808,7 +808,19 @@ export async function assembleReleaseCandidate({
       trustedRootPublicKeyPem,
     },
   );
+  const baselineProbeClosure =
+    releaseBaseline.kind === "enoki-release-baseline"
+      ? await inspectProbeAssetSet(
+          path.join(releaseBaselineDir, "probe-assets"),
+          {
+            expectedVersion: releaseBaseline.probeAssetSet.version,
+            requireEmbeddedProbeIdentity: false,
+            trustedRootPublicKeyPem,
+          },
+        )
+      : null;
   assertMigrationCandidateJoin({
+    baselineProbeClosure,
     identity,
     releaseBaseline,
     releaseTransition: probeAssetSet.releaseTransition ?? null,
@@ -1094,7 +1106,19 @@ export async function validateReleaseCandidate(
     path.join(candidateDir, "probe-assets"),
     { expectedVersion: probe.version, trustedRootPublicKeyPem },
   );
+  const baselineProbeClosure =
+    releaseBaseline.kind === "enoki-release-baseline"
+      ? await inspectProbeAssetSet(
+          path.join(candidateDir, "release-baseline", "probe-assets"),
+          {
+            expectedVersion: releaseBaseline.probeAssetSet.version,
+            requireEmbeddedProbeIdentity: false,
+            trustedRootPublicKeyPem,
+          },
+        )
+      : null;
   assertMigrationCandidateJoin({
+    baselineProbeClosure,
     identity,
     releaseBaseline,
     releaseTransition: inspectedProbe.releaseTransition ?? null,
@@ -1510,8 +1534,17 @@ export async function inspectProbeAssetSet(
     });
   }
   return {
+    assetSetManifestSha256: sha256(manifestBytes),
     files,
     ...(releaseTransition ? { releaseTransition } : {}),
+    probeComponents: targetProbeComponents.map(
+      ({ sha256: digest, target }) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: digest,
+        target,
+      }),
+    ),
     signingIdentity: {
       algorithm: "rsa-sha256",
       publicKeyFile: "signing-key.pem",

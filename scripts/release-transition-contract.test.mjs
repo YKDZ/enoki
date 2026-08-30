@@ -1,4 +1,16 @@
+import { execFile } from "node:child_process";
 import { createHash, sign } from "node:crypto";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 
 import {
   createReleaseTransitionContract,
@@ -13,6 +25,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
+
+const execFileAsync = promisify(execFile);
 
 describe("Trust Epoch release transition", () => {
   let fixture;
@@ -33,6 +47,20 @@ describe("Trust Epoch release transition", () => {
     );
   });
 
+  it("does not sign caller-supplied target component digests", async () => {
+    const signed = await createReleaseTransitionContract({
+      ...fixture.createInput,
+      targetProbeComponents: fixture.targetProbeComponents.map((component) => ({
+        ...component,
+        sha256: "f".repeat(64),
+      })),
+    });
+
+    expect(signed.contract.target.probeComponents).toEqual(
+      fixture.targetProbeComponents,
+    );
+  });
+
   it("requires the authenticated source release asset closure", async () => {
     await expect(
       createReleaseTransitionContract({
@@ -40,6 +68,70 @@ describe("Trust Epoch release transition", () => {
         sourceAssetDir: undefined,
       }),
     ).rejects.toThrow("source Probe asset closure is required");
+  });
+
+  it("rejects a re-signed outer target whose archive payload disagrees with its inner receipt before signing", async () => {
+    const local = await transitionFixture();
+    const archiveName = "enoki-probe-aarch64-unknown-linux-gnu.tar.gz";
+    const archivePath = path.join(
+      local.createInput.targetAssetDir,
+      archiveName,
+    );
+    const contents = await mkdtemp(
+      path.join(tmpdir(), "enoki-release-transition-mismatch-"),
+    );
+    try {
+      await execFileAsync("tar", [
+        "--extract",
+        "--gzip",
+        "--file",
+        archivePath,
+        "--directory",
+        contents,
+      ]);
+      await writeFile(
+        path.join(contents, "enoki-probe"),
+        Buffer.concat([
+          await readFile(path.join(contents, "enoki-probe")),
+          Buffer.from("different but still an ELF payload"),
+        ]),
+      );
+      await execFileAsync("tar", [
+        "--create",
+        "--gzip",
+        "--file",
+        archivePath,
+        "--directory",
+        contents,
+        "bundle-manifest.json",
+        "enoki-probe",
+      ]);
+      const archive = await readFile(archivePath);
+      const manifestPath = path.join(
+        local.createInput.targetAssetDir,
+        "manifest.json",
+      );
+      const manifest = JSON.parse(await readFile(manifestPath));
+      const asset = manifest.assets.find((entry) => entry.file === archiveName);
+      asset.sha256 = sha256(archive);
+      asset.size = archive.byteLength;
+      const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
+      await Promise.all([
+        writeFile(manifestPath, manifestBytes),
+        writeFile(
+          path.join(local.createInput.targetAssetDir, "manifest.json.sig"),
+          sign("RSA-SHA256", manifestBytes, local.release.privateKey),
+        ),
+        writeFile(`${archivePath}.sha256`, `${asset.sha256}  ${archiveName}\n`),
+      ]);
+
+      await expect(
+        createReleaseTransitionContract(local.createInput),
+      ).rejects.toThrow("target Probe asset closure is invalid");
+    } finally {
+      await rm(contents, { force: true, recursive: true });
+      await local.cleanup();
+    }
   });
 
   it.each([
@@ -396,38 +488,12 @@ async function transitionFixture() {
     legacyRelease,
     rootPrivateKeyPem: root.privateKey,
   });
-  const assets = [
-    "aarch64-unknown-linux-gnu",
-    "aarch64-unknown-linux-musl",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-  ].map((target, index) => ({
-    bundleManifestSha256: String(index + 1).repeat(64),
-    file: `enoki-probe-${target}.tar.gz`,
-    sha256: String(index + 5).repeat(64),
-    size: index + 1000,
-    target,
-  }));
-  const targetManifestBytes = Buffer.from(
-    `${JSON.stringify({
-      assets,
-      kind: "enoki-probe-assets",
-      signature: {
-        algorithm: "rsa-sha256",
-        delegationGeneration: 1,
-        delegationKeyId: delegation.delegation.signingIdentity.keyId,
-        file: "manifest.json.sig",
-        publicKey: "signing-key.pem",
-      },
-      version: "1.2.3",
-    })}\n`,
-  );
-  const targetProbeComponents = assets.map((asset, index) => ({
-    file: "enoki-probe",
-    role: "probe",
-    sha256: ["a", "b", "c", "d"][index].repeat(64),
-    target: asset.target,
-  }));
+  const target = await createVerifiedTargetAssetSet({
+    delegation,
+    release,
+    root,
+    version: "1.2.3",
+  });
   const candidateCommit = "a".repeat(40);
   return {
     createInput: {
@@ -440,8 +506,8 @@ async function transitionFixture() {
       rootPrivateKeyPem: root.privateKey,
       rootPublicKeyPem: root.publicKey,
       sourceAssetDir: source.assetDir,
-      targetProbeComponents,
-      targetManifestBytes,
+      targetAssetDir: target.assetDir,
+      targetManifestBytes: target.manifestBytes,
       targetVersion: "1.2.3",
     },
     expected: {
@@ -449,14 +515,166 @@ async function transitionFixture() {
       delegationGeneration: 1,
       sourceCommit: legacyRelease.githubRelease.peeledCommitSha,
       sourceTag: "v0.1.74",
-      targetAssetSetManifestSha256: sha256(targetManifestBytes),
+      targetAssetSetManifestSha256: sha256(target.manifestBytes),
       targetVersion: "1.2.3",
     },
     root,
-    cleanup: source.cleanup,
+    release,
+    cleanup: async () => {
+      await source.cleanup();
+      await target.cleanup();
+    },
     sourceProbeComponents: source.probeComponents,
-    targetProbeComponents,
+    targetProbeComponents: target.probeComponents,
   };
+}
+
+async function createVerifiedTargetAssetSet({
+  delegation,
+  release,
+  root,
+  version,
+}) {
+  const assetDir = await mkdtemp(
+    path.join(tmpdir(), "enoki-release-transition-target-"),
+  );
+  const assets = [];
+  const probeComponents = [];
+  const targets = [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+  ];
+  for (const target of targets) {
+    const contents = path.join(assetDir, `${target}.contents`);
+    const archiveName = `enoki-probe-${target}.tar.gz`;
+    const archivePath = path.join(assetDir, archiveName);
+    const probe = createProbeElf({ target, version: `v${version}` });
+    const bundleManifest = Buffer.from(
+      `${JSON.stringify({
+        components: [
+          {
+            path: "enoki-probe",
+            role: "probe",
+            sha256: sha256(probe),
+          },
+        ],
+        target,
+        version,
+      })}\n`,
+    );
+    await mkdir(contents);
+    await writeFile(path.join(contents, "enoki-probe"), probe);
+    await chmod(path.join(contents, "enoki-probe"), 0o755);
+    await writeFile(
+      path.join(contents, "bundle-manifest.json"),
+      bundleManifest,
+    );
+    await execFileAsync("tar", [
+      "--create",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+      "bundle-manifest.json",
+      "enoki-probe",
+    ]);
+    await rm(contents, { force: true, recursive: true });
+    const archive = await readFile(archivePath);
+    const archiveSha256 = sha256(archive);
+    await writeFile(
+      `${archivePath}.sha256`,
+      `${archiveSha256}  ${archiveName}\n`,
+    );
+    assets.push({
+      bundleManifestSha256: sha256(bundleManifest),
+      file: archiveName,
+      sha256: archiveSha256,
+      size: archive.byteLength,
+      target,
+    });
+    probeComponents.push({
+      file: "enoki-probe",
+      role: "probe",
+      sha256: sha256(probe),
+      target,
+    });
+  }
+  const manifestBytes = Buffer.from(
+    `${JSON.stringify({
+      assets,
+      kind: "enoki-probe-assets",
+      signature: {
+        algorithm: "rsa-sha256",
+        delegationGeneration: 1,
+        delegationKeyId: delegation.delegation.signingIdentity.keyId,
+        file: "manifest.json.sig",
+        publicKey: "signing-key.pem",
+      },
+      version,
+    })}\n`,
+  );
+  await Promise.all([
+    writeFile(path.join(assetDir, "manifest.json"), manifestBytes),
+    writeFile(
+      path.join(assetDir, "manifest.json.sig"),
+      sign("RSA-SHA256", manifestBytes, release.privateKey),
+    ),
+    writeFile(path.join(assetDir, "root-key.pem"), root.publicKey),
+    writeFile(path.join(assetDir, "signing-key.pem"), release.publicKey),
+    writeFile(path.join(assetDir, "trust-delegation.json"), delegation.bytes),
+    writeFile(
+      path.join(assetDir, "trust-delegation.json.sig"),
+      delegation.signature,
+    ),
+  ]);
+  return {
+    assetDir,
+    cleanup: () => rm(assetDir, { force: true, recursive: true }),
+    manifestBytes,
+    probeComponents,
+  };
+}
+
+function createProbeElf({ target, version }) {
+  const architecture = target.startsWith("x86_64-") ? 62 : 183;
+  const interpreter = target.endsWith("-gnu")
+    ? target.startsWith("x86_64-")
+      ? "/lib64/ld-linux-x86-64.so.2\0"
+      : "/lib/ld-linux-aarch64.so.1\0"
+    : "";
+  const headerSize = 64;
+  const programHeaderSize = interpreter ? 56 : 0;
+  const interpreterBytes = Buffer.from(interpreter);
+  const markers = Buffer.from(
+    `ENOKI_PROBE_TARGET=${target}\0ENOKI_PROBE_VERSION=${version}\0`,
+  );
+  const binary = Buffer.alloc(
+    headerSize + programHeaderSize + interpreterBytes.length + markers.length,
+  );
+  binary.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0], 0);
+  binary.writeUInt16LE(2, 16);
+  binary.writeUInt16LE(architecture, 18);
+  binary.writeUInt32LE(1, 20);
+  binary.writeUInt16LE(headerSize, 52);
+  binary.writeUInt16LE(56, 54);
+  binary.writeUInt16LE(interpreter ? 1 : 0, 56);
+  if (interpreter) {
+    binary.writeBigUInt64LE(BigInt(headerSize), 32);
+    binary.writeUInt32LE(3, headerSize);
+    binary.writeUInt32LE(4, headerSize + 4);
+    binary.writeBigUInt64LE(
+      BigInt(headerSize + programHeaderSize),
+      headerSize + 8,
+    );
+    binary.writeBigUInt64LE(BigInt(interpreterBytes.length), headerSize + 32);
+    binary.writeBigUInt64LE(BigInt(interpreterBytes.length), headerSize + 40);
+    binary.set(interpreterBytes, headerSize + programHeaderSize);
+  }
+  binary.set(markers, headerSize + programHeaderSize + interpreterBytes.length);
+  return binary;
 }
 
 function sha256(value) {

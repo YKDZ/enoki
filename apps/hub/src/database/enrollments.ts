@@ -29,6 +29,10 @@ export type EnrollmentTarget =
       sourceProbeSha256: string[];
       replacementPredecessorEnrollmentId?: string;
       replacementPredecessorAssetSetDigest?: string;
+      targetBundles: ReadonlyArray<{
+        bundleManifestSha256: string;
+        target: string;
+      }>;
       targetAssetSetDigest: string;
       targetProbeVersion: string;
     };
@@ -79,6 +83,8 @@ export type RegisterNewHostEnrollmentInput = {
     signedAttemptSha256: string;
     committedSourceProbeSha256: string;
     sourceProbeVersion: string;
+    targetBundleTarget: string;
+    targetManifestSha256: string;
     targetAssetSetDigest: string;
     targetProbeVersion: string;
   };
@@ -241,6 +247,7 @@ export function createEnrollmentRepository(
             enrollmentTokens.replacementPredecessorEnrollmentId,
           replacementPredecessorAssetSetDigest:
             enrollmentTokens.replacementPredecessorAssetSetDigest,
+          targetBundlesJson: enrollmentTokens.targetBundlesJson,
         })
         .from(enrollmentTokens)
         .where(
@@ -267,6 +274,7 @@ export function createEnrollmentRepository(
           !pending.expectedProbeVersion ||
           !pending.sourceProbeSha256Json ||
           !pending.targetAssetSetDigest ||
+          !pending.targetBundlesJson ||
           !pending.targetProbeVersion
         ) {
           return null;
@@ -299,7 +307,10 @@ export function createEnrollmentRepository(
         const sourceProbeSha256 = parseSourceProbeSha256(
           pending.sourceProbeSha256Json,
         );
-        if (!sourceProbeSha256) {
+        if (
+          !sourceProbeSha256 ||
+          !parseTargetBundles(pending.targetBundlesJson)
+        ) {
           return null;
         }
         return {
@@ -618,6 +629,9 @@ export function createEnrollmentRepository(
           if (!validSourceProbeSha256(input.target.sourceProbeSha256)) {
             return { kind: "existing_host_unavailable" };
           }
+          if (!validTargetBundles(input.target.targetBundles)) {
+            return { kind: "existing_host_unavailable" };
+          }
           const target = transaction
             .select({
               id: hosts.id,
@@ -725,6 +739,10 @@ export function createEnrollmentRepository(
             targetProbeVersion:
               input.target.kind === "manual_reinstall"
                 ? input.target.targetProbeVersion
+                : null,
+            targetBundlesJson:
+              input.target.kind === "manual_reinstall"
+                ? JSON.stringify(input.target.targetBundles)
                 : null,
             replacementPredecessorEnrollmentId:
               input.target.kind === "manual_reinstall"
@@ -856,6 +874,7 @@ export function createEnrollmentRepository(
               !pending.expectedProbeId ||
               !pending.expectedProbeVersion ||
               !pending.targetAssetSetDigest ||
+              !pending.targetBundlesJson ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
               (!pending.replacementPredecessorEnrollmentId &&
@@ -888,7 +907,12 @@ export function createEnrollmentRepository(
               pending.targetAssetSetDigest !==
                 input.registrationAttempt.targetAssetSetDigest ||
               pending.targetProbeVersion !==
-                input.registrationAttempt.targetProbeVersion)
+                input.registrationAttempt.targetProbeVersion ||
+              !targetBundleMatches(
+                pending.targetBundlesJson ?? "",
+                input.registrationAttempt.targetBundleTarget,
+                input.registrationAttempt.targetManifestSha256,
+              ))
           ) {
             return null;
           }
@@ -1066,6 +1090,65 @@ function validSourceProbeSha256(value: unknown): value is string[] {
     value.every(
       (digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
     )
+  );
+}
+
+const probeTargets = [
+  "aarch64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+] as const;
+
+function validTargetBundles(value: unknown) {
+  return (
+    Array.isArray(value) &&
+    value.length === probeTargets.length &&
+    value.every(
+      (bundle, index) =>
+        bundle &&
+        typeof bundle === "object" &&
+        !Array.isArray(bundle) &&
+        bundle.target === probeTargets[index] &&
+        /^[0-9a-f]{64}$/.test(bundle.bundleManifestSha256),
+    )
+  );
+}
+
+function parseTargetBundles(value: string) {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) &&
+      parsed.every(
+        (bundle) =>
+          bundle &&
+          typeof bundle === "object" &&
+          !Array.isArray(bundle) &&
+          Object.keys(bundle as object)
+            .sort()
+            .join(",") === "bundleManifestSha256,target",
+      ) &&
+      validTargetBundles(
+        parsed as Array<{ bundleManifestSha256: string; target: string }>,
+      )
+      ? (parsed as Array<{ bundleManifestSha256: string; target: string }>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function targetBundleMatches(
+  targetBundlesJson: string,
+  target: string,
+  bundleManifestSha256: string,
+) {
+  return (
+    parseTargetBundles(targetBundlesJson)?.some(
+      (bundle) =>
+        bundle.target === target &&
+        bundle.bundleManifestSha256 === bundleManifestSha256,
+    ) === true
   );
 }
 
