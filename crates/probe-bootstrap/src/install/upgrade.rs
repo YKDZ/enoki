@@ -1857,7 +1857,9 @@ pub(super) fn consume_runtime_failure_pair_for_upgrade(
     paths: &FixedInstallPaths,
 ) -> Result<(), InstallError> {
     let lock = acquire_runtime_failure_pair_lock(paths)?;
-    let mut consumption = load_validated_upgrade_attempt(paths)?
+    let state = load_validated_upgrade_attempt(paths)?;
+    validate_legacy_upgrade_progress_topology(paths, &state)?;
+    let mut consumption = state
         .runtime_failure_consumption
         .ok_or(InstallError::ExistingResidue)?;
     if consumption == RuntimeFailureConsumption::None {

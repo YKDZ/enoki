@@ -1710,20 +1710,8 @@ mod tests {
         let paths = &fixture.paths;
         let generation = "2d".repeat(32);
         write_runtime_failure_pair_fixture(paths, &generation);
-        write_authority_upgrade_journal(paths, 3, "prepared", Some(false), 0, 0);
+        prepare_legacy_postactivation_effect_phase(&fixture, "activation-started", 0);
         upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
-        let prepared = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        upgrade::write_upgrade_attempt_from_journal(
-            paths,
-            &prepared,
-            "activation-started",
-            0,
-            0,
-        )
-        .unwrap();
         upgrade::fail_next_atomic_write_containing("epoch-removed");
 
         assert!(upgrade::consume_runtime_failure_pair_for_upgrade(paths).is_err());
@@ -1747,6 +1735,40 @@ mod tests {
         .unwrap();
         assert!(completed.contains("runtime_failure_consumption = \"latch-removed\""));
         assert!(completed.contains(&format!("runtime_failure_generation = {generation:?}")));
+    }
+
+    #[test]
+    fn normal_upgrade_rejects_postactivation_topology_tamper_before_pair_consumption() {
+        let fixture = installed_bundle_fixture();
+        let paths = &fixture.paths;
+        let generation = "2e".repeat(32);
+        write_runtime_failure_pair_fixture(paths, &generation);
+        prepare_legacy_postactivation_effect_phase(&fixture, "activation-started", 0);
+        upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
+        let destination = &upgrade_destinations(paths)[0];
+        let name = destination.file_name().unwrap().to_str().unwrap();
+        let unexpected = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+        fs::write(&unexpected, b"postactivation topology tamper").unwrap();
+        fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o755)).unwrap();
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        let journal_before = fs::read(&journal_path).unwrap();
+        let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
+        let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
+        let systemd = Systemd::default();
+
+        assert_eq!(
+            upgrade::consume_runtime_failure_pair_for_upgrade(paths),
+            Err(InstallError::ExistingResidue),
+        );
+
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
+        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
+        assert_eq!(
+            fs::read(&unexpected).unwrap(),
+            b"postactivation topology tamper"
+        );
     }
 
     #[test]
