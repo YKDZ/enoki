@@ -894,15 +894,35 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
     let registration_binding = commit
         .registration_binding()
         .ok_or(InstallError::ExistingResidue)?;
+    let mut retained_commit = commit.clone();
     replacement_registration::converge_registered_identity_to_canonical(
         paths,
         &registration_binding,
     )?;
     replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
-    systemd.restart_canonical()?;
+    let identity_sha256 = replacement_registration::canonical_identity_sha256(
+        paths,
+        &registration_binding,
+        retained_commit.canonical_identity_sha256().is_none(),
+    )?;
+    retained_commit
+        .bind_canonical_identity_sha256(identity_sha256.clone())
+        .map_err(|()| InstallError::ExistingResidue)?;
+    if retained_commit != *commit {
+        commit_store
+            .persist_identity_binding_exact(commit, &retained_commit)
+            .map_err(|_| InstallError::ExistingResidue)?;
+    }
     retire_replacement_registration_attempt_source(paths)?;
+    if replacement_registration::canonical_identity_sha256(paths, &registration_binding, false)?
+        != identity_sha256
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
+    systemd.restart_canonical()?;
     commit_store
-        .retire_exact(commit)
+        .retire_exact(&retained_commit)
         .map_err(|_| InstallError::ExistingResidue)
 }
 

@@ -3581,7 +3581,8 @@ mod tests {
         )
         .unwrap();
         let replacement_bundle = bundle().with_test_complete_receipts(5);
-        let replacement_commit = replacement_commit(&replacement_bundle);
+        let mut replacement_commit = replacement_commit(&replacement_bundle);
+        replacement_commit.schema_version = 1;
         FileReplacementCommitStore::at(&commit_path, unsafe { libc::geteuid() })
             .persist(&replacement_commit)
             .unwrap();
@@ -3709,18 +3710,6 @@ mod tests {
         ));
         assert!(source.exists(), "wrong candidate key retains capsule");
         assert!(commit_path.exists(), "wrong candidate key retains commit");
-        fs::write(
-            paths.identity(),
-            registered_identity.replace("probe-registered", "probe-tampered"),
-        )
-        .unwrap();
-        assert!(run_replacement_lifecycle_child(
-            temporary.path(),
-            "reject-canonical-restart",
-            None,
-        ));
-        assert!(source.exists(), "wrong Probe ID retains capsule");
-        assert!(commit_path.exists(), "wrong Probe ID retains commit");
         fs::write(paths.identity(), &registered_identity).unwrap();
 
         for point in ["before-rename", "after-rename"] {
@@ -3770,24 +3759,20 @@ mod tests {
         fs::remove_file(&drop_in).unwrap();
         fs::remove_dir(drop_in.parent().unwrap()).unwrap();
 
-        for point in ["fail-restart", "before-restart"] {
+        for point in ["before-rename", "after-rename"] {
             assert!(!run_replacement_lifecycle_child(
                 temporary.path(),
                 "retire-source",
-                Some((&runtime_credential, point)),
+                Some((&commit_path, point)),
             ));
-            assert!(source.exists());
+            assert!(source.exists(), "identity binding must precede capsule retirement");
             assert!(commit_path.exists());
             assert!(runtime_credential.exists());
         }
-        assert!(!run_replacement_lifecycle_child(
-            temporary.path(),
-            "retire-source",
-            Some((&runtime_credential, "after-restart")),
-        ));
-        assert!(source.exists());
-        assert!(commit_path.exists());
-        assert!(!runtime_credential.exists());
+        let bound_commit: serde_json::Value =
+            serde_json::from_slice(&fs::read(&commit_path).unwrap()).unwrap();
+        assert_eq!(bound_commit["schemaVersion"], 2);
+        assert!(bound_commit["canonicalIdentitySha256"].as_str().is_some());
 
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
@@ -3795,6 +3780,7 @@ mod tests {
             Some((&source, "before-unlink")),
         ));
         assert!(source.exists());
+        assert!(commit_path.exists());
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
             "retire-source",
@@ -3802,18 +3788,29 @@ mod tests {
         ));
         assert!(!source.exists());
         assert!(commit_path.exists(), "registration retirement 中断必须保留 commit");
-        for point in ["fail-restart", "before-restart"] {
-            assert!(!run_replacement_lifecycle_child(
-                temporary.path(),
-                "retire-source",
-                Some((&runtime_credential, point)),
-            ));
-            assert!(!source.exists(), "source-absent retry 不得重建 capsule");
-            assert!(
-                commit_path.exists(),
-                "source-absent retry 仍必须 fresh restart 后才可退休 commit"
-            );
-        }
+
+        let bound_commit_bytes = fs::read(&commit_path).unwrap();
+        let mut legacy_without_capsule: serde_json::Value =
+            serde_json::from_slice(&bound_commit_bytes).unwrap();
+        legacy_without_capsule["schemaVersion"] = 1.into();
+        legacy_without_capsule
+            .as_object_mut()
+            .unwrap()
+            .remove("canonicalIdentitySha256");
+        fs::write(
+            &commit_path,
+            serde_json::to_vec(&legacy_without_capsule).unwrap(),
+        )
+        .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "reject-retirement",
+            None,
+        ));
+        assert!(commit_path.exists(), "legacy commit without capsule has no identity authority");
+        assert!(runtime_credential.exists(), "legacy rejection has zero restart effect");
+        fs::write(&commit_path, bound_commit_bytes).unwrap();
+
         let canonical_identity = fs::read_to_string(paths.identity()).unwrap();
         for tampered in [
             canonical_identity.replace("probe-registered", "probe-tampered"),
@@ -3826,16 +3823,35 @@ mod tests {
             fs::write(paths.identity(), tampered).unwrap();
             assert!(run_replacement_lifecycle_child(
                 temporary.path(),
-                "reject-canonical-restart",
+                "reject-retirement",
                 None,
             ));
             assert!(!source.exists());
+            assert!(commit_path.exists(), "identity digest mismatch must retain commit");
+            assert!(runtime_credential.exists(), "identity rejection has zero restart effect");
+        }
+        fs::write(paths.identity(), &canonical_identity).unwrap();
+
+        for point in ["fail-restart", "before-restart"] {
+            assert!(!run_replacement_lifecycle_child(
+                temporary.path(),
+                "retire-source",
+                Some((&runtime_credential, point)),
+            ));
+            assert!(!source.exists(), "source-absent retry 不得重建 capsule");
             assert!(
                 commit_path.exists(),
-                "Hub-authenticated canonical restart 失败必须保留 commit"
+                "source-absent retry 仍必须 fresh restart 后才可退休 commit"
             );
         }
-        fs::write(paths.identity(), canonical_identity).unwrap();
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&runtime_credential, "after-restart")),
+        ));
+        assert!(!source.exists());
+        assert!(commit_path.exists());
+        assert!(!runtime_credential.exists());
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
             "retire-source",
@@ -3980,13 +3996,15 @@ mod tests {
             }
             "retire-source" | "reject-retirement" | "reject-canonical-restart" => {
                 let bundle = bundle().with_test_complete_receipts(5);
-                let commit = replacement_commit(&bundle);
                 let mut store = FileReplacementCommitStore::at(
                     paths
                         .bootstrap_state()
                         .join("replacement-migration.json"),
                     unsafe { libc::geteuid() },
                 );
+                let Some(commit) = store.load().unwrap() else {
+                    return;
+                };
                 let mut systemd = ProductionRecoverySystemd {
                     paths: &paths,
                     timeout: false,

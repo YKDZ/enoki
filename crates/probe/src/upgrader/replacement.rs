@@ -915,6 +915,7 @@ mod tests {
             intent: old_intent,
             cleanup_complete: false,
             candidate_layout_complete: false,
+            canonical_identity_sha256: None,
         };
         let mut store = FileReplacementCommitStore::at(
             production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path())),
@@ -973,6 +974,7 @@ mod tests {
             intent: committed_intent.clone(),
             cleanup_complete: false,
             candidate_layout_complete: false,
+            canonical_identity_sha256: None,
         };
         let commit_path =
             production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path()));

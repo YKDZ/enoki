@@ -33,6 +33,8 @@ pub struct ReplacementCommitFact {
     pub intent: ReplacementIntent,
     pub cleanup_complete: bool,
     pub candidate_layout_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_identity_sha256: Option<String>,
 }
 
 /// Probe Local Lifecycle kernel 只持有这个不透明绑定；Enrollment、身份与候选语义
@@ -106,10 +108,35 @@ impl ReplacementCommitFact {
             })
     }
 
-    #[cfg(feature = "activator")]
     pub(crate) fn has_valid_binding(&self) -> bool {
-        canonical_intent_sha256(&self.intent).ok().as_deref()
-            == Some(self.canonical_intent_sha256.as_str())
+        matches!(self.schema_version, 1 | 2)
+            && canonical_intent_sha256(&self.intent).ok().as_deref()
+                == Some(self.canonical_intent_sha256.as_str())
+            && self
+                .canonical_identity_sha256
+                .as_deref()
+                .is_none_or(valid_lower_sha256)
+            && (self.schema_version == 2 || self.canonical_identity_sha256.is_none())
+    }
+
+    #[cfg(feature = "activator")]
+    pub(crate) fn canonical_identity_sha256(&self) -> Option<&str> {
+        self.canonical_identity_sha256.as_deref()
+    }
+
+    #[cfg(feature = "activator")]
+    pub(crate) fn bind_canonical_identity_sha256(&mut self, digest: String) -> Result<(), ()> {
+        if !valid_lower_sha256(&digest)
+            || self
+                .canonical_identity_sha256
+                .as_ref()
+                .is_some_and(|existing| existing != &digest)
+        {
+            return Err(());
+        }
+        self.schema_version = 2;
+        self.canonical_identity_sha256 = Some(digest);
+        Ok(())
     }
 
     #[cfg(all(test, feature = "activator"))]
@@ -119,11 +146,12 @@ impl ReplacementCommitFact {
         candidate_layout_complete: bool,
     ) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             canonical_intent_sha256: canonical_intent_sha256(&intent).expect("canonical intent"),
             intent,
             cleanup_complete,
             candidate_layout_complete,
+            canonical_identity_sha256: None,
         }
     }
 }
@@ -218,6 +246,31 @@ impl FileReplacementCommitStore {
             (self.expected_owner_uid, self.expected_owner_gid),
         )
     }
+
+    /// Deepens only the exact retained commit; a caller cannot overwrite a
+    /// different replacement fact while establishing identity custody.
+    #[cfg(feature = "activator")]
+    pub(crate) fn persist_identity_binding_exact(
+        &mut self,
+        expected: &ReplacementCommitFact,
+        bound: &ReplacementCommitFact,
+    ) -> std::io::Result<()> {
+        if self.load()?.as_ref() != Some(expected)
+            || expected.canonical_identity_sha256.is_some()
+            || bound.schema_version != 2
+            || bound.canonical_identity_sha256.is_none()
+            || bound.intent != expected.intent
+            || bound.canonical_intent_sha256 != expected.canonical_intent_sha256
+            || bound.cleanup_complete != expected.cleanup_complete
+            || bound.candidate_layout_complete != expected.candidate_layout_complete
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement commit changed before identity custody persisted",
+            ));
+        }
+        self.persist(bound)
+    }
 }
 
 impl ReplacementCommitStore for FileReplacementCommitStore {
@@ -259,10 +312,7 @@ impl ReplacementCommitStore for FileReplacementCommitStore {
                 "invalid replacement commit fact",
             )
         })?;
-        if fact.schema_version != 1
-            || canonical_intent_sha256(&fact.intent).ok().as_deref()
-                != Some(&fact.canonical_intent_sha256)
-        {
+        if !fact.has_valid_binding() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "invalid replacement commit binding",
@@ -276,6 +326,11 @@ impl ReplacementCommitStore for FileReplacementCommitStore {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing commit parent")
         })?;
         validate_private_parent(parent, self.expected_owner_uid)?;
+        crate::secure_file::retire_replacement_atomic_write_residue(
+            &self.path,
+            0o600,
+            (self.expected_owner_uid, self.expected_owner_gid),
+        )?;
         let bytes = serde_json::to_vec(fact).map_err(std::io::Error::other)?;
         if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
             return Err(std::io::Error::new(
@@ -322,7 +377,7 @@ where
         canonical_intent_sha256(&intent).map_err(|_| ReplacementCommitError::ConflictingCommit)?;
     let mut fact = match store.load().map_err(ReplacementCommitError::Store)? {
         Some(existing)
-            if existing.schema_version == 1
+            if matches!(existing.schema_version, 1 | 2)
                 && existing.canonical_intent_sha256 == digest
                 && existing.intent == intent =>
         {
@@ -331,11 +386,12 @@ where
         Some(_) => return Err(ReplacementCommitError::ConflictingCommit),
         None => {
             let committed = ReplacementCommitFact {
-                schema_version: 1,
+                schema_version: 2,
                 canonical_intent_sha256: digest,
                 intent,
                 cleanup_complete: false,
                 candidate_layout_complete: false,
+                canonical_identity_sha256: None,
             };
             store
                 .persist(&committed)
@@ -376,6 +432,13 @@ pub fn record_replacement_candidate_layout<S: ReplacementCommitStore>(
 
 fn canonical_intent_sha256(intent: &ReplacementIntent) -> Result<String, serde_json::Error> {
     serde_json::to_vec(intent).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn valid_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -553,6 +616,56 @@ mod tests {
                 .map(|entry| entry.unwrap().file_name())
                 .collect::<Vec<_>>(),
             [std::ffi::OsString::from("replacement-migration.json")]
+        );
+    }
+
+    #[cfg(feature = "activator")]
+    #[test]
+    fn identity_custody_schema_only_upgrades_legacy_facts_with_a_valid_digest() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = temporary.path().join("replacement-migration.json");
+        let mut store = FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() });
+        let mut legacy = ReplacementCommitFact::for_test(intent(), true, true);
+        legacy.schema_version = 1;
+        store.persist(&legacy).unwrap();
+        assert_eq!(store.load().unwrap(), Some(legacy.clone()));
+
+        let mut upgraded = legacy.clone();
+        upgraded
+            .bind_canonical_identity_sha256("d".repeat(64))
+            .unwrap();
+        store.persist(&upgraded).unwrap();
+        assert_eq!(store.load().unwrap(), Some(upgraded));
+
+        let mut different_intent = intent();
+        different_intent.enrollment_id.push_str("_other");
+        let different = ReplacementCommitFact::for_test(different_intent, true, true);
+        store.persist(&different).unwrap();
+        let mut attempted_overwrite = legacy.clone();
+        attempted_overwrite
+            .bind_canonical_identity_sha256("d".repeat(64))
+            .unwrap();
+        assert!(
+            store
+                .persist_identity_binding_exact(&legacy, &attempted_overwrite)
+                .is_err()
+        );
+        assert_eq!(store.load().unwrap(), Some(different));
+
+        legacy.canonical_identity_sha256 = Some("d".repeat(64));
+        store.persist(&legacy).unwrap();
+        assert!(
+            store.load().is_err(),
+            "schema 1 cannot claim identity custody"
+        );
+
+        let mut malformed = ReplacementCommitFact::for_test(intent(), true, true);
+        malformed.canonical_identity_sha256 = Some("not-a-digest".into());
+        store.persist(&malformed).unwrap();
+        assert!(
+            store.load().is_err(),
+            "malformed schema 2 custody fails closed"
         );
     }
 

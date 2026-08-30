@@ -70,7 +70,7 @@ struct ProbeRegistrationAttemptCapsule {
     signed_attempt_sha256: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ReplacementRegistrationBinding {
     committed_source_probe_sha256: String,
     enrollment_id: String,
@@ -301,6 +301,48 @@ impl From<BootstrapReplacementRegistrationBinding> for ReplacementRegistrationBi
 }
 
 impl ReplacementRegistrationBinding {
+    fn from_valid_proto(attempt: &ProbeRegistrationAttempt) -> Result<Self, RegistrationError> {
+        let binding = Self {
+            committed_source_probe_sha256: attempt.committed_source_probe_sha256.clone(),
+            enrollment_id: attempt.enrollment_id.clone(),
+            host_id: attempt.host_id.clone(),
+            hub_origin: attempt.hub_origin.clone(),
+            old_probe_id: attempt.old_probe_id.clone(),
+            replacement_commit_sha256: attempt.replacement_commit_sha256.clone(),
+            source_probe_version: attempt.source_probe_version.clone(),
+            target_asset_set_digest: attempt.target_asset_set_digest.clone(),
+            target_bundle_target: attempt.target_bundle_target.clone(),
+            target_manifest_sha256: attempt.target_manifest_sha256.clone(),
+            target_probe_version: attempt.target_probe_version.clone(),
+        };
+        if !valid_enrollment_id(&binding.enrollment_id)
+            || binding.host_id.parse::<u64>().ok().is_none_or(|id| id == 0)
+            || !bounded_identifier(&binding.old_probe_id)
+            || !valid_semver(&binding.source_probe_version)
+            || !valid_semver(&binding.target_probe_version)
+            || !valid_sha256(&binding.committed_source_probe_sha256)
+            || !valid_sha256(&binding.replacement_commit_sha256)
+            || !valid_sha256(&binding.target_manifest_sha256)
+            || !binding
+                .target_asset_set_digest
+                .strip_prefix("sha256:")
+                .is_some_and(valid_sha256)
+            || !matches!(
+                binding.target_bundle_target.as_str(),
+                "aarch64-unknown-linux-gnu"
+                    | "aarch64-unknown-linux-musl"
+                    | "x86_64-unknown-linux-gnu"
+                    | "x86_64-unknown-linux-musl"
+            )
+            || !binding.matches_proto(attempt)
+        {
+            return Err(RegistrationError::InvalidResponse(
+                "invalid replacement registration binding",
+            ));
+        }
+        Ok(binding)
+    }
+
     fn to_proto(
         &self,
         nonce: String,
@@ -409,20 +451,12 @@ pub fn replace_stale_root_replacement_registration_attempt(
     let capsule = read_registration_attempt_capsule(path)?.ok_or(
         RegistrationError::InvalidResponse("missing replacement registration capsule"),
     )?;
-    let request_body = decode_lower_hex(&capsule.request_hex).ok_or(
-        RegistrationError::InvalidResponse("invalid registration attempt capsule"),
-    )?;
-    let request = ProbeRegistrationRequest::decode(request_body.as_slice())
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    let attempt = ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    if attempt.encode_to_vec() != request.canonical_attempt
-        || capsule.hub_origin != binding.hub_origin
-        || attempt.hub_origin != binding.hub_origin
-        || attempt.host_id != binding.host_id
-        || attempt.old_probe_id != binding.old_probe_id
-        || attempt.source_probe_version != binding.source_probe_version
-        || attempt.committed_source_probe_sha256 != binding.committed_source_probe_sha256
+    let stale_binding = validate_self_bound_registration_attempt_capsule(&capsule)?;
+    if stale_binding.hub_origin != binding.hub_origin
+        || stale_binding.host_id != binding.host_id
+        || stale_binding.old_probe_id != binding.old_probe_id
+        || stale_binding.source_probe_version != binding.source_probe_version
+        || stale_binding.committed_source_probe_sha256 != binding.committed_source_probe_sha256
     {
         return Err(RegistrationError::InvalidResponse(
             "stale registration attempt does not match installed source",
@@ -540,11 +574,22 @@ fn validate_registration_attempt_capsule(
     input: &ProbeRegistrationInput,
     binding: &ReplacementRegistrationBinding,
 ) -> Result<(), RegistrationError> {
-    if capsule.schema_version != 1
-        || capsule.local_clock_reference_ms == 0
-        || capsule.enrollment_token_sha256 != sha256_hex(input.enrollment_token.as_bytes())
+    let stored_binding = validate_self_bound_registration_attempt_capsule(capsule)?;
+    if capsule.enrollment_token_sha256 != sha256_hex(input.enrollment_token.as_bytes())
         || capsule.hub_origin != input.hub_url
+        || stored_binding != *binding
     {
+        return Err(RegistrationError::InvalidResponse(
+            "registration attempt capsule binding mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_self_bound_registration_attempt_capsule(
+    capsule: &ProbeRegistrationAttemptCapsule,
+) -> Result<ReplacementRegistrationBinding, RegistrationError> {
+    if capsule.schema_version != 1 || capsule.local_clock_reference_ms == 0 {
         return Err(RegistrationError::InvalidResponse(
             "registration attempt capsule binding mismatch",
         ));
@@ -556,12 +601,13 @@ fn validate_registration_attempt_capsule(
         .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
     let attempt = ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
         .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    let binding = ReplacementRegistrationBinding::from_valid_proto(&attempt)?;
     if attempt.encode_to_vec() != request.canonical_attempt
-        || request.enrollment_token != input.enrollment_token
+        || capsule.enrollment_token_sha256 != sha256_hex(request.enrollment_token.as_bytes())
+        || capsule.hub_origin != binding.hub_origin
         || request.installation_inspection.is_some()
         || request.installation_rejection.is_some()
         || !request.snapshots.is_empty()
-        || !binding.matches_proto(&attempt)
     {
         return Err(RegistrationError::InvalidResponse(
             "registration attempt capsule binding mismatch",
@@ -593,7 +639,7 @@ fn validate_registration_attempt_capsule(
         &signature,
     )
     .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    Ok(())
+    Ok(binding)
 }
 
 fn registration_request(
@@ -676,6 +722,7 @@ fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn binding() -> BootstrapReplacementRegistrationBinding {
         BootstrapReplacementRegistrationBinding {
@@ -728,6 +775,127 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn stale_capsule_must_self_validate_before_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("attempt.json");
+        let old = binding();
+        prepare_root_replacement_registration_attempt(
+            &path,
+            RootReplacementRegistrationAttemptInput {
+                enrollment_token: "enk_old".into(),
+                binding: old.clone(),
+            },
+        )
+        .unwrap();
+        let original: ProbeRegistrationAttemptCapsule =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut next = old;
+        next.enrollment_id = "enr_abcdef0123456789".into();
+        next.replacement_commit_sha256 = "e".repeat(64);
+        let next = RootReplacementRegistrationAttemptInput {
+            enrollment_token: "enk_new".into(),
+            binding: next,
+        };
+
+        for mutation in [
+            "token-hash",
+            "raw-token",
+            "key",
+            "signature",
+            "signed-digest",
+            "binding",
+        ] {
+            let mut capsule = serde_json::from_slice::<ProbeRegistrationAttemptCapsule>(
+                &serde_json::to_vec(&original).unwrap(),
+            )
+            .unwrap();
+            match mutation {
+                "token-hash" => {
+                    let replacement = if capsule.enrollment_token_sha256.starts_with('a') {
+                        "b"
+                    } else {
+                        "a"
+                    };
+                    capsule
+                        .enrollment_token_sha256
+                        .replace_range(..1, replacement);
+                }
+                "raw-token" => {
+                    let mut request = ProbeRegistrationRequest::decode(
+                        decode_lower_hex(&capsule.request_hex).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                    request.enrollment_token.push_str("_tampered");
+                    capsule.request_hex = encode_lower_hex(&request.encode_to_vec());
+                }
+                "key" => capsule.candidate_private_key_pem = "not a private key".into(),
+                "signature" => {
+                    let mut request = ProbeRegistrationRequest::decode(
+                        decode_lower_hex(&capsule.request_hex).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                    request.candidate_signature[0] ^= 1;
+                    capsule.request_hex = encode_lower_hex(&request.encode_to_vec());
+                }
+                "signed-digest" => {
+                    let replacement = if capsule.signed_attempt_sha256.starts_with('0') {
+                        "1"
+                    } else {
+                        "0"
+                    };
+                    capsule
+                        .signed_attempt_sha256
+                        .replace_range(..1, replacement);
+                }
+                "binding" => {
+                    let mut request = ProbeRegistrationRequest::decode(
+                        decode_lower_hex(&capsule.request_hex).unwrap().as_slice(),
+                    )
+                    .unwrap();
+                    let mut attempt =
+                        ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
+                            .unwrap();
+                    attempt.target_manifest_sha256 = "z".repeat(64);
+                    request.canonical_attempt = attempt.encode_to_vec();
+                    let private_key =
+                        RsaPrivateKey::from_pkcs8_pem(&capsule.candidate_private_key_pem).unwrap();
+                    request.candidate_signature = SigningKey::<Sha256>::new(private_key)
+                        .sign_with_rng(
+                            &mut OsRng,
+                            registration_attempt_signature_payload(&request.canonical_attempt)
+                                .as_bytes(),
+                        )
+                        .to_bytes()
+                        .to_vec();
+                    capsule.signed_attempt_sha256 = signed_attempt_sha256(
+                        &request.canonical_attempt,
+                        &request.candidate_signature,
+                    );
+                    capsule.request_hex = encode_lower_hex(&request.encode_to_vec());
+                }
+                _ => unreachable!(),
+            }
+            let corrupt = serde_json::to_vec(&capsule).unwrap();
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(
+                replace_stale_root_replacement_registration_attempt(&path, next.clone()).is_err(),
+                "{mutation} mutation must fail closed"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        }
+
+        let original_bytes = serde_json::to_vec(&original).unwrap();
+        std::fs::write(&path, &original_bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(replace_stale_root_replacement_registration_attempt(&path, next.clone()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(replace_stale_root_replacement_registration_attempt(&path, next).is_err());
+        assert!(!path.exists());
     }
 
     #[test]

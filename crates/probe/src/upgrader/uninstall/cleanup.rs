@@ -1667,6 +1667,7 @@ mod tests {
             intent: intent.clone(),
             cleanup_complete: true,
             candidate_layout_complete: false,
+            canonical_identity_sha256: None,
         });
         let root = tempfile::tempdir().expect("test root");
         let mut systemd = TestSystemd::default();

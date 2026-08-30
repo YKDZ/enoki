@@ -1,5 +1,6 @@
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     ffi::OsStr,
@@ -134,6 +135,24 @@ pub(super) fn converge_registered_identity_to_canonical(
     canonical_identity_matches(paths, binding)
         .then_some(())
         .ok_or(InstallError::ExistingResidue)
+}
+
+/// Returns an exact digest of the already-canonical identity.  A legacy
+/// commit may establish this custody only while its root-private attempt
+/// capsule is still present; a bound commit can later prove the same bytes
+/// after the capsule has been retired.
+pub(super) fn canonical_identity_sha256(
+    paths: &FixedInstallPaths,
+    binding: &ReplacementRegistrationBinding,
+    require_attempt_capsule: bool,
+) -> Result<String, InstallError> {
+    let (identity, _) = read_identity(paths)?;
+    if !canonical_identity_matches_contents(paths, &identity, binding)
+        || (require_attempt_capsule && !matches!(read_attempt_receipt(paths), Ok(Some(_))))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(format!("{:x}", Sha256::digest(identity.as_bytes())))
 }
 
 /// Projects only the already-canonical registered identity and correlates it
