@@ -1,5 +1,6 @@
 import { type BrowserContext, type Page } from "@playwright/test";
 
+import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
 import { expect, test } from "./security-console";
 
 type BrowserEnrollmentTarget =
@@ -84,19 +85,21 @@ test("owner can generate the configured probe activation command", async ({
 
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
+  const probeApiOrigin = escapeRegex(releaseUiBrowserRuntime().probeApiUrl);
   const enrollmentToken = isCandidateImageGate
     ? /ENOKI_ENROLLMENT_TOKEN=/
     : /enk_enroll_[A-Za-z0-9_-]+/;
   if (isCandidateImageGate) {
     await expect(command).toHaveValue(
-      /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
-    );
-    await expect(command).toHaveValue(
-      /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38201'/,
+      new RegExp(
+        `^ENOKI_HUB_URL='${probeApiOrigin}' ENOKI_ENROLLMENT_TOKEN='enk_enroll_[A-Za-z0-9_-]+' /usr/local/bin/enoki-probe-bootstrap-acquire \\| sudo -- /usr/local/bin/enoki-probe-bootstrap-activate$`,
+      ),
     );
   } else {
     await expect(command).toHaveValue(
-      /^printf '%s\\n' 'enk_enroll_[A-Za-z0-9_-]+' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin 'http:\/\/127\.0\.0\.1:38201'$/,
+      new RegExp(
+        `^printf '%s\\\\n' 'enk_enroll_[A-Za-z0-9_-]+' \\| python3 -- \\.\\/enoki-probe-bootstrap\\.py --hub-origin '${probeApiOrigin}'$`,
+      ),
     );
   }
   await expect(command).toHaveValue(enrollmentToken);
@@ -117,6 +120,10 @@ test("owner can generate the configured probe activation command", async ({
   await command.press("Control+V");
   await expect(command).toHaveValue(enrollmentToken);
 });
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 test("owner can select the command with Cmd+A on a macOS browser runner", async ({
   page,

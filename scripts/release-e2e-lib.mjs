@@ -2911,8 +2911,11 @@ export function createProbeHostHarness({
       );
     }
     if (
-      workingDirectory !== undefined &&
-      !/^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/.test(workingDirectory)
+      workingDirectory != null &&
+      (typeof workingDirectory !== "string" ||
+        !/^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/.test(
+          workingDirectory,
+        ))
     ) {
       throw new Error(
         "Probe Host Harness install working directory is invalid",
@@ -3211,7 +3214,6 @@ export function createProbeHostHarness({
         "/etc/systemd/system/enoki-probe.service",
         "/var/lib/enoki-probe",
         "/etc/sudoers.d/enoki-probe-operations",
-        "/etc/sudoers.d/enoki-probe-collector-helpers",
         "enoki-probe.service",
       ];
       const missing = required.filter((entry) => !residue.includes(entry));
@@ -4043,7 +4045,8 @@ cat >"$expected_collector" <<'ENOKI_COLLECTOR_EOF'
 # Managed by Enoki Probe installer.
 enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes /usr/local/bin/enoki-probe internal-privileged-collector-helper --helper disk-health.smartctl
 ENOKI_COLLECTOR_EOF
-for candidate in "$operation" "$collector"; do
+validate_sudoers() {
+  candidate=$1
   [ -f "$candidate" ] && [ ! -L "$candidate" ]
   [ "$(stat -c %h "$candidate")" = 1 ]
   [ "$(stat -c %u "$candidate")" = 0 ]
@@ -4051,9 +4054,13 @@ for candidate in "$operation" "$collector"; do
   [ "$(stat -c %a "$candidate")" = 440 ]
   ! grep -Fq 'NOPASSWD: ALL' "$candidate"
   /usr/sbin/visudo -cf "$candidate" >/dev/null
-done
+}
+validate_sudoers "$operation"
 cmp --silent "$expected_operation" "$operation"
-cmp --silent "$expected_collector" "$collector"
+if [ -e "$collector" ] || [ -L "$collector" ]; then
+  validate_sudoers "$collector"
+  cmp --silent "$expected_collector" "$collector"
+fi
 printf 'verified\n'
 `;
 }

@@ -1049,6 +1049,7 @@ describe("Probe Host Harness", () => {
       authority: "enk_enroll_production",
       expectedToken: "enk_enroll_production",
       label: "ordinary Enrollment token",
+      workingDirectory: null,
     },
     {
       authority:
@@ -1059,16 +1060,19 @@ describe("Probe Host Harness", () => {
         enrollmentId: "enr_manual_reinstall_0001",
         target: { hostId: 7, kind: "manual_reinstall" },
       },
+      workingDirectory: undefined,
     },
   ])(
     "accepts the exact production Bootstrap command with $label",
-    async ({ authority, expectedToken, overrides = {} }) => {
+    async ({ authority, expectedToken, overrides = {}, workingDirectory }) => {
       const parsedAuthority = authority.startsWith("{")
         ? JSON.parse(authority)
         : null;
+      const commands = [];
       const preparedContracts = [];
       const harness = createProbeHostHarness({
         execute: async (command) => {
+          commands.push(command);
           if (command.includes("# enoki-release-e2e:inventory")) {
             return successfulCommand({
               accounts: { group: false, user: false },
@@ -1083,7 +1087,10 @@ describe("Probe Host Harness", () => {
         },
         prepareInstall: async ({ installContract }) => {
           preparedContracts.push(installContract);
-          return { evidence: { kind: "candidate-bootstrap-binaries" } };
+          return {
+            evidence: { kind: "candidate-bootstrap-binaries" },
+            workingDirectory,
+          };
         },
       });
       const enrollment = {
@@ -1112,6 +1119,11 @@ describe("Probe Host Harness", () => {
           token: expectedToken,
         },
       ]);
+      const install = commands.find((command) =>
+        command.includes("# enoki-release-e2e:bootstrap-acquire"),
+      );
+      expect(install).toContain(enrollment.installCommand);
+      expect(install).not.toContain("\ncd -- ");
     },
   );
 
@@ -1544,6 +1556,7 @@ describe("Probe Host Harness", () => {
   });
 
   it("accepts the exact v0.1.74 legacy layout without weakening the Candidate boundary", async () => {
+    let collectorSudoersPresent = false;
     let inventoryCount = 0;
     let legacyBoundaryFailure = null;
     const commands = [];
@@ -1559,17 +1572,20 @@ describe("Probe Host Harness", () => {
               units: [],
             });
           }
+          const files = [
+            "/usr/local/bin/enoki-probe",
+            "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+            "/etc/enoki/probe-install.toml",
+            "/etc/systemd/system/enoki-probe.service",
+            "/var/lib/enoki-probe",
+            "/etc/sudoers.d/enoki-probe-operations",
+          ];
+          if (collectorSudoersPresent) {
+            files.push("/etc/sudoers.d/enoki-probe-collector-helpers");
+          }
           return successfulCommand({
             accounts: { group: true, user: true },
-            files: [
-              "/usr/local/bin/enoki-probe",
-              "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-              "/etc/enoki/probe-install.toml",
-              "/etc/systemd/system/enoki-probe.service",
-              "/var/lib/enoki-probe",
-              "/etc/sudoers.d/enoki-probe-operations",
-              "/etc/sudoers.d/enoki-probe-collector-helpers",
-            ],
+            files,
             units: ["enoki-probe.service"],
           });
         }
@@ -1582,6 +1598,9 @@ describe("Probe Host Harness", () => {
           );
         }
         if (command.includes("# enoki-release-e2e:legacy-sudoers-boundary")) {
+          const allowsAbsentCollector = command.includes(
+            'if [ -e "$collector" ] || [ -L "$collector" ]; then',
+          );
           const enforcesExactBoundary =
             command.includes("/usr/sbin/visudo -cf") &&
             command.includes("NOPASSWD: ALL") &&
@@ -1590,6 +1609,13 @@ describe("Probe Host Harness", () => {
             command.includes(
               "internal-privileged-collector-helper --helper disk-health.smartctl",
             );
+          if (!collectorSudoersPresent && !allowsAbsentCollector) {
+            return {
+              code: 1,
+              stderr: "optional legacy collector sudoers is absent",
+              stdout: "",
+            };
+          }
           if (legacyBoundaryFailure === "sudoers" && enforcesExactBoundary) {
             return { code: 1, stderr: "legacy sudoers invalid", stdout: "" };
           }
@@ -1643,6 +1669,7 @@ describe("Probe Host Harness", () => {
       identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
       probeVersion: "0.1.74",
     });
+    collectorSudoersPresent = true;
     legacyBoundaryFailure = "sudoers";
     const sudoersMutation = await harness
       .assertLegacyReleaseBaselineInstalled("run-legacy-baseline", "0.1.74")
