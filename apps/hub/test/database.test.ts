@@ -1444,6 +1444,49 @@ describe("Hub database", () => {
       targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
       targetProbeVersion: "1.2.3",
     });
+    expect(
+      database.enrollments.terminalReplacementPredecessorForHost({
+        currentProbeId: "probe-wrong-current",
+        hostId: 7,
+      }),
+    ).toBeNull();
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_063_000,
+        enrollmentId: "enr_terminal_wrong_predecessor_0002",
+        expiresAtMs: 1_725_000_123_000,
+        target: {
+          expectedHubOrigin: "https://hub.example.test",
+          expectedProbeId: "probe-current",
+          expectedProbeVersion: "1.2.3",
+          hostId: 7,
+          kind: "manual_reinstall",
+          replacementPredecessorEnrollmentId: "enr_missing_predecessor_0000",
+          sourceProbeSha256: ["c".repeat(64)],
+          targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+          targetProbeVersion: "1.2.4",
+        },
+        tokenHash: "wrong-predecessor-token",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_063_000,
+        enrollmentId: "enr_terminal_ordinary_null_version_0002",
+        expiresAtMs: 1_725_000_123_000,
+        target: {
+          expectedHubOrigin: "https://hub.example.test",
+          expectedProbeId: "probe-current",
+          expectedProbeVersion: "1.2.3",
+          hostId: 7,
+          kind: "manual_reinstall",
+          sourceProbeSha256: ["c".repeat(64)],
+          targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+          targetProbeVersion: "1.2.4",
+        },
+        tokenHash: "ordinary-null-version-token",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
     const created = database.enrollments.createPending({
       createdAtMs: 1_725_000_063_000,
       enrollmentId: "enr_terminal_successor_0002",
