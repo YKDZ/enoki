@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
+  chown,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -7076,6 +7078,105 @@ describe("Release E2E command", () => {
       ).rejects.toThrow(/was not removed/);
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
+    }
+  });
+
+  it("does not follow a replaced Bootstrap staging directory into external resources", async () => {
+    const candidateDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-symlink-candidate-"),
+    );
+    const externalDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-symlink-external-"),
+    );
+    const recipeDir = path.join(candidateDir, "recipe");
+    const file = "enoki-probe-bootstrap.py";
+    const recipe = Buffer.from("verified candidate bootstrap recipe");
+    const externalRecipe = Buffer.from("external resource must be preserved");
+    const hostIdentity =
+      process.getuid?.() === 0 ? { gid: 65534, uid: 65534 } : {};
+    const runHostProcess = (command, arguments_, options) =>
+      new Promise((resolve) => {
+        const child = execFile(
+          command,
+          arguments_,
+          hostIdentity,
+          (error, stdout, stderr) => {
+            resolve({
+              code: typeof error?.code === "number" ? error.code : 0,
+              stderr,
+              stdout,
+            });
+          },
+        );
+        child.stdin.end(options.input);
+      });
+    let stageDir = null;
+    try {
+      await mkdir(recipeDir);
+      await writeFile(path.join(recipeDir, file), recipe);
+      await writeFile(path.join(externalDir, file), externalRecipe);
+      if (hostIdentity.uid !== undefined) {
+        await chown(externalDir, hostIdentity.uid, hostIdentity.gid);
+        await chown(
+          path.join(externalDir, file),
+          hostIdentity.uid,
+          hostIdentity.gid,
+        );
+      }
+      const adapter = createCiReleaseInfrastructureAdapter({
+        candidateManifestPath: path.join(
+          candidateDir,
+          "candidate-manifest.json",
+        ),
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_RUN_ATTEMPT: "2",
+          GITHUB_RUN_ID: "1234",
+          RUNNER_ARCH: "X64",
+          RUNNER_OS: "Linux",
+        },
+        loadCandidate: async () => ({
+          candidateDir,
+          manifest: {
+            ...candidateManifest(),
+            bootstrapRecipe: {
+              ...candidateManifest().bootstrapRecipe,
+              file,
+              sha256: createHash("sha256").update(recipe).digest("hex"),
+              size: recipe.byteLength,
+            },
+          },
+        }),
+        runProcess: runHostProcess,
+        transferFile: async ({ destination, source }) => {
+          await copyFile(source, destination);
+          if (hostIdentity.uid !== undefined) {
+            await chown(destination, hostIdentity.uid, hostIdentity.gid);
+          }
+        },
+      });
+      const prepared = await adapter.prepare({
+        matrixCell: freshMatrixCell(),
+        runId: "run-bootstrap-symlink",
+      });
+      const provisioned = await prepared.provisionBootstrap({
+        runId: "run-bootstrap-symlink",
+      });
+      stageDir = provisioned.workingDirectory;
+      await execFileAsync("rm", [path.join(stageDir, file)], hostIdentity);
+      await execFileAsync("rmdir", [stageDir], hostIdentity);
+      await execFileAsync("ln", ["-s", externalDir, stageDir], hostIdentity);
+
+      await expect(
+        adapter.release({ runId: "run-bootstrap-symlink" }),
+      ).rejects.toThrow();
+      await expect(readFile(path.join(externalDir, file))).resolves.toEqual(
+        externalRecipe,
+      );
+    } finally {
+      if (stageDir) await rm(stageDir, { force: true });
+      await rm(candidateDir, { force: true, recursive: true });
+      await rm(externalDir, { force: true, recursive: true });
     }
   });
 
