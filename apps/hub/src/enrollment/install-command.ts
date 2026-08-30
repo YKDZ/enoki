@@ -27,6 +27,10 @@ export type InstallCommandResult = {
 };
 
 const probeBootstrapRecipe = "./enoki-probe-bootstrap.py";
+const productionBootstrapAcquirer =
+  "/usr/local/bin/enoki-probe-bootstrap-acquire";
+const productionBootstrapActivator =
+  "/usr/local/bin/enoki-probe-bootstrap-activate";
 const supportedRecipeTargets = [
   "aarch64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",
@@ -120,6 +124,7 @@ export function renderInstallCommand(
   input: InstallCommandInput,
 ): InstallCommandResult {
   const hubUrl = config.probeApiOrigin ?? "http://localhost";
+  const bootstrapRecipe = config.bootstrapRecipe ?? developmentRecipeRecord;
   const enrollmentInput = input.replacementMigration
     ? JSON.stringify({
         hubOrigin: hubUrl,
@@ -129,19 +134,30 @@ export function renderInstallCommand(
       })
     : input.enrollmentToken;
   return {
-    bootstrapRecipe: config.bootstrapRecipe ?? developmentRecipeRecord,
+    bootstrapRecipe,
     hubUrl,
-    installCommand: [
-      "printf",
-      "'%s\\n'",
-      shellQuote(enrollmentInput),
-      "|",
-      "python3",
-      "--",
-      probeBootstrapRecipe,
-      "--hub-origin",
-      shellQuote(hubUrl),
-    ].join(" "),
+    installCommand:
+      bootstrapRecipe.distribution === "enoki"
+        ? [
+            `ENOKI_HUB_URL=${shellQuote(hubUrl)}`,
+            `ENOKI_ENROLLMENT_TOKEN=${shellQuote(enrollmentInput)}`,
+            productionBootstrapAcquirer,
+            "|",
+            "sudo",
+            "--",
+            productionBootstrapActivator,
+          ].join(" ")
+        : [
+            "printf",
+            "'%s\\n'",
+            shellQuote(enrollmentInput),
+            "|",
+            "python3",
+            "--",
+            probeBootstrapRecipe,
+            "--hub-origin",
+            shellQuote(hubUrl),
+          ].join(" "),
   };
 }
 

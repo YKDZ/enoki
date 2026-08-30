@@ -99,9 +99,17 @@ type ReplacementInstallEnrollment = {
 export function installCommandEnrollment(
   command: string,
 ): ReplacementInstallEnrollment {
-  const match = /^printf '%s\\n' '([^']+)' \|/.exec(command);
-  expect(match?.[1]).toBeTruthy();
-  return JSON.parse(match![1]!) as ReplacementInstallEnrollment;
+  const match =
+    /^ENOKI_HUB_URL='((?:[^'\r\n]|'"'"')*)' ENOKI_ENROLLMENT_TOKEN='((?:[^'\r\n]|'"'"')*)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/.exec(
+      command,
+    );
+  expect(match).not.toBeNull();
+  const hubOrigin = match![1]!.replaceAll("'\"'\"'", "'");
+  const enrollment = JSON.parse(
+    match![2]!.replaceAll("'\"'\"'", "'"),
+  ) as ReplacementInstallEnrollment;
+  expect(enrollment.hubOrigin).toBe(hubOrigin);
+  return enrollment;
 }
 
 export function replacementLifecycleRequest(input: {

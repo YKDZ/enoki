@@ -285,9 +285,8 @@ async function readAttemptIdentities(options) {
   let hub = null;
   let probeAssetSet = null;
   let releaseBaseline = null;
+  const trustedRootPublicKeyPem = process.env[options["--root-public-key-env"]];
   try {
-    const trustedRootPublicKeyPem =
-      process.env[options["--root-public-key-env"]];
     if (!trustedRootPublicKeyPem) {
       throw new Error(
         `Probe Distribution Trust Root environment variable ${options["--root-public-key-env"]} is empty`,
@@ -305,14 +304,17 @@ async function readAttemptIdentities(options) {
       options["--release-baseline-dir"],
       {
         candidateVersion: options["--requested-version"],
-        trustedRootPublicKeyPem: process.env[options["--root-public-key-env"]],
+        trustedRootPublicKeyPem,
       },
     );
   } catch (error) {
     errors.push(`Release Baseline identity unavailable: ${error.message}`);
   }
   try {
-    const inspected = await inspectProbeAssetSet(options["--probe-assets-dir"]);
+    const inspected = await inspectProbeAssetSet(
+      options["--probe-assets-dir"],
+      { trustedRootPublicKeyPem },
+    );
     probeAssetSet = {
       directory: "probe-assets",
       files: inspected.files,

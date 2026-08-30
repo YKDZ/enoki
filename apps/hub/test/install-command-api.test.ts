@@ -96,11 +96,26 @@ describe("Owner add-host install command", () => {
       { enrollmentToken: "token'; touch /tmp/injected #" },
     ).installCommand;
 
-    expect(command).toContain("enoki-probe-bootstrap.py");
-    expect(command).toContain("printf '%s\\n'");
+    expect(command).toBe(
+      "printf '%s\\n' 'token'\"'\"'; touch /tmp/injected #' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example/'\"'\"' $(whoami)'",
+    );
     expect(command).not.toContain("/usr/local/bin/enoki-probe-bootstrap");
     expect(command).not.toContain("sudo env");
     expect(command).not.toContain("sudo ENOKI_");
+  });
+
+  it("renders the production recipe as unprivileged acquisition followed by root activation", () => {
+    expect(
+      renderInstallCommand(
+        {
+          bootstrapRecipe,
+          probeApiOrigin: "https://hub.example/' $(whoami)",
+        },
+        { enrollmentToken: "token'; touch /tmp/injected #" },
+      ).installCommand,
+    ).toBe(
+      "ENOKI_HUB_URL='https://hub.example/'\"'\"' $(whoami)' ENOKI_ENROLLMENT_TOKEN='token'\"'\"'; touch /tmp/injected #' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+    );
   });
 
   it("creates a pending NewHost Enrollment with a copyable Probe install command", async () => {
@@ -148,11 +163,12 @@ describe("Owner add-host install command", () => {
     expect(body.expiresAtMs).toBeGreaterThan(Date.now() - 1_000);
     expect(body).not.toHaveProperty("installPath");
     expect(body).not.toHaveProperty("installScriptUrl");
-    expect(body.installCommand).toContain("enoki-probe-bootstrap.py");
-    expect(body.installCommand).toContain(body.enrollmentToken);
-    expect(body.installCommand).not.toContain(
-      "/usr/local/bin/enoki-probe-bootstrap",
+    expect(body.installCommand).toBe(
+      `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`,
     );
+    expect(body.installCommand).not.toContain("sudo env");
+    expect(body.installCommand).not.toContain("curl");
+    expect(body.installCommand).not.toContain("github.com");
     expect(
       database.sqlite
         .prepare("select count(*) as count from managed_hosts")
@@ -283,10 +299,26 @@ describe("Owner add-host install command", () => {
       target: { hostId: number; kind: string };
     };
     expect(body.target).toEqual({ hostId: 7, kind: "manual_reinstall" });
-    expect(body.installCommand).toContain("enoki-probe-bootstrap.py");
-    expect(body.installCommand).toContain(body.enrollmentToken);
-    expect(body.installCommand).not.toContain("&&");
-    expect(body.installCommand).not.toContain(" uninstall");
+    const replacementAuthority = JSON.stringify({
+      hubOrigin: "https://hub.example",
+      enrollmentToken: body.enrollmentToken,
+      replacementMigration: {
+        enrollmentId: body.enrollmentId,
+        expectedProbeId: "probe-old-identity",
+        sourceProbeSha256: release.sourceProbeSha256,
+        sourceProbeVersion: "1.2.2",
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetHostId: "7",
+        targetProbeVersion: "1.2.3",
+      },
+      schemaVersion: 1,
+    });
+    expect(body.installCommand).toBe(
+      `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${replacementAuthority}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`,
+    );
+    expect(body.installCommand).not.toContain("sudo env");
+    expect(body.installCommand).not.toContain("curl");
+    expect(body.installCommand).not.toContain("github.com");
     expect(
       database.enrollments.inspectPending({
         nowMs: Date.now(),

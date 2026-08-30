@@ -1999,6 +1999,7 @@ export function createReleaseVerificationSummary({
     candidateIsAvailable &&
     sameCandidate(request, candidateManifest.candidate) &&
     standardCiIsValid &&
+    evidenceErrors.length === 0 &&
     (!componentResults ||
       requiredComponentNames.every((name) => components[name] === "success")) &&
     normalizedGates.candidateBuild === "success" &&
