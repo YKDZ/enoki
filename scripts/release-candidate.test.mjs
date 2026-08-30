@@ -231,6 +231,33 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       "trusted-tool",
       "node trusted-tool/scripts/release-candidate.mjs validate candidate",
     );
+
+    const candidateInputJob = candidateWorkflow.slice(
+      candidateWorkflow.indexOf("  validate-candidate-inputs:"),
+      candidateWorkflow.indexOf("  validate-release-configuration:"),
+    );
+    const checkout = "Checkout exact candidate commit";
+    const bind =
+      "Bind exact candidate checkout before candidate-controlled setup";
+    const candidateSetup = "setup-release-workspace-dependencies";
+    const candidateNode =
+      "node candidate-source/scripts/release-candidate.mjs validate-inputs";
+    expect(candidateInputJob).toContain(bind);
+    expect(candidateInputJob).toContain(
+      'test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_COMMIT"',
+    );
+    expect(candidateInputJob).toContain(
+      'test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"',
+    );
+    expect(candidateInputJob.indexOf(checkout)).toBeLessThan(
+      candidateInputJob.indexOf(bind),
+    );
+    expect(candidateInputJob.indexOf(bind)).toBeLessThan(
+      candidateInputJob.indexOf(candidateSetup),
+    );
+    expect(candidateInputJob.indexOf(candidateSetup)).toBeLessThan(
+      candidateInputJob.indexOf(candidateNode),
+    );
   });
 
   it("reuses one strong in-memory test identity per slot while separating slots", () => {

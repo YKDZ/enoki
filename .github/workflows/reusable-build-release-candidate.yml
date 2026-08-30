@@ -65,19 +65,25 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.commit }}
 
+      - name: Bind exact candidate checkout before candidate-controlled setup
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
+        run: |
+          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
+          test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+
       - name: Set up candidate workspace dependencies
         uses: ./candidate-source/.github/actions/setup-release-workspace-dependencies
         with:
           working-directory: candidate-source
 
-      - name: Bind candidate source and release policy to one revision
+      - name: Validate candidate source inputs after trusted binding
         env:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
           CANDIDATE_VERSION: ${{ inputs.version }}
-          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
         run: >-
-          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
-          && node candidate-source/scripts/release-candidate.mjs validate-inputs
+          node candidate-source/scripts/release-candidate.mjs validate-inputs
           --commit "$CANDIDATE_COMMIT"
           --version "$CANDIDATE_VERSION"
           --source-dir candidate-source
