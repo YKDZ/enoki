@@ -860,6 +860,51 @@ with open(os.devnull, "rb") as input_stream:
     }
   });
 
+  it("packages the optimized native Probe bundle only when its release identity is retained", async () => {
+    const targetDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-native-probe-target-"),
+    );
+    const outputDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-native-probe-dist-"),
+    );
+    const target = "x86_64-unknown-linux-gnu";
+    const version = "v1.2.3";
+
+    try {
+      await execFileAsync(
+        "cargo",
+        ["build", "-p", "enoki-probe", "--release", "--target", target],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            CARGO_TARGET_DIR: targetDir,
+            ENOKI_PROBE_VERSION: version,
+          },
+        },
+      );
+
+      await expect(
+        runCandidateCli([
+          "package-probe",
+          "--binary",
+          path.join(targetDir, target, "release", "enoki-probe"),
+          "--output-dir",
+          outputDir,
+          "--source-date-epoch",
+          "0",
+          "--target",
+          target,
+          "--version",
+          version,
+        ]),
+      ).resolves.toMatchObject({ stderr: "" });
+    } finally {
+      await rm(targetDir, { force: true, recursive: true });
+      await rm(outputDir, { force: true, recursive: true });
+    }
+  }, 60_000);
+
   it("pins release toolchain and base inputs while normalizing build metadata", async () => {
     const [
       toolchain,
