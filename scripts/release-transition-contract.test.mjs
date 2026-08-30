@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, sign } from "node:crypto";
+import { renameSync } from "node:fs";
 import {
   chmod,
   mkdtemp,
@@ -21,12 +22,25 @@ import {
 } from "@enoki/probe-release";
 import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const execFileAsync = promisify(execFile);
+const archiveSwap = vi.hoisted(() => ({ replace: null }));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    spawn(...args) {
+      archiveSwap.replace?.();
+      archiveSwap.replace = null;
+      return original.spawn(...args);
+    },
+  };
+});
 
 describe("Trust Epoch release transition", () => {
   let fixture;
@@ -59,6 +73,92 @@ describe("Trust Epoch release transition", () => {
     expect(signed.contract.target.probeComponents).toEqual(
       fixture.targetProbeComponents,
     );
+  });
+
+  it("rejects an arbitrary target signer that re-signs a manifest claiming the delegated key id", async () => {
+    const local = await transitionFixture();
+    const attacker = rsa4096TestKeyPair("transition-attacker");
+    try {
+      const manifestPath = path.join(
+        local.createInput.targetAssetDir,
+        "manifest.json",
+      );
+      const manifest = await readFile(manifestPath);
+      await Promise.all([
+        writeFile(
+          path.join(local.createInput.targetAssetDir, "signing-key.pem"),
+          attacker.publicKey,
+        ),
+        writeFile(
+          path.join(local.createInput.targetAssetDir, "manifest.json.sig"),
+          sign("RSA-SHA256", manifest, attacker.privateKey),
+        ),
+      ]);
+
+      await expect(
+        createReleaseTransitionContract(local.createInput),
+      ).rejects.toThrow("target Probe asset closure is invalid");
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it("keeps target receipts bound to verified archive bytes when the archive path is atomically replaced", async () => {
+    const local = await transitionFixture();
+    const archiveName = "enoki-probe-aarch64-unknown-linux-gnu.tar.gz";
+    const archivePath = path.join(
+      local.createInput.targetAssetDir,
+      archiveName,
+    );
+    const contents = await mkdtemp(
+      path.join(tmpdir(), "enoki-release-transition-toctou-"),
+    );
+    const replacementPath = path.join(contents, "replacement.tar.gz");
+    try {
+      await execFileAsync("tar", [
+        "--extract",
+        "--gzip",
+        "--file",
+        archivePath,
+        "--directory",
+        contents,
+      ]);
+      const replacementProbe = Buffer.concat([
+        await readFile(path.join(contents, "enoki-probe")),
+        Buffer.from("replacement payload"),
+      ]);
+      const replacementManifest = JSON.parse(
+        await readFile(path.join(contents, "bundle-manifest.json")),
+      );
+      replacementManifest.components[0].sha256 = sha256(replacementProbe);
+      await Promise.all([
+        writeFile(path.join(contents, "enoki-probe"), replacementProbe),
+        writeFile(
+          path.join(contents, "bundle-manifest.json"),
+          `${JSON.stringify(replacementManifest)}\n`,
+        ),
+      ]);
+      await execFileAsync("tar", [
+        "--create",
+        "--gzip",
+        "--file",
+        replacementPath,
+        "--directory",
+        contents,
+        "bundle-manifest.json",
+        "enoki-probe",
+      ]);
+      archiveSwap.replace = () => renameSync(replacementPath, archivePath);
+
+      const signed = await createReleaseTransitionContract(local.createInput);
+      expect(signed.contract.target.probeComponents).toEqual(
+        local.targetProbeComponents,
+      );
+    } finally {
+      archiveSwap.replace = null;
+      await rm(contents, { force: true, recursive: true });
+      await local.cleanup();
+    }
   });
 
   it("requires the authenticated source release asset closure", async () => {

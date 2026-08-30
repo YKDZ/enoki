@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   createHash,
   createPrivateKey,
@@ -47,6 +47,8 @@ export async function createReleaseTransitionContract(input) {
   const target = await inspectTargetProbeAssetSet(input.targetAssetDir, {
     delegationBytes: input.delegationBytes,
     delegationSignature: input.delegationSignature,
+    delegationSigningKeyId: delegation.signingIdentity.keyId,
+    delegationSigningPublicKeyPem: delegation.signingIdentity.publicKeyPem,
     rootPublicKeyPem: input.rootPublicKeyPem,
     targetVersion: input.targetVersion,
   });
@@ -164,18 +166,27 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
     readFile(path.join(assetDir, "trust-delegation.json.sig")),
   ]);
   const root = canonicalPublicKey(createPublicKey(input.rootPublicKeyPem));
+  const expectedSigningKey = canonicalPublicKey(
+    createPublicKey(input.delegationSigningPublicKeyPem),
+  );
+  const actualSigningKey = canonicalPublicKey(createPublicKey(signingKey));
   if (
     !canonicalPublicKey(createPublicKey(rootKey)).equals(root) ||
+    !actualSigningKey.equals(expectedSigningKey) ||
+    sha256(actualSigningKey) !== input.delegationSigningKeyId ||
     !delegationBytes.equals(Buffer.from(input.delegationBytes)) ||
     !delegationSignature.equals(Buffer.from(input.delegationSignature)) ||
-    !verify("RSA-SHA256", manifestBytes, signingKey, manifestSignature)
+    !verify("RSA-SHA256", manifestBytes, actualSigningKey, manifestSignature)
   ) {
     throw new Error(
       "Release Transition Contract target Probe asset closure is invalid",
     );
   }
   const target = parseTargetManifest(manifestBytes);
-  if (target.version !== input.targetVersion) {
+  if (
+    target.version !== input.targetVersion ||
+    target.signingKeyId !== input.delegationSigningKeyId
+  ) {
     throw new Error("Release Transition Contract target does not match");
   }
   const probeComponents = [];
@@ -202,8 +213,8 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
       );
     }
     const [probe, bundleManifest] = await Promise.all([
-      tarMember(archivePath, "enoki-probe"),
-      tarMember(archivePath, "bundle-manifest.json"),
+      tarMember(archive, "enoki-probe"),
+      tarMember(archive, "bundle-manifest.json"),
     ]);
     if (sha256(bundleManifest) !== asset.bundleManifestSha256) {
       throw new Error(
@@ -250,19 +261,46 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
   };
 }
 
-async function tarMember(archivePath, member) {
-  try {
-    const { stdout } = await execFileAsync(
+function tarMember(archive, member) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
       "tar",
-      ["--extract", "--gzip", "--file", archivePath, "--to-stdout", member],
-      { encoding: "buffer", maxBuffer: 64 * 1024 * 1024 },
+      ["--extract", "--gzip", "--file", "-", "--to-stdout", member],
+      { stdio: ["pipe", "pipe", "ignore"] },
     );
-    return Buffer.from(stdout);
-  } catch {
-    throw new Error(
-      "Release Transition Contract target Probe asset closure is invalid",
-    );
-  }
+    const chunks = [];
+    let outputSize = 0;
+    let failed = false;
+    const fail = () => {
+      if (failed) return;
+      failed = true;
+      child.kill();
+      reject(
+        new Error(
+          "Release Transition Contract target Probe asset closure is invalid",
+        ),
+      );
+    };
+    child.once("error", fail);
+    child.stdout.on("data", (chunk) => {
+      outputSize += chunk.length;
+      if (outputSize > 64 * 1024 * 1024) {
+        fail();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.once("close", (code) => {
+      if (failed) return;
+      if (code !== 0) {
+        fail();
+        return;
+      }
+      resolve(Buffer.concat(chunks));
+    });
+    child.stdin.once("error", fail);
+    child.stdin.end(archive);
+  });
 }
 
 export function verifyReleaseTransitionContract({
