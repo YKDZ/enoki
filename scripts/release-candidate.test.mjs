@@ -2676,7 +2676,8 @@ async function writeOrdinaryTransitionContract({
       assetClosure: manifest.assets,
       assetSetManifestSha256: sha256(manifestBytes),
       delegationGeneration: manifest.signature.delegationGeneration,
-      probeComponents: await targetProbeComponentsFromAssetSet(probeAssetSetDir),
+      probeComponents:
+        await targetProbeComponentsFromAssetSet(probeAssetSetDir),
       signingKeyId: manifest.signature.delegationKeyId,
       version: manifest.version,
     },

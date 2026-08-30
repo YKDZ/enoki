@@ -1485,11 +1485,12 @@ export async function inspectProbeAssetSet(
       !Array.isArray(releaseTransition.target?.probeComponents) ||
       releaseTransition.target.probeComponents.length !==
         targetProbeComponents.length ||
-      releaseTransition.target.probeComponents.some((component, index) =>
-        component?.file !== "enoki-probe" ||
-        component?.role !== "probe" ||
-        component?.target !== targetProbeComponents[index]?.target ||
-        component?.sha256 !== targetProbeComponents[index]?.sha256,
+      releaseTransition.target.probeComponents.some(
+        (component, index) =>
+          component?.file !== "enoki-probe" ||
+          component?.role !== "probe" ||
+          component?.target !== targetProbeComponents[index]?.target ||
+          component?.sha256 !== targetProbeComponents[index]?.sha256,
       )
     ) {
       throw new Error(

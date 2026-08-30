@@ -1,6 +1,6 @@
+import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
-import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
 import { createAuditRepository } from "./audit.js";
@@ -178,10 +178,7 @@ export function createEnrollmentRepository(
             eq(enrollmentTokens.rejectionCode, "probe_startup_timeout"),
           ),
         )
-        .orderBy(
-          desc(enrollmentTokens.rejectedAtMs),
-          desc(enrollmentTokens.id),
-        )
+        .orderBy(desc(enrollmentTokens.rejectedAtMs), desc(enrollmentTokens.id))
         .limit(1)
         .get();
       if (
@@ -731,11 +728,11 @@ export function createEnrollmentRepository(
                 : null,
             replacementPredecessorEnrollmentId:
               input.target.kind === "manual_reinstall"
-                ? input.target.replacementPredecessorEnrollmentId ?? null
+                ? (input.target.replacementPredecessorEnrollmentId ?? null)
                 : null,
             replacementPredecessorAssetSetDigest:
               input.target.kind === "manual_reinstall"
-                ? input.target.replacementPredecessorAssetSetDigest ?? null
+                ? (input.target.replacementPredecessorAssetSetDigest ?? null)
                 : null,
             targetKind: input.target.kind,
             tokenHash: input.tokenHash,
