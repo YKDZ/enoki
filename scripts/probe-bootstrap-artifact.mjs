@@ -5,7 +5,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   rm,
   writeFile,
@@ -14,6 +13,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { inflateRawSync } from "node:zlib";
+
+import { readRegularFileSnapshot } from "@enoki/probe-release";
 
 const execFileAsync = promisify(execFile);
 const identityMagic = Buffer.from("ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0");
@@ -89,7 +90,10 @@ async function inspectProbeBootstrapArchiveInput({
   if (typeof archivePath !== "string") {
     throw new Error("Probe Bootstrap archive path is invalid");
   }
-  const archive = await readBoundedArchive(archivePath);
+  const archive = await readProbeBootstrapArchiveSnapshot(
+    archivePath,
+    expectedArchive,
+  );
   return inspectProbeBootstrapArchiveBytes({
     archive,
     distribution,
@@ -149,12 +153,8 @@ async function inspectProbeBootstrapArchiveBytes({
 
 function assertExpectedArchive(archive, expectedArchive) {
   if (expectedArchive === undefined) return;
+  validateExpectedArchive(expectedArchive);
   if (
-    !isPlainObject(expectedArchive) ||
-    Object.keys(expectedArchive).sort().join(",") !== "sha256,size" ||
-    !/^[0-9a-f]{64}$/.test(expectedArchive.sha256 ?? "") ||
-    !Number.isSafeInteger(expectedArchive.size) ||
-    expectedArchive.size <= 0 ||
     archive.byteLength !== expectedArchive.size ||
     sha256(archive) !== expectedArchive.sha256
   ) {
@@ -171,13 +171,11 @@ export async function withVerifiedProbeBootstrapArchive(input, callback) {
   if (typeof input?.archivePath !== "string") {
     throw new Error("Probe Bootstrap archive path is invalid");
   }
-  if (input.expectedArchive === undefined) {
-    throw new Error(
-      "Probe Bootstrap archive snapshot requires expected release bytes",
-    );
-  }
-  const archive = await readBoundedArchive(input.archivePath);
-  assertExpectedArchive(archive, input.expectedArchive);
+  const expectedArchive = validateExpectedArchive(input.expectedArchive, true);
+  const archive = await readProbeBootstrapArchiveSnapshot(
+    input.archivePath,
+    expectedArchive,
+  );
   return withPrivateProbeBootstrapArchive(archive, callback);
 }
 
@@ -265,25 +263,67 @@ async function withVerifiedProbeBootstrapArtifactInspection(
   );
 }
 
-async function readBoundedArchive(archivePath) {
-  const handle = await open(archivePath, "r");
+async function readProbeBootstrapArchiveSnapshot(archivePath, expectedArchive) {
+  const expected = validateExpectedArchive(expectedArchive);
+  const expectedSize =
+    expected?.size ?? (await boundedArchiveSize(archivePath));
+  const { bytes } = await readRegularFileSnapshot(
+    archivePath,
+    "Probe Bootstrap archive",
+    {
+      expectedSize,
+      maximumSize: probeBootstrapArchiveMaximumBytes,
+    },
+  );
+  assertExpectedArchive(bytes, expected);
+  return bytes;
+}
+
+async function boundedArchiveSize(archivePath) {
+  let details;
   try {
-    const details = await handle.stat();
-    if (
-      !details.isFile() ||
-      details.size <= 0 ||
-      details.size > probeBootstrapArchiveMaximumBytes
-    ) {
-      throw new Error("Probe Bootstrap archive size is invalid");
-    }
-    const archive = await handle.readFile();
-    if (archive.byteLength !== details.size) {
-      throw new Error("Probe Bootstrap archive changed while being read");
-    }
-    return archive;
-  } finally {
-    await handle.close();
+    details = await lstat(archivePath, { bigint: true });
+  } catch {
+    throw new Error(
+      "Probe Bootstrap archive must be a regular non-symbolic-link file",
+    );
   }
+  if (!details.isFile() || details.isSymbolicLink() || details.nlink > 1n) {
+    throw new Error(
+      "Probe Bootstrap archive must be a regular single-link file",
+    );
+  }
+  if (
+    details.size <= 0n ||
+    details.size > BigInt(probeBootstrapArchiveMaximumBytes)
+  ) {
+    throw new Error("Probe Bootstrap archive size is invalid");
+  }
+  return Number(details.size);
+}
+
+function validateExpectedArchive(expectedArchive, required = false) {
+  if (expectedArchive === undefined) {
+    if (required) {
+      throw new Error(
+        "Probe Bootstrap archive snapshot requires expected release bytes",
+      );
+    }
+    return undefined;
+  }
+  if (
+    !isPlainObject(expectedArchive) ||
+    Object.keys(expectedArchive).sort().join(",") !== "sha256,size" ||
+    !/^[0-9a-f]{64}$/.test(expectedArchive.sha256 ?? "") ||
+    !Number.isSafeInteger(expectedArchive.size) ||
+    expectedArchive.size <= 0 ||
+    expectedArchive.size > probeBootstrapArchiveMaximumBytes
+  ) {
+    throw new Error(
+      "Probe Bootstrap archive does not match the expected release bytes",
+    );
+  }
+  return expectedArchive;
 }
 
 function parseExactProbeBootstrapArchive(archive) {
