@@ -723,8 +723,6 @@ describe("Probe registration API", () => {
       installCommand: string;
     };
     const { enrollmentId, enrollmentToken } = enrollmentCommand;
-    expect(enrollmentCommand.installCommand).toContain(enrollmentToken);
-    expect(enrollmentCommand.installCommand).not.toContain("&&");
     expect(installCommandEnrollment(enrollmentCommand.installCommand)).toEqual({
       enrollmentToken,
       hubOrigin: "https://hub.example",
@@ -3586,7 +3584,13 @@ describe("Probe registration API", () => {
 });
 
 function installCommandEnrollment(command: string): unknown {
-  const match = /^printf '%s\\n' '([^']+)' \|/.exec(command);
-  expect(match?.[1]).toBeTruthy();
-  return JSON.parse(match![1]!);
+  const match =
+    /^ENOKI_HUB_URL='((?:[^'\r\n]|'"'"')*)' ENOKI_ENROLLMENT_TOKEN='((?:[^'\r\n]|'"'"')*)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/.exec(
+      command,
+    );
+  expect(match).not.toBeNull();
+  const hubOrigin = match![1]!.replaceAll("'\"'\"'", "'");
+  const enrollment: unknown = JSON.parse(match![2]!.replaceAll("'\"'\"'", "'"));
+  expect((enrollment as { hubOrigin?: unknown }).hubOrigin).toBe(hubOrigin);
+  return enrollment;
 }
