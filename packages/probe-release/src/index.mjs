@@ -2,6 +2,7 @@ export {
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
+  inspectProbeBundleArchiveBytes,
 } from "./probe-asset-bundle.mjs";
 export {
   inspectLegacyProbeAssetSet,

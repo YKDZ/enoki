@@ -296,6 +296,7 @@ export function createEnrollmentRepository(
           pending.replacementPredecessorAssetSetDigest !== null ||
           pending.targetBundlesJson !== null ||
           !sourceProbeSha256 ||
+          !validLegacyOrdinaryImmutableFields(pending, sourceProbeSha256) ||
           !host ||
           host.probeId !== pending.expectedProbeId ||
           host.probeVersion !== pending.expectedProbeVersion ||
@@ -407,7 +408,12 @@ export function createEnrollmentRepository(
         const sourceProbeSha256 = parseSourceProbeSha256(
           pending.sourceProbeSha256Json,
         );
-        if (!sourceProbeSha256) return { kind: "invalid" };
+        if (
+          !sourceProbeSha256 ||
+          !validManualImmutableFields(pending, sourceProbeSha256)
+        ) {
+          return { kind: "invalid" };
+        }
         if (
           pending.targetBundlesJson === null &&
           pending.replacementPredecessorEnrollmentId === null &&
@@ -1277,6 +1283,64 @@ export function createEnrollmentRepository(
       });
     },
   };
+}
+
+function validManualImmutableFields(
+  pending: {
+    enrollmentId: string | null;
+    expectedHubOrigin: string | null;
+    expectedProbeId: string | null;
+    expectedProbeVersion: string | null;
+    targetAssetSetDigest: string | null;
+    targetProbeVersion: string | null;
+  },
+  sourceProbeSha256: string[],
+) {
+  return (
+    validEnrollmentId(pending.enrollmentId) &&
+    validHubOrigin(pending.expectedHubOrigin) &&
+    validProbeId(pending.expectedProbeId) &&
+    validSemver(pending.expectedProbeVersion) &&
+    /^sha256:[0-9a-f]{64}$/.test(pending.targetAssetSetDigest ?? "") &&
+    validSemver(pending.targetProbeVersion) &&
+    sourceProbeSha256.length === probeTargets.length
+  );
+}
+
+function validLegacyOrdinaryImmutableFields(
+  pending: {
+    enrollmentId: string | null;
+    expectedHubOrigin: string | null;
+    expectedProbeId: string | null;
+    expectedProbeVersion: string | null;
+    targetAssetSetDigest: string | null;
+    targetProbeVersion: string | null;
+  },
+  sourceProbeSha256: string[],
+) {
+  return validManualImmutableFields(pending, sourceProbeSha256);
+}
+
+function validHubOrigin(value: string | null) {
+  try {
+    const url = new URL(value ?? "");
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.origin === value &&
+      !url.username &&
+      !url.password
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validProbeId(value: string | null) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
+function validSemver(value: string | null) {
+  return /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value ?? "");
 }
 
 function parseSourceProbeSha256(value: string) {

@@ -46,6 +46,10 @@ export async function createReleaseTransitionContract(input) {
     delegationSignature: input.delegationSignature,
     delegationSigningKeyId: delegation.signingIdentity.keyId,
     delegationSigningPublicKeyPem: delegation.signingIdentity.publicKeyPem,
+    bundledBootstrap: {
+      distribution: authorization.distribution,
+      rootKeyId: authorization.rootKeyId,
+    },
     rootPublicKeyPem: input.rootPublicKeyPem,
     targetVersion: input.targetVersion,
   });
@@ -210,6 +214,7 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
       );
     }
     const inspectedBundle = await inspectProbeBundleArchiveBytes(archive, {
+      bundledBootstrap: input.bundledBootstrap,
       target: targetName,
       version: `v${target.version}`,
     });

@@ -38,6 +38,15 @@ export const probeBundleComponentProfiles: Readonly<
 >;
 export const probeBundledBootstrapAssets: readonly ProbeBundledBootstrapAsset[];
 export const probeTargets: readonly string[];
+export function inspectProbeBundleArchiveBytes(
+  archive: Buffer,
+  input: {
+    bundledBootstrap?: { distribution: string; rootKeyId: string };
+    requireEmbeddedProbeIdentity?: boolean;
+    target: string;
+    version: string;
+  },
+): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
 
 export function canonicalPublicKeyPem(value: string | Buffer): Buffer;
 export function createProbeTrustDelegation(input: {

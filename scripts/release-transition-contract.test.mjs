@@ -17,6 +17,7 @@ import { promisify } from "node:util";
 import {
   createReleaseTransitionContract,
   createProbeTrustDelegation,
+  probeBundledBootstrapAssets,
   preflightReleaseMigrationConfiguration,
   probeBundleComponentProfiles,
   releaseTransitionContractSigningInput,
@@ -31,6 +32,20 @@ import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const execFileAsync = promisify(execFile);
 const archiveSwap = vi.hoisted(() => ({ replace: null }));
+const sourceArchiveSwap = vi.hoisted(() => ({ replace: null }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const original = await importOriginal();
+  return {
+    ...original,
+    async open(...args) {
+      const handle = await original.open(...args);
+      sourceArchiveSwap.replace?.(String(args[0]));
+      sourceArchiveSwap.replace = null;
+      return handle;
+    },
+  };
+});
 
 vi.mock("node:child_process", async (importOriginal) => {
   const original = await importOriginal();
@@ -196,6 +211,51 @@ describe("Trust Epoch release transition", () => {
     }
   });
 
+  it("rejects a non-regular legacy source archive before deriving its receipt", async () => {
+    const local = await transitionFixture();
+    const sourceArchive = path.join(
+      local.createInput.sourceAssetDir,
+      "enoki-probe-aarch64-unknown-linux-gnu.tar.gz",
+    );
+    try {
+      await rm(sourceArchive);
+      await mkdir(sourceArchive);
+
+      await expect(
+        createReleaseTransitionContract(local.createInput),
+      ).rejects.toThrow("legacy Probe Asset Set archive does not match");
+    } finally {
+      await local.cleanup();
+    }
+  });
+
+  it("keeps source receipts bound to the opened regular-file snapshot when its path is replaced", async () => {
+    const local = await transitionFixture();
+    const archivePath = path.join(
+      local.createInput.sourceAssetDir,
+      "enoki-probe-aarch64-unknown-linux-gnu.tar.gz",
+    );
+    const replacementDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-legacy-source-snapshot-"),
+    );
+    const replacement = path.join(replacementDir, "replacement.tar.gz");
+    try {
+      await writeFile(replacement, Buffer.from("untrusted replacement"));
+      sourceArchiveSwap.replace = (openedPath) => {
+        if (openedPath === archivePath) renameSync(replacement, archivePath);
+      };
+
+      const signed = await createReleaseTransitionContract(local.createInput);
+      expect(signed.contract.source.probeComponents).toEqual(
+        local.sourceProbeComponents,
+      );
+    } finally {
+      sourceArchiveSwap.replace = null;
+      await rm(replacementDir, { force: true, recursive: true });
+      await local.cleanup();
+    }
+  });
+
   it("rejects a re-signed outer target whose archive payload disagrees with its inner receipt before signing", async () => {
     const local = await transitionFixture();
     const archiveName = "enoki-probe-aarch64-unknown-linux-gnu.tar.gz";
@@ -256,6 +316,23 @@ describe("Trust Epoch release transition", () => {
       ).rejects.toThrow("Probe bundle archive closure is invalid");
     } finally {
       await rm(contents, { force: true, recursive: true });
+      await local.cleanup();
+    }
+  });
+
+  it("rejects a self-consistent target archive whose bundled Bootstrap identity has the wrong trust root before signing", async () => {
+    const local = await transitionFixture();
+    try {
+      await replaceTargetArchiveWithBootstrap(local, {
+        rootKeyId: "f".repeat(64),
+      });
+
+      await expect(
+        createReleaseTransitionContract(local.createInput),
+      ).rejects.toThrow(
+        "Probe Bootstrap embedded build identity does not match",
+      );
+    } finally {
       await local.cleanup();
     }
   });
@@ -774,6 +851,97 @@ async function createVerifiedTargetAssetSet({
   };
 }
 
+async function replaceTargetArchiveWithBootstrap(local, { rootKeyId }) {
+  const target = "aarch64-unknown-linux-gnu";
+  const archiveName = `enoki-probe-${target}.tar.gz`;
+  const archivePath = path.join(local.createInput.targetAssetDir, archiveName);
+  const contents = await mkdtemp(
+    path.join(tmpdir(), "enoki-transition-bootstrap-"),
+  );
+  try {
+    await execFileAsync("tar", [
+      "--extract",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+    ]);
+    const bundleManifestPath = path.join(contents, "bundle-manifest.json");
+    const bundleManifest = JSON.parse(await readFile(bundleManifestPath));
+    bundleManifest.bootstrapAssets = probeBundledBootstrapAssets.map(
+      (asset) => {
+        const bytes = createBootstrapElf({
+          identity: {
+            distribution: "enoki",
+            role: asset.bootstrapBuildRole,
+            rootFingerprint: rootKeyId,
+            rootKeyId,
+            target,
+            version: "v1.2.3",
+          },
+          target,
+        });
+        const destination = path.join(contents, asset.archivePath);
+        return { asset, bytes, destination };
+      },
+    );
+    for (const { bytes, destination } of bundleManifest.bootstrapAssets) {
+      await mkdir(path.dirname(destination), { recursive: true });
+      await writeFile(destination, bytes, { mode: 0o755 });
+      await chmod(destination, 0o755);
+    }
+    bundleManifest.bootstrapAssets = bundleManifest.bootstrapAssets.map(
+      ({ asset, bytes }) => ({
+        path: asset.archivePath,
+        permissionProfile: asset.permissionProfile,
+        role: asset.role,
+        sha256: sha256(bytes),
+        size: bytes.byteLength,
+        version: "1.2.3",
+      }),
+    );
+    const bundleManifestBytes = Buffer.from(
+      `${JSON.stringify(bundleManifest)}\n`,
+    );
+    await writeFile(bundleManifestPath, bundleManifestBytes);
+    await execFileAsync("tar", [
+      "--create",
+      "--gzip",
+      "--file",
+      archivePath,
+      "--directory",
+      contents,
+      "bundle-manifest.json",
+      ...Object.values(probeBundleComponentProfiles).map(
+        ({ path: componentPath }) => componentPath,
+      ),
+      ...probeBundledBootstrapAssets.map(({ archivePath: member }) => member),
+    ]);
+    const archive = await readFile(archivePath);
+    const manifestPath = path.join(
+      local.createInput.targetAssetDir,
+      "manifest.json",
+    );
+    const manifest = JSON.parse(await readFile(manifestPath));
+    const asset = manifest.assets.find((entry) => entry.file === archiveName);
+    asset.bundleManifestSha256 = sha256(bundleManifestBytes);
+    asset.sha256 = sha256(archive);
+    asset.size = archive.byteLength;
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
+    await Promise.all([
+      writeFile(manifestPath, manifestBytes),
+      writeFile(
+        path.join(local.createInput.targetAssetDir, "manifest.json.sig"),
+        sign("RSA-SHA256", manifestBytes, local.release.privateKey),
+      ),
+      writeFile(`${archivePath}.sha256`, `${asset.sha256}  ${archiveName}\n`),
+    ]);
+  } finally {
+    await rm(contents, { force: true, recursive: true });
+  }
+}
+
 function createProbeElf({ target, version }) {
   const architecture = target.startsWith("x86_64-") ? 62 : 183;
   const interpreter = target.endsWith("-gnu")
@@ -811,6 +979,58 @@ function createProbeElf({ target, version }) {
   }
   binary.set(markers, headerSize + programHeaderSize + interpreterBytes.length);
   return binary;
+}
+
+function createBootstrapElf({ identity, target }) {
+  const machine = target.startsWith("aarch64-") ? 183 : 62;
+  const names = Buffer.from("\0.shstrtab\0.enoki_bootstrap\0", "utf8");
+  const payload = Buffer.from(JSON.stringify(identity), "utf8");
+  const section = Buffer.concat([
+    Buffer.from("ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0", "utf8"),
+    Buffer.from([
+      (payload.byteLength >>> 24) & 0xff,
+      (payload.byteLength >>> 16) & 0xff,
+      (payload.byteLength >>> 8) & 0xff,
+      payload.byteLength & 0xff,
+    ]),
+    payload,
+  ]);
+  const sectionTableOffset = 64;
+  const identityOffset = sectionTableOffset + 3 * 64;
+  const namesOffset = identityOffset + section.byteLength;
+  const binary = Buffer.alloc(namesOffset + names.byteLength);
+  binary.write("\x7fELF", 0, "binary");
+  binary[4] = 2;
+  binary[5] = 1;
+  binary[6] = 1;
+  binary.writeUInt16LE(machine, 18);
+  binary.writeBigUInt64LE(BigInt(sectionTableOffset), 40);
+  binary.writeUInt16LE(64, 58);
+  binary.writeUInt16LE(3, 60);
+  binary.writeUInt16LE(1, 62);
+  writeElfSection(binary, sectionTableOffset + 64, {
+    nameOffset: 1,
+    offset: namesOffset,
+    size: names.byteLength,
+  });
+  writeElfSection(binary, sectionTableOffset + 128, {
+    nameOffset: 11,
+    offset: identityOffset,
+    size: section.byteLength,
+  });
+  section.copy(binary, identityOffset);
+  names.copy(binary, namesOffset);
+  return binary;
+}
+
+function writeElfSection(
+  binary,
+  offset,
+  { nameOffset, offset: contents, size },
+) {
+  binary.writeUInt32LE(nameOffset, offset);
+  binary.writeBigUInt64LE(BigInt(contents), offset + 24);
+  binary.writeBigUInt64LE(BigInt(size), offset + 32);
 }
 
 function sha256(value) {

@@ -28,6 +28,7 @@ import {
   canonicalPublicKeyPem,
   createProbeTrustDelegation,
   inspectLegacyProbeAssetSet,
+  inspectProbeBundleArchiveBytes,
   inspectProbeElf,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
@@ -1566,133 +1567,35 @@ async function inspectProbeArchive(
   archivePath,
   { bundledBootstrap, requireEmbeddedProbeIdentity = true, target, version },
 ) {
-  const extractionDir = await mkdtemp(
-    path.join(tmpdir(), "enoki-probe-archive-"),
-  );
-
   try {
-    let listing;
-    try {
-      ({ stdout: listing } = await execFileAsync(
-        "tar",
-        ["--list", "--gzip", "--file", archivePath],
-        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-      ));
-    } catch {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} is not a valid gzip/tar archive`,
-      );
-    }
-    const expectedListing = [
-      "bundle-manifest.json",
-      ...Object.values(probeBundleComponentProfiles).map(
-        ({ path: componentPath }) => componentPath,
-      ),
-      ...(bundledBootstrap
-        ? probeBundledBootstrapAssets.map(({ archivePath }) => archivePath)
-        : []),
-    ].join("\n");
-    if (listing !== `${expectedListing}\n`) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} must contain exactly its bundle manifest and enoki-probe payload`,
-      );
-    }
-
-    try {
-      await execFileAsync(
-        "tar",
-        [
-          "--extract",
-          "--gzip",
-          "--file",
-          archivePath,
-          "--directory",
-          extractionDir,
-          "--no-same-owner",
-        ],
-        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-      );
-    } catch {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} is not a valid gzip/tar archive`,
-      );
-    }
-
-    const binaryPath = path.join(extractionDir, "enoki-probe");
-    const details = await lstat(binaryPath);
-    if (!details.isFile()) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} payload must be a regular file`,
-      );
-    }
-    if ((details.mode & 0o111) === 0) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} payload must be executable`,
-      );
-    }
-
-    const manifestPath = path.join(extractionDir, "bundle-manifest.json");
-    const manifestDetails = await lstat(manifestPath);
-    if (!manifestDetails.isFile()) {
-      throw new Error(
-        `Probe archive ${path.basename(archivePath)} bundle manifest must be a regular file`,
-      );
-    }
-    inspectProbeElf(await readFile(binaryPath), {
+    return await inspectProbeBundleArchiveBytes(await readFile(archivePath), {
+      bundledBootstrap,
       requireEmbeddedProbeIdentity,
       target,
       version,
     });
-    if (bundledBootstrap) {
-      for (const asset of probeBundledBootstrapAssets) {
-        const bootstrapPath = path.join(extractionDir, asset.archivePath);
-        const bootstrapDetails = await lstat(bootstrapPath);
-        if (
-          !bootstrapDetails.isFile() ||
-          (bootstrapDetails.mode & 0o111) === 0
-        ) {
-          throw new Error(
-            `Probe archive ${path.basename(archivePath)} bundled Bootstrap asset must be a regular executable file`,
-          );
-        }
-        await inspectProbeBootstrapBinary({
-          binaryPath: bootstrapPath,
-          distribution: bundledBootstrap.distribution,
-          role: asset.bootstrapBuildRole,
-          rootKeyId: bundledBootstrap.rootKeyId,
-          target,
-          version,
-        });
-      }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    const archive = path.basename(archivePath);
+    if (message === "Probe bundle archive is invalid") {
+      throw new Error(
+        `Probe archive ${archive} is not a valid gzip/tar archive`,
+      );
     }
-    const componentDetails = await readProbeBundleComponentDetails(
-      extractionDir,
-      probeBundleComponentProfiles,
-    );
-    const bootstrapDetails = bundledBootstrap
-      ? await readProbeBundleComponentDetails(
-          extractionDir,
-          Object.fromEntries(
-            probeBundledBootstrapAssets.map((asset) => [
-              asset.role,
-              { path: asset.archivePath },
-            ]),
-          ),
-        )
-      : undefined;
-    const bundleManifest = await readFile(manifestPath);
-    validateProbeBundleManifest(bundleManifest, {
-      bootstrapDetails,
-      componentDetails,
-      target,
-      version: version.slice(1),
-    });
-    return {
-      bundleManifestSha256: sha256(bundleManifest),
-      probeSha256: componentDetails.get("enoki-probe")?.sha256,
-    };
-  } finally {
-    await rm(extractionDir, { force: true, recursive: true });
+    if (message === "Probe bundle archive closure is invalid") {
+      throw new Error(
+        `Probe archive ${archive} must contain exactly its bundle manifest and enoki-probe payload`,
+      );
+    }
+    if (message === "Probe bundle manifest is invalid") {
+      throw new Error(
+        `Probe archive ${archive} bundle manifest must be a regular file`,
+      );
+    }
+    if (message === "Probe bundle component is invalid") {
+      throw new Error(`Probe archive ${archive} payload must be executable`);
+    }
+    throw error;
   }
 }
 
@@ -1710,110 +1613,6 @@ async function readProbeBundleComponentDetails(extractionDir, profiles) {
     });
   }
   return detailsByPath;
-}
-
-function validateProbeBundleManifest(
-  bytes,
-  { bootstrapDetails, componentDetails, target, version },
-) {
-  let manifest;
-  try {
-    manifest = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new Error("Probe bundle manifest is malformed");
-  }
-  assertPlainObject(manifest, "Probe bundle manifest");
-  assertExactKeys(
-    manifest,
-    bootstrapDetails
-      ? ["bootstrapAssets", "components", "kind", "target", "version"]
-      : ["components", "kind", "target", "version"],
-  );
-  if (
-    manifest.kind !== "enoki-probe-bundle" ||
-    manifest.target !== target ||
-    manifest.version !== version ||
-    !Array.isArray(manifest.components) ||
-    manifest.components.length !==
-      Object.keys(probeBundleComponentProfiles).length
-  ) {
-    throw new Error("Probe bundle manifest is incoherent");
-  }
-  const expectedRoles = Object.keys(probeBundleComponentProfiles);
-  const byRole = new Map();
-  for (const component of manifest.components) {
-    assertPlainObject(component, "Probe bundle component");
-    assertExactKeys(component, [
-      "path",
-      "permissionProfile",
-      "resourceContract",
-      "role",
-      "sha256",
-      "size",
-      "version",
-    ]);
-    if (typeof component.role !== "string" || byRole.has(component.role)) {
-      throw new Error("Probe bundle component is incoherent");
-    }
-    byRole.set(component.role, component);
-  }
-  for (const role of expectedRoles) {
-    const component = byRole.get(role);
-    const profile = probeBundleComponentProfiles[role];
-    if (
-      !component ||
-      component.path !== profile.path ||
-      component.permissionProfile !== profile.permissionProfile ||
-      component.resourceContract !== profile.resourceContract ||
-      component.sha256 !== componentDetails.get(profile.path)?.sha256 ||
-      !Number.isSafeInteger(component.size) ||
-      component.size <= 0 ||
-      component.size !== componentDetails.get(profile.path)?.size ||
-      component.version !== version
-    ) {
-      throw new Error("Probe bundle component is incoherent");
-    }
-  }
-  if (bootstrapDetails) {
-    if (
-      !Array.isArray(manifest.bootstrapAssets) ||
-      manifest.bootstrapAssets.length !== probeBundledBootstrapAssets.length
-    ) {
-      throw new Error("Probe bundle Bootstrap asset is incoherent");
-    }
-    const byRole = new Map();
-    for (const asset of manifest.bootstrapAssets) {
-      assertPlainObject(asset, "Probe bundle Bootstrap asset");
-      assertExactKeys(asset, [
-        "path",
-        "permissionProfile",
-        "role",
-        "sha256",
-        "size",
-        "version",
-      ]);
-      if (typeof asset.role !== "string" || byRole.has(asset.role)) {
-        throw new Error("Probe bundle Bootstrap asset is incoherent");
-      }
-      byRole.set(asset.role, asset);
-    }
-    for (const expected of probeBundledBootstrapAssets) {
-      const asset = byRole.get(expected.role);
-      const details = bootstrapDetails.get(expected.archivePath);
-      if (
-        !asset ||
-        asset.path !== expected.archivePath ||
-        asset.permissionProfile !== expected.permissionProfile ||
-        asset.sha256 !== details?.sha256 ||
-        !Number.isSafeInteger(asset.size) ||
-        asset.size <= 0 ||
-        asset.size !== details?.size ||
-        asset.version !== version
-      ) {
-        throw new Error("Probe bundle Bootstrap asset is incoherent");
-      }
-    }
-  }
 }
 
 function renderProbeBundleComponentsFromDetails({ componentDetails, version }) {

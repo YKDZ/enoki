@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
+import { constants } from "node:fs";
 import {
   lstat,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -140,18 +142,16 @@ export async function inspectLegacyProbeAssetSet(
       throw new Error(`legacy Probe Asset Set target ${target} is invalid`);
     }
     const archivePath = path.join(assetDir, file);
-    const archiveDetails = await lstat(archivePath);
-    const archive = await readFile(archivePath);
+    const archive = await readRegularFileSnapshot(archivePath);
     const authorizedAsset = expectedAssets.find(
       (expected) => expected.name === file,
     );
     if (
-      !archiveDetails.isFile() ||
-      archiveDetails.size !== asset.size ||
-      sha256(archive) !== asset.sha256 ||
+      archive.size !== asset.size ||
+      sha256(archive.bytes) !== asset.sha256 ||
       !authorizedAsset ||
-      archiveDetails.size !== authorizedAsset.size ||
-      sha256(archive) !== authorizedAsset.sha256
+      archive.size !== authorizedAsset.size ||
+      sha256(archive.bytes) !== authorizedAsset.sha256
     ) {
       throw new Error(`legacy Probe Asset Set archive does not match ${file}`);
     }
@@ -164,7 +164,7 @@ export async function inspectLegacyProbeAssetSet(
     probeComponents.push({
       file: "enoki-probe",
       role: "probe",
-      sha256: await inspectLegacyProbeArchive(archive, {
+      sha256: await inspectLegacyProbeArchive(archive.bytes, {
         archiveName: file,
         target,
         version: `v${manifest.version}`,
@@ -184,6 +184,28 @@ export async function inspectLegacyProbeAssetSet(
     probeComponents,
     version: manifest.version,
   };
+}
+
+async function readRegularFileSnapshot(filePath) {
+  let handle;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw new Error("legacy Probe Asset Set archive does not match");
+  }
+  try {
+    const details = await handle.stat();
+    if (!details.isFile()) {
+      throw new Error("legacy Probe Asset Set archive does not match");
+    }
+    const bytes = await handle.readFile();
+    if (bytes.byteLength !== details.size) {
+      throw new Error("legacy Probe Asset Set archive changed while reading");
+    }
+    return { bytes, size: details.size };
+  } finally {
+    await handle.close();
+  }
 }
 
 async function inspectLegacyProbeArchive(

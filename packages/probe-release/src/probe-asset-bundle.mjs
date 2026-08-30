@@ -69,7 +69,7 @@ export const probeTargets = Object.freeze([
 
 export async function inspectProbeBundleArchiveBytes(
   archive,
-  { target, version },
+  { bundledBootstrap, requireEmbeddedProbeIdentity = true, target, version },
 ) {
   const extractionDir = await mkdtemp(
     path.join(tmpdir(), "enoki-probe-bundle-"),
@@ -129,7 +129,7 @@ export async function inspectProbeBundleArchiveBytes(
         throw new Error("Probe bundle component is invalid");
       }
       const bytes = await readFile(componentPath);
-      inspectProbeElf(bytes, { target, version });
+      inspectProbeElf(bytes, { requireEmbeddedProbeIdentity, target, version });
       componentDetails.set(role, {
         sha256: sha256(bytes),
         size: bytes.byteLength,
@@ -144,6 +144,16 @@ export async function inspectProbeBundleArchiveBytes(
           throw new Error("Probe bundle Bootstrap asset is invalid");
         }
         const bytes = await readFile(assetPath);
+        if (!bundledBootstrap) {
+          throw new Error("Probe bundle Bootstrap authority is unavailable");
+        }
+        inspectProbeBootstrapIdentity(bytes, {
+          distribution: bundledBootstrap.distribution,
+          role: asset.bootstrapBuildRole,
+          rootKeyId: bundledBootstrap.rootKeyId,
+          target,
+          version,
+        });
         bootstrapDetails.set(asset.role, {
           sha256: sha256(bytes),
           size: bytes.byteLength,
@@ -169,6 +179,112 @@ export async function inspectProbeBundleArchiveBytes(
   } finally {
     await rm(extractionDir, { force: true, recursive: true });
   }
+}
+
+const bootstrapIdentityMagic = Buffer.from(
+  "ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0",
+);
+
+function inspectProbeBootstrapIdentity(bytes, expected) {
+  const section = bootstrapElfSection(bytes, expected.target);
+  if (section.byteLength < bootstrapIdentityMagic.byteLength + 4) {
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  }
+  if (
+    !section
+      .subarray(0, bootstrapIdentityMagic.byteLength)
+      .equals(bootstrapIdentityMagic)
+  ) {
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  }
+  const length = section.readUInt32BE(bootstrapIdentityMagic.byteLength);
+  const payloadOffset = bootstrapIdentityMagic.byteLength + 4;
+  if (payloadOffset + length !== section.length) {
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  }
+  let identity;
+  try {
+    identity = JSON.parse(section.subarray(payloadOffset));
+  } catch {
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  }
+  if (
+    !plainObject(identity) ||
+    Object.keys(identity).join(",") !==
+      "distribution,rootFingerprint,rootKeyId,target,version,role" ||
+    !Buffer.from(JSON.stringify(identity)).equals(
+      section.subarray(payloadOffset),
+    ) ||
+    identity.distribution !== expected.distribution ||
+    identity.role !== expected.role ||
+    identity.rootFingerprint !== expected.rootKeyId ||
+    identity.rootKeyId !== expected.rootKeyId ||
+    identity.target !== expected.target ||
+    identity.version !== expected.version
+  ) {
+    throw new Error("Probe Bootstrap embedded build identity does not match");
+  }
+}
+
+function bootstrapElfSection(bytes, target) {
+  const machine = target.startsWith("aarch64-") ? 183 : 62;
+  if (
+    bytes.length < 64 ||
+    !bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) ||
+    bytes[4] !== 2 ||
+    bytes[5] !== 1 ||
+    bytes[6] !== 1 ||
+    bytes.readUInt16LE(18) !== machine
+  )
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  const offset = Number(bytes.readBigUInt64LE(40));
+  const entrySize = bytes.readUInt16LE(58);
+  const count = bytes.readUInt16LE(60);
+  const namesIndex = bytes.readUInt16LE(62);
+  if (
+    !Number.isSafeInteger(offset) ||
+    entrySize < 64 ||
+    !count ||
+    namesIndex >= count ||
+    offset + entrySize * count > bytes.length
+  ) {
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  }
+  const at = (index) => offset + index * entrySize;
+  const namesHeader = at(namesIndex);
+  const namesOffset = Number(bytes.readBigUInt64LE(namesHeader + 24));
+  const namesSize = Number(bytes.readBigUInt64LE(namesHeader + 32));
+  if (
+    !Number.isSafeInteger(namesOffset) ||
+    !Number.isSafeInteger(namesSize) ||
+    namesOffset + namesSize > bytes.length
+  ) {
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  }
+  const names = bytes.subarray(namesOffset, namesOffset + namesSize);
+  const matches = [];
+  for (let index = 0; index < count; index += 1) {
+    const header = at(index);
+    const nameOffset = bytes.readUInt32LE(header);
+    const end = names.indexOf(0, nameOffset);
+    if (
+      end < 0 ||
+      names.subarray(nameOffset, end).toString("utf8") !== ".enoki_bootstrap"
+    )
+      continue;
+    const contents = Number(bytes.readBigUInt64LE(header + 24));
+    const size = Number(bytes.readBigUInt64LE(header + 32));
+    if (
+      !Number.isSafeInteger(contents) ||
+      !Number.isSafeInteger(size) ||
+      contents + size > bytes.length
+    )
+      throw new Error("Probe Bootstrap embedded build identity is invalid");
+    matches.push(bytes.subarray(contents, contents + size));
+  }
+  if (matches.length !== 1)
+    throw new Error("Probe Bootstrap embedded build identity is invalid");
+  return matches[0];
 }
 
 function validateProbeBundleManifest(
