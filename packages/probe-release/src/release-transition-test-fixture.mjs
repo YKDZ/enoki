@@ -120,6 +120,7 @@ export function createGenericReleaseTransitionContractFixture({
       rootKeyId: sha256(rootPublicKey),
       schemaVersion: 1,
       source: {
+        assetSetManifestSha256: sha256(manifest),
         probeComponents: sourceProbeComponents,
         version: sourceVersion,
       },

@@ -101,6 +101,9 @@ export async function writeSignedProbeAssetSet(
       sourceProbeComponents,
       targetProbeComponents,
     });
+  const contractValue = JSON.parse(contract.bytes.toString("utf8")) as {
+    source: { assetSetManifestSha256: string };
+  };
 
   await Promise.all([
     writeFile(path.join(assetDir, "manifest.json"), manifest),
@@ -156,6 +159,7 @@ export async function writeSignedProbeAssetSet(
     sourceProbeSha256: (
       trustEpoch?.sourceProbeComponents ?? sourceProbeComponents
     ).map(({ sha256 }: { sha256: string }) => sha256),
+    sourceAssetSetDigest: `sha256:${contractValue.source.assetSetManifestSha256}`,
     targetProbeSha256: targetProbeComponents.map(({ sha256 }) => sha256),
   };
 }

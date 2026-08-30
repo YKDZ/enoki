@@ -24,6 +24,7 @@ describe("verified Probe release transition", () => {
       }),
     ).resolves.toEqual({
       classification: "replacement-required",
+      sourceAssetSetDigest: fixture.sourceAssetSetDigest,
       sourceProbeSha256: fixture.sourceProbeSha256,
       sourceProbeVersion: "0.1.74",
       targetProbeSha256: fixture.targetProbeSha256,
@@ -65,6 +66,7 @@ describe("verified Probe release transition", () => {
       }),
     ).resolves.toEqual({
       classification: "compatible",
+      sourceAssetSetDigest: fixture.sourceAssetSetDigest,
       sourceProbeSha256: [5, 6, 7, 8].map((value) => String(value).repeat(64)),
       sourceProbeVersion: "1.3.0",
       targetProbeSha256: fixture.targetProbeSha256,

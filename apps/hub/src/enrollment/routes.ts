@@ -109,6 +109,8 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
         expectedProbeVersion: terminalRecovery.predecessor.targetProbeVersion,
         hostId,
         kind: "manual_reinstall",
+        replacementPredecessorAssetSetDigest:
+          terminalRecovery.predecessor.targetAssetSetDigest,
         replacementPredecessorEnrollmentId: terminalRecovery.predecessor.enrollmentId,
         sourceProbeSha256: terminalRecovery.sourceProbeSha256,
         targetAssetSetDigest: releaseContext.releaseTransition!
@@ -293,10 +295,14 @@ function terminalReplacementRecovery(input: {
   if (!input.predecessor || !input.releaseTransition) return null;
   const sourceProbeSha256 =
     input.predecessor.targetProbeVersion ===
-    input.releaseTransition.targetProbeVersion
+      input.releaseTransition.targetProbeVersion &&
+    input.predecessor.targetAssetSetDigest ===
+      input.releaseTransition.targetAssetSetDigest
       ? input.releaseTransition.targetProbeSha256
       : input.predecessor.targetProbeVersion ===
-          input.releaseTransition.sourceProbeVersion
+            input.releaseTransition.sourceProbeVersion &&
+          input.predecessor.targetAssetSetDigest ===
+            input.releaseTransition.sourceAssetSetDigest
         ? input.releaseTransition.sourceProbeSha256
         : null;
   return sourceProbeSha256?.length === 4

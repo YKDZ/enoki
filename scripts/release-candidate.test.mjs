@@ -2663,6 +2663,7 @@ async function writeOrdinaryTransitionContract({
     rootKeyId: sha256(Buffer.from(root.publicKey)),
     schemaVersion: 1,
     source: {
+      assetSetManifestSha256: "a".repeat(64),
       probeComponents: probeTargets.map((target) => ({
         file: "enoki-probe",
         role: "probe",

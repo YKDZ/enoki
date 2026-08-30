@@ -105,6 +105,11 @@ export function verifiedReleaseTransitionFromMetadata(input: {
     valueAt(contract, "target", "assetClosure"),
   );
   const sourceVersion = stringAt(contract, "source", "version");
+  const sourceAssetSetManifestSha256 = stringAt(
+    contract,
+    "source",
+    "assetSetManifestSha256",
+  );
   const sourceProbeSha256 = sourceProbeComponentDigests(contract);
   const targetProbeSha256 = targetProbeComponentDigests(contract);
   const targetVersion = stringAt(contract, "target", "version");
@@ -165,6 +170,7 @@ export function verifiedReleaseTransitionFromMetadata(input: {
       "transition",
     ]) ||
     !hasExactKeys(valueAt(contract, "source"), [
+      "assetSetManifestSha256",
       "probeComponents",
       "version",
     ]) ||
@@ -201,6 +207,7 @@ export function verifiedReleaseTransitionFromMetadata(input: {
     stringAt(contract, "distribution") !== "enoki" ||
     stringAt(contract, "rootKeyId") !== rootKeyId ||
     !semverPattern.test(sourceVersion ?? "") ||
+    !digestPattern.test(sourceAssetSetManifestSha256 ?? "") ||
     !sourceProbeSha256 ||
     !targetProbeSha256 ||
     !semverPattern.test(targetVersion ?? "") ||
@@ -228,6 +235,7 @@ export function verifiedReleaseTransitionFromMetadata(input: {
   return {
     classification: transition as VerifiedReleaseTransition["classification"],
     sourceProbeVersion: sourceVersion!,
+    sourceAssetSetDigest: `sha256:${sourceAssetSetManifestSha256}`,
     sourceProbeSha256,
     targetProbeSha256,
     targetAssetSetDigest,
@@ -364,6 +372,11 @@ function verifiedTrustEpochMigrationTransition(input: {
   if (!input.authorization || !input.authorizationSignature) return null;
   const authorization = parseCanonicalObject(input.authorization);
   const sourceProbeSha256 = sourceProbeComponentDigests(input.contract);
+  const sourceAssetSetManifestSha256 = stringAt(
+    input.contract,
+    "source",
+    "assetSetManifestSha256",
+  );
   const targetProbeSha256 = targetProbeComponentDigests(input.contract);
   if (
     !authorization ||
@@ -416,6 +429,7 @@ function verifiedTrustEpochMigrationTransition(input: {
       `v${stringAt(input.contract, "target", "version")}` ||
     !exactTrustEpochLegacyReleaseMatches(authorization, input.contract) ||
     !sourceProbeSha256 ||
+    !digestPattern.test(sourceAssetSetManifestSha256 ?? "") ||
     !targetProbeSha256 ||
     !exactTrustEpochTargetMatches(
       input.contract,
@@ -430,6 +444,7 @@ function verifiedTrustEpochMigrationTransition(input: {
   return {
     classification: "replacement-required",
     sourceProbeVersion: "0.1.74",
+    sourceAssetSetDigest: `sha256:${sourceAssetSetManifestSha256}`,
     sourceProbeSha256,
     targetProbeSha256,
     targetAssetSetDigest: input.targetAssetSetDigest,
@@ -495,6 +510,7 @@ function exactTrustEpochLegacyReleaseMatches(
   const source = valueAt(contract, "source");
   if (
     !hasExactKeys(source, [
+      "assetSetManifestSha256",
       "assets",
       "commit",
       "hubDigest",

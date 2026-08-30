@@ -1472,6 +1472,26 @@ describe("Hub database", () => {
     expect(
       database.enrollments.createPending({
         createdAtMs: 1_725_000_063_000,
+        enrollmentId: "enr_terminal_wrong_asset_set_0002",
+        expiresAtMs: 1_725_000_123_000,
+        target: {
+          expectedHubOrigin: "https://hub.example.test",
+          expectedProbeId: "probe-current",
+          expectedProbeVersion: "1.2.3",
+          hostId: 7,
+          kind: "manual_reinstall",
+          replacementPredecessorAssetSetDigest: `sha256:${"f".repeat(64)}`,
+          replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
+          sourceProbeSha256: ["c".repeat(64)],
+          targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+          targetProbeVersion: "1.2.4",
+        },
+        tokenHash: "wrong-asset-set-token",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_063_000,
         enrollmentId: "enr_terminal_ordinary_null_version_0002",
         expiresAtMs: 1_725_000_123_000,
         target: {
@@ -1497,6 +1517,7 @@ describe("Hub database", () => {
         expectedProbeVersion: "1.2.3",
         hostId: 7,
         kind: "manual_reinstall",
+        replacementPredecessorAssetSetDigest: `sha256:${"b".repeat(64)}`,
         replacementPredecessorEnrollmentId: "enr_terminal_predecessor_0001",
         sourceProbeSha256: ["c".repeat(64)],
         targetAssetSetDigest: `sha256:${"d".repeat(64)}`,

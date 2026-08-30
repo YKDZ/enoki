@@ -5,6 +5,7 @@ import {
   sign,
   verify,
 } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
 import { probeTargets } from "./probe-asset-bundle.mjs";
@@ -74,6 +75,9 @@ export async function createReleaseTransitionContract(input) {
       expectedVersion: authorization.legacyRelease.githubRelease.tag.slice(1),
     },
   );
+  const sourceAssetSetManifestSha256 = sha256(
+    await readFile(`${input.sourceAssetDir}/manifest.json`),
+  );
   const contract = validateContract({
     candidateCommit: input.candidateCommit,
     distribution: authorization.distribution,
@@ -83,6 +87,7 @@ export async function createReleaseTransitionContract(input) {
     rootKeyId: authorization.rootKeyId,
     schemaVersion: 1,
     source: {
+      assetSetManifestSha256: sourceAssetSetManifestSha256,
       assets: authorization.legacyRelease.assets,
       commit: authorization.legacyRelease.githubRelease.peeledCommitSha,
       hubDigest: authorization.legacyRelease.hub.digest,
@@ -336,6 +341,7 @@ function validateContract(value) {
   ]);
   assertPlainObject(value.source, "Release Transition Contract source");
   assertExactKeys(value.source, [
+    "assetSetManifestSha256",
     "assets",
     "commit",
     "hubDigest",
@@ -367,6 +373,7 @@ function validateContract(value) {
     !digestPattern.test(value.rootKeyId ?? "") ||
     value.migrationGeneration !== 1 ||
     value.source.tag !== "v0.1.74" ||
+    !digestPattern.test(value.source.assetSetManifestSha256 ?? "") ||
     !/^[0-9a-f]{40}$/.test(value.source.commit ?? "") ||
     !/^sha256:[0-9a-f]{64}$/.test(value.source.hubDigest ?? "") ||
     !Array.isArray(value.source.assets) ||
@@ -400,7 +407,11 @@ function validateGenericContract(value) {
     "transition",
   ]);
   assertPlainObject(value.source, "Release Transition Contract source");
-  assertExactKeys(value.source, ["probeComponents", "version"]);
+  assertExactKeys(value.source, [
+    "assetSetManifestSha256",
+    "probeComponents",
+    "version",
+  ]);
   assertPlainObject(value.target, "Release Transition Contract target");
   assertExactKeys(value.target, [
     "assetClosure",
@@ -417,6 +428,7 @@ function validateGenericContract(value) {
     !/^[0-9a-f]{40}$/.test(value.candidateCommit ?? "") ||
     !/^[a-z][a-z0-9-]{0,63}$/.test(value.distribution ?? "") ||
     !digestPattern.test(value.rootKeyId ?? "") ||
+    !digestPattern.test(value.source.assetSetManifestSha256 ?? "") ||
     !semverPattern.test(value.source.version ?? "") ||
     !semverPattern.test(value.target.version ?? "") ||
     !digestPattern.test(value.target.assetSetManifestSha256 ?? "") ||

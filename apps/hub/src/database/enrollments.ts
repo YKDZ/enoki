@@ -28,6 +28,7 @@ export type EnrollmentTarget =
       kind: "manual_reinstall";
       sourceProbeSha256: string[];
       replacementPredecessorEnrollmentId?: string;
+      replacementPredecessorAssetSetDigest?: string;
       targetAssetSetDigest: string;
       targetProbeVersion: string;
     };
@@ -197,6 +198,8 @@ export function createEnrollmentRepository(
         pending: {
           expectedProbeId: input.currentProbeId,
           expectedProbeVersion: predecessor.targetProbeVersion,
+          replacementPredecessorAssetSetDigest:
+            predecessor.targetAssetSetDigest,
           replacementPredecessorEnrollmentId: predecessor.enrollmentId,
           targetAssetSetDigest: predecessor.targetAssetSetDigest,
           targetHostId: input.hostId,
@@ -239,6 +242,8 @@ export function createEnrollmentRepository(
           targetProbeVersion: enrollmentTokens.targetProbeVersion,
           replacementPredecessorEnrollmentId:
             enrollmentTokens.replacementPredecessorEnrollmentId,
+          replacementPredecessorAssetSetDigest:
+            enrollmentTokens.replacementPredecessorAssetSetDigest,
         })
         .from(enrollmentTokens)
         .where(
@@ -641,6 +646,8 @@ export function createEnrollmentRepository(
                   expectedProbeVersion: input.target.expectedProbeVersion,
                   replacementPredecessorEnrollmentId:
                     input.target.replacementPredecessorEnrollmentId,
+                  replacementPredecessorAssetSetDigest:
+                    input.target.replacementPredecessorAssetSetDigest ?? null,
                   targetAssetSetDigest: input.target.targetAssetSetDigest,
                   targetHostId: input.target.hostId,
                   targetProbeVersion: input.target.targetProbeVersion,
@@ -725,6 +732,10 @@ export function createEnrollmentRepository(
             replacementPredecessorEnrollmentId:
               input.target.kind === "manual_reinstall"
                 ? input.target.replacementPredecessorEnrollmentId ?? null
+                : null,
+            replacementPredecessorAssetSetDigest:
+              input.target.kind === "manual_reinstall"
+                ? input.target.replacementPredecessorAssetSetDigest ?? null
                 : null,
             targetKind: input.target.kind,
             tokenHash: input.tokenHash,
@@ -1074,6 +1085,7 @@ function terminalReplacementPredecessorMatches(
     pending: {
       expectedProbeId: string | null;
       expectedProbeVersion: string | null;
+      replacementPredecessorAssetSetDigest: string | null;
       replacementPredecessorEnrollmentId: string | null;
       targetAssetSetDigest: string | null;
       targetHostId: number | null;
@@ -1097,6 +1109,8 @@ function terminalReplacementPredecessorMatches(
     predecessor.rejectionCode !== "probe_startup_timeout" ||
     predecessor.hostId !== input.hostId ||
     predecessor.targetProbeVersion !== input.pending.expectedProbeVersion ||
+    predecessor.targetAssetSetDigest !==
+      input.pending.replacementPredecessorAssetSetDigest ||
     !predecessor.registrationOutcome
   ) {
     return false;

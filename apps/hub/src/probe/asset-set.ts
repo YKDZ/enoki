@@ -39,6 +39,7 @@ export type ProbeAssetSetVersionResult = {
 export type VerifiedReleaseTransition = {
   classification: "compatible" | "replacement-required";
   sourceProbeVersion: string;
+  sourceAssetSetDigest: string;
   sourceProbeSha256: string[];
   targetProbeSha256: string[];
   targetAssetSetDigest: string;

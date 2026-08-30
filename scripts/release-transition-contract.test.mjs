@@ -98,6 +98,7 @@ describe("Trust Epoch release transition", () => {
         rootKeyId: sha256(Buffer.from(fixture.root.publicKey)),
         schemaVersion: 1,
         source: {
+          assetSetManifestSha256: "f".repeat(64),
           probeComponents: fixture.sourceProbeComponents,
           version: "1.2.2",
         },

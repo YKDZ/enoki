@@ -395,6 +395,7 @@ function signedContractFixture(rootPublicKeyPem) {
     rootKeyId: createHash("sha256").update(rootPublicKeyPem).digest("hex"),
     schemaVersion: 1,
     source: {
+      assetSetManifestSha256: "a".repeat(64),
       probeComponents: targets.map((target) => ({
         file: "enoki-probe",
         role: "probe",
