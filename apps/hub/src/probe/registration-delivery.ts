@@ -18,6 +18,7 @@ import {
 } from "./host-profile-snapshots.js";
 import { validProbePublicKeyPem } from "./probe-identity.js";
 import { resolveRegistrationAttempt } from "./registration-attempt.js";
+import { readProbeReleaseContextFromDirectory } from "./release-context.js";
 import {
   observedIpFromContext,
   probeJsonError,
@@ -86,6 +87,28 @@ export function createProbeRegistrationRoutes(
       return probeJsonError("malformed_probe_registration", 400);
     }
     if (installationInspection) {
+      if (
+        services.probeAssetDir &&
+        services.probeDistributionRootPublicKeyPem
+      ) {
+        const releaseContext = await readProbeReleaseContextFromDirectory({
+          assetDir: services.probeAssetDir,
+          trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+        });
+        const transition = releaseContext.releaseTransition;
+        if (transition) {
+          services.enrollments.hydrateLegacyOrdinaryPendingClosure({
+            closure: {
+              sourceProbeSha256: transition.sourceProbeSha256,
+              targetAssetSetDigest: transition.targetAssetSetDigest,
+              targetBundles: transition.targetBundles ?? [],
+              targetProbeVersion: transition.targetProbeVersion,
+            },
+            nowMs: now(),
+            tokenHash: hashSecret(request.enrollmentToken),
+          });
+        }
+      }
       const enrollment = services.enrollments.inspectPending({
         nowMs: now(),
         tokenHash: hashSecret(request.enrollmentToken),

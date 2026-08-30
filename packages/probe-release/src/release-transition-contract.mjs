@@ -1,4 +1,3 @@
-import { execFile, spawn } from "node:child_process";
 import {
   createHash,
   createPrivateKey,
@@ -8,13 +7,12 @@ import {
 } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
+import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
 import {
-  inspectLegacyProbeAssetSet,
-  inspectProbeElf,
-} from "./legacy-probe-asset-set.mjs";
-import { probeTargets } from "./probe-asset-bundle.mjs";
+  inspectProbeBundleArchiveBytes,
+  probeTargets,
+} from "./probe-asset-bundle.mjs";
 import { verifyProbeTrustDelegation } from "./probe-trust-delegation.mjs";
 import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
@@ -28,7 +26,6 @@ const MAX_CONTRACT_BYTES = 64 * 1024;
 const MAX_SIGNATURE_BYTES = 1024;
 const MAX_TARGET_BUNDLE_BYTES = 1024 * 1024 * 1024;
 const MAX_TARGET_CLOSURE_BYTES = 4 * 1024 * 1024 * 1024;
-const execFileAsync = promisify(execFile);
 
 export async function createReleaseTransitionContract(input) {
   const authorization = verifyTrustEpochMigrationAuthorization({
@@ -212,37 +209,11 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
         "Release Transition Contract target Probe asset closure is invalid",
       );
     }
-    const [probe, bundleManifest] = await Promise.all([
-      tarMember(archive, "enoki-probe"),
-      tarMember(archive, "bundle-manifest.json"),
-    ]);
-    if (sha256(bundleManifest) !== asset.bundleManifestSha256) {
-      throw new Error(
-        "Release Transition Contract target Probe asset closure is invalid",
-      );
-    }
-    inspectProbeElf(probe, {
+    const inspectedBundle = await inspectProbeBundleArchiveBytes(archive, {
       target: targetName,
       version: `v${target.version}`,
     });
-    let inner;
-    try {
-      inner = JSON.parse(bundleManifest.toString("utf8"));
-    } catch {
-      throw new Error(
-        "Release Transition Contract target Probe asset closure is invalid",
-      );
-    }
-    const component = Array.isArray(inner?.components)
-      ? inner.components.find((entry) => entry?.role === "probe")
-      : null;
-    if (
-      !component ||
-      component.path !== "enoki-probe" ||
-      component.sha256 !== sha256(probe) ||
-      inner.target !== targetName ||
-      inner.version !== target.version
-    ) {
+    if (inspectedBundle.bundleManifestSha256 !== asset.bundleManifestSha256) {
       throw new Error(
         "Release Transition Contract target Probe asset closure is invalid",
       );
@@ -250,7 +221,7 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
     probeComponents.push({
       file: "enoki-probe",
       role: "probe",
-      sha256: sha256(probe),
+      sha256: inspectedBundle.probeSha256,
       target: targetName,
     });
   }
@@ -259,48 +230,6 @@ async function inspectTargetProbeAssetSet(assetDir, input) {
     assetSetManifestSha256: sha256(manifestBytes),
     probeComponents,
   };
-}
-
-function tarMember(archive, member) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "tar",
-      ["--extract", "--gzip", "--file", "-", "--to-stdout", member],
-      { stdio: ["pipe", "pipe", "ignore"] },
-    );
-    const chunks = [];
-    let outputSize = 0;
-    let failed = false;
-    const fail = () => {
-      if (failed) return;
-      failed = true;
-      child.kill();
-      reject(
-        new Error(
-          "Release Transition Contract target Probe asset closure is invalid",
-        ),
-      );
-    };
-    child.once("error", fail);
-    child.stdout.on("data", (chunk) => {
-      outputSize += chunk.length;
-      if (outputSize > 64 * 1024 * 1024) {
-        fail();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    child.once("close", (code) => {
-      if (failed) return;
-      if (code !== 0) {
-        fail();
-        return;
-      }
-      resolve(Buffer.concat(chunks));
-    });
-    child.stdin.once("error", fail);
-    child.stdin.end(archive);
-  });
 }
 
 export function verifyReleaseTransitionContract({

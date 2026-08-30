@@ -7,6 +7,7 @@ import {
   mkdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +18,7 @@ import {
   createReleaseTransitionContract,
   createProbeTrustDelegation,
   preflightReleaseMigrationConfiguration,
+  probeBundleComponentProfiles,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
 } from "@enoki/probe-release";
@@ -170,6 +172,30 @@ describe("Trust Epoch release transition", () => {
     ).rejects.toThrow("source Probe asset closure is required");
   });
 
+  it("rejects a symlinked legacy source archive before deriving its receipt", async () => {
+    const local = await transitionFixture();
+    const sourceArchive = path.join(
+      local.createInput.sourceAssetDir,
+      "enoki-probe-aarch64-unknown-linux-gnu.tar.gz",
+    );
+    const replacementDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-legacy-source-symlink-"),
+    );
+    const replacement = path.join(replacementDir, "authorized.tar.gz");
+    try {
+      await writeFile(replacement, await readFile(sourceArchive));
+      await rm(sourceArchive);
+      await symlink(replacement, sourceArchive);
+
+      await expect(
+        createReleaseTransitionContract(local.createInput),
+      ).rejects.toThrow("legacy Probe Asset Set archive does not match");
+    } finally {
+      await rm(replacementDir, { force: true, recursive: true });
+      await local.cleanup();
+    }
+  });
+
   it("rejects a re-signed outer target whose archive payload disagrees with its inner receipt before signing", async () => {
     const local = await transitionFixture();
     const archiveName = "enoki-probe-aarch64-unknown-linux-gnu.tar.gz";
@@ -227,7 +253,7 @@ describe("Trust Epoch release transition", () => {
 
       await expect(
         createReleaseTransitionContract(local.createInput),
-      ).rejects.toThrow("target Probe asset closure is invalid");
+      ).rejects.toThrow("Probe bundle archive closure is invalid");
     } finally {
       await rm(contents, { force: true, recursive: true });
       await local.cleanup();
@@ -651,22 +677,30 @@ async function createVerifiedTargetAssetSet({
     const archiveName = `enoki-probe-${target}.tar.gz`;
     const archivePath = path.join(assetDir, archiveName);
     const probe = createProbeElf({ target, version: `v${version}` });
+    const components = Object.entries(probeBundleComponentProfiles).map(
+      ([role, profile]) => ({
+        ...profile,
+        role,
+        sha256: sha256(probe),
+        size: probe.byteLength,
+        version,
+      }),
+    );
     const bundleManifest = Buffer.from(
       `${JSON.stringify({
-        components: [
-          {
-            path: "enoki-probe",
-            role: "probe",
-            sha256: sha256(probe),
-          },
-        ],
+        components,
+        kind: "enoki-probe-bundle",
         target,
         version,
       })}\n`,
     );
     await mkdir(contents);
-    await writeFile(path.join(contents, "enoki-probe"), probe);
-    await chmod(path.join(contents, "enoki-probe"), 0o755);
+    for (const { path: componentPath } of Object.values(
+      probeBundleComponentProfiles,
+    )) {
+      await writeFile(path.join(contents, componentPath), probe);
+      await chmod(path.join(contents, componentPath), 0o755);
+    }
     await writeFile(
       path.join(contents, "bundle-manifest.json"),
       bundleManifest,
@@ -679,7 +713,9 @@ async function createVerifiedTargetAssetSet({
       "--directory",
       contents,
       "bundle-manifest.json",
-      "enoki-probe",
+      ...Object.values(probeBundleComponentProfiles).map(
+        ({ path: componentPath }) => componentPath,
+      ),
     ]);
     await rm(contents, { force: true, recursive: true });
     const archive = await readFile(archivePath);

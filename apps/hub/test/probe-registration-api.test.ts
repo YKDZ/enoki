@@ -1198,7 +1198,11 @@ describe("Probe registration API", () => {
         },
         {
           body: signedBody({
-            overrides: { committedSourceProbeSha256: "e".repeat(64) },
+            overrides: {
+              // 该 receipt 本身属于同一冻结 source closure，但只授权给
+              // 另一 target；不能退化为任何 receipt 的 includes 检查。
+              committedSourceProbeSha256: release.sourceProbeSha256[1]!,
+            },
           }),
           field: "committedSourceProbeSha256",
         },

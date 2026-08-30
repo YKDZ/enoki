@@ -98,6 +98,16 @@ type ResolvedRegisterNewHostEnrollmentInput = Omit<
   "host"
 > & { host: NewHostRow };
 
+type LegacyOrdinaryPendingClosure = {
+  sourceProbeSha256: string[];
+  targetAssetSetDigest: string;
+  targetBundles: ReadonlyArray<{
+    bundleManifestSha256: string;
+    target: string;
+  }>;
+  targetProbeVersion: string;
+};
+
 export type EnrollmentRepository = {
   replayRegistrationOutcome: (input: {
     signedAttemptSha256: string;
@@ -116,6 +126,11 @@ export type EnrollmentRepository = {
     nowMs: number;
     tokenHash: string;
   }) => PendingEnrollmentInspection | null;
+  hydrateLegacyOrdinaryPendingClosure: (input: {
+    closure: LegacyOrdinaryPendingClosure;
+    nowMs: number;
+    tokenHash: string;
+  }) => void;
   rejectInstallation: (input: {
     code: string;
     message: string;
@@ -230,6 +245,47 @@ export function createEnrollmentRepository(
           .limit(1)
           .get()?.tokenHash ?? null
       );
+    },
+    hydrateLegacyOrdinaryPendingClosure(input) {
+      if (!validTargetBundles(input.closure.targetBundles)) return;
+      database.transaction((transaction) => {
+        const pending = transaction
+          .select()
+          .from(enrollmentTokens)
+          .where(
+            and(
+              eq(enrollmentTokens.tokenHash, input.tokenHash),
+              isNull(enrollmentTokens.usedAtMs),
+              eq(enrollmentTokens.status, "pending"),
+              gt(enrollmentTokens.expiresAtMs, input.nowMs),
+            ),
+          )
+          .get();
+        const sourceProbeSha256 = parseSourceProbeSha256(
+          pending?.sourceProbeSha256Json ?? "",
+        );
+        if (
+          !pending ||
+          pending.targetKind !== "manual_reinstall" ||
+          pending.replacementPredecessorEnrollmentId !== null ||
+          pending.replacementPredecessorAssetSetDigest !== null ||
+          pending.targetBundlesJson !== null ||
+          !sourceProbeSha256 ||
+          pending.targetAssetSetDigest !== input.closure.targetAssetSetDigest ||
+          pending.targetProbeVersion !== input.closure.targetProbeVersion ||
+          JSON.stringify(sourceProbeSha256) !==
+            JSON.stringify(input.closure.sourceProbeSha256)
+        ) {
+          return;
+        }
+        transaction
+          .update(enrollmentTokens)
+          .set({
+            targetBundlesJson: JSON.stringify(input.closure.targetBundles),
+          })
+          .where(eq(enrollmentTokens.id, pending.id))
+          .run();
+      });
     },
     inspectPending(input) {
       const pending = database
@@ -899,11 +955,12 @@ export function createEnrollmentRepository(
                 input.registrationAttempt.oldProbeId ||
               pending.expectedProbeVersion !==
                 input.registrationAttempt.sourceProbeVersion ||
-              parseSourceProbeSha256(
+              !sourceReceiptMatchesTargetBundle(
                 pending.sourceProbeSha256Json ?? "",
-              )?.includes(
+                pending.targetBundlesJson ?? "",
+                input.registrationAttempt.targetBundleTarget,
                 input.registrationAttempt.committedSourceProbeSha256,
-              ) !== true ||
+              ) ||
               pending.targetAssetSetDigest !==
                 input.registrationAttempt.targetAssetSetDigest ||
               pending.targetProbeVersion !==
@@ -1149,6 +1206,25 @@ function targetBundleMatches(
         bundle.target === target &&
         bundle.bundleManifestSha256 === bundleManifestSha256,
     ) === true
+  );
+}
+
+function sourceReceiptMatchesTargetBundle(
+  sourceProbeSha256Json: string,
+  targetBundlesJson: string,
+  target: string,
+  sourceReceipt: string,
+) {
+  const sourceProbeSha256 = parseSourceProbeSha256(sourceProbeSha256Json);
+  const targetBundles = parseTargetBundles(targetBundlesJson);
+  const targetIndex = targetBundles?.findIndex(
+    (bundle) => bundle.target === target,
+  );
+  return (
+    sourceProbeSha256 !== null &&
+    targetIndex !== undefined &&
+    targetIndex >= 0 &&
+    sourceProbeSha256[targetIndex] === sourceReceipt
   );
 }
 

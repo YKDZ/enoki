@@ -46,6 +46,7 @@ function app(
         };
       },
       inspectPending: () => null,
+      hydrateLegacyOrdinaryPendingClosure: () => {},
       lifecycleAuthorityTokenHashForHost: () => null,
       replayRegistrationOutcome: () => null,
       readStatus: () => null,

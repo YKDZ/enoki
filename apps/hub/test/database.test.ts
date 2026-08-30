@@ -286,6 +286,180 @@ describe("Hub database", () => {
     migrated.close();
   });
 
+  it("migrates a valid ordinary manual authority, freezes its verified closure, and retains its Host-version check", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const closureMigration = "20260830050322_hot_zuras";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, closureMigration), {
+      force: true,
+      recursive: true,
+    });
+    const options = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const tokenHash = "legacy-ordinary-token-hash";
+    const enrollmentId = "enr_legacy_ordinary_0001";
+    const sourceProbeSha256 = ["a", "b", "c", "d"].map((value) =>
+      value.repeat(64),
+    );
+    const targetAssetSetDigest = `sha256:${"e".repeat(64)}`;
+    const frozenBundles = targetBundles();
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    createHost(legacy, { id: 74, probeId: "probe-legacy-ordinary" });
+    legacy.sqlite
+      .prepare("update managed_hosts set probe_version = ? where id = ?")
+      .run("1.2.3", 74);
+    legacy.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms,
+          target_kind, target_host_id, expected_hub_origin,
+          expected_probe_id, expected_probe_version, source_probe_sha256_json,
+          target_asset_set_digest, target_probe_version, status
+        ) values (?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      )
+      .run(
+        enrollmentId,
+        tokenHash,
+        1_725_000_000_000,
+        1_725_003_600_000,
+        74,
+        "https://hub.example.test",
+        "probe-legacy-ordinary",
+        "1.2.3",
+        JSON.stringify(sourceProbeSha256),
+        targetAssetSetDigest,
+        "1.2.4",
+      );
+    legacy.close();
+
+    await cp(
+      path.resolve("drizzle", closureMigration),
+      path.join(stagedMigrations, closureMigration),
+      { recursive: true },
+    );
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select target_bundles_json as targetBundlesJson from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ targetBundlesJson: null });
+    expect(
+      migrated.enrollments.inspectPending({
+        nowMs: 1_725_000_001_000,
+        tokenHash,
+      }),
+    ).toBeNull();
+
+    migrated.enrollments.hydrateLegacyOrdinaryPendingClosure({
+      closure: {
+        sourceProbeSha256,
+        targetAssetSetDigest,
+        targetBundles: frozenBundles,
+        targetProbeVersion: "1.2.4",
+      },
+      nowMs: 1_725_000_001_000,
+      tokenHash,
+    });
+    expect(
+      migrated.enrollments.inspectPending({
+        nowMs: 1_725_000_001_000,
+        tokenHash,
+      }),
+    ).toMatchObject({ enrollmentId, targetKind: "manual_reinstall" });
+
+    const candidate = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const candidatePublicKeyPem = String(
+      candidate.publicKey.export({ format: "pem", type: "spki" }),
+    );
+    const registrationInput = (sourceProbeVersion: string) => ({
+      candidatePublicKeyPem,
+      committedSourceProbeSha256: sourceProbeSha256[0]!,
+      enrollmentId,
+      hostId: 74,
+      hubOrigin: "https://hub.example.test",
+      oldProbeId: "probe-legacy-ordinary",
+      outcome: (host: { id: number; probeId: string }) =>
+        Buffer.from(
+          (enoki.v1.ProbeRegistrationResponse as any)
+            .encode(
+              (enoki.v1.ProbeRegistrationResponse as any).create({
+                hostId: String(host.id),
+                probeId: host.probeId,
+              }),
+            )
+            .finish(),
+        ),
+      signedAttemptSha256: "f".repeat(64),
+      sourceProbeVersion,
+      targetAssetSetDigest,
+      targetBundleTarget: frozenBundles[0]!.target,
+      targetManifestSha256: frozenBundles[0]!.bundleManifestSha256,
+      targetProbeVersion: "1.2.4",
+    });
+    const host = {
+      architecture: null,
+      clockSkewDetected: false,
+      connectAddress: "10.0.0.74",
+      createdAtMs: 1_725_000_002_000,
+      displayName: "Recovered legacy Host",
+      displayNameEdited: false,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-legacy-ordinary-successor",
+      probePublicKeyPem: candidatePublicKeyPem,
+      probeSecretHash: "legacy-ordinary-successor-secret",
+    };
+    expect(
+      migrated.enrollments.registerNewHost({
+        host,
+        hostProfile: null,
+        registeredAtMs: 1_725_000_002_000,
+        registrationAttempt: registrationInput("1.2.5"),
+        tokenHash,
+        verificationDeadlineAtMs: 1_725_000_062_000,
+      }),
+    ).toBeNull();
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ status: "pending", usedAtMs: null });
+    expect(
+      migrated.enrollments.registerNewHost({
+        host,
+        hostProfile: null,
+        registeredAtMs: 1_725_000_002_000,
+        registrationAttempt: registrationInput("1.2.3"),
+        tokenHash,
+        verificationDeadlineAtMs: 1_725_000_062_000,
+      }),
+    ).toMatchObject({ enrollment: { status: "verifying" }, replayed: false });
+    migrated.close();
+  });
+
   it("applies ordered Migration Layers with independent history tables", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
