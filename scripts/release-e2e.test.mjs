@@ -6620,9 +6620,11 @@ describe("Release E2E command", () => {
       intent: false,
     };
     let failAfterFirstPublication = true;
-    let failFirstRecovery = true;
+    let failAfterConsumedStaging = true;
+    let failFirstRecovery = false;
     let foreignPartial = null;
     let resourcesOwnInstalledBootstrap = false;
+    let stagingPresent = false;
     try {
       await mkdir(bootstrapDir, { recursive: true });
       await mkdir(assetDir);
@@ -6692,6 +6694,7 @@ describe("Release E2E command", () => {
               "# enoki-release-e2e:candidate-bootstrap-binary-stage",
             )
           ) {
+            stagingPresent = true;
             return successfulCommandText(
               "/tmp/enoki-release-e2e-bootstrap.abcdef\n",
             );
@@ -6701,6 +6704,18 @@ describe("Release E2E command", () => {
               "# enoki-release-e2e:candidate-bootstrap-binary-install",
             )
           ) {
+            if (failAfterConsumedStaging) {
+              failAfterConsumedStaging = false;
+              installedBootstrap.intent = true;
+              installedBootstrap.acquirer = true;
+              installedBootstrap.activator = true;
+              stagingPresent = false;
+              return {
+                code: 1,
+                stderr: "connection lost after Bootstrap publication",
+                stdout: "",
+              };
+            }
             if (foreignPartial) {
               if (
                 options.input.includes(
@@ -6744,6 +6759,7 @@ describe("Release E2E command", () => {
               };
             }
             installedBootstrap.activator = true;
+            stagingPresent = false;
             return successfulCommandText("installed\n");
           }
           if (
@@ -6780,6 +6796,25 @@ describe("Release E2E command", () => {
             resourcesOwnInstalledBootstrap = true;
             return successfulCommandText("completed\n");
           }
+          if (
+            options.input.includes(
+              "# enoki-release-e2e:candidate-bootstrap-staging-remove",
+            )
+          ) {
+            if (!stagingPresent) {
+              return options.input.includes(
+                '[ ! -e "$stage_dir" ] && [ ! -L "$stage_dir" ]',
+              )
+                ? successfulCommandText("removed\n")
+                : {
+                    code: 1,
+                    stderr: "staging directory no longer exists",
+                    stdout: "",
+                  };
+            }
+            stagingPresent = false;
+            return successfulCommandText("removed\n");
+          }
           return successfulCommandText("removed\n");
         },
       });
@@ -6788,6 +6823,29 @@ describe("Release E2E command", () => {
         runId: "run-bootstrap-binaries",
       });
 
+      const lostSentinelError = await prepared
+        .provisionBootstrap({
+          installContract: { kind: "production-bootstrap" },
+          ownershipToken: "00000000-0000-4000-8000-000000000001",
+          runId: "run-bootstrap-binaries",
+        })
+        .then(
+          () => null,
+          (error) => error,
+        );
+      expect(lostSentinelError).toMatchObject({
+        message: expect.stringMatching(
+          /connection lost after Bootstrap publication/,
+        ),
+      });
+      expect(lostSentinelError).not.toHaveProperty("cleanupError");
+      expect(installedBootstrap).toEqual({
+        acquirer: false,
+        activator: false,
+        intent: false,
+      });
+
+      failFirstRecovery = true;
       await expect(
         prepared.provisionBootstrap({
           installContract: { kind: "production-bootstrap" },
@@ -6920,9 +6978,10 @@ describe("Release E2E command", () => {
         Promise.all(
           commands
             .filter(({ options }) =>
-              options.input.includes(
+              [
                 "# enoki-release-e2e:candidate-bootstrap-binary-",
-              ),
+                "# enoki-release-e2e:candidate-bootstrap-staging-remove",
+              ].some((marker) => options.input.includes(marker)),
             )
             .map(({ options }) =>
               execFileAsync("sh", ["-n", "-c", options.input]),

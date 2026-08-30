@@ -730,7 +730,7 @@ function verifyCandidateBootstrapRecipeScript({ recipe, stageDir }) {
 }
 
 function removeCandidateBootstrapStagingScript(stageDir) {
-  return `# enoki-release-e2e:candidate-bootstrap-staging-remove\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\ncase "$stage_dir" in /tmp/enoki-release-e2e-recipe.*|/tmp/enoki-release-e2e-bootstrap.*) ;; *) exit 1 ;; esac\nrm -f -- "$stage_dir/enoki-probe-bootstrap.py" "$stage_dir/enoki-probe-bootstrap-acquire" "$stage_dir/enoki-probe-bootstrap-activate"\nrmdir -- "$stage_dir"\nprintf 'removed\\n'\n`;
+  return `# enoki-release-e2e:candidate-bootstrap-staging-remove\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\ncase "$stage_dir" in /tmp/enoki-release-e2e-recipe.*|/tmp/enoki-release-e2e-bootstrap.*) ;; *) exit 1 ;; esac\nif [ ! -e "$stage_dir" ] && [ ! -L "$stage_dir" ]; then printf 'removed\\n'; exit 0; fi\nrm -f -- "$stage_dir/enoki-probe-bootstrap.py" "$stage_dir/enoki-probe-bootstrap-acquire" "$stage_dir/enoki-probe-bootstrap-activate"\nrmdir -- "$stage_dir"\nprintf 'removed\\n'\n`;
 }
 
 async function extractCandidateBootstrapBinaries({
