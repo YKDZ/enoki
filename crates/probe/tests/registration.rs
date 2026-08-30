@@ -372,8 +372,14 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
         .join(".attempt.json-enoki-write-new-namespace");
     fs::write(&new_namespace_residue, b"new namespace custody").unwrap();
     fs::write(&swap_resume, b"resume").unwrap();
-    assert!(swap_child.wait().unwrap().success());
-    assert!(swapped_original.join("attempt.json").exists());
+    assert!(
+        !swap_child.wait().unwrap().success(),
+        "publisher must not authorize an orphaned durable capsule"
+    );
+    assert!(
+        !swapped_original.join("attempt.json").exists(),
+        "first-scan namespace rejection precedes capsule publication"
+    );
     assert!(
         !swapped.exists(),
         "held FD never publishes into replacement namespace"
@@ -381,6 +387,40 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
     assert_eq!(
         fs::read(&new_namespace_residue).unwrap(),
         b"new namespace custody"
+    );
+
+    let post_publish = temporary.path().join("post-publish-swap/attempt.json");
+    let post_publish_signal = temporary.path().join("post-publish-signal");
+    let post_publish_resume = temporary.path().join("post-publish-resume");
+    let mut post_publish_child = spawn_root_capsule_post_publish_race(
+        &post_publish,
+        &post_publish_signal,
+        &post_publish_resume,
+    );
+    wait_for_test_signal(&post_publish_signal);
+    let post_publish_original = temporary.path().join("post-publish-original");
+    fs::rename(post_publish.parent().unwrap(), &post_publish_original).unwrap();
+    fs::create_dir(post_publish.parent().unwrap()).unwrap();
+    fs::set_permissions(
+        post_publish.parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let post_publish_residue = post_publish
+        .parent()
+        .unwrap()
+        .join(".attempt.json-enoki-write-new-namespace");
+    fs::write(&post_publish_residue, b"post-publish new namespace").unwrap();
+    fs::write(&post_publish_resume, b"resume").unwrap();
+    assert!(!post_publish_child.wait().unwrap().success());
+    assert!(
+        post_publish_original.join("attempt.json").exists(),
+        "post-publish detection must not compensate orphan custody"
+    );
+    assert!(!post_publish.exists());
+    assert_eq!(
+        fs::read(&post_publish_residue).unwrap(),
+        b"post-publish new namespace"
     );
 
     let after_scan = temporary.path().join("after-scan/attempt.json");
@@ -439,6 +479,23 @@ fn spawn_root_capsule_race(
     command
         .spawn()
         .expect("spawn synchronized capsule operation")
+}
+
+fn spawn_root_capsule_post_publish_race(
+    path: &std::path::Path,
+    signal: &std::path::Path,
+    resume: &std::path::Path,
+) -> std::process::Child {
+    Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
+        .arg("--nocapture")
+        .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path)
+        .env("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_PATH", path)
+        .env("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_SIGNAL", signal)
+        .env("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_RESUME", resume)
+        .spawn()
+        .expect("spawn synchronized post-publish capsule operation")
 }
 
 fn wait_for_test_signal(path: &std::path::Path) {

@@ -81,6 +81,7 @@ impl PrivateAtomicFileCustody {
         if fd < 0 {
             let error = io::Error::last_os_error();
             return if error.kind() == io::ErrorKind::NotFound {
+                self.verify_parent_namespace()?;
                 Ok(None)
             } else {
                 Err(error)
@@ -111,6 +112,7 @@ impl PrivateAtomicFileCustody {
                 "private atomic file is too large",
             ));
         }
+        self.verify_parent_namespace()?;
         Ok(Some(bytes))
     }
 
@@ -124,7 +126,9 @@ impl PrivateAtomicFileCustody {
             contents,
             self.mode,
             Some(self.owner),
-        )
+        )?;
+        private_atomic_after_publish_for_test(&self.path)?;
+        self.verify_parent_namespace()
     }
 
     /// Removes only the exact private target in this held namespace.
@@ -132,13 +136,18 @@ impl PrivateAtomicFileCustody {
         self.guard_residue()?;
         match stat_at(self.parent.raw(), &self.target) {
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.verify_parent_namespace()?;
+                return Ok(());
+            }
             Err(error) => return Err(error),
         }
         verify_file(self.parent.raw(), &self.target, self.mode, Some(self.owner))?;
+        self.verify_parent_namespace()?;
         secure_file_effect_crash(&self.path, "before-unlink");
         unlink_at(self.parent.raw(), &self.target)?;
         sync_directory(self.parent.raw())?;
+        self.verify_parent_namespace()?;
         secure_file_effect_crash(&self.path, "after-unlink");
         Ok(())
     }
@@ -146,14 +155,7 @@ impl PrivateAtomicFileCustody {
     /// Removes the now-empty held parent only if its original namespace entry
     /// still resolves to the exact held directory inode.
     pub(crate) fn remove_empty_parent(&self) -> io::Result<()> {
-        let held = stat_fd(self.parent.raw())?;
-        let named = stat_at(self.container.raw(), &self.parent_name)?;
-        if held.st_dev != named.st_dev || held.st_ino != named.st_ino {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private atomic parent namespace changed before retirement",
-            ));
-        }
+        self.verify_parent_namespace()?;
         if unsafe {
             libc::unlinkat(
                 self.container.raw(),
@@ -170,7 +172,20 @@ impl PrivateAtomicFileCustody {
     fn guard_residue(&self) -> io::Result<()> {
         reject_atomic_write_residue_at(self.parent.raw(), &self.target)?;
         private_atomic_after_scan_for_test(&self.path)?;
-        reject_atomic_write_residue_at(self.parent.raw(), &self.target)
+        reject_atomic_write_residue_at(self.parent.raw(), &self.target)?;
+        self.verify_parent_namespace()
+    }
+
+    fn verify_parent_namespace(&self) -> io::Result<()> {
+        let held = stat_fd(self.parent.raw())?;
+        let named = stat_at(self.container.raw(), &self.parent_name)?;
+        if held.st_dev == named.st_dev && held.st_ino == named.st_ino {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private atomic parent namespace changed",
+        ))
     }
 }
 
@@ -703,6 +718,37 @@ fn private_atomic_after_scan_for_test(path: &Path) -> io::Result<()> {
 
 #[cfg(not(any(test, feature = "deterministic-test-seams")))]
 fn private_atomic_after_scan_for_test(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(any(test, feature = "deterministic-test-seams"))]
+fn private_atomic_after_publish_for_test(path: &Path) -> io::Result<()> {
+    if std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_PATH").as_deref()
+        != Some(path.as_os_str())
+    {
+        return Ok(());
+    }
+    let Some(signal) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_SIGNAL") else {
+        return Ok(());
+    };
+    let Some(resume) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_RESUME") else {
+        return Ok(());
+    };
+    std::fs::write(&signal, b"published")?;
+    for _ in 0..2_000 {
+        if Path::new(&resume).exists() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "private atomic post-publish test race did not resume",
+    ))
+}
+
+#[cfg(not(any(test, feature = "deterministic-test-seams")))]
+fn private_atomic_after_publish_for_test(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 

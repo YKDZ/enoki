@@ -224,13 +224,30 @@ fn coordinate_inspected_replacement(
         enrollment_token: enrollment_token.clone(),
         binding: registration_binding,
     };
+    prepare_registration_attempt_then_commit(&attempt_path, attempt_input, || {
+        let mut systemd = SystemProbeUpgraderSystemdRunner;
+        commit_and_cleanup_response(commit_replacement_and_cleanup_install_with_systemd(
+            intent,
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            production_root,
+            &mut systemd,
+        ))
+    })
+}
+
+fn prepare_registration_attempt_then_commit(
+    attempt_path: &Path,
+    attempt_input: crate::registration::RootReplacementRegistrationAttemptInput,
+    commit: impl FnOnce() -> LifecycleResponse,
+) -> LifecycleResponse {
     if crate::registration::prepare_root_replacement_registration_attempt(
-        &attempt_path,
+        attempt_path,
         attempt_input.clone(),
     )
     .or_else(|_| {
         crate::registration::replace_stale_root_replacement_registration_attempt(
-            &attempt_path,
+            attempt_path,
             attempt_input,
         )
     })
@@ -238,14 +255,7 @@ fn coordinate_inspected_replacement(
     {
         return LifecycleResponse::failed("lifecycle.registration_attempt_failed");
     }
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    commit_and_cleanup_response(commit_replacement_and_cleanup_install_with_systemd(
-        intent,
-        &mut store,
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        production_root,
-        &mut systemd,
-    ))
+    commit()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -930,6 +940,109 @@ mod tests {
         );
         assert_eq!(fs::read(&attempt_path).unwrap(), original_capsule);
         assert_eq!(store.load().unwrap(), Some(commit));
+    }
+
+    #[cfg(feature = "deterministic-test-seams")]
+    #[test]
+    fn coordinator_rejects_parent_replacement_before_commit_and_cleanup() {
+        if let Some(root) = std::env::var_os("ENOKI_TEST_REPLACEMENT_PARENT_ROOT") {
+            let root = PathBuf::from(root);
+            let token = "enk_enroll_parent_swap";
+            let intent = replacement_intent("enr_0123456789abcdef", token);
+            let attempt_path = production_path(
+                PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+                Some(&root),
+            );
+            let commit_path = production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(&root));
+            let cleanup_marker = root.join("cleanup-effect");
+            let response = prepare_registration_attempt_then_commit(
+                &attempt_path,
+                crate::registration::RootReplacementRegistrationAttemptInput {
+                    enrollment_token: token.to_owned(),
+                    binding: intent.registration_binding().unwrap(),
+                },
+                || {
+                    let mut store = FileReplacementCommitStore::at(&commit_path, 0);
+                    let mut cleanup = || -> Result<(), crate::upgrader::ProbeUpgraderRunError> {
+                        fs::write(&cleanup_marker, b"cleanup invoked")
+                            .map_err(crate::upgrader::ProbeUpgraderRunError::Io)
+                    };
+                    commit_and_cleanup_response(
+                        enoki_probe_bootstrap::replacement::commit_and_cleanup_replacement(
+                            intent,
+                            &mut store,
+                            &mut cleanup,
+                        ),
+                    )
+                },
+            );
+            assert_eq!(
+                response,
+                LifecycleResponse::failed("lifecycle.registration_attempt_failed")
+            );
+            assert!(!commit_path.exists());
+            assert!(!cleanup_marker.exists());
+            return;
+        }
+
+        assert_eq!(unsafe { libc::geteuid() }, 0, "test requires root custody");
+        let temporary = tempfile::tempdir().unwrap();
+        let registration_parent =
+            production_path("/var/lib/enoki-probe-registration", Some(temporary.path()));
+        let commit_parent =
+            production_path("/var/lib/enoki-probe-bootstrap", Some(temporary.path()));
+        for directory in [&registration_parent, &commit_parent] {
+            fs::create_dir_all(directory).unwrap();
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let attempt_path = production_path(
+            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+            Some(temporary.path()),
+        );
+        let signal = temporary.path().join("capsule-first-scan");
+        let resume = temporary.path().join("capsule-resume");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "upgrader::replacement::tests::coordinator_rejects_parent_replacement_before_commit_and_cleanup",
+                "--nocapture",
+            ])
+            .env("ENOKI_TEST_REPLACEMENT_PARENT_ROOT", temporary.path())
+            .env("ENOKI_TEST_PRIVATE_ATOMIC_PATH", &attempt_path)
+            .env("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL", &signal)
+            .env("ENOKI_TEST_PRIVATE_ATOMIC_RESUME", &resume);
+        let mut child = child.spawn().unwrap();
+        for _ in 0..2_000 {
+            if signal.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(signal.exists(), "coordinator reached capsule custody scan");
+
+        let original_parent = production_path(
+            "/var/lib/enoki-probe-registration-original",
+            Some(temporary.path()),
+        );
+        fs::rename(&registration_parent, &original_parent).unwrap();
+        fs::create_dir(&registration_parent).unwrap();
+        fs::set_permissions(&registration_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let new_residue = registration_parent.join("new-namespace-residue");
+        fs::write(&new_residue, b"new registration namespace").unwrap();
+        fs::write(&resume, b"resume").unwrap();
+
+        assert!(child.wait().unwrap().success());
+        assert!(!original_parent.join("registration-attempt.json").exists());
+        assert!(!attempt_path.exists());
+        assert!(
+            !production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path())).exists()
+        );
+        assert!(!temporary.path().join("cleanup-effect").exists());
+        assert_eq!(
+            fs::read(new_residue).unwrap(),
+            b"new registration namespace"
+        );
     }
 
     #[test]

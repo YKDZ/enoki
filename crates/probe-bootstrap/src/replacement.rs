@@ -719,6 +719,76 @@ mod tests {
 
     #[cfg(feature = "activator")]
     #[test]
+    fn identity_custody_cas_rejects_a_replaced_parent_namespace() {
+        if let Some(path) = std::env::var_os("ENOKI_TEST_REPLACEMENT_COMMIT_CAS_PATH") {
+            let path = PathBuf::from(path);
+            let legacy = ReplacementCommitFact::for_test(intent(), true, true);
+            let mut bound = legacy.clone();
+            bound
+                .bind_canonical_identity_sha256("d".repeat(64))
+                .unwrap();
+            FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() })
+                .persist_identity_binding_exact(&legacy, &bound)
+                .expect("exact schema 1 commit advances to identity custody");
+            return;
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = temporary.path().join("commit-custody");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = parent.join("replacement-migration.json");
+        let legacy = ReplacementCommitFact::for_test(intent(), true, true);
+        FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() })
+            .persist(&legacy)
+            .unwrap();
+        let legacy_bytes = fs::read(&path).unwrap();
+        let signal = temporary.path().join("commit-cas-scanned");
+        let resume = temporary.path().join("commit-cas-resume");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "replacement::tests::identity_custody_cas_rejects_a_replaced_parent_namespace",
+                "--nocapture",
+            ])
+            .env("ENOKI_TEST_REPLACEMENT_COMMIT_CAS_PATH", &path)
+            .env("ENOKI_TEST_PRIVATE_ATOMIC_PATH", &path)
+            .env("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL", &signal)
+            .env("ENOKI_TEST_PRIVATE_ATOMIC_RESUME", &resume);
+        let mut child = child.spawn().unwrap();
+        for _ in 0..2_000 {
+            if signal.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(signal.exists(), "schema CAS reached its first custody scan");
+
+        let original = temporary.path().join("commit-custody-original");
+        fs::rename(&parent, &original).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let residue = parent.join("new-namespace-residue");
+        fs::write(&residue, b"new namespace commit custody").unwrap();
+        fs::write(&resume, b"resume").unwrap();
+
+        assert!(!child.wait().unwrap().success());
+        assert_eq!(
+            fs::read(original.join("replacement-migration.json")).unwrap(),
+            legacy_bytes,
+            "rejected CAS retains the exact schema 1 custody"
+        );
+        assert!(
+            !path.exists(),
+            "CAS cannot publish into the replacement namespace"
+        );
+        assert_eq!(fs::read(residue).unwrap(), b"new namespace commit custody");
+    }
+
+    #[cfg(feature = "activator")]
+    #[test]
     fn filesystem_store_retires_only_the_exact_complete_replacement_fact() {
         let temporary = tempfile::tempdir().unwrap();
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
