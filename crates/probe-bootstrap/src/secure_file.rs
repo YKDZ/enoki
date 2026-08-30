@@ -395,7 +395,7 @@ enum SystemdProbeStateView {
 }
 
 impl SystemdProbeStateView {
-    fn private_parent_contract(self) -> (u32, u64) {
+    fn private_parent_contract(self) -> (u32, libc::nlink_t) {
         match self {
             Self::HostJournal => (0o700, 1),
             Self::ServiceConfig => (0o755, 2),
@@ -898,7 +898,7 @@ fn verify_owned_directory(
     fd: RawFd,
     mode: u32,
     owner: (u32, u32),
-    minimum_links: u64,
+    minimum_links: libc::nlink_t,
 ) -> io::Result<()> {
     let stat = stat_fd(fd)?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR

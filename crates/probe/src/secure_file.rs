@@ -11,6 +11,9 @@ use std::{
 
 const SYSTEMD_PROBE_CREDENTIAL_DIRECTORY: &str = "/run/credentials/enoki-probe.service";
 const SYSTEMD_REGISTRATION_CREDENTIAL_NAME: &str = "registration-attempt";
+#[cfg(target_env = "musl")]
+const TMPFS_MAGIC: libc::c_ulong = 0x0102_1994;
+#[cfg(not(target_env = "musl"))]
 const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
 
 #[cfg(test)]
@@ -229,6 +232,10 @@ fn read_systemd_registration_credential(path: &Path, maximum_bytes: usize) -> io
     }
     let filesystem = statfs_fd(parent.raw())?;
     let mount = statvfs_fd(parent.raw())?;
+    #[cfg(target_env = "musl")]
+    let required_flags =
+        (libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC) as libc::c_ulong;
+    #[cfg(not(target_env = "musl"))]
     let required_flags = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
     if filesystem.f_type != TMPFS_MAGIC || mount.f_flag & required_flags != required_flags {
         return Err(io::Error::new(
