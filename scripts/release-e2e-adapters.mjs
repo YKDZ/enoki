@@ -1309,7 +1309,7 @@ export function createReleaseEnvironment({
       });
       canonicalReports = canonicalReportTransportFactory({
         listenUrl: hubPublicUrl,
-        upstreamUrl: hubOwnerUrl,
+        upstreamUrl: dockerResources.probeUpstreamOrigin,
       });
       const transport = await canonicalReports.start();
       if (transport.origin !== new URL(hubPublicUrl).origin) {
@@ -1594,6 +1594,8 @@ export function createDockerHubController({
         exportedRecipeDirs: [],
         identityVerified: false,
         manifestDigest: active.manifestDigest,
+        probeUpstreamOrigin: null,
+        probeUpstreamPort: null,
         redactionSecrets: [ownerPassword, operationSigningSecret],
         runId,
         runtimeHistory: [],
@@ -2322,6 +2324,8 @@ export function createDockerHubController({
       { mode: 0o600 },
     );
     await chmod(envFile, 0o600);
+    const probeContainerPort = runtime.name === "baseline" ? 3000 : 3001;
+    const requestedProbePort = owned.probeUpstreamPort;
     try {
       await successfulExec(exec, containerEngine, [
         "run",
@@ -2334,27 +2338,54 @@ export function createDockerHubController({
         envFile,
         "--publish",
         `${currentRuntimeEnvironment.ownerPort}:3000`,
+        "--publish",
+        requestedProbePort === null
+          ? `127.0.0.1::${probeContainerPort}`
+          : `127.0.0.1:${requestedProbePort}:${probeContainerPort}`,
         "--mount",
         `type=volume,source=${owned.volume},target=/data`,
         runtime.tag,
       ]);
       owned.containerCreated = true;
-      const [loadedImage, containerImage] = await Promise.all([
-        successfulExec(exec, containerEngine, [
-          "image",
-          "inspect",
-          "--format",
-          "{{.Id}}",
-          runtime.tag,
-        ]),
-        successfulExec(exec, containerEngine, [
-          "container",
-          "inspect",
-          "--format",
-          "{{.Image}}",
-          owned.container,
-        ]),
-      ]);
+      const [loadedImage, containerImage, probePortEvidence] =
+        await Promise.all([
+          successfulExec(exec, containerEngine, [
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            runtime.tag,
+          ]),
+          successfulExec(exec, containerEngine, [
+            "container",
+            "inspect",
+            "--format",
+            "{{.Image}}",
+            owned.container,
+          ]),
+          successfulExec(exec, containerEngine, [
+            "port",
+            owned.container,
+            `${probeContainerPort}/tcp`,
+          ]),
+        ]);
+      const observedProbePort = parseDockerProbeUpstreamPort(
+        probePortEvidence.stdout,
+        {
+          containerPort: probeContainerPort,
+          ownerPort: currentRuntimeEnvironment.ownerPort,
+        },
+      );
+      if (
+        requestedProbePort !== null &&
+        observedProbePort !== requestedProbePort
+      ) {
+        throw new Error(
+          "Docker changed the run-owned Probe upstream port during Hub switch",
+        );
+      }
+      owned.probeUpstreamPort = observedProbePort;
+      owned.probeUpstreamOrigin = `http://127.0.0.1:${observedProbePort}`;
       if (
         loadedImage.stdout.trim() !== runtime.configDigest ||
         containerImage.stdout.trim() !== runtime.configDigest
@@ -2376,12 +2407,69 @@ export function createDockerHubController({
         configDigest: runtime.configDigest,
         hub: runtime.name,
         manifestDigest: runtime.manifestDigest,
+        probeContainerPort,
+        probeUpstreamOrigin: owned.probeUpstreamOrigin,
         volume: owned.volume,
       });
     } finally {
       await rm(envDir, { force: true, recursive: true });
     }
   }
+}
+
+function parseDockerProbeUpstreamPort(output, { containerPort, ownerPort }) {
+  const lines = output.endsWith("\n")
+    ? output.slice(0, -1).split("\n")
+    : output.split("\n");
+  if (lines.length === 0 || lines.some((line) => line.length === 0)) {
+    throw new Error("Docker Probe upstream port evidence is absent");
+  }
+  const bindings = lines.map((line) => {
+    const match =
+      /^(?:([0-9]+(?:\.[0-9]+){3})|\[([0-9A-Fa-f:]+)\]):([0-9]+)$/.exec(line);
+    if (!match) {
+      throw new Error("Docker Probe upstream port evidence is malformed");
+    }
+    if (
+      match[1] &&
+      match[1]
+        .split(".")
+        .some((octet) => Number(octet) > 255 || String(Number(octet)) !== octet)
+    ) {
+      throw new Error("Docker Probe upstream port evidence is malformed");
+    }
+    const port = Number(match[3]);
+    if (
+      !Number.isSafeInteger(port) ||
+      port < 1 ||
+      port > 65_535 ||
+      String(port) !== match[3]
+    ) {
+      throw new Error("Docker Probe upstream port evidence is unsafe");
+    }
+    return { host: match[1] ?? `[${match[2]}]`, port };
+  });
+  const numericOwnerPort = Number(ownerPort);
+  const probeBindings =
+    containerPort === 3000
+      ? bindings.filter(({ port }) => port !== numericOwnerPort)
+      : bindings;
+  if (
+    (containerPort === 3000 &&
+      !bindings.some(({ port }) => port === numericOwnerPort)) ||
+    probeBindings.length !== 1
+  ) {
+    throw new Error(
+      "Docker Probe upstream port evidence does not contain one exact mapping",
+    );
+  }
+  const [{ host, port }] = probeBindings;
+  if (host !== "127.0.0.1") {
+    throw new Error(
+      "Docker Probe upstream port evidence is not an IPv4 loopback mapping",
+    );
+  }
+  return port;
 }
 
 function validateSshOptions(values) {
