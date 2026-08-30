@@ -1724,6 +1724,7 @@ mod tests {
         assert!(journal.contains("finalized_targets = 21"));
     }
 
+    #[cfg(feature = "acquirer")]
     #[test]
     fn normal_activation_custody_rejection_preserves_facts_without_repair_authority() {
         let fixture = installed_bundle_fixture();
@@ -1785,8 +1786,24 @@ mod tests {
             ..Systemd::default()
         };
 
-        let result = upgrade_current_probe_for_operation(
-            VerifiedUpgradeComponents {
+        let request = crate::lifecycle::LifecycleRequest::hub_upgrade(
+            &source.hub_origin,
+            "host_01",
+            &source.probe_id,
+            &attempt.operation_id,
+            &source.source_bundle_version,
+            &source.source_install_state_sha256,
+            &source.source_manifest_sha256,
+            &target.version,
+            &format!("sha256:{}", target.asset_set_manifest_sha256),
+            &target.manifest_sha256,
+            &"9".repeat(64),
+            u64::MAX,
+            "signed-authority",
+        )
+        .unwrap();
+        let mut mechanics = compatible_upgrade::RealMechanicsForTest {
+            components: Some(VerifiedUpgradeComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
                 system_state_provider: &mut system_state,
@@ -1794,15 +1811,23 @@ mod tests {
                 lifecycle_companion: &mut lifecycle,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
-            },
-            &target,
-            source,
-            &attempt,
+            }),
+            bundle: &target,
+            expected_source: source,
+            consumed: &attempt,
             paths,
-            &mut systemd,
+            systemd: &mut systemd,
+        };
+        let response = compatible_upgrade::run_compatible_upgrade_with_real_mechanics_for_test(
+            &request,
+            unsafe { libc::geteuid() },
+            &mut mechanics,
         );
 
-        assert_eq!(result, Err(InstallError::ExistingResidue));
+        assert_eq!(
+            response,
+            crate::lifecycle::LifecycleResponse::failed("lifecycle.install_state_invalid")
+        );
         assert_eq!(systemd.calls, ["stop", "reload"]);
         let protected_before = systemd
             .reload_topology_tamper
@@ -2515,7 +2540,9 @@ mod tests {
                 &paths,
                 &mut preactivation_systemd,
             ),
-            Err(InstallError::InvalidVerifiedComponent)
+            Err(UpgradeOperationFailure::Failed(
+                InstallError::InvalidVerifiedComponent
+            ))
         );
         assert!(preactivation_systemd.calls.is_empty());
         assert_eq!(
@@ -2555,7 +2582,9 @@ mod tests {
                 &paths,
                 &mut Systemd::default(),
             ),
-            Err(InstallError::ExistingResidue),
+            Err(UpgradeOperationFailure::Failed(
+                InstallError::ExistingResidue
+            )),
             "the consumed authority cannot be replayed after pre-activation failure"
         );
 

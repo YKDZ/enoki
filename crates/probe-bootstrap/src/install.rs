@@ -2085,13 +2085,13 @@ use filesystem::*;
 pub use systemd::SystemSystemd;
 #[cfg(feature = "acquirer")]
 pub(crate) use upgrade::{
-    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
+    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeOperationFailure,
     abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     upgrade_current_probe_for_operation,
 };
 #[cfg(all(test, not(feature = "acquirer")))]
 use upgrade::{
-    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
+    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeOperationFailure,
     abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     upgrade_current_probe_for_operation,
 };

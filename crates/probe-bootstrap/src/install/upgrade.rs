@@ -1382,14 +1382,26 @@ fn trusted_file(path: &Path, uid: u32, mode: u32) -> Result<File, InstallError> 
     super::installed_layout::trusted_file(path, uid, metadata.gid(), mode, metadata.len())
 }
 
-pub fn upgrade_current_probe_for_operation(
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum UpgradeOperationFailure {
+    CustodyRejected(InstallError),
+    Failed(InstallError),
+}
+
+impl From<InstallError> for UpgradeOperationFailure {
+    fn from(error: InstallError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+pub(crate) fn upgrade_current_probe_for_operation(
     components: VerifiedUpgradeComponents<'_>,
     bundle: &VerifiedBundle,
     expected_source: &InstalledUpgradeBinding,
     attempt: &UpgradeAttempt,
     paths: &FixedInstallPaths,
     systemd: &mut impl SystemdPort,
-) -> Result<UpgradeCompletion, InstallError> {
+) -> Result<UpgradeCompletion, UpgradeOperationFailure> {
     if attempt.operation_id.is_empty()
         || attempt.operation_id.len() > 96
         || !attempt
@@ -1397,7 +1409,7 @@ pub fn upgrade_current_probe_for_operation(
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
-        return Err(InstallError::ExistingResidue);
+        return Err(InstallError::ExistingResidue.into());
     }
     upgrade_current_probe_inner(
         components,
@@ -1461,7 +1473,7 @@ fn upgrade_current_probe_inner(
     attempt: Option<&UpgradeAttempt>,
     paths: &FixedInstallPaths,
     systemd: &mut impl SystemdPort,
-) -> Result<UpgradeCompletion, InstallError> {
+) -> Result<UpgradeCompletion, UpgradeOperationFailure> {
     let mut effects = UpgradeEffects {
         components: Some(components),
         bundle,
@@ -1496,7 +1508,7 @@ impl From<InstallError> for UpgradeActivationEffectFailure {
 }
 
 impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
-    type Error = InstallError;
+    type Error = UpgradeOperationFailure;
 
     fn verify_and_prepare(&mut self) -> Result<(), Self::Error> {
         if let Some(attempt) = self.attempt {
@@ -1507,7 +1519,7 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             || self.bundle.version == actual.source_bundle_version
             || !version_is_newer(&self.bundle.version, &actual.source_bundle_version)
         {
-            return Err(InstallError::ExistingResidue);
+            return Err(InstallError::ExistingResidue.into());
         }
         let components = self
             .components
@@ -1530,7 +1542,7 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             )
             .is_err()
         {
-            return Err(InstallError::Io);
+            return Err(InstallError::Io.into());
         }
         self.prepared = Some(prepared);
         Ok(())
@@ -1540,7 +1552,9 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         let mut prepared = self
             .prepared
             .take()
-            .ok_or(UpgradeActivationFailure::Preactivation(InstallError::Io))?;
+            .ok_or(UpgradeActivationFailure::Preactivation(
+                UpgradeOperationFailure::Failed(InstallError::Io),
+            ))?;
         prepared.retain_for_repair = true;
         let activated: Result<(), UpgradeActivationEffectFailure> = (|| {
             if let Some(attempt) = self.attempt {
@@ -1640,30 +1654,32 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         let error = match activated {
             Ok(()) => return Ok(()),
             Err(UpgradeActivationEffectFailure::CustodyRejected(error)) => {
-                return Err(UpgradeActivationFailure::RecoveryPersistence(error));
+                return Err(UpgradeActivationFailure::RecoveryPersistence(
+                    UpgradeOperationFailure::CustodyRejected(error),
+                ));
             }
             Err(UpgradeActivationEffectFailure::Repairable(error)) => error,
         };
         let Some(attempt) = self.attempt else {
-            return Err(UpgradeActivationFailure::Postactivation(error));
+            return Err(UpgradeActivationFailure::Postactivation(error.into()));
         };
         let journal = trusted_text(
             &self.paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
             self.paths.expected_root_uid(),
             0o600,
         )
-        .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+        .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
         let phase = journal_string(&journal, "phase")
-            .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+            .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
         if matches!(phase, "consumed" | "admitted" | "prepared") {
             prepared.retain_for_repair = false;
             cleanup_pre_activation_residue(self.paths)
-                .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+                .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
             transition_upgrade_attempt_phase(
                 self.paths,
                 UpgradeAttemptTerminalTransition::AbortPreactivation,
             )
-            .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+            .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
             write_operation_status(
                 self.paths,
                 attempt,
@@ -1671,14 +1687,14 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
                 "failed",
                 Some("lifecycle.upgrade_failed_before_activation"),
             )
-            .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
-            return Err(UpgradeActivationFailure::Preactivation(error));
+            .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
+            return Err(UpgradeActivationFailure::Preactivation(error.into()));
         }
         transition_upgrade_attempt_phase(
             self.paths,
             UpgradeAttemptTerminalTransition::RequireRepair,
         )
-        .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+        .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
         write_operation_status(
             self.paths,
             attempt,
@@ -1686,8 +1702,8 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             "failed",
             Some("lifecycle.upgrade_repair_required"),
         )
-        .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
-        Err(UpgradeActivationFailure::Postactivation(error))
+        .map_err(|error| UpgradeActivationFailure::RecoveryPersistence(error.into()))?;
+        Err(UpgradeActivationFailure::Postactivation(error.into()))
     }
 }
 

@@ -14,10 +14,11 @@ use crate::{
 
 use super::{
     ConsumeBeforeOuterError, FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd,
-    UpgradeAttempt, UpgradeAuthorityConsumption, VerifiedUpgradeComponents,
-    abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
-    finalize_probe_upgrade_stage_cleanup, inspect_installed_probe_for_upgrade,
-    recover_incomplete_probe_upgrade, upgrade_current_probe_for_operation,
+    UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeOperationFailure,
+    VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
+    consume_signed_before_upgrade_outer_checks, finalize_probe_upgrade_stage_cleanup,
+    inspect_installed_probe_for_upgrade, recover_incomplete_probe_upgrade,
+    upgrade_current_probe_for_operation,
 };
 
 /// 兼容升级的封闭生产接口。调用者只交付 Hub 的类型化请求与
@@ -274,6 +275,9 @@ fn run_compatible_upgrade_with_host<H: CompatibleUpgradeHost>(
         CompatibleUpgradeOutcome::RepairRequired => {
             LifecycleResponse::failed("lifecycle.upgrade_repair_required")
         }
+        CompatibleUpgradeOutcome::InstallStateInvalid => {
+            LifecycleResponse::failed("lifecycle.install_state_invalid")
+        }
     }
 }
 
@@ -288,6 +292,7 @@ enum CompatibleUpgradeOutcome {
     Activated,
     FailedBeforeActivation,
     RepairRequired,
+    InstallStateInvalid,
 }
 
 mod mechanics {
@@ -298,7 +303,7 @@ mod mechanics {
         paths: &FixedInstallPaths,
         systemd: &mut impl super::super::SystemdPort,
     ) -> CompatibleUpgradeOutcome {
-        let result = upgrade_current_probe_for_operation(
+        execute_verified_components(
             VerifiedUpgradeComponents {
                 probe: &mut plan.stage.probe,
                 observation_runtime: &mut plan.stage.observation_runtime,
@@ -311,6 +316,24 @@ mod mechanics {
             &plan.stage.bundle,
             &plan.expected_source,
             &plan.consumed,
+            paths,
+            systemd,
+        )
+    }
+
+    pub(super) fn execute_verified_components(
+        components: VerifiedUpgradeComponents<'_>,
+        bundle: &crate::verifier::VerifiedBundle,
+        expected_source: &InstalledUpgradeBinding,
+        consumed: &UpgradeAttempt,
+        paths: &FixedInstallPaths,
+        systemd: &mut impl super::super::SystemdPort,
+    ) -> CompatibleUpgradeOutcome {
+        let result = upgrade_current_probe_for_operation(
+            components,
+            bundle,
+            expected_source,
+            consumed,
             paths,
             systemd,
         );
@@ -332,22 +355,93 @@ mod mechanics {
                 }
             }
             Ok(UpgradeCompletion::RepairRequired) => CompatibleUpgradeOutcome::RepairRequired,
-            Err(_) => match recover_incomplete_probe_upgrade(paths, systemd) {
-                Ok(Some(receipt))
-                    if !receipt.activated()
-                        && remove_verified_probe_upgrade_stage(
-                            receipt.operation_id(),
-                            receipt.stage_owner_uid(),
-                        )
-                        .is_ok()
-                        && finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_ok() =>
-                {
-                    CompatibleUpgradeOutcome::FailedBeforeActivation
+            Err(UpgradeOperationFailure::CustodyRejected(_)) => {
+                CompatibleUpgradeOutcome::InstallStateInvalid
+            }
+            Err(UpgradeOperationFailure::Failed(_)) => {
+                match recover_incomplete_probe_upgrade(paths, systemd) {
+                    Ok(Some(receipt))
+                        if !receipt.activated()
+                            && remove_verified_probe_upgrade_stage(
+                                receipt.operation_id(),
+                                receipt.stage_owner_uid(),
+                            )
+                            .is_ok()
+                            && finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_ok() =>
+                    {
+                        CompatibleUpgradeOutcome::FailedBeforeActivation
+                    }
+                    _ => CompatibleUpgradeOutcome::RepairRequired,
                 }
-                _ => CompatibleUpgradeOutcome::RepairRequired,
-            },
+            }
         }
     }
+}
+
+#[cfg(test)]
+pub(super) struct RealMechanicsForTest<'a, S> {
+    pub(super) components: Option<VerifiedUpgradeComponents<'a>>,
+    pub(super) bundle: &'a crate::verifier::VerifiedBundle,
+    pub(super) expected_source: &'a InstalledUpgradeBinding,
+    pub(super) consumed: &'a UpgradeAttempt,
+    pub(super) paths: &'a FixedInstallPaths,
+    pub(super) systemd: &'a mut S,
+}
+
+#[cfg(test)]
+impl<S: super::SystemdPort> CompatibleUpgradeHost for RealMechanicsForTest<'_, S> {
+    type Consumed = ();
+    type Plan = ();
+
+    fn now_ms(&self) -> Result<u128, ()> {
+        Ok(0)
+    }
+
+    fn admit(
+        &mut self,
+        admission: CompatibleUpgradeAdmission<'_>,
+    ) -> Result<Self::Plan, CompatibleUpgradeAdmissionFailure<Self::Consumed>> {
+        (admission.authority.operation_id == self.consumed.operation_id
+            && admission.authority.stage_owner_uid == self.consumed.stage_owner_uid
+            && admission.authority.hub_origin == self.expected_source.hub_origin
+            && admission.authority.probe_id == self.expected_source.probe_id
+            && admission.authority.source_bundle_version
+                == self.expected_source.source_bundle_version
+            && admission.authority.source_install_state_sha256
+                == self.expected_source.source_install_state_sha256
+            && admission.authority.source_manifest_sha256
+                == self.expected_source.source_manifest_sha256
+            && admission.authority.target_bundle_version == self.bundle.version
+            && admission.authority.target_manifest_sha256 == self.bundle.manifest_sha256)
+            .then_some(())
+            .ok_or(CompatibleUpgradeAdmissionFailure::Consumed)
+    }
+
+    fn cleanup_failed_admission(&mut self, _: &Self::Consumed, _: &str, _: u32) -> bool {
+        false
+    }
+
+    fn execute(&mut self, _: Self::Plan) -> CompatibleUpgradeOutcome {
+        mechanics::execute_verified_components(
+            self.components
+                .take()
+                .expect("production mechanics runs once"),
+            self.bundle,
+            self.expected_source,
+            self.consumed,
+            self.paths,
+            self.systemd,
+        )
+    }
+}
+
+#[cfg(test)]
+pub(super) fn run_compatible_upgrade_with_real_mechanics_for_test(
+    request: &LifecycleRequest,
+    peer_uid: u32,
+    host: &mut RealMechanicsForTest<'_, impl super::SystemdPort>,
+) -> LifecycleResponse {
+    run_compatible_upgrade_with_host(request, Some(peer_uid), host)
 }
 
 #[cfg(test)]
@@ -506,6 +600,10 @@ mod tests {
             (
                 CompatibleUpgradeOutcome::RepairRequired,
                 LifecycleResponse::failed("lifecycle.upgrade_repair_required"),
+            ),
+            (
+                CompatibleUpgradeOutcome::InstallStateInvalid,
+                LifecycleResponse::failed("lifecycle.install_state_invalid"),
             ),
         ] {
             let mut host = DeterministicHost {
