@@ -2701,14 +2701,18 @@ async function writeOrdinaryTransitionContract({
 async function targetProbeComponentsFromAssetSet(assetDir) {
   return Promise.all(
     probeTargets.map(async (target) => {
-      const { stdout } = await execFileAsync("tar", [
-        "--extract",
-        "--gzip",
-        "--file",
-        path.join(assetDir, `enoki-probe-${target}.tar.gz`),
-        "--to-stdout",
-        "enoki-probe",
-      ]);
+      const { stdout } = await execFileAsync(
+        "tar",
+        [
+          "--extract",
+          "--gzip",
+          "--file",
+          path.join(assetDir, `enoki-probe-${target}.tar.gz`),
+          "--to-stdout",
+          "enoki-probe",
+        ],
+        { encoding: "buffer" },
+      );
       return {
         file: "enoki-probe",
         role: "probe",
