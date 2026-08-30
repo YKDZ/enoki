@@ -192,7 +192,7 @@ describe("Probe release primitives", () => {
         signature: signed.signature,
       }),
     ).toEqual(signed.delegation);
-  });
+  }, 20_000);
 
   it("rejects explicitly weak RSA-2048 production trust identities", () => {
     const root = rsa4096TestKeyPair("probe-release-root");

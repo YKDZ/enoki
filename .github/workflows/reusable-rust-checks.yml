@@ -29,4 +29,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: |
+          cleanup() {
+            local status=$?
+            if [[ -d target ]] && ! sudo chown -R "$(id -u):$(id -g)" target; then
+              exit 1
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          cargo="$(command -v cargo)"
+          sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME "$cargo" test --workspace

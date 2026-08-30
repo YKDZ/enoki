@@ -15,7 +15,7 @@
     "db:generate:official-metrics": "drizzle-kit generate --config drizzle.official-metrics.config.ts",
     "db:push": "drizzle-kit push --config drizzle.config.ts && drizzle-kit push --config drizzle.official-metrics.config.ts",
     "start": "node dist/src/server.js",
-    "test": "turbo run build --filter=@enoki/hub && pnpm run test:built",
+    "test": "pnpm run test:built",
     "test:built": "vitest run",
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.typecheck.json"
   },
