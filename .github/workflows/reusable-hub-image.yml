@@ -57,11 +57,11 @@ jobs:
           echo "::error::A packaged Hub artifact requires signed Probe assets and reproducibility verification."
           exit 1
 
-      - name: Set up Node.js for release verification
+      - name: Set up workspace dependencies for release verification
         if: inputs.package-artifact
-        uses: actions/setup-node@v6
+        uses: ./source/.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: source/package.json
+          working-directory: source
 
       - name: Download signed Probe Asset Set
         if: inputs.probe-assets-artifact-name != ''

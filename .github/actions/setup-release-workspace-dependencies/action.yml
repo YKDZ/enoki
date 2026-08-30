@@ -1,0 +1,25 @@
+name: Set up Release workspace dependencies
+description: Install the pinned Node workspace dependencies required by isolated Release tooling checkouts.
+inputs:
+  working-directory:
+    description: Checked-out Enoki workspace containing package.json and pnpm-lock.yaml.
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Enable Corepack
+      shell: bash
+      run: corepack enable
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version-file: ${{ inputs.working-directory }}/package.json
+        cache: pnpm
+        cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+
+    - name: Install workspace dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: pnpm install --frozen-lockfile

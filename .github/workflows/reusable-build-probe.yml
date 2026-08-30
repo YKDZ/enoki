@@ -70,11 +70,11 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           --target ${{ matrix.target }}
 
-      - name: Set up Node.js for deterministic packaging
+      - name: Set up workspace dependencies for deterministic packaging
         if: inputs.package-artifacts
-        uses: actions/setup-node@v6
+        uses: ./.github/actions/setup-release-workspace-dependencies
         with:
-          node-version-file: package.json
+          working-directory: .
 
       - name: Cache Rust build
         if: ${{ !inputs.verify-reproducible }}

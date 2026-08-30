@@ -87,6 +87,152 @@ const probeTargets = [
 const testDistributionRoot = rsa4096TestKeyPair("candidate-root");
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
+  it("prepares every isolated Release workspace before its Node tooling runs", async () => {
+    const [
+      bootstrapWorkflow,
+      candidateWorkflow,
+      hubWorkflow,
+      probeWorkflow,
+      publicationWorkflow,
+      workspaceSetup,
+    ] = await Promise.all([
+      readFile(".github/workflows/reusable-build-probe-bootstrap.yml", "utf8"),
+      readFile(
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "utf8",
+      ),
+      readFile(".github/workflows/reusable-hub-image.yml", "utf8"),
+      readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
+      readFile(
+        ".github/workflows/reusable-publish-release-candidate.yml",
+        "utf8",
+      ),
+      readFile(
+        ".github/actions/setup-release-workspace-dependencies/action.yml",
+        "utf8",
+      ),
+    ]);
+
+    expect(workspaceSetup).toContain("actions/setup-node@v6");
+    expect(workspaceSetup).toContain("corepack enable");
+    expect(workspaceSetup).toContain("pnpm install --frozen-lockfile");
+    expect(workspaceSetup).toContain(
+      "working-directory: ${{ inputs.working-directory }}",
+    );
+
+    const setup = "setup-release-workspace-dependencies";
+    const expectPrepared = (workflow, start, end, workspace, nodeCommand) => {
+      const job = workflow.slice(
+        workflow.indexOf(start),
+        end ? workflow.indexOf(end) : undefined,
+      );
+      const action =
+        workspace === "."
+          ? `./.github/actions/${setup}`
+          : `./${workspace}/.github/actions/${setup}`;
+      expect(job).toContain(`uses: ${action}`);
+      expect(job).toContain(`working-directory: ${workspace}`);
+      expect(job.indexOf(setup)).toBeLessThan(job.indexOf(nodeCommand));
+    };
+
+    expectPrepared(
+      probeWorkflow,
+      "  build-probe:",
+      undefined,
+      ".",
+      "node scripts/release-candidate.mjs package-probe",
+    );
+    expectPrepared(
+      bootstrapWorkflow,
+      "  build-probe-bootstrap:",
+      undefined,
+      ".",
+      "node scripts/probe-bootstrap-artifact.mjs",
+    );
+    expectPrepared(
+      hubWorkflow,
+      "  hub-image:",
+      undefined,
+      "source",
+      "node source/scripts/release-candidate.mjs",
+    );
+
+    for (const [start, end, workspace, nodeCommand] of [
+      [
+        "  validate-candidate-inputs:",
+        "  validate-release-configuration:",
+        "candidate-source",
+        "node candidate-source/scripts/release-candidate.mjs",
+      ],
+      [
+        "  validate-release-configuration:",
+        "  resolve-release-baseline:",
+        "trusted-tool",
+        "node trusted-tool/scripts/release-transition-preflight.mjs",
+      ],
+      [
+        "  resolve-release-baseline:",
+        "  build-probe:",
+        "trusted-tool",
+        "node trusted-tool/scripts/release-baseline.mjs resolve",
+      ],
+      [
+        "  prepare-unsigned-probe-assets:",
+        "  sign-probe-assets:",
+        "candidate-source",
+        "node candidate-source/scripts/release-candidate.mjs",
+      ],
+      [
+        "  sign-probe-assets:",
+        "  build-hub-oci:",
+        "trusted-signer",
+        "node trusted-signer/scripts/release-candidate.mjs",
+      ],
+      [
+        "  assemble-candidate:",
+        "  prepare-release-e2e-matrix:",
+        "trusted-tool",
+        "node trusted-tool/scripts/release-baseline.mjs recheck",
+      ],
+      [
+        "  prepare-release-e2e-matrix:",
+        "  candidate-release-e2e:",
+        "trusted-tool",
+        "node trusted-tool/scripts/release-scenario-plan.mjs",
+      ],
+      [
+        "  candidate-release-e2e:",
+        "  candidate-ui-contract:",
+        "trusted-tool",
+        "node trusted-tool/scripts/release-e2e.mjs run",
+      ],
+      [
+        "  finalize-verification:",
+        undefined,
+        "trusted-tool",
+        "node trusted-tool/scripts/release-verification.mjs summarize",
+      ],
+    ]) {
+      expectPrepared(candidateWorkflow, start, end, workspace, nodeCommand);
+    }
+
+    const candidateUiJob = candidateWorkflow.slice(
+      candidateWorkflow.indexOf("  candidate-ui-contract:"),
+      candidateWorkflow.indexOf("  finalize-verification:"),
+    );
+    expect(
+      candidateUiJob.indexOf("pnpm install --frozen-lockfile"),
+    ).toBeLessThan(candidateUiJob.indexOf("pnpm run test:e2e:candidate"));
+
+    expectPrepared(
+      publicationWorkflow,
+      "  publish-candidate:",
+      undefined,
+      "trusted-tool",
+      "node trusted-tool/scripts/release-candidate.mjs validate candidate",
+    );
+  });
+
   it("reuses one strong in-memory test identity per slot while separating slots", () => {
     const release = rsa4096TestKeyPair("candidate-release");
     const sameRelease = rsa4096TestKeyPair("candidate-release");
