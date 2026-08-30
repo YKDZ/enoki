@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createProbeHostHarness } from "./release-e2e-lib.mjs";
 import {
@@ -591,6 +591,133 @@ describe("verify-only release workflow", () => {
         "not-a-valid-commit",
       );
     } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it("independently verifies the downloaded Probe Asset Set with the finalizer trust root", async () => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-attempt-identities-"),
+    );
+    const hubDir = path.join(workDir, "hub");
+    const summaryPath = path.join(workDir, "summary.json");
+    const markdownPath = path.join(workDir, "summary.md");
+    const trustedRootPublicKeyPem = "trusted external root";
+    const inspectProbeAssetSet = vi.fn(async () => ({
+      files: [{ file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz" }],
+      signingIdentity: { rootKeyId: "root-key-id" },
+      version: "1.2.3",
+    }));
+    let capturedIdentities;
+    const candidateManifest = {
+      candidate: { commit: "a".repeat(40), version: "v1.2.3" },
+      hub: { digest: "sha256:candidate" },
+      probeAssetSet: { version: "1.2.3" },
+      releaseBaseline: { version: "v1.2.2" },
+    };
+
+    vi.doMock("./release-candidate-lib.mjs", () => ({
+      inspectProbeAssetSet,
+      releaseTransitionForValidatedCandidate: () => ({}),
+      validateReleaseCandidate: async () => candidateManifest,
+    }));
+    vi.doMock("./release-baseline-lib.mjs", () => ({
+      validateResolvedReleaseBaseline: async () => ({ version: "v1.2.2" }),
+    }));
+    vi.doMock("./release-candidate-oci.mjs", () => ({
+      inspectHubOciArchive: async () => ({ digest: "sha256:downloaded" }),
+    }));
+    vi.doMock("./release-e2e-matrix.mjs", () => ({
+      readReleaseE2EMatrix: async () => [],
+    }));
+    vi.doMock("./release-scenario-plan.mjs", () => ({
+      compileReleaseScenarioPlan: () => ({}),
+    }));
+    vi.doMock("./release-verification-lib.mjs", () => ({
+      createMatrixGateResult: vi.fn(),
+      createReleaseVerificationSummary: ({ identities }) => {
+        capturedIdentities = identities;
+        return { identities };
+      },
+      createUiGateResult: vi.fn(),
+      renderReleaseVerificationEvidenceMarkdown: () => "summary\n",
+    }));
+
+    const originalArgv = process.argv;
+    const originalExitCode = process.exitCode;
+    const originalTrustRoot = process.env.TEST_FINALIZER_ROOT;
+    try {
+      await mkdir(hubDir);
+      await writeFile(path.join(hubDir, "enoki-hub-v1.2.3.oci.tar"), "oci");
+      process.argv = [
+        process.execPath,
+        "scripts/release-verification.mjs",
+        "summarize",
+        "--candidate-dir",
+        path.join(workDir, "candidate"),
+        "--root-public-key-env",
+        "TEST_FINALIZER_ROOT",
+        "--release-baseline-dir",
+        path.join(workDir, "baseline"),
+        "--probe-assets-dir",
+        path.join(workDir, "probe-assets"),
+        "--hub-oci-dir",
+        hubDir,
+        "--matrix",
+        path.join(workDir, "matrix.json"),
+        "--matrix-evidence-root",
+        path.join(workDir, "host-evidence"),
+        "--ui-gate",
+        path.join(workDir, "ui-gate.json"),
+        "--component-results",
+        path.join(workDir, "component-results.json"),
+        "--artifact-index",
+        path.join(workDir, "artifact-index.json"),
+        "--requested-commit",
+        candidateManifest.candidate.commit,
+        "--requested-version",
+        candidateManifest.candidate.version,
+        "--standard-ci",
+        path.join(workDir, "standard-ci.json"),
+        "--run-id",
+        "33331428561",
+        "--run-attempt",
+        "1",
+        "--run-url",
+        "https://github.com/YKDZ/enoki/actions/runs/33331428561",
+        "--output",
+        summaryPath,
+        "--markdown",
+        markdownPath,
+      ];
+      process.env.TEST_FINALIZER_ROOT = trustedRootPublicKeyPem;
+      await import("./release-verification.mjs?finalizer-trust-root-test");
+
+      expect(inspectProbeAssetSet).toHaveBeenCalledWith(
+        path.join(workDir, "probe-assets"),
+        { trustedRootPublicKeyPem },
+      );
+      expect(capturedIdentities.errors).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("Probe Asset Set identity unavailable"),
+          expect.stringContaining("Hub OCI identity unavailable"),
+        ]),
+      );
+    } finally {
+      if (originalTrustRoot === undefined) {
+        delete process.env.TEST_FINALIZER_ROOT;
+      } else {
+        process.env.TEST_FINALIZER_ROOT = originalTrustRoot;
+      }
+      process.argv = originalArgv;
+      process.exitCode = originalExitCode;
+      vi.doUnmock("./release-candidate-lib.mjs");
+      vi.doUnmock("./release-baseline-lib.mjs");
+      vi.doUnmock("./release-candidate-oci.mjs");
+      vi.doUnmock("./release-e2e-matrix.mjs");
+      vi.doUnmock("./release-scenario-plan.mjs");
+      vi.doUnmock("./release-verification-lib.mjs");
+      vi.resetModules();
       await rm(workDir, { force: true, recursive: true });
     }
   });
