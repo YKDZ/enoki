@@ -119,20 +119,6 @@ fn run(
         return LifecycleResponse::failed("lifecycle.authority_invalid");
     };
     let enrollment_token = enrollment_token.clone();
-    if crate::registration::prepare_root_replacement_registration_attempt(
-        &production_path(
-            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
-            production_root,
-        ),
-        crate::registration::RootReplacementRegistrationAttemptInput {
-            enrollment_token: enrollment_token.clone(),
-            binding: registration_binding,
-        },
-    )
-    .is_err()
-    {
-        return LifecycleResponse::failed("lifecycle.registration_attempt_failed");
-    }
     let mut registration = crate::registration::HttpRegistrationTransport;
     let inspected = crate::registration::inspect_probe_installation(
         crate::registration::ProbeInstallationInspectionInput {
@@ -152,6 +138,33 @@ fn run(
         production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, production_root),
         0,
     );
+    match store.load() {
+        Ok(None) => {}
+        Ok(Some(_)) => return LifecycleResponse::failed("lifecycle.replacement_commit_conflict"),
+        Err(_) => return LifecycleResponse::failed("lifecycle.replacement_commit_failed"),
+    }
+    let attempt_path = production_path(
+        PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+        production_root,
+    );
+    let attempt_input = crate::registration::RootReplacementRegistrationAttemptInput {
+        enrollment_token: enrollment_token.clone(),
+        binding: registration_binding,
+    };
+    if crate::registration::prepare_root_replacement_registration_attempt(
+        &attempt_path,
+        attempt_input.clone(),
+    )
+    .or_else(|_| {
+        crate::registration::replace_stale_root_replacement_registration_attempt(
+            &attempt_path,
+            attempt_input,
+        )
+    })
+    .is_err()
+    {
+        return LifecycleResponse::failed("lifecycle.registration_attempt_failed");
+    }
     let mut systemd = SystemProbeUpgraderSystemdRunner;
     commit_and_cleanup_response(commit_replacement_and_cleanup_install_with_systemd(
         intent,

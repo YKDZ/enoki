@@ -378,6 +378,44 @@ pub fn prepare_root_replacement_registration_attempt(
     }
 }
 
+/// 仅替换仍精确绑定当前 Probe、Hub、Host 与 source 的 precommit capsule。
+/// coordinator 只能在新 inspection 成功且 Replacement commit 缺失后调用。
+pub fn replace_stale_root_replacement_registration_attempt(
+    path: &Path,
+    input: RootReplacementRegistrationAttemptInput,
+) -> Result<(), RegistrationError> {
+    let binding = ReplacementRegistrationBinding::from(input.binding.clone());
+    let capsule = read_registration_attempt_capsule(path)?.ok_or(
+        RegistrationError::InvalidResponse("missing replacement registration capsule"),
+    )?;
+    let request_body = decode_lower_hex(&capsule.request_hex).ok_or(
+        RegistrationError::InvalidResponse("invalid registration attempt capsule"),
+    )?;
+    let request = ProbeRegistrationRequest::decode(request_body.as_slice())
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    let attempt = ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    if attempt.encode_to_vec() != request.canonical_attempt
+        || capsule.hub_origin != binding.hub_origin
+        || attempt.hub_origin != binding.hub_origin
+        || attempt.host_id != binding.host_id
+        || attempt.old_probe_id != binding.old_probe_id
+        || attempt.source_probe_version != binding.source_probe_version
+        || attempt.committed_source_probe_sha256 != binding.committed_source_probe_sha256
+    {
+        return Err(RegistrationError::InvalidResponse(
+            "stale registration attempt does not match installed source",
+        ));
+    }
+    let registration_input = ProbeRegistrationInput {
+        bootstrap_config_path: Default::default(),
+        enrollment_token: input.enrollment_token,
+        hub_url: binding.hub_origin.clone(),
+    };
+    let replacement = create_registration_attempt(&registration_input, &binding)?;
+    persist_registration_attempt_capsule(path, &replacement)
+}
+
 fn create_registration_attempt(
     input: &ProbeRegistrationInput,
     binding: &ReplacementRegistrationBinding,
@@ -612,4 +650,62 @@ fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
             Some(((high << 4) | low) as u8)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding() -> BootstrapReplacementRegistrationBinding {
+        BootstrapReplacementRegistrationBinding {
+            committed_source_probe_sha256: "a".repeat(64),
+            enrollment_id: "enr_0123456789abcdef".into(),
+            host_id: "7".into(),
+            hub_origin: "https://hub.example".into(),
+            old_probe_id: "probe_old_01".into(),
+            replacement_commit_sha256: "b".repeat(64),
+            source_probe_version: "1.2.3".into(),
+            target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+            target_bundle_target: "x86_64-unknown-linux-gnu".into(),
+            target_manifest_sha256: "d".repeat(64),
+            target_probe_version: "1.2.4".into(),
+        }
+    }
+
+    #[test]
+    fn stale_capsule_replacement_requires_the_exact_installed_source_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("attempt.json");
+        let old = binding();
+        let old_input = RootReplacementRegistrationAttemptInput {
+            enrollment_token: "enk_old".into(),
+            binding: old.clone(),
+        };
+        prepare_root_replacement_registration_attempt(&path, old_input).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut next = old.clone();
+        next.enrollment_id = "enr_abcdef0123456789".into();
+        next.replacement_commit_sha256 = "e".repeat(64);
+        replace_stale_root_replacement_registration_attempt(
+            &path,
+            RootReplacementRegistrationAttemptInput {
+                enrollment_token: "enk_new".into(),
+                binding: next,
+            },
+        )
+        .unwrap();
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        let mut wrong = old;
+        wrong.old_probe_id = "probe_other".into();
+        assert!(
+            replace_stale_root_replacement_registration_attempt(
+                &path,
+                RootReplacementRegistrationAttemptInput {
+                    enrollment_token: "enk_third".into(),
+                    binding: wrong
+                }
+            )
+            .is_err()
+        );
+    }
 }

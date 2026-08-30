@@ -328,19 +328,6 @@ where
         {
             existing
         }
-        Some(existing) if existing.candidate_layout_complete => {
-            let committed = ReplacementCommitFact {
-                schema_version: 1,
-                canonical_intent_sha256: digest,
-                intent,
-                cleanup_complete: false,
-                candidate_layout_complete: false,
-            };
-            store
-                .persist(&committed)
-                .map_err(ReplacementCommitError::Store)?;
-            committed
-        }
         Some(_) => return Err(ReplacementCommitError::ConflictingCommit),
         None => {
             let committed = ReplacementCommitFact {
@@ -516,6 +503,28 @@ mod tests {
         commit_and_cleanup_replacement(intent(), &mut store, &mut replay).unwrap();
         assert_eq!(replay.calls, 0);
         assert_eq!(store.writes, 3);
+    }
+
+    #[test]
+    fn completed_layout_does_not_authorize_a_different_replacement_commit() {
+        let mut store = Store::default();
+        let mut cleanup = Cleanup::default();
+        let committed = commit_and_cleanup_replacement(intent(), &mut store, &mut cleanup).unwrap();
+        record_replacement_candidate_layout(&mut store, &committed.canonical_intent_sha256)
+            .unwrap();
+        let mut different = intent();
+        different.enrollment_id.push_str("_new");
+        let mut replacement_cleanup = Cleanup::default();
+
+        assert_eq!(
+            commit_and_cleanup_replacement(different, &mut store, &mut replacement_cleanup),
+            Err(ReplacementCommitError::ConflictingCommit)
+        );
+        assert_eq!(replacement_cleanup.calls, 0);
+        assert_eq!(
+            store.load().unwrap().unwrap().canonical_intent_sha256,
+            committed.canonical_intent_sha256
+        );
     }
 
     #[test]

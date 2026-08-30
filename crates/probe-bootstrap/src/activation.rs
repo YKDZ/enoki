@@ -124,11 +124,30 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
-        let replacement_activation = prepare_replacement_migration(
+        let mut replacement_activation = prepare_replacement_migration(
             &self.enrollment,
             &self.bundle,
             &mut self.lifecycle_companion,
         )?;
+        if let ReplacementActivation::CompletePredecessor(commit) = &replacement_activation {
+            let paths = FixedInstallPaths::production();
+            let resume_binding = commit.resume_binding();
+            let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+            crate::install::finalize_and_retire_complete_replacement_current_probe(
+                &paths,
+                &resume_binding,
+                &self.bundle,
+                commit,
+                &mut store,
+                &mut systemd,
+            )
+            .map_err(ActivationError::Install)?;
+            replacement_activation = prepare_replacement_migration(
+                &self.enrollment,
+                &self.bundle,
+                &mut self.lifecycle_companion,
+            )?;
+        }
         if let ReplacementActivation::Complete(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
             let resume_binding = commit.resume_binding();
@@ -237,11 +256,13 @@ enum ReplacementActivation {
     Fresh,
     Resume(crate::replacement::ReplacementCommitFact),
     Complete(crate::replacement::ReplacementCommitFact),
+    CompletePredecessor(crate::replacement::ReplacementCommitFact),
 }
 
 enum MatchingReplacementCommit {
     CleanupRequired(Box<crate::replacement::ReplacementCommitFact>),
     Ready(Box<crate::replacement::ReplacementCommitFact>),
+    CompletePredecessor(Box<crate::replacement::ReplacementCommitFact>),
 }
 
 fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStore>(
@@ -283,6 +304,9 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
                 } else {
                     ReplacementActivation::Resume(*fact)
                 });
+            }
+            MatchingReplacementCommit::CompletePredecessor(fact) => {
+                return Ok(ReplacementActivation::CompletePredecessor(*fact));
             }
         }
     } else {
@@ -350,7 +374,9 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
     if !fact.cleanup_complete || fact.intent.hub_origin != enrollment.hub_origin() {
         return Err(ActivationError::Replacement);
     }
-    Ok(None)
+    Ok(Some(MatchingReplacementCommit::CompletePredecessor(
+        Box::new(fact),
+    )))
 }
 
 fn replacement_request_for_installed_state(
@@ -1259,16 +1285,17 @@ mod tests {
 
         let other_enrollment =
             Enrollment::new(received.enrollment.hub_origin(), "enk_enroll_other").unwrap();
-        assert!(
-            matching_replacement_commit_in(
-                &mut Store(Some(fact.clone())),
-                &other_enrollment,
-                &received.bundle,
-            )
-            .unwrap()
-            .is_none(),
-            "只有 candidate receipt 完成后，新 Enrollment 才能显式开始"
-        );
+        let predecessor = matching_replacement_commit_in(
+            &mut Store(Some(fact.clone())),
+            &other_enrollment,
+            &received.bundle,
+        )
+        .unwrap()
+        .unwrap();
+        let MatchingReplacementCommit::CompletePredecessor(predecessor) = predecessor else {
+            panic!("完整 predecessor 必须先由 finalizer 退休")
+        };
+        assert_eq!(*predecessor, fact);
         let mut incomplete = fact;
         incomplete.candidate_layout_complete = false;
         assert!(matches!(

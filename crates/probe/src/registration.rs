@@ -3,6 +3,7 @@ mod replacement_attempt;
 use replacement_attempt::InstalledRegistrationAttempt;
 pub use replacement_attempt::{
     RootReplacementRegistrationAttemptInput, prepare_root_replacement_registration_attempt,
+    replace_stale_root_replacement_registration_attempt,
 };
 
 use std::{
