@@ -551,6 +551,76 @@ function collectWebSocketJson(
   });
 }
 
+type HostSummaryWithDiskHealth = {
+  host: {
+    collectorCapabilities: {
+      official: {
+        diskHealth: unknown;
+      };
+    };
+    probeUpgradeProblem: unknown;
+  };
+  type: "host_summary";
+};
+
+function isHostSummaryWithDiskHealth(
+  message: unknown,
+): message is HostSummaryWithDiskHealth {
+  if (
+    typeof message !== "object" ||
+    message === null ||
+    !(
+      "type" in message &&
+      message.type === "host_summary" &&
+      "host" in message &&
+      typeof message.host === "object" &&
+      message.host !== null &&
+      "collectorCapabilities" in message.host &&
+      typeof message.host.collectorCapabilities === "object" &&
+      message.host.collectorCapabilities !== null &&
+      "official" in message.host.collectorCapabilities &&
+      typeof message.host.collectorCapabilities.official === "object" &&
+      message.host.collectorCapabilities.official !== null
+    )
+  ) {
+    return false;
+  }
+
+  return "diskHealth" in message.host.collectorCapabilities.official;
+}
+
+function waitForHostSummaryWithDiskHealth(socket: WebSocket) {
+  return new Promise<HostSummaryWithDiskHealth>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(
+        new Error("Timed out waiting for a Host summary with disk health."),
+      );
+    }, 500);
+    const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as unknown;
+      if (!isHostSummaryWithDiskHealth(message)) {
+        return;
+      }
+
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
 async function closeSocket(socket: WebSocket) {
   if (
     socket.readyState === WebSocket.CLOSED ||
@@ -934,77 +1004,65 @@ describe("WebSocket live updates", () => {
     const initialOverview = (await initialOverviewResponse.json()) as {
       hosts: Array<{ probeUpgradeProblem: unknown }>;
     };
-    const summaryMessages = collectWebSocketJson(socket);
+    const summaryAfterSnapshotReplay = waitForHostSummaryWithDiskHealth(socket);
     await sendReport(baseUrl, registration, {
       bootId: "boot-live-summary",
       diskAvailable: false,
       sequence: 2,
     });
 
-    const receivedSummaries = await summaryMessages;
-    expect(receivedSummaries).toEqual(
-      expect.arrayContaining([
-        {
-          host: {
-            id: 1,
-            collectorCapabilities: {
-              official: {
-                diskHealth: {
-                  diagnostic: "SMART data is unsupported",
-                  status: 6,
-                },
-              },
-            },
-            lastSeenAtMs: 1_725_000_010_000,
-            latestMetrics: {
-              batteryPercent: null,
-              batteryState: null,
-              collectedAtMs: 1_725_000_009_500,
-              cpuIdlePercent: null,
-              cpuIowaitPercent: null,
-              cpuPercent: 42.5,
-              cpuStealPercent: null,
-              cpuSystemPercent: null,
-              cpuUserPercent: null,
-              diskTotalBytes: 2_048,
-              diskUsedBytes: 1_536,
-              memoryCacheBytes: null,
-              memoryTotalBytes: 2_147_483_648,
-              memoryUsedBytes: 1_073_741_824,
-              networkRxBitsPerSecond: 6_400,
-              networkRxBytesDelta: 4_000,
-              networkTxBitsPerSecond: 3_200,
-              networkTxBytesDelta: 2_000,
-              receivedAtMs: 1_725_000_010_000,
-              swapTotalBytes: null,
-              swapUsedBytes: null,
-              temperatureCelsius: null,
-              uptimeSeconds: 86_400,
-            },
-            probeUpgradeProblem: { status: "in_progress" },
-            status: "online",
-            warningFlags: {
-              clockSkew: false,
-              probeConfigurationError: false,
+    const receivedSummary = await summaryAfterSnapshotReplay;
+    expect(receivedSummary).toEqual({
+      host: {
+        id: 1,
+        collectorCapabilities: {
+          official: {
+            diskHealth: {
+              diagnostic: "SMART data is unsupported",
+              status: 6,
             },
           },
-          type: "host_summary",
         },
-      ]),
-    );
-    const activeLiveSummary = receivedSummaries.find(
-      (message) =>
-        typeof message === "object" &&
-        message !== null &&
-        "host" in message &&
-        (message.host as { probeUpgradeProblem?: unknown })
-          .probeUpgradeProblem !== undefined,
-    ) as { host: { probeUpgradeProblem: unknown } } | undefined;
-    expect(activeLiveSummary?.host.probeUpgradeProblem).toEqual(
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: {
+          batteryPercent: null,
+          batteryState: null,
+          collectedAtMs: 1_725_000_009_500,
+          cpuIdlePercent: null,
+          cpuIowaitPercent: null,
+          cpuPercent: 42.5,
+          cpuStealPercent: null,
+          cpuSystemPercent: null,
+          cpuUserPercent: null,
+          diskTotalBytes: 2_048,
+          diskUsedBytes: 1_536,
+          memoryCacheBytes: null,
+          memoryTotalBytes: 2_147_483_648,
+          memoryUsedBytes: 1_073_741_824,
+          networkRxBitsPerSecond: 6_400,
+          networkRxBytesDelta: 4_000,
+          networkTxBitsPerSecond: 3_200,
+          networkTxBytesDelta: 2_000,
+          receivedAtMs: 1_725_000_010_000,
+          swapTotalBytes: null,
+          swapUsedBytes: null,
+          temperatureCelsius: null,
+          uptimeSeconds: 86_400,
+        },
+        probeUpgradeProblem: { status: "in_progress" },
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+      type: "host_summary",
+    });
+    expect(receivedSummary.host.probeUpgradeProblem).toEqual(
       initialOverview.hosts[0]?.probeUpgradeProblem,
     );
-    expect(JSON.stringify(receivedSummaries)).not.toContain("failureCode");
-    expect(JSON.stringify(receivedSummaries)).not.toContain("failureMessage");
+    expect(JSON.stringify(receivedSummary)).not.toContain("failureCode");
+    expect(JSON.stringify(receivedSummary)).not.toContain("failureMessage");
 
     const currentOperation = database.probeOperations.findLatestForHost(1);
     expect(currentOperation).not.toBeNull();

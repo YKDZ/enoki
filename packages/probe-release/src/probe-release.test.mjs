@@ -2,13 +2,29 @@ import { generateKeyPairSync } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { rsa4096TestKeyPair } from "../../../scripts/test-rsa-key-pool.mjs";
 import {
   createProbeTrustDelegation,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   verifyProbeTrustDelegation,
 } from "./index.mjs";
+
+const rsa4096TestIdentities = new Map();
+
+function rsa4096TestKeyPair(slot) {
+  let identity = rsa4096TestIdentities.get(slot);
+  if (!identity) {
+    identity = Object.freeze(
+      generateKeyPairSync("rsa", {
+        modulusLength: 4096,
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      }),
+    );
+    rsa4096TestIdentities.set(slot, identity);
+  }
+  return identity;
+}
 
 describe("Probe release primitives", () => {
   it("keeps the fixed Probe Asset Bundle roles in one package", () => {
