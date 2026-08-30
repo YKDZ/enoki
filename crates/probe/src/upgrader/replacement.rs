@@ -356,6 +356,29 @@ pub(super) fn resume_committed_from_exact_request(
     request: &LifecycleRequest,
     production_root: Option<&Path>,
 ) -> Option<LifecycleResponse> {
+    resume_committed_from_exact_request_with(request, production_root, |fact, store| {
+        let metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
+        if !fact.cleanup_complete && !metadata_path.exists() {
+            // exact request 是 authority binding，不是 effect receipt。没有仍受 commit
+            // custody 的 metadata 就无法证明旧 inventory 已完整清理，必须零效果关闭。
+            return LifecycleResponse::failed("lifecycle.replacement_cleanup_failed");
+        }
+        let mut systemd = SystemProbeUpgraderSystemdRunner;
+        commit_and_cleanup_response(commit_replacement_and_cleanup_install_with_systemd(
+            fact.intent,
+            store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            production_root,
+            &mut systemd,
+        ))
+    })
+}
+
+fn resume_committed_from_exact_request_with(
+    request: &LifecycleRequest,
+    production_root: Option<&Path>,
+    resume: impl FnOnce(ReplacementCommitFact, &mut FileReplacementCommitStore) -> LifecycleResponse,
+) -> Option<LifecycleResponse> {
     let mut store = FileReplacementCommitStore::at(
         production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, production_root),
         0,
@@ -374,24 +397,34 @@ pub(super) fn resume_committed_from_exact_request(
             "lifecycle.replacement_commit_conflict",
         ));
     }
-    let metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
-    if !fact.cleanup_complete && !metadata_path.exists() {
-        // exact request 是 authority binding，不是 effect receipt。没有仍受 commit
-        // custody 的 metadata 就无法证明旧 inventory 已完整清理，必须零效果关闭。
+    let LifecycleRequestAuthority::ReplacementEnrollment {
+        enrollment_token, ..
+    } = request.authority()
+    else {
+        return Some(LifecycleResponse::failed("lifecycle.invalid_authority"));
+    };
+    let Some(binding) = fact.intent.registration_binding() else {
         return Some(LifecycleResponse::failed(
-            "lifecycle.replacement_cleanup_failed",
+            "lifecycle.replacement_commit_conflict",
+        ));
+    };
+    if crate::registration::validate_root_replacement_registration_attempt(
+        &production_path(
+            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+            production_root,
+        ),
+        crate::registration::RootReplacementRegistrationAttemptInput {
+            enrollment_token: enrollment_token.clone(),
+            binding,
+        },
+    )
+    .is_err()
+    {
+        return Some(LifecycleResponse::failed(
+            "lifecycle.registration_attempt_failed",
         ));
     }
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
-    Some(commit_and_cleanup_response(
-        commit_replacement_and_cleanup_install_with_systemd(
-            fact.intent,
-            &mut store,
-            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-            production_root,
-            &mut systemd,
-        ),
-    ))
+    Some(resume(fact, &mut store))
 }
 
 fn commit_and_cleanup_response<E>(
@@ -636,7 +669,7 @@ fn authority_matches(
 mod tests {
     use super::*;
     use enoki_probe_bootstrap::handoff::Enrollment;
-    use std::{sync::mpsc, time::Duration};
+    use std::{cell::Cell, sync::mpsc, time::Duration};
 
     fn replacement_intent(enrollment_id: &str, token: &str) -> ReplacementIntent {
         ReplacementIntent {
@@ -896,6 +929,152 @@ mod tests {
         );
         assert_eq!(fs::read(&attempt_path).unwrap(), original_capsule);
         assert_eq!(store.load().unwrap(), Some(commit));
+    }
+
+    #[test]
+    fn committed_resume_requires_the_exact_durable_registration_capsule_in_both_seams() {
+        assert_eq!(unsafe { libc::geteuid() }, 0, "test requires root custody");
+        let temporary = tempfile::tempdir().unwrap();
+        for directory in [
+            "/var/lib/enoki-probe-bootstrap",
+            "/var/lib/enoki-probe-registration",
+            "/etc/enoki",
+        ] {
+            let path = production_path(directory, Some(temporary.path()));
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let metadata_path =
+            production_path(PRODUCTION_INSTALL_METADATA_PATH, Some(temporary.path()));
+        fs::write(&metadata_path, b"retained old installation metadata").unwrap();
+        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let capsule_token = "enk_enroll_capsule_a";
+        let capsule_intent = replacement_intent("enr_0123456789abcdef", capsule_token);
+        let attempt_path = production_path(
+            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+            Some(temporary.path()),
+        );
+        crate::registration::prepare_root_replacement_registration_attempt(
+            &attempt_path,
+            crate::registration::RootReplacementRegistrationAttemptInput {
+                enrollment_token: capsule_token.to_owned(),
+                binding: capsule_intent.registration_binding().unwrap(),
+            },
+        )
+        .unwrap();
+
+        let committed_token = "enk_enroll_commit_b";
+        let committed_intent = replacement_intent("enr_abcdef0123456789", committed_token);
+        let request = replacement_request(&committed_intent, committed_token);
+        let commit = ReplacementCommitFact {
+            schema_version: 1,
+            canonical_intent_sha256: committed_intent.canonical_sha256().unwrap(),
+            intent: committed_intent.clone(),
+            cleanup_complete: false,
+            candidate_layout_complete: false,
+        };
+        let commit_path =
+            production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path()));
+        let mut store = FileReplacementCommitStore::at(&commit_path, 0);
+        store.persist(&commit).unwrap();
+        let original_capsule = fs::read(&attempt_path).unwrap();
+        let original_commit = fs::read(&commit_path).unwrap();
+
+        let effects = Cell::new(0);
+        assert_eq!(
+            resume_committed_from_exact_request_with(&request, Some(temporary.path()), |_, _| {
+                effects.set(effects.get() + 1);
+                LifecycleResponse::succeeded()
+            },),
+            Some(LifecycleResponse::failed(
+                "lifecycle.registration_attempt_failed"
+            ))
+        );
+        assert_eq!(effects.get(), 0);
+        assert_eq!(fs::read(&attempt_path).unwrap(), original_capsule);
+        assert_eq!(fs::read(&commit_path).unwrap(), original_commit);
+        assert_eq!(
+            fs::read(&metadata_path).unwrap(),
+            b"retained old installation metadata"
+        );
+
+        let post_inspection = coordinate_inspected_replacement(
+            &request,
+            &replacement_authority(&committed_intent),
+            committed_intent.clone(),
+            committed_intent.registration_binding().unwrap(),
+            Some(temporary.path()),
+        );
+        assert_eq!(
+            post_inspection,
+            LifecycleResponse::failed("lifecycle.registration_attempt_failed")
+        );
+        assert_eq!(fs::read(&attempt_path).unwrap(), original_capsule);
+        assert_eq!(fs::read(&commit_path).unwrap(), original_commit);
+        assert_eq!(
+            fs::read(&metadata_path).unwrap(),
+            b"retained old installation metadata"
+        );
+
+        fs::remove_file(&attempt_path).unwrap();
+        let missing_capsule_effects = Cell::new(0);
+        assert_eq!(
+            resume_committed_from_exact_request_with(&request, Some(temporary.path()), |_, _| {
+                missing_capsule_effects.set(missing_capsule_effects.get() + 1);
+                LifecycleResponse::succeeded()
+            },),
+            Some(LifecycleResponse::failed(
+                "lifecycle.registration_attempt_failed"
+            ))
+        );
+        assert_eq!(missing_capsule_effects.get(), 0);
+        assert_eq!(fs::read(&commit_path).unwrap(), original_commit);
+        assert_eq!(
+            fs::read(&metadata_path).unwrap(),
+            b"retained old installation metadata"
+        );
+
+        let exact_root = tempfile::tempdir().unwrap();
+        for directory in [
+            "/var/lib/enoki-probe-bootstrap",
+            "/var/lib/enoki-probe-registration",
+        ] {
+            let path = production_path(directory, Some(exact_root.path()));
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let exact_attempt_path = production_path(
+            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+            Some(exact_root.path()),
+        );
+        crate::registration::prepare_root_replacement_registration_attempt(
+            &exact_attempt_path,
+            crate::registration::RootReplacementRegistrationAttemptInput {
+                enrollment_token: committed_token.to_owned(),
+                binding: committed_intent.registration_binding().unwrap(),
+            },
+        )
+        .unwrap();
+        let exact_commit_path =
+            production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(exact_root.path()));
+        FileReplacementCommitStore::at(&exact_commit_path, 0)
+            .persist(&commit)
+            .unwrap();
+        let exact_effects = Cell::new(0);
+        assert_eq!(
+            resume_committed_from_exact_request_with(
+                &request,
+                Some(exact_root.path()),
+                |resumed, _| {
+                    exact_effects.set(exact_effects.get() + 1);
+                    assert_eq!(resumed, commit);
+                    LifecycleResponse::succeeded()
+                },
+            ),
+            Some(LifecycleResponse::succeeded())
+        );
+        assert_eq!(exact_effects.get(), 1);
     }
 
     fn metadata_for_hub(

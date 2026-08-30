@@ -378,6 +378,27 @@ pub fn prepare_root_replacement_registration_attempt(
     }
 }
 
+/// Validates the durable root capsule against one already-retained Replacement
+/// commit before the coordinator may resume any destructive effect.
+pub(crate) fn validate_root_replacement_registration_attempt(
+    path: &Path,
+    input: RootReplacementRegistrationAttemptInput,
+) -> Result<(), RegistrationError> {
+    let binding = ReplacementRegistrationBinding::from(input.binding);
+    let capsule = read_registration_attempt_capsule(path)?.ok_or(
+        RegistrationError::InvalidResponse("missing replacement registration capsule"),
+    )?;
+    validate_registration_attempt_capsule(
+        &capsule,
+        &ProbeRegistrationInput {
+            bootstrap_config_path: Default::default(),
+            enrollment_token: input.enrollment_token,
+            hub_url: binding.hub_origin.clone(),
+        },
+        &binding,
+    )
+}
+
 /// 仅替换仍精确绑定当前 Probe、Hub、Host 与 source 的 precommit capsule。
 /// coordinator 只能在新 inspection 成功且 Replacement commit 缺失后调用。
 pub fn replace_stale_root_replacement_registration_attempt(
@@ -707,5 +728,59 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn retained_commit_validation_covers_the_complete_durable_capsule_binding() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("attempt.json");
+        let exact = RootReplacementRegistrationAttemptInput {
+            enrollment_token: "enk_exact".into(),
+            binding: binding(),
+        };
+        prepare_root_replacement_registration_attempt(&path, exact.clone()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        validate_root_replacement_registration_attempt(&path, exact.clone()).unwrap();
+
+        let mutations: [fn(&mut RootReplacementRegistrationAttemptInput); 12] = [
+            |input| input.enrollment_token.push_str("_other"),
+            |input| input.binding.enrollment_id.push_str("_other"),
+            |input| input.binding.host_id.push('8'),
+            |input| input.binding.hub_origin.push_str("/other"),
+            |input| input.binding.old_probe_id.push_str("_other"),
+            |input| input.binding.source_probe_version.push_str("+other"),
+            |input| {
+                input
+                    .binding
+                    .committed_source_probe_sha256
+                    .replace_range(..1, "f")
+            },
+            |input| {
+                input
+                    .binding
+                    .replacement_commit_sha256
+                    .replace_range(..1, "f")
+            },
+            |input| input.binding.target_probe_version.push_str("+other"),
+            |input| {
+                input
+                    .binding
+                    .target_asset_set_digest
+                    .replace_range(7..8, "f")
+            },
+            |input| input.binding.target_bundle_target.push_str("-other"),
+            |input| input.binding.target_manifest_sha256.replace_range(..1, "f"),
+        ];
+        for mutate in mutations {
+            let mut changed = exact.clone();
+            mutate(&mut changed);
+            assert!(validate_root_replacement_registration_attempt(&path, changed).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+
+        let corrupt = b"corrupt durable capsule";
+        std::fs::write(&path, corrupt).unwrap();
+        assert!(validate_root_replacement_registration_attempt(&path, exact).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
     }
 }
