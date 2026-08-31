@@ -839,6 +839,162 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
+  it("keeps a failed Probe Uninstall observable with its typed lifecycle failure", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_067_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    const deleteResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+      method: "DELETE",
+    });
+    const uninstall = (await deleteResponse.json()) as {
+      probeUninstallRequest: { id: number };
+    };
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const requestBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-failed-uninstall",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const requestResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", requestBody),
+    );
+    const pending = ReportResponse.decode(
+      new Uint8Array(await requestResponse.arrayBuffer()),
+    ).pendingOperation;
+    expect(pending?.id).toBe(String(uninstall.probeUninstallRequest.id));
+
+    const incompleteFailureBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-failed-uninstall",
+        operationAcknowledgements: [
+          { operationId: String(uninstall.probeUninstallRequest.id) },
+        ],
+        operationStatuses: [
+          {
+            failed: {
+              errorCode: "lifecycle.companion_unavailable",
+            },
+            operationId: String(uninstall.probeUninstallRequest.id),
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const incompleteFailureResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        incompleteFailureBody,
+      ),
+    );
+    expect(incompleteFailureResponse.status).toBe(400);
+    await expect(incompleteFailureResponse.json()).resolves.toEqual({
+      error: "malformed_probe_operation_status",
+    });
+    expect(
+      database.probeOperations.findById(uninstall.probeUninstallRequest.id),
+    ).toMatchObject({
+      acceptedAtMs: null,
+      completedAtMs: null,
+      failureCode: null,
+      failureMessage: null,
+      state: "pending",
+    });
+    const pendingOperationResponse = await app.request(
+      `/api/web/probe-operations/${uninstall.probeUninstallRequest.id}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(pendingOperationResponse.json()).resolves.toEqual({
+      probeOperation: expect.objectContaining({
+        completedAtMs: null,
+        failure: null,
+        state: "pending",
+      }),
+    });
+
+    const failureBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-failed-uninstall",
+        operationAcknowledgements: [
+          { operationId: String(uninstall.probeUninstallRequest.id) },
+        ],
+        operationStatuses: [
+          {
+            failed: {
+              errorCode: "lifecycle.companion_unavailable",
+              message: "The local Probe lifecycle operation failed.",
+            },
+            operationId: String(uninstall.probeUninstallRequest.id),
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const failureResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", failureBody),
+    );
+    expect(failureResponse.status).toBe(200);
+
+    const persisted = database.probeOperations.findById(
+      uninstall.probeUninstallRequest.id,
+    );
+    expect(persisted).toMatchObject({
+      completedAtMs: 1_725_000_067_000,
+      failureCode: "lifecycle.companion_unavailable",
+      failureMessage: "The local Probe lifecycle operation failed.",
+      state: "failed",
+    });
+
+    const operationResponse = await app.request(
+      `/api/web/probe-operations/${uninstall.probeUninstallRequest.id}`,
+      { headers: { cookie: ownerSession } },
+    );
+
+    expect(operationResponse.status).toBe(200);
+    await expect(operationResponse.json()).resolves.toEqual({
+      probeOperation: expect.objectContaining({
+        completedAtMs: 1_725_000_067_000,
+        failure: {
+          code: "lifecycle.companion_unavailable",
+          message: "The local Probe lifecycle operation failed.",
+        },
+        hostId,
+        id: uninstall.probeUninstallRequest.id,
+        kind: "probe_uninstall",
+        state: "failed",
+      }),
+    });
+
+    database.close();
+  });
+
   it("can delete Hub-side Host data when the Probe is already gone", async () => {
     const database = await createTemporaryDatabase();
     const removedHostIds: number[] = [];

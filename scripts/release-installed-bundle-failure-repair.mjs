@@ -423,18 +423,6 @@ remaining=50
 while [ "$remaining" -gt 0 ]; do
   active_state=$(systemctl show "$unit" --property=ActiveState --value)
   result=$(systemctl show "$unit" --property=Result --value)
-  if [ "$active_state" = failed ] && { [ "$result" = exit-code ] || [ "$result" = start-limit-hit ]; }; then break; fi
-  sleep 1
-  remaining=$((remaining - 1))
-done
-[ "$active_state" = failed ] || fail 'Observation Runtime did not reach terminal failure before start-limit admission'
-if [ "$result" = exit-code ]; then
-  systemctl start "$unit" >/dev/null 2>&1 || true
-fi
-remaining=20
-while [ "$remaining" -gt 0 ]; do
-  active_state=$(systemctl show "$unit" --property=ActiveState --value)
-  result=$(systemctl show "$unit" --property=Result --value)
   if [ "$active_state" = failed ] && [ "$result" = start-limit-hit ]; then break; fi
   sleep 1
   remaining=$((remaining - 1))

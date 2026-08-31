@@ -5955,7 +5955,9 @@ function assertProbeOperation(operation, expected = {}) {
     if (
       !operation.failure ||
       typeof operation.failure.code !== "string" ||
-      typeof operation.failure.message !== "string"
+      operation.failure.code.length === 0 ||
+      typeof operation.failure.message !== "string" ||
+      operation.failure.message.length === 0
     ) {
       throw assertionError(
         "probe_operation_failure_invalid",
