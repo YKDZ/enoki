@@ -3219,10 +3219,14 @@ printf covered > '${covered}'
     const retired = commands.findIndex((command) =>
       command.includes("# enoki-release-e2e:retire-runtime-failure-custody"),
     );
+    const uninstalled = commands.findIndex((command) =>
+      command.includes("# enoki-release-e2e:local-probe-uninstall"),
+    );
     expect(installedBoundary).toBeGreaterThan(recovered);
     expect(renewed).toBeGreaterThan(installedBoundary);
     expect(verified).toBeGreaterThan(renewed);
     expect(retired).toBeGreaterThan(verified);
+    expect(uninstalled).toBeGreaterThan(retired);
   });
 
   it("rediscovers durable Runtime custody from a fresh Host driver after exact verification is interrupted", async () => {
