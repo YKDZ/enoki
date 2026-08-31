@@ -271,6 +271,109 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       createPublicKey(release.publicKey).asymmetricKeyDetails?.modulusLength,
     ).toBe(4096);
   });
+  it("accepts raw-byte signed Probe Asset Set metadata in the generated bootstrap recipe", async () => {
+    const publication = await createProbeBootstrapPublication({
+      bundleVersion: "1.2.3",
+      sourceDir: process.cwd(),
+      trustedRootPublicKeyPem: testDistributionRoot.publicKey,
+    });
+    const signing = rsa4096TestKeyPair("candidate-release");
+    const delegation = createProbeTrustDelegation({
+      distribution: "enoki",
+      generation: 1,
+      releasePublicKeyPem: signing.publicKey,
+      rootPrivateKeyPem: testDistributionRoot.privateKey,
+    });
+    const manifestBytes = Buffer.from(
+      `${JSON.stringify({
+        assets: [
+          {
+            bundleManifestSha256: "a".repeat(64),
+            file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+            sha256: "b".repeat(64),
+            size: 1,
+            target: "x86_64-unknown-linux-gnu",
+          },
+        ],
+        kind: "enoki-probe-assets",
+        signature: {
+          algorithm: "rsa-sha256",
+          delegationGeneration: delegation.delegation.generation,
+          delegationKeyId: delegation.delegation.signingIdentity.keyId,
+          file: "manifest.json.sig",
+          publicKey: "signing-key.pem",
+        },
+        version: "1.2.3",
+      })}\n`,
+    );
+    const manifestSignature = signBytes(
+      "RSA-SHA256",
+      manifestBytes,
+      signing.privateKey,
+    );
+    expect(
+      verifySignature(
+        "RSA-SHA256",
+        manifestBytes,
+        signing.publicKey,
+        manifestSignature,
+      ),
+    ).toBe(true);
+    const directory = await mkdtemp(
+      path.join(tmpdir(), "enoki-recipe-manifest-signature-"),
+    );
+    try {
+      const recipePath = path.join(directory, "recipe.py");
+      const metadataPath = path.join(directory, "metadata");
+      await mkdir(metadataPath);
+      await Promise.all([
+        writeFile(recipePath, publication.recipeBytes),
+        writeFile(
+          path.join(metadataPath, "root-key.pem"),
+          testDistributionRoot.publicKey,
+        ),
+        writeFile(
+          path.join(metadataPath, "signing-key.pem"),
+          signing.publicKey,
+        ),
+        writeFile(
+          path.join(metadataPath, "trust-delegation.json"),
+          delegation.bytes,
+        ),
+        writeFile(
+          path.join(metadataPath, "trust-delegation.json.sig"),
+          delegation.signature,
+        ),
+        writeFile(path.join(metadataPath, "manifest.json"), manifestBytes),
+        writeFile(
+          path.join(metadataPath, "manifest.json.sig"),
+          manifestSignature,
+        ),
+      ]);
+      const program = String.raw`
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location("enoki_recipe", sys.argv[1])
+recipe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recipe)
+stage = pathlib.Path(sys.argv[2])
+assert recipe.authenticate_metadata(stage, "x86_64-unknown-linux-gnu")["target"] == "x86_64-unknown-linux-gnu"
+(stage / "manifest.json.sig").write_bytes(b"invalid")
+try:
+    recipe.authenticate_metadata(stage, "x86_64-unknown-linux-gnu")
+except RuntimeError as error:
+    assert str(error) == "Probe Asset Set manifest signature is invalid"
+else:
+    raise AssertionError("invalid manifest signature was accepted")
+`;
+      await expect(
+        execFileAsync("python3", ["-c", program, recipePath, metadataPath], {
+          env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+        }),
+      ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
   it("generates the bootstrap recipe from the canonical seven-role bundle closure", async () => {
     const publication = await createProbeBootstrapPublication({
       bundleVersion: "1.2.3",
