@@ -104,7 +104,7 @@ describe("Owner add-host install command", () => {
     expect(command).not.toContain("sudo ENOKI_");
   });
 
-  it("renders the production recipe as unprivileged acquisition followed by root activation", () => {
+  it("renders the official production recipe as the single stdin-fed acquisition entry", () => {
     expect(
       renderInstallCommand(
         {
@@ -114,7 +114,7 @@ describe("Owner add-host install command", () => {
         { enrollmentToken: "token'; touch /tmp/injected #" },
       ).installCommand,
     ).toBe(
-      "ENOKI_HUB_URL='https://hub.example/'\"'\"' $(whoami)' ENOKI_ENROLLMENT_TOKEN='token'\"'\"'; touch /tmp/injected #' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+      "printf '%s\\n' 'token'\"'\"'; touch /tmp/injected #' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example/'\"'\"' $(whoami)'",
     );
   });
 
@@ -164,7 +164,7 @@ describe("Owner add-host install command", () => {
     expect(body).not.toHaveProperty("installPath");
     expect(body).not.toHaveProperty("installScriptUrl");
     expect(body.installCommand).toBe(
-      `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`,
+      `printf '%s\\n' '${body.enrollmentToken}' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'`,
     );
     expect(body.installCommand).not.toContain("sudo env");
     expect(body.installCommand).not.toContain("curl");
@@ -314,7 +314,7 @@ describe("Owner add-host install command", () => {
       schemaVersion: 1,
     });
     expect(body.installCommand).toBe(
-      `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${replacementAuthority}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`,
+      `printf '%s\\n' '${replacementAuthority}' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'`,
     );
     expect(body.installCommand).not.toContain("sudo env");
     expect(body.installCommand).not.toContain("curl");

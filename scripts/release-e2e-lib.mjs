@@ -14,8 +14,6 @@ import {
 // invoked by this test-only path.
 const releaseE2EInfrastructureResources = Object.freeze([
   { kind: "file", path: "/usr/local/bin/enoki-probe" },
-  { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-acquire" },
-  { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-activate" },
   {
     kind: "file",
     path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
@@ -3223,8 +3221,6 @@ export function createProbeHostHarness({
         );
       }
       const unexpectedCandidateResources = [
-        "/usr/local/bin/enoki-probe-bootstrap-acquire",
-        "/usr/local/bin/enoki-probe-bootstrap-activate",
         "/var/lib/enoki-probe-bootstrap",
       ].filter((entry) => residue.includes(entry));
       if (unexpectedCandidateResources.length > 0) {
@@ -4803,21 +4799,6 @@ function assertInstallCommand(command, expectedSourceProbeSha256) {
       kind: "bootstrap-recipe",
     };
   }
-  const production = command.match(
-    /^ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='((?:[^'\r\n]|'"'"')*)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/,
-  );
-  if (production) {
-    assertInstallHubOrigin(production[1]);
-    return {
-      ...parseBootstrapEnrollmentAuthority(
-        decodeShellSingleQuoted(production[2]),
-        production[1],
-        expectedSourceProbeSha256,
-      ),
-      hubUrl: production[1],
-      kind: "production-bootstrap",
-    };
-  }
   const legacy = command.match(
     /^curl -fsSL '(https?:\/\/[^'\s]+\/api\/probe\/install\.sh)' \| sudo env ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='(enk_enroll_[A-Za-z0-9_-]+)' bash$/,
   );
@@ -4963,10 +4944,7 @@ function assertEnrollmentInstallContract(enrollment, options = {}) {
       "Hub manual Probe reinstall Enrollment has no Replacement authority",
     );
   }
-  if (
-    parsed.kind === "bootstrap-recipe" ||
-    parsed.kind === "production-bootstrap"
-  ) {
+  if (parsed.kind === "bootstrap-recipe") {
     assertBootstrapRecipeRecord(enrollment.bootstrapRecipe);
   } else if (enrollment.bootstrapRecipe !== undefined) {
     throw new Error(
