@@ -1318,6 +1318,25 @@ describe("Probe Host Harness", () => {
     }
   });
 
+  it("rejects an ambiguous newline member in a systemd StateDirectory projection", async () => {
+    const fixture = await createSystemdStateDirectoryFixture(
+      "enoki-e2e-state-directory-newline-",
+    );
+
+    try {
+      await writeFile(path.join(fixture.privateState, "a"), "visible", "utf8");
+      await writeFile(
+        path.join(fixture.privateState, "a\n."),
+        "hidden",
+        "utf8",
+      );
+
+      await expect(fixture.fingerprint()).rejects.toMatchObject({ code: 1 });
+    } finally {
+      await fixture.remove();
+    }
+  });
+
   it.each([
     ["an ordinary directory symlink", "ordinary-link"],
     ["a non-canonical link target", "link-target"],

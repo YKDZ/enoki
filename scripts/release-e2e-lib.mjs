@@ -4648,6 +4648,10 @@ export function renderReleaseE2EResourceFingerprint(resources) {
 }
 fingerprint_directory() {
   directory=$1
+  newline='
+'
+  invalid=$(find -P "$directory" -xdev -name "*$newline*" -print) || return 1
+  [ -z "$invalid" ] || return 1
   members=$(find -P "$directory" -xdev -print | LC_ALL=C sort) || return 1
   printf '%s\n' "$members" | while IFS= read -r member; do
     [ -n "$member" ] || continue
