@@ -631,21 +631,21 @@ function runtimeClaimPreflight(runId, ownershipToken) {
 [ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
 [ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
 resources_next=
-backup_tmp=
+recovered_backup_tmp=
 for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
   [ -f "$member" ] && [ ! -L "$member" ] || fail 'release E2E claim member is invalid'
   case "$(basename -- "$member")" in
     resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E resource recovery is invalid'; resources_next=$member ;;
-    observation-runtime-original.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || fail 'Runtime backup temporary boundary is invalid'; backup_tmp=$member ;;
+    observation-runtime-original.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || fail 'Runtime backup temporary boundary is invalid'; recovered_backup_tmp=$member ;;
     observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || fail 'run-owned Runtime backup boundary is invalid' ;;
     run-id|token|resources) ;;
     *) fail 'release E2E claim has an unknown member' ;;
   esac
 done
-if [ -n "$resources_next" ] || [ -n "$backup_tmp" ]; then
+if [ -n "$resources_next" ] || [ -n "$recovered_backup_tmp" ]; then
   [ -z "$resources_next" ] || rm -- "$resources_next"
-  [ -z "$backup_tmp" ] || rm -- "$backup_tmp"
+  [ -z "$recovered_backup_tmp" ] || rm -- "$recovered_backup_tmp"
   sync -f "$claim" || fail 'could not persist release E2E claim recovery'
 fi`;
 }

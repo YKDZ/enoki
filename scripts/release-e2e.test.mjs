@@ -2952,6 +2952,42 @@ printf covered > '${covered}'
     }
   });
 
+  it("keeps the fresh canonical Runtime backup target through claim preflight", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-fresh-backup-target-",
+    );
+    let exhaustResult = null;
+    try {
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun() {},
+        async execute(command) {
+          const result = await fixture.runHostScript(command);
+          if (
+            command.includes(
+              "# enoki-release-e2e:exhaust-observation-runtime-budget",
+            )
+          ) {
+            exhaustResult = result;
+          }
+          return result;
+        },
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+
+      await expect(
+        driver.repair("run-runtime-custody", "1.2.3"),
+      ).rejects.toThrow(/durable Observation Runtime failure eligibility/i);
+      expect(exhaustResult.stderr).not.toContain(
+        "cp: cannot create regular file '': No such file or directory",
+      );
+      await expect(readFile(fixture.paths.backup, "utf8")).resolves.toBe(
+        "canonical runtime\n",
+      );
+    } finally {
+      await fixture.remove();
+    }
+  });
+
   it("discards a partial fixed backup-publication temp before atomically publishing fresh custody", async () => {
     const fixture = await createRuntimeFailureCustodyFixture(
       "enoki-runtime-backup-publication-temp-",
@@ -5124,6 +5160,54 @@ describe("Hub Lifecycle Client", () => {
       pathname: "/api/web/hosts/7",
       search: "?mode=hub-only",
     });
+  });
+
+  it("以精确 Hub Origin 请求卸载探针", async () => {
+    const requests = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example:8443",
+      fetch: async (url, init = {}) => {
+        const parsed = new URL(url);
+        requests.push({
+          method: init.method ?? "GET",
+          origin: new Headers(init.headers).get("origin"),
+          pathname: parsed.pathname,
+        });
+        if (parsed.pathname === "/api/web/hosts/7") {
+          return jsonResponse(
+            {
+              probeUninstallRequest: {
+                acceptedAtMs: null,
+                completedAtMs: null,
+                createdAtMs: 1_725_000_000_000,
+                failure: null,
+                id: 42,
+                runningAtMs: null,
+                state: "pending",
+                targetProbeVersion: "1.2.3",
+                updatedAtMs: 1_725_000_000_000,
+              },
+            },
+            202,
+          );
+        }
+        throw new Error(`unexpected request ${parsed.pathname}`);
+      },
+    });
+
+    await expect(client.requestProbeUninstall(7)).resolves.toMatchObject({
+      hostId: 7,
+      id: 42,
+      kind: "probe_uninstall",
+      state: "pending",
+    });
+    expect(requests).toEqual([
+      {
+        method: "DELETE",
+        origin: "https://hub.example:8443",
+        pathname: "/api/web/hosts/7",
+      },
+    ]);
   });
 
   it("reads the terminal typed rejection for the matching Enrollment", async () => {
