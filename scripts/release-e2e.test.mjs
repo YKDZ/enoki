@@ -4164,6 +4164,10 @@ printf covered > '${covered}'
     const outcomes = [];
     for (const scenario of [
       "normal",
+      "partial-before-cleanup",
+      "private-state-link-before-cleanup",
+      "content-before-cleanup",
+      "content-after-outer-verify",
       "query-failure",
       "stop-failure",
       "insert-after-stop",
@@ -4177,6 +4181,7 @@ printf covered > '${covered}'
       const publicState = path.join(publicParent, "enoki-probe");
       const privateState = path.join(privateParent, "enoki-probe");
       const identity = path.join(privateState, "identity");
+      const config = path.join(identity, "probe-bootstrap.toml");
       const adjacent = path.join(privateParent, "external", "data");
       const serviceState = path.join(root, "service-state");
       const insertedMember = path.join(privateState, "inserted-after-stop");
@@ -4269,6 +4274,12 @@ exit 0
             ) {
               return successfulCommandText("cleaned\n");
             }
+            if (
+              scenario === "content-after-outer-verify" &&
+              command.includes("# enoki-release-e2e:emergency-cleanup")
+            ) {
+              await writeFile(config, "changed identity", "utf8");
+            }
             return runHostScript(command);
           },
         });
@@ -4276,11 +4287,24 @@ exit 0
         const runId = `run-private-state-cleanup-${scenario}`;
         await harness.assertDisposable(runId);
         await harness.install(officialEnrollment(), runId);
+        if (scenario === "partial-before-cleanup") {
+          await rm(identity, { force: true, recursive: true });
+        }
+        if (scenario === "content-before-cleanup") {
+          await writeFile(config, "changed identity", "utf8");
+        }
+        if (scenario === "private-state-link-before-cleanup") {
+          await rm(privateState, { force: true, recursive: true });
+          await symlink("../external", privateState);
+        }
         let clean = true;
         try {
           await harness.cleanup(runId);
         } catch {
           clean = false;
+        }
+        if (scenario === "content-after-outer-verify") {
+          expect(await readFile(serviceState, "utf8")).toBe("active");
         }
         const present = (candidate) =>
           lstat(candidate).then(
@@ -4310,14 +4334,30 @@ exit 0
         projection: [false, false, false],
         scenario: "normal",
       },
-      ...["query-failure", "stop-failure", "insert-after-stop"].map(
-        (scenario) => ({
-          adjacent: "preserved",
-          clean: false,
-          projection: [true, true, true],
-          scenario,
-        }),
-      ),
+      {
+        adjacent: "preserved",
+        clean: true,
+        projection: [false, false, false],
+        scenario: "partial-before-cleanup",
+      },
+      {
+        adjacent: "preserved",
+        clean: false,
+        projection: [true, true, false],
+        scenario: "private-state-link-before-cleanup",
+      },
+      ...[
+        "content-before-cleanup",
+        "content-after-outer-verify",
+        "query-failure",
+        "stop-failure",
+        "insert-after-stop",
+      ].map((scenario) => ({
+        adjacent: "preserved",
+        clean: false,
+        projection: [true, true, true],
+        scenario,
+      })),
     ]);
   });
 

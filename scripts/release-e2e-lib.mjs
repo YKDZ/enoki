@@ -4929,7 +4929,7 @@ ${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-${resourceFingerprintFunction()}
+${resourceFingerprintFunction(allowRemainingSubset)}
 ${action}
 `;
 }
@@ -5124,8 +5124,9 @@ printf 'owned\n'
 `;
 }
 
-function resourceFingerprintFunction() {
-  return renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources);
+function resourceFingerprintFunction(allowRemainingSubset = false) {
+  return `${renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources)}
+allow_remaining_subset=${allowRemainingSubset ? "true" : "false"}`;
 }
 
 function resourceTemporaryCreatePrelude() {
@@ -5231,6 +5232,7 @@ fingerprint_systemd_state_directory() {
   public_name=$(basename -- "$public") || return 1
   private_parent="$public_parent/private"
   private_state="$private_parent/$public_name"
+  identity="$private_state/identity"
   [ -d "$public_parent" ] && [ ! -L "$public_parent" ] || return 1
   [ "$(stat -c %u -- "$public_parent")" = 0 ] || return 1
   [ "$(stat -c %g -- "$public_parent")" = 0 ] || return 1
@@ -5243,16 +5245,34 @@ fingerprint_systemd_state_directory() {
     [ "$(stat -c %h -- "$public")" = 1 ] || return 1
     [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
     fingerprint_path "$public" || return 1
+  elif [ "$allow_remaining_subset" != true ]; then
+    return 1
   fi
-  [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 0
+  [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 1
   [ "$(stat -c %u -- "$private_parent")" = 0 ] || return 1
   [ "$(stat -c %g -- "$private_parent")" = 0 ] || return 1
   [ "$(stat -c %a -- "$private_parent")" = 700 ] || return 1
-  [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 0
+  if [ ! -e "$private_state" ] && [ ! -L "$private_state" ]; then
+    [ "$allow_remaining_subset" = true ] || return 1
+    return 0
+  fi
+  [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 1
   state_uid=$(stat -c %u -- "$private_state") || return 1
   state_gid=$(stat -c %g -- "$private_state") || return 1
   [ "$(stat -c %a -- "$private_state")" = 750 ] || return 1
   [ "$(stat -c %h -- "$private_state")" -ge 2 ] || return 1
+  if [ -e "$identity" ] || [ -L "$identity" ]; then
+    [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
+    [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
+    [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
+    [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
+    [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
+  elif [ "$allow_remaining_subset" != true ]; then
+    return 1
+  fi
+  if [ -e "$public" ] || [ -L "$public" ]; then
+    [ "$(stat -Lc %d:%i -- "$public")" = "$(stat -c %d:%i -- "$private_state")" ] || return 1
+  fi
   fingerprint_directory "$private_state" || return 1
 }
 ${legacyInstallMetadataValidationFragment()}
@@ -5308,6 +5328,7 @@ fingerprint() {
     else
       private_candidate="$(dirname -- "$candidate")/private/$(basename -- "$candidate")"
       if [ -e "$private_candidate" ] || [ -L "$private_candidate" ]; then
+        [ "$allow_remaining_subset" = true ] || return 1
         fingerprint_systemd_state_directory "$candidate" || return 1
       fi
     fi
@@ -5492,7 +5513,7 @@ ${claimMutationPreflight(runId, token, true)}
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ -f "$claim/resources" ]
-${resourceFingerprintFunction()}
+${resourceFingerprintFunction(true)}
 temporary="$claim/resources.next"
 [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource cleanup recovery is pending\n' >&2; exit 75; }
 ${resourceTemporaryCreatePrelude()}
