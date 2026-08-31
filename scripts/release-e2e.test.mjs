@@ -5703,7 +5703,7 @@ describe("Hub Lifecycle Client", () => {
     });
   });
 
-  it("rejects invalid operation states and changing terminal failures", async () => {
+  it("rejects invalid operation states, untyped failures, and changing terminal failures", async () => {
     const invalid = operationPollingClient(() => ({
       acceptedAtMs: null,
       completedAtMs: null,
@@ -5724,6 +5724,30 @@ describe("Hub Lifecycle Client", () => {
         timeoutMs: 2,
       }),
     ).rejects.toMatchObject({
+      timeline: [expect.objectContaining({ state: "pending" })],
+    });
+
+    const untyped = operationPollingClient(() => ({
+      acceptedAtMs: 2,
+      completedAtMs: 2,
+      createdAtMs: 1,
+      failure: { recoveryDisposition: null },
+      hostId: 7,
+      id: 42,
+      kind: "probe_uninstall",
+      runningAtMs: null,
+      state: "failed",
+      updatedAtMs: 2,
+    }));
+    await untyped.authenticate("owner-password");
+    const untypedRequest = await untyped.requestProbeUninstall(7);
+    await expect(
+      untyped.waitForProbeOperation(untypedRequest, {
+        intervalMs: 1,
+        timeoutMs: 2,
+      }),
+    ).rejects.toMatchObject({
+      code: "probe_operation_failure_invalid",
       timeline: [expect.objectContaining({ state: "pending" })],
     });
 
