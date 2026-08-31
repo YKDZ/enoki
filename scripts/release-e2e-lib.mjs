@@ -4695,8 +4695,7 @@ retiring_dir="$claim_root/claim-retiring"
 acquiring_dir="$claim_root/claim-acquiring"
 ${claimLockPrelude()}
 install -d -m 0700 "$claim_root"
-[ "$(stat -c '%u:%a:%h' "$claim_root")" = 0:700:2 ] || { printf 'Host claim root custody is invalid\n' >&2; exit 73; }
-[ ! -e "$claim_dir" ] && [ ! -L "$claim_dir" ] || { printf 'Host already claimed by another Release E2E run\n' >&2; exit 73; }
+[ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'Host claim root custody is invalid\n' >&2; exit 73; }
 if [ -e "$retiring_dir" ] || [ -L "$retiring_dir" ]; then
   printf 'Host claim retirement is incomplete\n' >&2
   exit 73
@@ -4717,6 +4716,13 @@ recover_acquiring() {
   sync -f "$claim_root"
 }
 if [ -e "$acquiring_dir" ] || [ -L "$acquiring_dir" ]; then recover_acquiring; fi
+if [ -e "$claim_dir" ] || [ -L "$claim_dir" ]; then
+  [ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir")" = 0:700:2 ] &&
+    [ -f "$claim_dir/run-id" ] && [ ! -L "$claim_dir/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir/run-id")" = 0:600:1 ] &&
+    [ -f "$claim_dir/token" ] && [ ! -L "$claim_dir/token" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir/token")" = 0:600:1 ] || { printf 'Host claim custody is invalid\n' >&2; exit 73; }
+  if [ "$(cat "$claim_dir/run-id")" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim_dir/token")" = ${shellSingleQuote(token)} ]; then printf 'owned\n'; exit 0; fi
+  printf 'Host already claimed by another Release E2E run\n' >&2; exit 73
+fi
 if ! mkdir -m 0700 "$acquiring_dir" 2>/dev/null; then
   printf 'Host already claimed by another Release E2E run\n' >&2
   exit 73
