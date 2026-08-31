@@ -3194,7 +3194,21 @@ export function createProbeHostHarness({
     expectedBundleVersion = null,
   ) {
     const recovered = await installedBundleFailureRepair.cleanup(runId);
-    if (!recovered.recoveredBundleVersion) return null;
+    let claimBoundVersion = null;
+    if (!recovered.recoveredBundleVersion) {
+      const bound = await execute(
+        claimBoundBundleVersionScript(runId, ownershipToken),
+        { root: true },
+      );
+      if (bound.code !== 0) return null;
+      claimBoundVersion = bound.stdout.trim();
+      if (
+        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+          claimBoundVersion,
+        )
+      )
+        return null;
+    }
     if (
       expectedBundleVersion !== null &&
       recovered.recoveredBundleVersion !== expectedBundleVersion
@@ -3202,7 +3216,9 @@ export function createProbeHostHarness({
       throw new Error("Recovered Probe version changed during Runtime custody");
     }
     const bundleVersion =
-      expectedBundleVersion ?? recovered.recoveredBundleVersion;
+      expectedBundleVersion ??
+      recovered.recoveredBundleVersion ??
+      claimBoundVersion;
     const { boundary, assertionSnapshot } = await assertInstalledBoundary(
       runId,
       bundleVersion,
@@ -4618,6 +4634,32 @@ flock -x 9
 path_inode=$(stat -Lc '%d:%i' "$lock_path")
 fd_inode=$(stat -Lc '%d:%i' "/proc/$$/fd/9")
 [ "$path_inode" = "$fd_inode" ] || { printf 'release E2E lock inode changed\n' >&2; exit 75; }
+`;
+}
+
+function claimBoundBundleVersionScript(runId, token) {
+  return `# enoki-release-e2e:claim-bound-bundle-version
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token, true)}
+[ -f "$claim/resources" ]
+${resourceFingerprintFunction()}
+temporary="$claim/resources.next"
+fingerprint > "$temporary"
+cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; exit 75; }
+rm -- "$temporary"
+sync -f "$claim"
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+[ -f "$identity" ] && [ ! -L "$identity" ] || exit 75
+bundle_version=$(sed -n 's/^bundle_version = "\\([^"\\]*\\)"$/\\1/p' "$identity")
+[ "$(printf '%s\\n' "$bundle_version" | wc -l)" -eq 1 ] || exit 75
+metadata=/etc/enoki/probe-install.toml
+if [ -f "$metadata" ] && [ ! -L "$metadata" ] && grep -Fxq 'schema_version = 5' "$metadata"; then
+  metadata_version=$(sed -n 's/^bundle_version = "\\([^"\\]*\\)"$/\\1/p' "$metadata")
+  [ "$metadata_version" = "$bundle_version" ] || exit 75
+fi
+printf '%s\\n' "$bundle_version"
 `;
 }
 
