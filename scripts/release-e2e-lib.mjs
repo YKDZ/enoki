@@ -5279,6 +5279,8 @@ metadata_schema=bootstrap-v2`;
 }
 
 function removeClaimScript(runId, token) {
+  const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
+  const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
   return `# enoki-release-e2e:remove-claim
 set -eu
 claim_root=/var/lib/enoki-release-e2e
@@ -5318,6 +5320,12 @@ if [ -e "$claim" ] || [ -L "$claim" ]; then
   [ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] || fail 'release E2E resource evidence is missing'
   [ ! -e "$claim/observation-runtime-original" ] && [ ! -L "$claim/observation-runtime-original" ] || fail 'Runtime custody remains held'
   check_members "$claim"
+  residue=
+  for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || residue=present; done
+  for account in ${users}; do getent passwd "$account" >/dev/null 2>&1 && residue=present || true; done
+  for account in ${groups}; do getent group "$account" >/dev/null 2>&1 && residue=present || true; done
+  units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
+  [ -z "$residue$units" ] || fail 'canonical Product is not empty before claim retirement'
   mv -- "$claim" "$retiring"
   sync -f "$claim_root" || fail 'could not persist release E2E claim retirement'
 fi
@@ -5345,6 +5353,10 @@ if [ -e "$retiring" ] || [ -L "$retiring" ]; then
   if "$has_token"; then rm -- "$retiring/token"; sync -f "$retiring"; has_token=false; fi
   rmdir "$retiring"
   sync -f "$claim_root" || fail 'could not persist release E2E claim release'
+fi
+if [ -e "$claim_root" ] || [ -L "$claim_root" ]; then
+  [ -d "$claim_root" ] && [ ! -L "$claim_root" ] || fail 'release E2E claim root custody is invalid'
+  for child in "$claim_root"/* "$claim_root"/.[!.]* "$claim_root"/..?*; do [ -e "$child" ] || [ -L "$child" ] || continue; fail 'release E2E claim root is not empty'; done
 fi
 if rmdir "$claim_root" 2>/dev/null; then
   sync -f "$(dirname -- "$claim_root")" || fail 'could not persist release E2E claim root removal'
