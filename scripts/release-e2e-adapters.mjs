@@ -1960,7 +1960,7 @@ export function createDockerHubController({
         "--env-file",
         envFile,
         "--publish",
-        `${currentRuntimeEnvironment.ownerPort}:3000`,
+        `127.0.0.1:${currentRuntimeEnvironment.ownerPort}:3000`,
         "--publish",
         requestedProbePort === null
           ? `127.0.0.1::${probeContainerPort}`

@@ -27,6 +27,10 @@ describe("Release E2E legacy public-origin adapter", () => {
       runId: "run-legacy-public-origin",
     });
 
+    expect(docker.ownerPublishes).toEqual([
+      "127.0.0.1:33001:3000",
+      "127.0.0.1:33001:3000",
+    ]);
     expect(docker.envFiles).toEqual([
       expect.arrayContaining([
         "ENOKI_PUBLIC_HUB_URL=http://127.0.0.1:33000",
@@ -107,6 +111,7 @@ function trustEpochMigrationManifest() {
 function dockerCommandTracer() {
   const envFiles = [];
   const images = new Map();
+  const ownerPublishes = [];
   const volumes = new Set();
   let activeImage = null;
   let container = false;
@@ -115,6 +120,7 @@ function dockerCommandTracer() {
 
   return {
     envFiles,
+    ownerPublishes,
     exec: async (command, arguments_) => {
       if (command === "tar") {
         const baseline = arguments_.some((value) =>
@@ -160,6 +166,7 @@ function dockerCommandTracer() {
       if (arguments_[0] === "run") {
         const envFile = arguments_[arguments_.indexOf("--env-file") + 1];
         envFiles.push((await readFile(envFile, "utf8")).trim().split("\n"));
+        ownerPublishes.push(arguments_[arguments_.indexOf("--publish") + 1]);
         activeImage = images.get(arguments_.at(-1));
         container = true;
         return commandResult("container-id\n");
