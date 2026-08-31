@@ -265,6 +265,136 @@ ${extraMetadata}`,
   };
 }
 
+async function createRuntimeFailureCustodyFixture(prefix) {
+  const root = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const fakeBin = path.join(root, "fake-bin");
+  const claim = path.join(root, "var", "lib", "enoki-release-e2e", "claim");
+  const runtime = path.join(
+    root,
+    "usr",
+    "local",
+    "bin",
+    "enoki-observation-runtime",
+  );
+  const runtimeDirectory = path.dirname(runtime);
+  const runtimeUnit = path.join(
+    root,
+    "etc",
+    "systemd",
+    "system",
+    "enoki-observation-runtime.service",
+  );
+  const systemctlLog = path.join(root, "systemctl.log");
+  const environment = {
+    ...process.env,
+    ENOKI_RUNTIME_UNIT: runtimeUnit,
+    ENOKI_SYSTEMCTL_LOG: systemctlLog,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+  };
+  const mapHostPaths = (command) =>
+    command
+      .replaceAll("/var/lib/", `${root}/var/lib/`)
+      .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
+      .replaceAll("/etc/", `${root}/etc/`)
+      .replaceAll("/run/", `${root}/run/`);
+  const runHostScript = async (command) => {
+    try {
+      const result = await execFileAsync("sh", ["-c", mapHostPaths(command)], {
+        env: environment,
+      });
+      return successfulCommandText(result.stdout);
+    } catch (error) {
+      return {
+        code: typeof error.code === "number" ? error.code : 1,
+        stderr: error.stderr ?? error.message,
+        stdout: error.stdout ?? "",
+      };
+    }
+  };
+
+  await mkdir(fakeBin, { recursive: true });
+  await mkdir(claim, { recursive: true, mode: 0o700 });
+  await mkdir(runtimeDirectory, { recursive: true });
+  await mkdir(path.dirname(runtimeUnit), { recursive: true });
+  await writeFile(path.join(claim, "run-id"), "run-runtime-custody\n");
+  await writeFile(
+    path.join(claim, "token"),
+    "00000000-0000-4000-8000-000000000001\n",
+  );
+  await writeFile(path.join(claim, "resources"), "resources\n");
+  for (const member of ["run-id", "token", "resources"]) {
+    await chmod(path.join(claim, member), 0o600);
+  }
+  await writeFile(runtime, "canonical runtime\n");
+  await chmod(runtime, 0o755);
+  await writeFile(
+    runtimeUnit,
+    "StartLimitBurst=3\nStartLimitIntervalSec=60s\n",
+  );
+  await chmod(runtimeUnit, 0o644);
+  await writeFile(
+    path.join(fakeBin, "systemctl"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$ENOKI_SYSTEMCTL_LOG"
+if [ "$1" = show ] && [ "$3" = --property=FragmentPath ]; then
+  printf '%s\\n' "$ENOKI_RUNTIME_UNIT"
+  exit 0
+fi
+exit 1
+`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(root, "usr", "local", "bin", "enoki-probe"),
+    "#!/bin/sh\nprintf 'enoki-probe 1.2.3\\n'\n",
+  );
+  await chmod(path.join(fakeBin, "systemctl"), 0o755);
+  await chmod(path.join(root, "usr", "local", "bin", "enoki-probe"), 0o755);
+
+  return {
+    paths: {
+      backup: path.join(claim, "observation-runtime-original"),
+      backupTemp: path.join(claim, "observation-runtime-original.next"),
+      claim,
+      restoreTemp: path.join(
+        runtimeDirectory,
+        ".enoki-observation-runtime.release-e2e.restore",
+      ),
+      runtime,
+      systemctlLog,
+    },
+    async remove() {
+      await rm(root, { force: true, recursive: true });
+    },
+    runHostScript,
+  };
+}
+
+async function captureRuntimeFailureCommand(header) {
+  let command = null;
+  const driver = createInstalledBundleFailureRepairHostDriver({
+    assertOwnedRun() {},
+    async execute(candidate) {
+      if (candidate.includes(`# enoki-release-e2e:${header}`)) {
+        command = candidate;
+      }
+      return { code: 79, stderr: "interrupted", stdout: "" };
+    },
+    ownershipToken: "00000000-0000-4000-8000-000000000001",
+  });
+  if (header === "exhaust-observation-runtime-budget") {
+    await expect(driver.repair("run-runtime-custody", "1.2.3")).rejects.toThrow(
+      /durable Observation Runtime failure eligibility/i,
+    );
+  } else {
+    await expect(driver.cleanup("run-runtime-custody")).rejects.toThrow(
+      /cleanup failed/i,
+    );
+  }
+  expect(command).toEqual(expect.any(String));
+  return command;
+}
+
 describe("Release E2E business assertions", () => {
   it("transfers cleanup ownership when the existing runner enters environment start", async () => {
     const calls = [];
@@ -2772,6 +2902,127 @@ printf covered > '${covered}'
       }
     },
   );
+
+  it("refuses an unknown claim member before exhaust can publish backup or touch systemd", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-exhaust-unknown-member-",
+    );
+    try {
+      const exhaust = await captureRuntimeFailureCommand(
+        "exhaust-observation-runtime-budget",
+      );
+      await writeFile(path.join(fixture.paths.claim, "foreign-member"), "x\n");
+      await chmod(path.join(fixture.paths.claim, "foreign-member"), 0o600);
+
+      expect((await fixture.runHostScript(exhaust)).code).not.toBe(0);
+      await expect(lstat(fixture.paths.backup)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        readFile(fixture.paths.systemctlLog, "utf8"),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("recovers the exact owner's fixed resources temp before exhaust continues", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-exhaust-resources-next-",
+    );
+    try {
+      const exhaust = await captureRuntimeFailureCommand(
+        "exhaust-observation-runtime-budget",
+      );
+      const resourcesNext = path.join(fixture.paths.claim, "resources.next");
+      await writeFile(resourcesNext, "interrupted renewal\n");
+      await chmod(resourcesNext, 0o600);
+
+      expect((await fixture.runHostScript(exhaust)).code).not.toBe(0);
+      await expect(lstat(resourcesNext)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        readFile(fixture.paths.systemctlLog, "utf8"),
+      ).resolves.toContain("show enoki-observation-runtime.service");
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("discards a partial fixed backup-publication temp before atomically publishing fresh custody", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-backup-publication-temp-",
+    );
+    try {
+      const exhaust = await captureRuntimeFailureCommand(
+        "exhaust-observation-runtime-budget",
+      );
+      await writeFile(fixture.paths.backupTemp, "partial copy\n");
+      await chmod(fixture.paths.backupTemp, 0o755);
+
+      expect((await fixture.runHostScript(exhaust)).code).not.toBe(0);
+      await expect(lstat(fixture.paths.backupTemp)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(readFile(fixture.paths.backup, "utf8")).resolves.toBe(
+        "canonical runtime\n",
+      );
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("rewrites an interrupted fixed restore temp only for the exact active owner", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-restore-temp-",
+    );
+    try {
+      const cleanup = await captureRuntimeFailureCommand(
+        "cleanup-observation-runtime-failure",
+      );
+      await writeFile(fixture.paths.backup, "canonical runtime\n");
+      await chmod(fixture.paths.backup, 0o755);
+      await writeFile(fixture.paths.restoreTemp, "partial copy\n");
+      await chmod(fixture.paths.restoreTemp, 0o755);
+
+      expect((await fixture.runHostScript(cleanup)).code).not.toBe(0);
+      await expect(lstat(fixture.paths.restoreTemp)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("retains a foreign fixed restore temp without systemd effects", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-restore-temp-foreign-",
+    );
+    try {
+      const cleanup = await captureRuntimeFailureCommand(
+        "cleanup-observation-runtime-failure",
+      );
+      await writeFile(fixture.paths.backup, "canonical runtime\n");
+      await chmod(fixture.paths.backup, 0o755);
+      await writeFile(fixture.paths.restoreTemp, "foreign\n");
+      await chmod(fixture.paths.restoreTemp, 0o644);
+
+      expect((await fixture.runHostScript(cleanup)).code).not.toBe(0);
+      await expect(readFile(fixture.paths.restoreTemp, "utf8")).resolves.toBe(
+        "foreign\n",
+      );
+      await expect(
+        readFile(fixture.paths.systemctlLog, "utf8"),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await fixture.remove();
+    }
+  });
 
   it("exhausts the Observation Runtime budget and consumes its durable failure epoch through Repair", async () => {
     const commands = [];

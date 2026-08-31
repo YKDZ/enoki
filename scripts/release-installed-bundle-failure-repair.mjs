@@ -363,6 +363,7 @@ set -eu
 claim=/var/lib/enoki-release-e2e/claim
 runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
+backup_tmp="$claim/observation-runtime-original.next"
 restore_tmp=/usr/local/bin/.enoki-observation-runtime.release-e2e.restore
 unit_file=/etc/systemd/system/enoki-observation-runtime.service
 epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
@@ -371,16 +372,13 @@ unit=${shellSingleQuote(observationRuntimeUnit)}
 ${runtimeClaimLockPrelude()}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
 ${systemdUnitStateFunctions()}
-[ -d "$claim" ] || fail 'release E2E ownership claim is missing'
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
-[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
-[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
+${runtimeClaimPreflight(runId, ownershipToken)}
 [ -f "$runtime" ] && [ ! -L "$runtime" ] || fail 'Observation Runtime binary boundary is invalid'
 [ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'Observation Runtime binary ownership is invalid'
 [ -f "$unit_file" ] && [ ! -L "$unit_file" ] || fail 'Observation Runtime unit boundary is invalid'
 [ "$(stat -c '%u:%a:%h' "$unit_file")" = 0:644:1 ] || fail 'Observation Runtime unit ownership is invalid'
 [ "$(systemctl show "$unit" --property=FragmentPath --value)" = "$unit_file" ] || fail 'Observation Runtime unit path is not canonical'
-[ ! -e "$backup" ] && [ ! -e "$epoch" ] && [ ! -e "$latch" ] || fail 'Observation Runtime failure state is not fresh'
+[ ! -e "$backup" ] && [ ! -L "$backup" ] && [ ! -e "$backup_tmp" ] && [ ! -L "$backup_tmp" ] && [ ! -e "$epoch" ] && [ ! -e "$latch" ] || fail 'Observation Runtime failure state is not fresh'
 [ -z "$(systemctl show "$unit" --property=DropInPaths --value)" ] || fail 'Observation Runtime has an unexpected drop-in'
 version_output=$(/usr/local/bin/enoki-probe --version)
 bundle_version=\${version_output#"enoki-probe "}
@@ -389,11 +387,15 @@ bundle_version=\${bundle_version#v}
 start_limit_burst=$(sed -n 's/^StartLimitBurst=//p' "$unit_file")
 start_limit_interval=$(sed -n 's/^StartLimitIntervalSec=//p' "$unit_file")
 [ "$start_limit_burst" = 3 ] && [ "$start_limit_interval" = 60s ] || fail 'Observation Runtime recovery budget is not build-fixed'
-cp --preserve=mode,ownership,timestamps -- "$runtime" "$backup"
-[ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'Runtime backup custody is invalid'
-sync -f "$backup" || fail 'could not persist Runtime backup custody'
+runtime_sha256=$(sha256sum "$runtime" | cut -d ' ' -f 1)
+cp --preserve=mode,ownership,timestamps -- "$runtime" "$backup_tmp"
+[ "$(stat -c '%u:%a:%h' "$backup_tmp")" = 0:755:1 ] || fail 'Runtime backup temporary boundary is invalid'
+[ "$(sha256sum "$backup_tmp" | cut -d ' ' -f 1)" = "$runtime_sha256" ] || fail 'Runtime backup temporary digest changed'
+sync -f "$backup_tmp" || fail 'could not persist Runtime backup temporary'
+mv -- "$backup_tmp" "$backup"
 sync -f "$claim" || fail 'could not persist Runtime backup publication'
-runtime_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1)
+[ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'Runtime backup custody is invalid'
+[ "$(sha256sum "$backup" | cut -d ' ' -f 1)" = "$runtime_sha256" ] || fail 'Runtime backup custody digest changed'
 temporary=$(mktemp /usr/local/bin/.enoki-observation-runtime.release-e2e.XXXXXX)
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 printf '#!/bin/sh\nexit 70\n' > "$temporary"
@@ -519,7 +521,6 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   backup_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1) || fail 'could not read run-owned Runtime backup'
   if [ -e "$restore_tmp" ] || [ -L "$restore_tmp" ]; then
     [ -f "$restore_tmp" ] && [ ! -L "$restore_tmp" ] && [ "$(stat -c '%u:%a:%h' "$restore_tmp")" = 0:755:1 ] || fail 'Runtime restore temporary residue is invalid'
-    [ "$(sha256sum "$restore_tmp" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'Runtime restore temporary digest changed'
     rm -- "$restore_tmp"
     sync -f /usr/local/bin || fail 'could not persist Runtime restore temporary cleanup'
   fi
@@ -624,22 +625,29 @@ function runtimeClaimPreflight(runId, ownershipToken) {
   return `claim_root=/var/lib/enoki-release-e2e
 [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || fail 'release E2E claim root custody is invalid'
 [ -d "$claim" ] && [ ! -L "$claim" ] && [ "$(stat -c '%u:%a:%h' "$claim")" = 0:700:2 ] || fail 'release E2E ownership claim is invalid'
+[ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] || fail 'release E2E run claim is invalid'
+[ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] || fail 'release E2E ownership token is invalid'
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
+[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
+[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
 resources_next=
+backup_tmp=
 for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
   [ -f "$member" ] && [ ! -L "$member" ] || fail 'release E2E claim member is invalid'
-    case "$(basename -- "$member")" in
-      resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E resource recovery is invalid'; resources_next=$member ;;
-      run-id|token|resources|observation-runtime-original) ;;
-      *) fail 'release E2E claim has an unknown member' ;;
-    esac
+  case "$(basename -- "$member")" in
+    resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E resource recovery is invalid'; resources_next=$member ;;
+    observation-runtime-original.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || fail 'Runtime backup temporary boundary is invalid'; backup_tmp=$member ;;
+    observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || fail 'run-owned Runtime backup boundary is invalid' ;;
+    run-id|token|resources) ;;
+    *) fail 'release E2E claim has an unknown member' ;;
+  esac
 done
-[ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] || fail 'release E2E run claim is invalid'
-[ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] || fail 'release E2E ownership token is invalid'
-[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
-[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
-[ -z "$resources_next" ] || { rm -- "$resources_next"; sync -f "$claim" || fail 'could not persist release E2E resource recovery'; }`;
+if [ -n "$resources_next" ] || [ -n "$backup_tmp" ]; then
+  [ -z "$resources_next" ] || rm -- "$resources_next"
+  [ -z "$backup_tmp" ] || rm -- "$backup_tmp"
+  sync -f "$claim" || fail 'could not persist release E2E claim recovery'
+fi`;
 }
 
 function systemdUnitStateFunctions() {
