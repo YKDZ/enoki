@@ -4896,9 +4896,43 @@ claim=/var/lib/enoki-release-e2e/claim
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+service_state() {
+  service=$1
+  if ! properties=$(LC_ALL=C systemctl show "$service" --no-pager --property=LoadState --property=ActiveState 2>/dev/null); then
+    return 1
+  fi
+  property_count=$(printf '%s\\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || return 1
+  load_count=$(printf '%s\\n' "$properties" | awk -F= '$1 == "LoadState" { count += 1 } END { print count + 0 }') || return 1
+  active_count=$(printf '%s\\n' "$properties" | awk -F= '$1 == "ActiveState" { count += 1 } END { print count + 0 }') || return 1
+  [ "$property_count" -eq 2 ] && [ "$load_count" -eq 1 ] && [ "$active_count" -eq 1 ] || return 1
+  load_state=$(printf '%s\\n' "$properties" | awk -F= '$1 == "LoadState" { print substr($0, index($0, "=") + 1) }') || return 1
+  active_state=$(printf '%s\\n' "$properties" | awk -F= '$1 == "ActiveState" { print substr($0, index($0, "=") + 1) }') || return 1
+  case "$load_state:$active_state" in
+    loaded:inactive) printf 'inactive\\n' ;;
+    loaded:active|loaded:activating|loaded:deactivating|loaded:reloading) printf 'running\\n' ;;
+    not-found:inactive) printf 'absent\\n' ;;
+    *) return 1 ;;
+  esac
+}
+for service in ${services}; do
+  if ! state=$(service_state "$service"); then
+    printf 'could not prove Probe service state\\n' >&2
+    exit 75
+  fi
+  if [ "$state" != absent ]; then
+    if ! systemctl disable --now "$service" >/dev/null 2>&1; then
+      printf 'could not quiesce Probe service\\n' >&2
+      exit 75
+    fi
+  fi
+  if ! state=$(service_state "$service"); then
+    printf 'could not prove Probe service state after stop\\n' >&2
+    exit 75
+  fi
+  case "$state" in inactive|absent) ;; *) printf 'Probe service is not quiescent\\n' >&2; exit 75 ;; esac
+done
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\\n' >&2; exit 75; }
-systemctl disable --now ${services} >/dev/null 2>&1 || true
+cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }
 rm -f -- ${files}
 rm -rf -- ${privateStateDirectories}
 rm -rf -- ${directories}
