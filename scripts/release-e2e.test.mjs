@@ -3286,6 +3286,7 @@ printf covered > '${covered}'
   it("keeps the run claim and Runtime custody when post-restore exact verification fails", async () => {
     const commands = [];
     let inventoryCount = 0;
+    let snapshotCount = 0;
     const installedInventory = {
       accounts: { group: true, user: true },
       files: [
@@ -3337,8 +3338,14 @@ printf covered > '${covered}'
           return successfulCommandText("enoki-probe 1.2.3\n");
         if (command.includes("# enoki-release-e2e:bootstrap-generation"))
           return successfulCommandText("1\n");
-        if (command.includes("# enoki-release-e2e:capture-resources-snapshot"))
-          return successfulCommandText("asserted-resource-snapshot\n");
+        if (
+          command.includes("# enoki-release-e2e:capture-resources-snapshot")
+        ) {
+          snapshotCount += 1;
+          return successfulCommandText(
+            snapshotCount === 1 ? "closure-before\n" : "closure-after\n",
+          );
+        }
         if (
           command.includes(
             "# enoki-release-e2e:inspect-runtime-failure-custody",
@@ -3368,7 +3375,16 @@ printf covered > '${covered}'
     await harness.install(officialEnrollment(), "run-runtime-custody-failure");
     await expect(
       harness.cleanup("run-runtime-custody-failure"),
-    ).rejects.toThrow(/verify run-owned Probe resources/);
+    ).rejects.toThrow(/Asserted Probe resource closure changed/);
+    for (const marker of [
+      "# enoki-release-e2e:renew-resources",
+      "# enoki-release-e2e:retire-runtime-failure-custody",
+      "# enoki-release-e2e:local-probe-uninstall",
+      "# enoki-release-e2e:emergency-cleanup",
+      "# enoki-release-e2e:remove-claim",
+    ]) {
+      expect(commands.some((command) => command.includes(marker))).toBe(false);
+    }
     expect(
       commands.some((command) =>
         command.includes("# enoki-release-e2e:emergency-cleanup"),
