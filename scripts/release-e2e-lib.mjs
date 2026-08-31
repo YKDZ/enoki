@@ -2747,6 +2747,7 @@ export function createHubLifecycleClient({
     async requestProbeUninstall(hostId) {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(`/api/web/hosts/${hostId}`, {
+        headers: { origin: normalizedBaseUrl.origin },
         method: "DELETE",
       });
       const operation = body?.probeUninstallRequest;

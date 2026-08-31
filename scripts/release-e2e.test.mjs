@@ -5162,6 +5162,54 @@ describe("Hub Lifecycle Client", () => {
     });
   });
 
+  it("以精确 Hub Origin 请求卸载探针", async () => {
+    const requests = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example:8443",
+      fetch: async (url, init = {}) => {
+        const parsed = new URL(url);
+        requests.push({
+          method: init.method ?? "GET",
+          origin: new Headers(init.headers).get("origin"),
+          pathname: parsed.pathname,
+        });
+        if (parsed.pathname === "/api/web/hosts/7") {
+          return jsonResponse(
+            {
+              probeUninstallRequest: {
+                acceptedAtMs: null,
+                completedAtMs: null,
+                createdAtMs: 1_725_000_000_000,
+                failure: null,
+                id: 42,
+                runningAtMs: null,
+                state: "pending",
+                targetProbeVersion: "1.2.3",
+                updatedAtMs: 1_725_000_000_000,
+              },
+            },
+            202,
+          );
+        }
+        throw new Error(`unexpected request ${parsed.pathname}`);
+      },
+    });
+
+    await expect(client.requestProbeUninstall(7)).resolves.toMatchObject({
+      hostId: 7,
+      id: 42,
+      kind: "probe_uninstall",
+      state: "pending",
+    });
+    expect(requests).toEqual([
+      {
+        method: "DELETE",
+        origin: "https://hub.example:8443",
+        pathname: "/api/web/hosts/7",
+      },
+    ]);
+  });
+
   it("reads the terminal typed rejection for the matching Enrollment", async () => {
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
