@@ -2988,7 +2988,7 @@ printf covered > '${covered}'
     }
   });
 
-  it("uses a final real systemd start request to turn an exhausted Runtime into recorder eligibility", async () => {
+  it("lets systemd exhaust the Runtime recovery budget without an intervening start request", async () => {
     const fixture = await createRuntimeFailureCustodyFixture(
       "enoki-runtime-final-start-limit-",
     );
@@ -3035,15 +3035,40 @@ if [ "$1" = start ] && [ "$2" = enoki-observation-runtime.service ]; then
   requests=$(cat "$ENOKI_START_REQUESTS" 2>/dev/null || printf 0)
   requests=$((requests + 1))
   printf '%s\\n' "$requests" > "$ENOKI_START_REQUESTS"
-  if [ "$requests" -eq 1 ]; then
-    printf 'auto-restarting\\n' > "$ENOKI_RUNTIME_STATE"
-    exit 0
-  fi
-  [ "$(cat "$ENOKI_RUNTIME_STATE")" = exit-code ] || exit 1
-  printf 'start-limit-hit\\n' > "$ENOKI_RUNTIME_STATE"
-  mkdir -p "$(dirname "$ENOKI_RUNTIME_EPOCH")"
-  unit_sha=$(sha256sum "$ENOKI_RUNTIME_UNIT" | cut -d ' ' -f 1)
-  cat > "$ENOKI_RUNTIME_EPOCH" <<EOF
+  [ "$requests" -eq 1 ] || {
+    printf 'interrupted\\n' > "$ENOKI_RUNTIME_STATE"
+    exit 1
+  }
+  printf '0\\n' > "$ENOKI_RUNTIME_STATE"
+  exit 0
+fi
+if [ "$1" = show ]; then
+  poll=$(cat "$ENOKI_RUNTIME_STATE" 2>/dev/null || printf interrupted)
+  case " $* " in
+    *" --property=ActiveState --value "*)
+      [ "$poll" != interrupted ] || { printf 'failed\\n'; exit 0; }
+      poll=$((poll + 1))
+      printf '%s\\n' "$poll" > "$ENOKI_RUNTIME_STATE"
+      if [ "$poll" -ge 5 ]; then active=failed
+      elif [ $((poll % 2)) -eq 1 ]; then active=failed
+      else active=activating
+      fi
+      printf '%s\\n' "$active"
+      ;;
+    *" --property=Result --value "*)
+      [ "$poll" != interrupted ] || { printf 'exit-code\\n'; exit 0; }
+      if [ "$poll" -ge 5 ]; then result=start-limit-hit
+      else result=exit-code
+      fi
+      printf '%s\\n' "$result"
+      ;;
+    *" --property=NRestarts --value "*) printf '2\\n' ;;
+    *) printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'; exit 0 ;;
+  esac
+  if [ "$poll" -ge 5 ] && [ ! -f "$ENOKI_RUNTIME_EPOCH" ]; then
+    mkdir -p "$(dirname "$ENOKI_RUNTIME_EPOCH")"
+    unit_sha=$(sha256sum "$ENOKI_RUNTIME_UNIT" | cut -d ' ' -f 1)
+    cat > "$ENOKI_RUNTIME_EPOCH" <<EOF
 schema_version = 1
 generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 boot_id = "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51"
@@ -3057,27 +3082,9 @@ manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 bundle_version = "1.2.3"
 result = "start-limit-hit"
 EOF
-  printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$ENOKI_RUNTIME_LATCH"
-  chmod 0600 "$ENOKI_RUNTIME_EPOCH" "$ENOKI_RUNTIME_LATCH"
-  exit 1
-fi
-if [ "$1" = show ]; then
-  current=$(cat "$ENOKI_RUNTIME_STATE" 2>/dev/null || printf stopped)
-  if [ "$current" = auto-restarting ]; then
-    printf 'exit-code\\n' > "$ENOKI_RUNTIME_STATE"
-    current=exit-code
+    printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$ENOKI_RUNTIME_LATCH"
+    chmod 0600 "$ENOKI_RUNTIME_EPOCH" "$ENOKI_RUNTIME_LATCH"
   fi
-  case "$current" in
-    start-limit-hit) active=failed; result=start-limit-hit ;;
-    exit-code|auto-restarting) active=failed; result=exit-code ;;
-    *) active=inactive; result=success ;;
-  esac
-  case " $* " in
-    *" --property=ActiveState --value "*) printf '%s\\n' "$active" ;;
-    *" --property=Result --value "*) printf '%s\\n' "$result" ;;
-    *" --property=NRestarts --value "*) printf '2\\n' ;;
-    *) printf 'LoadState=loaded\\nActiveState=%s\\nSubState=dead\\n' "$active" ;;
-  esac
   exit 0
 fi
 exit 1
@@ -3116,7 +3123,7 @@ exit 1
       ).resolves.toMatchObject({
         failure: { result: "start-limit-hit", status: "latched" },
       });
-      await expect(readFile(startRequests, "utf8")).resolves.toBe("2\n");
+      await expect(readFile(startRequests, "utf8")).resolves.toBe("1\n");
     } finally {
       await fixture.remove();
     }
