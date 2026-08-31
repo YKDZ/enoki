@@ -2258,6 +2258,7 @@ exit "$status"
 
     try {
       let inventoryCount = 0;
+      let recordResourcesCommand;
       const harness = createProbeHostHarness({
         execute: async (command) => {
           if (command.includes("# enoki-release-e2e:inventory")) {
@@ -2290,10 +2291,11 @@ exit "$status"
             await fixture.installLegacyFiles();
             return successfulCommandText(productInstallerOutput());
           }
-          if (
-            command.includes("# enoki-release-e2e:claim") ||
-            command.includes("# enoki-release-e2e:record-resources")
-          ) {
+          if (command.includes("# enoki-release-e2e:claim")) {
+            return fixture.runHostScript(command);
+          }
+          if (command.includes("# enoki-release-e2e:record-resources")) {
+            recordResourcesCommand = command;
             return fixture.runHostScript(command);
           }
           if (command.includes("# enoki-release-e2e:service-boundary")) {
@@ -2324,6 +2326,24 @@ exit "$status"
         },
         "run-active-legacy-recording",
       );
+      const claimDirectory = path.dirname(fixture.paths.claimResources);
+      const tokenPath = path.join(claimDirectory, "token");
+      const resourcesNext = path.join(claimDirectory, "resources.next");
+      const expectedToken = await readFile(tokenPath, "utf8");
+      await writeFile(resourcesNext, "pending\n", "utf8");
+      await chmod(resourcesNext, 0o600);
+      await writeFile(tokenPath, "foreign-token\n", "utf8");
+      expect(
+        (await fixture.runHostScript(recordResourcesCommand)).code,
+      ).not.toBe(0);
+      await expect(lstat(resourcesNext)).resolves.toBeDefined();
+      await writeFile(tokenPath, expectedToken, "utf8");
+      expect(
+        (await fixture.runHostScript(recordResourcesCommand)).code,
+      ).not.toBe(0);
+      await expect(lstat(resourcesNext)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       await expect(
         harness.assertLegacyReleaseBaselineInstalled(
           "run-active-legacy-recording",

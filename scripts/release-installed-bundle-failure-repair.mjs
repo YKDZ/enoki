@@ -624,11 +624,12 @@ function runtimeClaimPreflight(runId, ownershipToken) {
   return `claim_root=/var/lib/enoki-release-e2e
 [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || fail 'release E2E claim root custody is invalid'
 [ -d "$claim" ] && [ ! -L "$claim" ] && [ "$(stat -c '%u:%a:%h' "$claim")" = 0:700:2 ] || fail 'release E2E ownership claim is invalid'
+resources_next=
 for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
   [ -f "$member" ] && [ ! -L "$member" ] || fail 'release E2E claim member is invalid'
     case "$(basename -- "$member")" in
-      resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E resource recovery is invalid'; rm -- "$member"; sync -f "$claim" || fail 'could not persist release E2E resource recovery' ;;
+      resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E resource recovery is invalid'; resources_next=$member ;;
       run-id|token|resources|observation-runtime-original) ;;
       *) fail 'release E2E claim has an unknown member' ;;
     esac
@@ -637,7 +638,8 @@ done
 [ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] || fail 'release E2E ownership token is invalid'
 [ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
-[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'`;
+[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
+[ -z "$resources_next" ] || { rm -- "$resources_next"; sync -f "$claim" || fail 'could not persist release E2E resource recovery'; }`;
 }
 
 function systemdUnitStateFunctions() {

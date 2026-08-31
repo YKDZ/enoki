@@ -4720,23 +4720,25 @@ printf '%s\\n' "$bundle_version"
 
 function claimMutationPreflight(runId, token, recoverResourcesNext = false) {
   const resourcesNext = recoverResourcesNext
-    ? `[ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E resource recovery is invalid\\n' >&2; exit 75; }; rm -- "$member"; sync -f "$claim" || exit 75`
+    ? `rm -- "$resources_next"; sync -f "$claim" || exit 75`
     : `{ printf 'release E2E resource recovery is pending\\n' >&2; exit 75; }`;
   return `claim_root=/var/lib/enoki-release-e2e
 [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'release E2E claim root custody is invalid\n' >&2; exit 75; }
 [ -d "$claim" ] && [ ! -L "$claim" ] && [ "$(stat -c '%u:%a:%h' "$claim")" = 0:700:2 ] || { printf 'release E2E claim custody is invalid\n' >&2; exit 75; }
+resources_next=
 for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
   [ -f "$member" ] && [ ! -L "$member" ] || { printf 'release E2E claim member is invalid\n' >&2; exit 75; }
   case "$(basename -- "$member")" in
     observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || { printf 'release E2E Runtime custody is invalid\n' >&2; exit 75; } ;;
-    resources.next) ${resourcesNext} ;;
+    resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E resource recovery is invalid\n' >&2; exit 75; }; resources_next=$member ;;
     run-id|token|resources|upgrade-before-resources|upgrade-target|upgrade-operation-id|post-replacement-fault) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E claim evidence is invalid\n' >&2; exit 75; } ;;
     *) printf 'release E2E claim has an unknown member\n' >&2; exit 75 ;;
   esac
 done
 [ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] && [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || { printf 'release E2E run claim changed\n' >&2; exit 75; }
-[ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] && [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ] || { printf 'release E2E ownership token changed\n' >&2; exit 75; }`;
+[ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] && [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ] || { printf 'release E2E ownership token changed\n' >&2; exit 75; }
+[ -z "$resources_next" ] || ${resourcesNext}`;
 }
 
 function claimRunScript(runId, token) {
@@ -5162,7 +5164,7 @@ export function renderReleaseE2EResourceFingerprint(resources) {
     .join(" ");
   return String.raw`fingerprint_path() {
   path=$1
-  metadata=$(stat -c '%u\t%g\t%a\t%h\t%d\t%i\t%s' -- "$path") || return 1
+  metadata=$(stat -c '%u\t%g\t%a\t%d\t%i\t%s' -- "$path") || return 1
   path_hash=$(printf '%s' "$path" | sha256sum | awk '{print $1}') || return 1
   if [ -L "$path" ]; then
     type=symlink
@@ -5229,33 +5231,28 @@ fingerprint_systemd_state_directory() {
   public_name=$(basename -- "$public") || return 1
   private_parent="$public_parent/private"
   private_state="$private_parent/$public_name"
-  identity="$private_state/identity"
   [ -d "$public_parent" ] && [ ! -L "$public_parent" ] || return 1
   [ "$(stat -c %u -- "$public_parent")" = 0 ] || return 1
   [ "$(stat -c %g -- "$public_parent")" = 0 ] || return 1
   [ "$(stat -c %a -- "$public_parent")" = 755 ] || return 1
-  [ -L "$public" ] || return 1
-  [ "$(stat -c %u -- "$public")" = 0 ] || return 1
-  [ "$(stat -c %g -- "$public")" = 0 ] || return 1
-  [ "$(stat -c %a -- "$public")" = 777 ] || return 1
-  [ "$(stat -c %h -- "$public")" = 1 ] || return 1
-  [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
-  [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 1
+  if [ -e "$public" ] || [ -L "$public" ]; then
+    [ -L "$public" ] || return 1
+    [ "$(stat -c %u -- "$public")" = 0 ] || return 1
+    [ "$(stat -c %g -- "$public")" = 0 ] || return 1
+    [ "$(stat -c %a -- "$public")" = 777 ] || return 1
+    [ "$(stat -c %h -- "$public")" = 1 ] || return 1
+    [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
+    fingerprint_path "$public" || return 1
+  fi
+  [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 0
   [ "$(stat -c %u -- "$private_parent")" = 0 ] || return 1
   [ "$(stat -c %g -- "$private_parent")" = 0 ] || return 1
   [ "$(stat -c %a -- "$private_parent")" = 700 ] || return 1
-  [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 1
+  [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 0
   state_uid=$(stat -c %u -- "$private_state") || return 1
   state_gid=$(stat -c %g -- "$private_state") || return 1
   [ "$(stat -c %a -- "$private_state")" = 750 ] || return 1
   [ "$(stat -c %h -- "$private_state")" -ge 2 ] || return 1
-  [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
-  [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
-  [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
-  [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
-  [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
-  [ "$(stat -Lc %d:%i -- "$public")" = "$(stat -c %d:%i -- "$private_state")" ] || return 1
-  fingerprint_path "$public" || return 1
   fingerprint_directory "$private_state" || return 1
 }
 ${legacyInstallMetadataValidationFragment()}
@@ -5310,7 +5307,9 @@ fingerprint() {
       fi
     else
       private_candidate="$(dirname -- "$candidate")/private/$(basename -- "$candidate")"
-      [ ! -e "$private_candidate" ] && [ ! -L "$private_candidate" ] || return 1
+      if [ -e "$private_candidate" ] || [ -L "$private_candidate" ]; then
+        fingerprint_systemd_state_directory "$candidate" || return 1
+      fi
     fi
   done
   for account in ${users}; do
