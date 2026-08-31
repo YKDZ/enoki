@@ -3219,11 +3219,19 @@ export function createProbeHostHarness({
       expectedBundleVersion ??
       recovered.recoveredBundleVersion ??
       claimBoundVersion;
-    const { boundary, assertionSnapshot } = await assertInstalledBoundary(
-      runId,
-      bundleVersion,
-      true,
-    );
+    let asserted;
+    try {
+      asserted = await assertInstalledBoundary(runId, bundleVersion, true);
+    } catch (error) {
+      if (
+        claimBoundVersion !== null &&
+        error.message.startsWith("Probe installation is incomplete:")
+      ) {
+        return null;
+      }
+      throw error;
+    }
+    const { boundary, assertionSnapshot } = asserted;
     const renewed = await execute(
       renewRunResourcesScript(runId, ownershipToken, assertionSnapshot),
       { root: true },

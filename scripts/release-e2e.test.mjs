@@ -4015,7 +4015,7 @@ printf covered > '${covered}'
     expect(commands).toHaveLength(5);
   });
 
-  it("uses only run-owned emergency infrastructure cleanup for a partial installation", async () => {
+  it("uses only run-owned emergency infrastructure cleanup for a backup-absent exact claim-bound incomplete installation", async () => {
     const commands = [];
     let inventoryCount = 0;
     const harness = createProbeHostHarness({
@@ -4024,7 +4024,7 @@ printf covered > '${covered}'
         if (command.includes("# enoki-release-e2e:inventory")) {
           inventoryCount += 1;
           return successfulCommand(
-            inventoryCount === 2
+            inventoryCount === 2 || inventoryCount === 3
               ? {
                   accounts: { group: true, user: true },
                   files: ["/usr/local/bin/enoki-probe"],
@@ -4049,6 +4049,14 @@ printf covered > '${covered}'
           )
         ) {
           return successfulCommandText("cleaned\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:claim-bound-bundle-version")
+        ) {
+          return successfulCommandText("1.2.3\n");
+        }
+        if (command.includes("# enoki-release-e2e:verify-resources")) {
+          return successfulCommandText("owned\n");
         }
         if (command.includes("# enoki-release-e2e:dependencies")) {
           return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
