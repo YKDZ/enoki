@@ -97,6 +97,172 @@ async function createSystemdStateDirectoryFixture(prefix) {
   };
 }
 
+async function createLegacyReleaseRecordingFixture(prefix) {
+  const root = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const fakeBin = path.join(root, "fake-bin");
+  const publicParent = path.join(root, "var", "lib");
+  const publicState = path.join(publicParent, "enoki-probe");
+  const identity = path.join(publicState, "identity");
+  const identityFile = path.join(identity, "probe-bootstrap.toml");
+  const metadata = path.join(root, "etc", "enoki", "probe-install.toml");
+  const binary = path.join(root, "usr", "local", "bin", "enoki-probe");
+  const operationStatus = path.join(publicState, "probe-operation-status.toml");
+  const unit = path.join(
+    root,
+    "etc",
+    "systemd",
+    "system",
+    "enoki-probe.service",
+  );
+  const operationSudoers = path.join(
+    root,
+    "etc",
+    "sudoers.d",
+    "enoki-probe-operations",
+  );
+  const collectorSudoers = path.join(
+    root,
+    "etc",
+    "sudoers.d",
+    "enoki-probe-collector-helpers",
+  );
+  const environment = {
+    ...process.env,
+    ENOKI_ACCOUNTS_READY: path.join(root, "accounts-ready"),
+    ENOKI_GETENT_GROUP_GID: "65534",
+    ENOKI_GETENT_PASSWD_GID: "65534",
+    ENOKI_GETENT_PASSWD_UID: "65534",
+    ENOKI_ID_GID: "65534",
+    ENOKI_ID_UID: "65534",
+    PATH: `${fakeBin}:${process.env.PATH}`,
+  };
+  const mapHostPaths = (command) =>
+    command
+      .replaceAll("/var/lib/", `${root}/var/lib/`)
+      .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
+      .replaceAll("/etc/", `${root}/etc/`)
+      .replaceAll("/run/", `${root}/run/`);
+  const runHostScript = async (command) => {
+    try {
+      const result = await execFileAsync("sh", ["-c", mapHostPaths(command)], {
+        env: environment,
+      });
+      return successfulCommandText(result.stdout);
+    } catch (error) {
+      return {
+        code: typeof error.code === "number" ? error.code : 1,
+        stderr: error.stderr ?? error.message,
+        stdout: error.stdout ?? "",
+      };
+    }
+  };
+
+  await mkdir(fakeBin, { recursive: true });
+  await writeFile(
+    path.join(fakeBin, "getent"),
+    `#!/bin/sh
+[ -f "$ENOKI_ACCOUNTS_READY" ] || exit 2
+case "$1:$2" in
+  passwd:enoki-probe) printf 'enoki-probe:x:%s:%s::/var/lib/enoki-probe:/usr/sbin/nologin\\n' "$ENOKI_GETENT_PASSWD_UID" "$ENOKI_GETENT_PASSWD_GID" ;;
+  group:enoki-probe) printf 'enoki-probe:x:%s:\\n' "$ENOKI_GETENT_GROUP_GID" ;;
+  *) exit 2 ;;
+esac
+`,
+    "utf8",
+  );
+  await writeFile(
+    path.join(fakeBin, "id"),
+    `#!/bin/sh
+[ -f "$ENOKI_ACCOUNTS_READY" ] || exec /usr/bin/id "$@"
+case "$1:$2" in
+  -u:enoki-probe) printf '%s\\n' "$ENOKI_ID_UID" ;;
+  -g:enoki-probe) printf '%s\\n' "$ENOKI_ID_GID" ;;
+  *) exec /usr/bin/id "$@" ;;
+esac
+`,
+    "utf8",
+  );
+  await writeFile(path.join(fakeBin, "systemctl"), "#!/bin/sh\nexit 0\n");
+  for (const command of ["getent", "id", "systemctl"]) {
+    await chmod(path.join(fakeBin, command), 0o755);
+  }
+
+  return {
+    environment,
+    paths: {
+      binary,
+      claimResources: path.join(
+        root,
+        "var",
+        "lib",
+        "enoki-release-e2e",
+        "claim",
+        "resources",
+      ),
+      collectorSudoers,
+      identity,
+      identityFile,
+      metadata,
+      operationStatus,
+      operationSudoers,
+      publicParent,
+      publicState,
+      unit,
+    },
+    async installLegacyFiles({
+      extraMetadata = "",
+      identityGid = 65534,
+      identityMode = 0o600,
+      identityUid = 65534,
+      stateGid = 65534,
+      stateUid = 65534,
+    } = {}) {
+      await mkdir(identity, { recursive: true });
+      for (const candidate of [metadata, binary, unit, operationSudoers]) {
+        await mkdir(path.dirname(candidate), { recursive: true });
+      }
+      await chmod(publicParent, 0o755);
+      await chmod(publicState, 0o750);
+      await chmod(identity, 0o700);
+      await chown(publicState, stateUid, stateGid);
+      await chown(identity, stateUid, stateGid);
+      await writeFile(identityFile, "identity", "utf8");
+      await chmod(identityFile, identityMode);
+      await chown(identityFile, identityUid, identityGid);
+      await writeFile(
+        metadata,
+        `schema_version = 1
+hub_url = "https://hub.example"
+install_path = "${binary}"
+identity_path = "${identityFile}"
+state_dir = "${publicState}"
+operation_status_path = "${operationStatus}"
+service_name = "enoki-probe"
+service_user = "enoki-probe"
+service_group = "enoki-probe"
+service_unit_path = "${unit}"
+operation_sudoers_path = "${operationSudoers}"
+collector_helper_sudoers_path = "${collectorSudoers}"
+probe_asset_public_key_sha256 = "${"a".repeat(64)}"
+${extraMetadata}`,
+        "utf8",
+      );
+      await chmod(metadata, 0o600);
+      await writeFile(binary, "binary", "utf8");
+      await chmod(binary, 0o755);
+      await writeFile(unit, "unit", "utf8");
+      await chmod(unit, 0o644);
+      await writeFile(operationSudoers, "sudoers", "utf8");
+      await chmod(operationSudoers, 0o440);
+      await writeFile(environment.ENOKI_ACCOUNTS_READY, "ready", "utf8");
+    },
+    async remove() {
+      await rm(root, { force: true, recursive: true });
+    },
+    runHostScript,
+  };
+}
+
 describe("Release E2E business assertions", () => {
   it("transfers cleanup ownership when the existing runner enters environment start", async () => {
     const calls = [];
@@ -1742,6 +1908,112 @@ exit "$status"
     ).toHaveLength(1);
   });
 
+  it("reads Bootstrap generation only from its canonical managed root", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-generation-"),
+    );
+    const managedRoot = path.join(root, "var", "lib", "enoki-probe-bootstrap");
+    const generation = path.join(managedRoot, "trust", "delegation-generation");
+    const externalRoot = path.join(root, "external");
+    const externalGeneration = path.join(
+      externalRoot,
+      "trust",
+      "delegation-generation",
+    );
+    const mapHostPaths = (command) => command.replaceAll("/var", `${root}/var`);
+    const runHostScript = async (command) => {
+      try {
+        const result = await execFileAsync("sh", ["-c", mapHostPaths(command)]);
+        return successfulCommandText(result.stdout);
+      } catch (error) {
+        return {
+          code: typeof error.code === "number" ? error.code : 1,
+          stderr: error.stderr ?? error.message,
+          stdout: error.stdout ?? "",
+        };
+      }
+    };
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
+              : {
+                  accounts: { group: true, user: true },
+                  files: [
+                    "/usr/local/bin/enoki-probe",
+                    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                    "/var/lib/enoki-probe-bootstrap",
+                    "/etc/enoki/probe-install.toml",
+                    "/etc/systemd/system/enoki-probe.service",
+                    "/var/lib/enoki-probe",
+                  ],
+                  units: ["enoki-probe.service"],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
+          return successfulCommandText("");
+        }
+        if (command.includes("# enoki-release-e2e:binary-version")) {
+          return successfulCommandText("enoki-probe v1.2.3\n");
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
+          return runHostScript(command);
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+
+    try {
+      await mkdir(path.dirname(generation), { recursive: true });
+      await chmod(path.join(root, "var", "lib"), 0o755);
+      await chmod(managedRoot, 0o700);
+      await chmod(path.dirname(generation), 0o700);
+      await writeFile(generation, "1\n", "utf8");
+      await chmod(generation, 0o600);
+      await harness.assertDisposable("run-bootstrap-generation");
+      await harness.install(officialEnrollment(), "run-bootstrap-generation");
+      await expect(
+        harness.assertInstalled("run-bootstrap-generation", "1.2.3"),
+      ).resolves.toMatchObject({ delegationGeneration: 1 });
+
+      await mkdir(path.dirname(externalGeneration), { recursive: true });
+      await chmod(externalRoot, 0o700);
+      await chmod(path.dirname(externalGeneration), 0o700);
+      await writeFile(externalGeneration, "2\n", "utf8");
+      await chmod(externalGeneration, 0o600);
+      await rm(managedRoot, { recursive: true });
+      await symlink(externalRoot, managedRoot);
+      await expect(
+        harness.assertInstalled("run-bootstrap-generation", "1.2.3"),
+      ).rejects.toThrow(/delegation generation state is missing or invalid/i);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it("accepts the exact v0.1.74 legacy layout without weakening the Candidate boundary", async () => {
     let collectorSudoersPresent = false;
     let inventoryCount = 0;
@@ -1814,10 +2086,11 @@ exit "$status"
         }
         if (command.includes("# enoki-release-e2e:legacy-install-metadata")) {
           const enforcesIdentityBoundary =
+            command.includes("validate_legacy_install_metadata") &&
             command.includes('id -u "enoki-probe"') &&
             command.includes('id -g "enoki-probe"') &&
-            command.includes('stat -c %a "$identity"') &&
-            command.includes('stat -c %h "$identity"');
+            command.includes('stat -c %a "$legacy_identity"') &&
+            command.includes('stat -c %h "$legacy_identity"');
           if (
             legacyBoundaryFailure === "identity" &&
             enforcesIdentityBoundary
@@ -1884,6 +2157,165 @@ exit "$status"
         command.includes("# enoki-release-e2e:legacy-install-metadata"),
       ),
     ).toBe(true);
+  });
+
+  it("records the exact active v0.1.74 public StateDirectory layout", async () => {
+    const fixture = await createLegacyReleaseRecordingFixture(
+      "enoki-e2e-legacy-resource-recording-",
+    );
+
+    try {
+      let inventoryCount = 0;
+      const harness = createProbeHostHarness({
+        execute: async (command) => {
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            inventoryCount += 1;
+            return successfulCommand(
+              inventoryCount === 1
+                ? {
+                    accounts: { group: false, user: false },
+                    files: [],
+                    units: [],
+                  }
+                : {
+                    accounts: { group: true, user: true },
+                    files: [
+                      "/usr/local/bin/enoki-probe",
+                      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                      "/etc/enoki/probe-install.toml",
+                      "/etc/systemd/system/enoki-probe.service",
+                      "/var/lib/enoki-probe",
+                      "/etc/sudoers.d/enoki-probe-operations",
+                    ],
+                    units: ["enoki-probe.service"],
+                  },
+            );
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+            await fixture.installLegacyFiles();
+            return successfulCommandText(productInstallerOutput());
+          }
+          if (
+            command.includes("# enoki-release-e2e:claim") ||
+            command.includes("# enoki-release-e2e:record-resources")
+          ) {
+            return fixture.runHostScript(command);
+          }
+          if (command.includes("# enoki-release-e2e:service-boundary")) {
+            return successfulCommandText(
+              "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+            );
+          }
+          if (command.includes("# enoki-release-e2e:legacy-sudoers-boundary")) {
+            return successfulCommandText("verified\n");
+          }
+          if (command.includes("# enoki-release-e2e:legacy-install-metadata")) {
+            return successfulCommandText("verified\n");
+          }
+          if (command.includes("# enoki-release-e2e:binary-version")) {
+            return successfulCommandText("enoki-probe v0.1.74\n");
+          }
+          return successfulCommandText("");
+        },
+      });
+
+      await harness.assertDisposable("run-active-legacy-recording");
+      await harness.install(
+        {
+          enrollmentToken: "enk_enroll_legacy",
+          hubUrl: "https://hub.example",
+          installCommand:
+            "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+        },
+        "run-active-legacy-recording",
+      );
+      await expect(
+        harness.assertLegacyReleaseBaselineInstalled(
+          "run-active-legacy-recording",
+          "0.1.74",
+        ),
+      ).resolves.toMatchObject({ probeVersion: "0.1.74" });
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("rejects malformed active legacy metadata before recording resources authority", async () => {
+    const fixture = await createLegacyReleaseRecordingFixture(
+      "enoki-e2e-legacy-resource-rejection-",
+    );
+
+    try {
+      fixture.environment.ENOKI_ID_GID = "65535";
+      fixture.environment.ENOKI_ID_UID = "65535";
+      let inventoryCount = 0;
+      const harness = createProbeHostHarness({
+        execute: async (command) => {
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            inventoryCount += 1;
+            return successfulCommand(
+              inventoryCount === 1
+                ? {
+                    accounts: { group: false, user: false },
+                    files: [],
+                    units: [],
+                  }
+                : {
+                    accounts: { group: true, user: true },
+                    files: [
+                      "/usr/local/bin/enoki-probe",
+                      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                      "/etc/enoki/probe-install.toml",
+                      "/etc/systemd/system/enoki-probe.service",
+                      "/var/lib/enoki-probe",
+                      "/etc/sudoers.d/enoki-probe-operations",
+                    ],
+                    units: ["enoki-probe.service"],
+                  },
+            );
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+            await fixture.installLegacyFiles({
+              extraMetadata:
+                'schema_version = 2\nbootstrap_state_dir = "/var/lib/enoki-probe-bootstrap"\n',
+              identityMode: 0o644,
+            });
+            return successfulCommandText(productInstallerOutput());
+          }
+          if (
+            command.includes("# enoki-release-e2e:claim") ||
+            command.includes("# enoki-release-e2e:record-resources")
+          ) {
+            return fixture.runHostScript(command);
+          }
+          return successfulCommandText("");
+        },
+      });
+
+      await harness.assertDisposable("run-malformed-legacy-recording");
+      await expect(
+        harness.install(
+          {
+            enrollmentToken: "enk_enroll_legacy",
+            hubUrl: "https://hub.example",
+            installCommand:
+              "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+          },
+          "run-malformed-legacy-recording",
+        ),
+      ).rejects.toMatchObject({ code: "probe_resource_recording_failed" });
+      await expect(
+        readFile(fixture.paths.claimResources, "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fixture.remove();
+    }
   });
 
   it("rejects an installed Probe binary from a different candidate version", async () => {

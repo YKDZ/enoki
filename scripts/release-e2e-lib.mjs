@@ -4124,45 +4124,52 @@ printf 'verified\n'
 `;
 }
 
+function legacyInstallMetadataValidationFragment() {
+  return String.raw`validate_legacy_install_metadata() {
+  legacy_metadata=/etc/enoki/probe-install.toml
+  legacy_identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+  [ -f "$legacy_metadata" ] && [ ! -L "$legacy_metadata" ] || return 1
+  [ "$(stat -c %u "$legacy_metadata")" = 0 ] || return 1
+  [ "$(stat -c %g "$legacy_metadata")" = 0 ] || return 1
+  [ "$(stat -c %a "$legacy_metadata")" = 600 ] || return 1
+  [ -f "$legacy_identity" ] && [ ! -L "$legacy_identity" ] || return 1
+  [ "$(stat -c %h "$legacy_identity")" = 1 ] || return 1
+  [ "$(stat -c %u "$legacy_identity")" = "$(id -u "enoki-probe")" ] || return 1
+  [ "$(stat -c %g "$legacy_identity")" = "$(id -g "enoki-probe")" ] || return 1
+  [ "$(stat -c %a "$legacy_identity")" = 600 ] || return 1
+  require_legacy_metadata_key() { [ "$(grep -Ec "^$1 = " "$legacy_metadata")" -eq 1 ]; }
+  require_legacy_metadata_line() {
+  expected=$1
+  legacy_key=$(printf '%s\n' "$expected" | sed 's/ = .*//') || return 1
+  require_legacy_metadata_key "$legacy_key" && [ "$(grep -Fxc "$expected" "$legacy_metadata")" -eq 1 ]
+  }
+  awk '
+  /^[[:space:]]*$/ { next }
+  $0 !~ /^(schema_version|hub_url|install_path|identity_path|state_dir|operation_status_path|service_name|service_user|service_group|service_unit_path|operation_sudoers_path|collector_helper_sudoers_path|probe_asset_public_key_sha256) = / { exit 1 }
+' "$legacy_metadata" || return 1
+  require_legacy_metadata_line 'schema_version = 1' || return 1
+  require_legacy_metadata_key hub_url || return 1
+  grep -Eq '^hub_url = "https?://[^"[:space:]]+"$' "$legacy_metadata" || return 1
+  require_legacy_metadata_line 'install_path = "/usr/local/bin/enoki-probe"' || return 1
+  require_legacy_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"' || return 1
+  require_legacy_metadata_line 'state_dir = "/var/lib/enoki-probe"' || return 1
+  require_legacy_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"' || return 1
+  require_legacy_metadata_line 'service_name = "enoki-probe"' || return 1
+  require_legacy_metadata_line 'service_user = "enoki-probe"' || return 1
+  require_legacy_metadata_line 'service_group = "enoki-probe"' || return 1
+  require_legacy_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"' || return 1
+  require_legacy_metadata_line 'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"' || return 1
+  require_legacy_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"' || return 1
+  require_legacy_metadata_key probe_asset_public_key_sha256 || return 1
+  grep -Eq '^probe_asset_public_key_sha256 = "[0-9A-Fa-f]{64}"$' "$legacy_metadata" || return 1
+}`;
+}
+
 function legacyInstallMetadataBoundaryScript() {
   return String.raw`# enoki-release-e2e:legacy-install-metadata
 set -eu
-metadata=/etc/enoki/probe-install.toml
-identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
-[ -f "$metadata" ] && [ ! -L "$metadata" ]
-[ "$(stat -c %u "$metadata")" = 0 ]
-[ "$(stat -c %g "$metadata")" = 0 ]
-[ "$(stat -c %a "$metadata")" = 600 ]
-[ -f "$identity" ] && [ ! -L "$identity" ]
-[ "$(stat -c %h "$identity")" = 1 ]
-[ "$(stat -c %u "$identity")" = "$(id -u "enoki-probe")" ]
-[ "$(stat -c %g "$identity")" = "$(id -g "enoki-probe")" ]
-[ "$(stat -c %a "$identity")" = 600 ]
-require_metadata_key() { [ "$(grep -Ec "^$1 = " "$metadata")" -eq 1 ]; }
-require_metadata_line() {
-  expected=$1
-  key=$(printf '%s\n' "$expected" | sed 's/ = .*//')
-  require_metadata_key "$key" && [ "$(grep -Fxc "$expected" "$metadata")" -eq 1 ]
-}
-awk '
-  /^[[:space:]]*$/ { next }
-  $0 !~ /^(schema_version|hub_url|install_path|identity_path|state_dir|operation_status_path|service_name|service_user|service_group|service_unit_path|operation_sudoers_path|collector_helper_sudoers_path|probe_asset_public_key_sha256) = / { exit 1 }
-' "$metadata"
-require_metadata_line 'schema_version = 1'
-require_metadata_key hub_url
-grep -Eq '^hub_url = "https?://[^"[:space:]]+"$' "$metadata"
-require_metadata_line 'install_path = "/usr/local/bin/enoki-probe"'
-require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
-require_metadata_line 'state_dir = "/var/lib/enoki-probe"'
-require_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"'
-require_metadata_line 'service_name = "enoki-probe"'
-require_metadata_line 'service_user = "enoki-probe"'
-require_metadata_line 'service_group = "enoki-probe"'
-require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
-require_metadata_line 'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"'
-require_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"'
-require_metadata_key probe_asset_public_key_sha256
-grep -Eq '^probe_asset_public_key_sha256 = "[0-9A-Fa-f]{64}"$' "$metadata"
+${legacyInstallMetadataValidationFragment()}
+validate_legacy_install_metadata
 printf 'verified\n'
 `;
 }
@@ -4177,10 +4184,29 @@ set -eu
 function bootstrapGenerationStateScript() {
   return String.raw`# enoki-release-e2e:bootstrap-generation
 set -eu
-generation=/var/lib/enoki-probe/trust/delegation-generation
+var=/var
+lib=/var/lib
+state=/var/lib/enoki-probe-bootstrap
+trust="$state/trust"
+generation="$trust/delegation-generation"
+validate_directory() {
+  candidate=$1
+  mode=$2
+  [ -d "$candidate" ] && [ ! -L "$candidate" ]
+  [ "$(stat -c %u -- "$candidate")" = 0 ]
+  [ "$(stat -c %g -- "$candidate")" = 0 ]
+  [ "$(stat -c %a -- "$candidate")" = "$mode" ]
+  [ "$(stat -c %h -- "$candidate")" -ge 2 ]
+}
+validate_directory "$var" 755
+validate_directory "$lib" 755
+validate_directory "$state" 700
+validate_directory "$trust" 700
 [ -f "$generation" ] && [ ! -L "$generation" ]
 [ "$(stat -c %u "$generation")" = 0 ]
+[ "$(stat -c %g "$generation")" = 0 ]
 [ "$(stat -c %a "$generation")" = 600 ]
+[ "$(stat -c %h "$generation")" = 1 ]
 value=$(cat -- "$generation")
 case "$value" in [1-9]* ) ;; *) exit 1 ;; esac
 case "$value" in *[!0-9]* ) exit 1 ;; esac
@@ -4473,7 +4499,11 @@ fingerprint > "$temporary"
 cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }
 printf 'owned\n'`
     : String.raw`[ ! -e "$claim/resources" ] || { printf 'run resource evidence already exists\n' >&2; exit 76; }
-( umask 077; fingerprint > "$claim/resources" )
+if ! ( umask 077; fingerprint > "$claim/resources" ); then
+  rm -f -- "$claim/resources"
+  printf 'could not fingerprint installed Probe resources\n' >&2
+  exit 75
+fi
 printf 'recorded\n'`;
   return `# enoki-release-e2e:${header}
 set -eu
@@ -4790,6 +4820,36 @@ fingerprint_systemd_state_directory() {
   fingerprint_path "$public" || return 1
   fingerprint_directory "$private_state" || return 1
 }
+${legacyInstallMetadataValidationFragment()}
+fingerprint_legacy_state_directory() {
+  public=$1
+  public_parent=$(dirname -- "$public") || return 1
+  public_name=$(basename -- "$public") || return 1
+  private_state="$public_parent/private/$public_name"
+  identity="$public/identity"
+  [ "$public" = /var/lib/enoki-probe ] || return 1
+  validate_legacy_install_metadata || return 1
+  user_entry=$(getent passwd enoki-probe) || return 1
+  group_entry=$(getent group enoki-probe) || return 1
+  state_uid=$(printf '%s' "$user_entry" | cut -d: -f3) || return 1
+  state_gid=$(printf '%s' "$group_entry" | cut -d: -f3) || return 1
+  [ -d "$public_parent" ] && [ ! -L "$public_parent" ] || return 1
+  [ "$(stat -c %u -- "$public_parent")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$public_parent")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$public_parent")" = 755 ] || return 1
+  [ -d "$public" ] && [ ! -L "$public" ] || return 1
+  [ "$(stat -c %u -- "$public")" = "$state_uid" ] || return 1
+  [ "$(stat -c %g -- "$public")" = "$state_gid" ] || return 1
+  [ "$(stat -c %a -- "$public")" = 750 ] || return 1
+  [ "$(stat -c %h -- "$public")" -ge 2 ] || return 1
+  [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
+  [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
+  [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
+  [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
+  [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
+  [ ! -e "$private_state" ] && [ ! -L "$private_state" ] || return 1
+  fingerprint_directory "$public" || return 1
+}
 fingerprint() {
   for candidate in ${files}; do
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
@@ -4805,7 +4865,11 @@ fingerprint() {
   done
   for candidate in ${systemdStateDirectories}; do
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
-      fingerprint_systemd_state_directory "$candidate" || return 1
+      if [ -L "$candidate" ]; then
+        fingerprint_systemd_state_directory "$candidate" || return 1
+      else
+        fingerprint_legacy_state_directory "$candidate" || return 1
+      fi
     else
       private_candidate="$(dirname -- "$candidate")/private/$(basename -- "$candidate")"
       [ ! -e "$private_candidate" ] && [ ! -L "$private_candidate" ] || return 1
