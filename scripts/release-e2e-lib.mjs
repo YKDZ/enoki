@@ -3075,9 +3075,218 @@ export function createProbeHostHarness({
     };
   }
 
+  async function assertInstalledBoundary(
+    runId,
+    expectedProbeVersion,
+    captureAssertionSnapshot = false,
+  ) {
+    const incomplete = (message) => {
+      const error = new Error(message);
+      error.code = "installed_boundary_incomplete";
+      return error;
+    };
+    assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+    if (
+      !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+        expectedProbeVersion ?? "",
+      )
+    ) {
+      throw new Error("Candidate Probe version is invalid");
+    }
+    const snapshotBefore = captureAssertionSnapshot
+      ? execute(captureRunResourcesSnapshotScript(runId, ownershipToken), {
+          root: true,
+        })
+      : null;
+    const [
+      inspected,
+      serviceResult,
+      sudoersResult,
+      binaryVersionResult,
+      generationResult,
+    ] = await Promise.all([
+      inventory(),
+      execute(serviceBoundaryScript()),
+      execute(sudoersBoundaryScript(), { root: true }),
+      execute(binaryVersionScript()),
+      execute(bootstrapGenerationStateScript(), { root: true }),
+    ]);
+    const residue = inventoryResidue(inspected);
+    const required = [
+      "user:enoki-probe",
+      "group:enoki-probe",
+      "/usr/local/bin/enoki-probe",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+      "/var/lib/enoki-probe-bootstrap",
+      "/etc/enoki/probe-install.toml",
+      "/etc/systemd/system/enoki-probe.service",
+      "/var/lib/enoki-probe",
+      "enoki-probe.service",
+    ];
+    const missing = required.filter((entry) => !residue.includes(entry));
+    if (missing.length > 0) {
+      throw incomplete(
+        `Probe installation is incomplete: missing ${missing.join(", ")}`,
+      );
+    }
+    if (serviceResult.code !== 0) {
+      throw new Error(
+        `Probe service inspection failed: ${serviceResult.stderr}`,
+      );
+    }
+    const service = parseKeyValues(serviceResult.stdout);
+    if (
+      service.LoadState !== "loaded" ||
+      service.ActiveState !== "active" ||
+      service.User !== "enoki-probe" ||
+      service.Group !== "enoki-probe" ||
+      service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
+    ) {
+      throw incomplete(
+        `Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
+      );
+    }
+    if (sudoersResult.code !== 0) {
+      throw new Error("Probe Bootstrap sudoers inspection failed");
+    }
+    if (sudoersResult.stdout.trim() !== "") {
+      throw incomplete(
+        "Probe Bootstrap schema 2 installation must not retain Probe sudoers",
+      );
+    }
+    const generation = generationResult.stdout.trim();
+    if (generationResult.code !== 0) {
+      throw new Error(
+        "Probe Bootstrap delegation generation state is missing or invalid",
+      );
+    }
+    if (!/^[1-9]\d*$/.test(generation)) {
+      throw incomplete(
+        "Probe Bootstrap delegation generation state is missing or invalid",
+      );
+    }
+    if (binaryVersionResult.code !== 0) {
+      throw new Error("Installed Probe binary version inspection failed");
+    }
+    const probeVersion = binaryVersionResult.stdout
+      .trim()
+      .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1];
+    if (probeVersion !== expectedProbeVersion) {
+      throw incomplete(
+        `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
+      );
+    }
+    const boundary = {
+      inventory: inspected,
+      probeVersion,
+      service,
+      sudoers: sudoersResult.stdout,
+      delegationGeneration: Number(generation),
+    };
+    if (!captureAssertionSnapshot) return boundary;
+    const before = await snapshotBefore;
+    const snapshot = await execute(
+      captureRunResourcesSnapshotScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (
+      before.code !== 0 ||
+      snapshot.code !== 0 ||
+      before.stdout.trim() === "" ||
+      before.stdout.trim() !== snapshot.stdout.trim()
+    ) {
+      throw new Error(
+        `Asserted Probe resource closure changed: ${before.stderr || snapshot.stderr || snapshot.stdout}`,
+      );
+    }
+    return { boundary, assertionSnapshot: snapshot.stdout.trim() };
+  }
+
+  async function completeRuntimeRecoveryCustody(
+    runId,
+    expectedBundleVersion = null,
+  ) {
+    const recovered = await installedBundleFailureRepair.cleanup(runId);
+    let claimBoundVersion = null;
+    if (!recovered.recoveredBundleVersion) {
+      const bound = await execute(
+        claimBoundBundleVersionScript(runId, ownershipToken),
+        { root: true },
+      );
+      if (bound.code !== 0) return null;
+      claimBoundVersion = bound.stdout.trim();
+      if (
+        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+          claimBoundVersion,
+        )
+      )
+        return null;
+    }
+    if (
+      expectedBundleVersion !== null &&
+      recovered.recoveredBundleVersion !== expectedBundleVersion
+    ) {
+      throw new Error("Recovered Probe version changed during Runtime custody");
+    }
+    const bundleVersion =
+      expectedBundleVersion ??
+      recovered.recoveredBundleVersion ??
+      claimBoundVersion;
+    let asserted;
+    try {
+      asserted = await assertInstalledBoundary(runId, bundleVersion, true);
+    } catch (error) {
+      if (
+        claimBoundVersion !== null &&
+        error.code === "installed_boundary_incomplete"
+      ) {
+        return { classification: "run_owned_partial" };
+      }
+      throw error;
+    }
+    const { boundary, assertionSnapshot } = asserted;
+    const renewed = await execute(
+      renewRunResourcesScript(runId, ownershipToken, assertionSnapshot),
+      { root: true },
+    );
+    if (renewed.code !== 0 || renewed.stdout.trim() !== "renewed") {
+      throw new Error(
+        `Could not renew run-owned Probe resources after Installed Bundle Failure Repair: ${renewed.stderr || renewed.stdout}`,
+      );
+    }
+    const verified = await execute(
+      verifyRunResourcesScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (verified.code !== 0 || verified.stdout.trim() !== "owned") {
+      throw new Error(
+        `Could not verify run-owned Probe resources after Installed Bundle Failure Repair: ${verified.stderr || verified.stdout}`,
+      );
+    }
+    await installedBundleFailureRepair.retireCustody(runId);
+    return { boundary, bundleVersion };
+  }
+
   return {
     async repairInstalledBundleFailure(runId, expectedBundleVersion) {
-      return installedBundleFailureRepair.repair(runId, expectedBundleVersion);
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      const result = await installedBundleFailureRepair.repair(
+        runId,
+        expectedBundleVersion,
+      );
+      await completeRuntimeRecoveryCustody(runId, expectedBundleVersion);
+      return {
+        failure: result.failure,
+        repair: {
+          failureEpochRemoved: result.repair.failureEpochRemoved,
+          faultRemoved: true,
+          latchRemoved: result.repair.latchRemoved,
+          output: result.repair.output,
+          runtimeSha256: result.repair.runtimeSha256,
+          sameBundle: result.repair.sameBundle,
+          unit: result.repair.unit,
+        },
+      };
     },
     async assertReleaseTestHost(expected) {
       if (
@@ -3160,91 +3369,7 @@ export function createProbeHostHarness({
     },
 
     async assertInstalled(runId, expectedProbeVersion) {
-      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
-      if (
-        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-          expectedProbeVersion ?? "",
-        )
-      ) {
-        throw new Error("Candidate Probe version is invalid");
-      }
-      const [
-        inspected,
-        serviceResult,
-        sudoersResult,
-        binaryVersionResult,
-        generationResult,
-      ] = await Promise.all([
-        inventory(),
-        execute(serviceBoundaryScript()),
-        execute(sudoersBoundaryScript(), { root: true }),
-        execute(binaryVersionScript()),
-        execute(bootstrapGenerationStateScript(), { root: true }),
-      ]);
-      const residue = inventoryResidue(inspected);
-      const required = [
-        "user:enoki-probe",
-        "group:enoki-probe",
-        "/usr/local/bin/enoki-probe",
-        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        "/var/lib/enoki-probe-bootstrap",
-        "/etc/enoki/probe-install.toml",
-        "/etc/systemd/system/enoki-probe.service",
-        "/var/lib/enoki-probe",
-        "enoki-probe.service",
-      ];
-      const missing = required.filter((entry) => !residue.includes(entry));
-      if (missing.length > 0) {
-        throw new Error(
-          `Probe installation is incomplete: missing ${missing.join(", ")}`,
-        );
-      }
-      if (serviceResult.code !== 0) {
-        throw new Error(
-          `Probe service inspection failed: ${serviceResult.stderr}`,
-        );
-      }
-      const service = parseKeyValues(serviceResult.stdout);
-      if (
-        service.LoadState !== "loaded" ||
-        service.ActiveState !== "active" ||
-        service.User !== "enoki-probe" ||
-        service.Group !== "enoki-probe" ||
-        service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
-      ) {
-        throw new Error(
-          `Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
-        );
-      }
-      if (sudoersResult.code !== 0 || sudoersResult.stdout.trim() !== "") {
-        throw new Error(
-          "Probe Bootstrap schema 2 installation must not retain Probe sudoers",
-        );
-      }
-      const generation = generationResult.stdout.trim();
-      if (generationResult.code !== 0 || !/^[1-9]\d*$/.test(generation)) {
-        throw new Error(
-          "Probe Bootstrap delegation generation state is missing or invalid",
-        );
-      }
-      const probeVersion =
-        binaryVersionResult.code === 0
-          ? binaryVersionResult.stdout
-              .trim()
-              .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
-          : null;
-      if (probeVersion !== expectedProbeVersion) {
-        throw new Error(
-          `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
-        );
-      }
-      return {
-        inventory: inspected,
-        probeVersion,
-        service,
-        sudoers: sudoersResult.stdout,
-        delegationGeneration: Number(generation),
-      };
+      return assertInstalledBoundary(runId, expectedProbeVersion);
     },
 
     async assertLegacyReleaseBaselineInstalled(runId, expectedProbeVersion) {
@@ -3732,7 +3857,47 @@ export function createProbeHostHarness({
     async cleanup(runId) {
       assertRunId(runId);
       if (disposableRunId !== runId || !runOwnsMutation) {
-        return { clean: true, skipped: "run_did_not_mutate_host" };
+        const activeClaim = await execute(
+          verifyClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (activeClaim.code === 0 && activeClaim.stdout.trim() === "owned") {
+          disposableRunId = runId;
+          runOwnsMutation = true;
+        } else {
+          const claim = await execute(
+            inspectClaimScript(runId, ownershipToken),
+            {
+              root: true,
+            },
+          );
+          if (claim.code !== 0 || claim.stdout.trim() !== "retiring-owned") {
+            return { clean: true, skipped: "run_did_not_mutate_host" };
+          }
+          const released = await execute(
+            removeClaimScript(runId, ownershipToken),
+            {
+              root: true,
+            },
+          );
+          if (released.code !== 0 || released.stdout.trim() !== "released") {
+            throw new Error(
+              `Could not resume retiring run claim: ${released.stderr}`,
+            );
+          }
+          const completed = await execute(
+            inspectClaimScript(runId, ownershipToken),
+            {
+              root: true,
+            },
+          );
+          if (completed.code !== 0 || completed.stdout.trim() !== "absent") {
+            throw new Error("Run claim remains after retirement recovery");
+          }
+          return { clean: true, removedPartialInstallation: false };
+        }
       }
       const errors = [];
       const attempt = async (operation) => {
@@ -3744,17 +3909,61 @@ export function createProbeHostHarness({
         }
       };
       let claimOwned = false;
+      let claimRetiring = false;
       await attempt(async () => {
         const claim = await execute(verifyClaimScript(runId, ownershipToken), {
           root: true,
         });
-        if (claim.code !== 0 || claim.stdout.trim() !== "owned") {
+        if (claim.code === 0 && claim.stdout.trim() === "owned") {
+          claimOwned = true;
+          return;
+        }
+        const inspected = await execute(
+          inspectClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (
+          inspected.code === 0 &&
+          inspected.stdout.trim() === "retiring-owned"
+        ) {
+          claimOwned = true;
+          claimRetiring = true;
+          return;
+        }
+        {
           throw new Error(
             `Refusing cleanup because Host state is not attributable to run ${runId}: ${claim.stderr}`,
           );
         }
-        claimOwned = true;
       });
+
+      if (claimRetiring) {
+        const released = await execute(
+          removeClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (released.code !== 0 || released.stdout.trim() !== "released") {
+          throw new Error(
+            `Could not resume retiring run claim: ${released.stderr}`,
+          );
+        }
+        const completed = await execute(
+          inspectClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (completed.code !== 0 || completed.stdout.trim() !== "absent") {
+          throw new Error("Run claim remains after retirement recovery");
+        }
+        runOwnsMutation = false;
+        readyForReinstallation = false;
+        return { clean: true, removedPartialInstallation: false };
+      }
 
       if (postReplacementFaultArmed) {
         await attempt(async () => {
@@ -3785,14 +3994,59 @@ export function createProbeHostHarness({
         });
       }
 
-      await attempt(() => installedBundleFailureRepair.cleanup(runId));
+      let completedCustody;
+      try {
+        completedCustody = await completeRuntimeRecoveryCustody(runId);
+      } catch (error) {
+        errors.push(error);
+        const aggregate = new AggregateError(
+          errors,
+          `Release Test Host cleanup failed before Runtime custody completed: ${errors.map((item) => item.message).join("; ")}`,
+        );
+        aggregate.code = "release_test_host_cleanup_failed";
+        throw aggregate;
+      }
 
       let inspected = await attempt(() => inventory());
       let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
+      const runOwnedPartial =
+        completedCustody?.classification === "run_owned_partial";
+      if (completedCustody?.boundary && residue?.length > 0) {
+        const uninstalled = await execute(
+          "# enoki-release-e2e:local-probe-uninstall\n/usr/local/bin/enoki-probe uninstall\n",
+          { root: true },
+        );
+        if (
+          uninstalled.code !== 0 ||
+          uninstalled.stdout.trim() !== "Local Probe Uninstall completed."
+        ) {
+          throw new Error(
+            `Local Probe Uninstall after Runtime custody failed: ${uninstalled.stderr || uninstalled.stdout}`,
+          );
+        }
+        inspected = await inventory();
+        residue = inventoryResidue(inspected);
+        if (residue.length > 0) {
+          throw new Error(
+            `Local Probe Uninstall after Runtime custody left residue: ${residue.join(", ")}`,
+          );
+        }
+      }
       if (residue?.length > 0) {
+        if (
+          hasCompleteInstalledInventory(residue) &&
+          !completedCustody &&
+          !runOwnedPartial
+        ) {
+          errors.push(
+            new Error(
+              "Refusing cleanup of a complete backup-absent installation without this-call expected-version assertion",
+            ),
+          );
+        }
         const verifiedResources = await execute(
-          verifyRunResourcesScript(runId, ownershipToken),
+          verifyRunResourcesScript(runId, ownershipToken, true),
           { root: true },
         );
         const resourcesOwned = verifiedResources.code === 0;
@@ -3803,7 +4057,11 @@ export function createProbeHostHarness({
             ),
           );
         }
-        if (resourcesOwned) {
+        if (
+          resourcesOwned &&
+          (runOwnedPartial ||
+            (!completedCustody && !hasCompleteInstalledInventory(residue)))
+        ) {
           await attempt(async () => {
             const cleaned = await execute(
               releaseEmergencyCleanupScript(runId, ownershipToken),
@@ -4414,6 +4672,75 @@ done
 `;
 }
 
+function claimLockPrelude() {
+  return String.raw`lock_root=/run/enoki-release-e2e
+lock_path="$lock_root/claim.lock"
+lock_parent=$(dirname -- "$lock_root")
+[ -d "$lock_parent" ] || mkdir -p "$lock_parent"
+[ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] && { mkdir -m 0700 "$lock_root" && sync -f "$lock_parent"; }
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 75; }
+[ ! -e "$lock_path" ] && [ ! -L "$lock_path" ] && ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; )
+[ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 75; }
+exec 9<>"$lock_path"
+flock -x 9
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory changed\n' >&2; exit 75; }
+[ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody changed\n' >&2; exit 75; }
+path_inode=$(stat -Lc '%d:%i' "$lock_path")
+fd_inode=$(stat -Lc '%d:%i' "/proc/$$/fd/9")
+[ "$path_inode" = "$fd_inode" ] || { printf 'release E2E lock inode changed\n' >&2; exit 75; }
+`;
+}
+
+function claimBoundBundleVersionScript(runId, token) {
+  return `# enoki-release-e2e:claim-bound-bundle-version
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token, true)}
+[ -f "$claim/resources" ]
+${resourceFingerprintFunction()}
+temporary="$claim/resources.next"
+${resourceTemporaryCreatePrelude()}
+fingerprint > "$temporary"
+cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; exit 75; }
+rm -- "$temporary"
+sync -f "$claim"
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+[ -f "$identity" ] && [ ! -L "$identity" ] || exit 75
+bundle_version=$(sed -n 's/^bundle_version = "\\([^"\\]*\\)"$/\\1/p' "$identity")
+[ "$(printf '%s\\n' "$bundle_version" | wc -l)" -eq 1 ] || exit 75
+metadata=/etc/enoki/probe-install.toml
+if [ -f "$metadata" ] && [ ! -L "$metadata" ] && grep -Fxq 'schema_version = 5' "$metadata"; then
+  metadata_version=$(sed -n 's/^bundle_version = "\\([^"\\]*\\)"$/\\1/p' "$metadata")
+  [ "$metadata_version" = "$bundle_version" ] || exit 75
+fi
+printf '%s\\n' "$bundle_version"
+`;
+}
+
+function claimMutationPreflight(runId, token, recoverResourcesNext = false) {
+  const resourcesNext = recoverResourcesNext
+    ? `rm -- "$resources_next"; sync -f "$claim" || exit 75`
+    : `{ printf 'release E2E resource recovery is pending\\n' >&2; exit 75; }`;
+  return `claim_root=/var/lib/enoki-release-e2e
+[ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'release E2E claim root custody is invalid\n' >&2; exit 75; }
+[ -d "$claim" ] && [ ! -L "$claim" ] && [ "$(stat -c '%u:%a:%h' "$claim")" = 0:700:2 ] || { printf 'release E2E claim custody is invalid\n' >&2; exit 75; }
+resources_next=
+for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
+  [ -e "$member" ] || [ -L "$member" ] || continue
+  [ -f "$member" ] && [ ! -L "$member" ] || { printf 'release E2E claim member is invalid\n' >&2; exit 75; }
+  case "$(basename -- "$member")" in
+    observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || { printf 'release E2E Runtime custody is invalid\n' >&2; exit 75; } ;;
+    resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E resource recovery is invalid\n' >&2; exit 75; }; resources_next=$member ;;
+    run-id|token|resources|upgrade-before-resources|upgrade-target|upgrade-operation-id|post-replacement-fault) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E claim evidence is invalid\n' >&2; exit 75; } ;;
+    *) printf 'release E2E claim has an unknown member\n' >&2; exit 75 ;;
+  esac
+done
+[ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] && [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || { printf 'release E2E run claim changed\n' >&2; exit 75; }
+[ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] && [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ] || { printf 'release E2E ownership token changed\n' >&2; exit 75; }
+[ -z "$resources_next" ] || ${resourcesNext}`;
+}
+
 function claimRunScript(runId, token) {
   const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
   const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
@@ -4421,14 +4748,59 @@ function claimRunScript(runId, token) {
 set -eu
 claim_root=/var/lib/enoki-release-e2e
 claim_dir="$claim_root/claim"
-install -d -m 0700 "$claim_root"
-if ! mkdir -m 0700 "$claim_dir" 2>/dev/null; then
+retiring_dir="$claim_root/claim-retiring"
+acquiring_dir="$claim_root/claim-acquiring"
+${claimLockPrelude()}
+root_missing=false
+[ -e "$claim_root" ] || [ -L "$claim_root" ] || root_missing=true
+[ -d "$(dirname -- "$claim_root")" ] || mkdir -p "$(dirname -- "$claim_root")"
+[ "$root_missing" = false ] || { mkdir -m 0700 "$claim_root" || { printf 'Host claim root creation failed\n' >&2; exit 73; }; }
+[ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'Host claim root custody is invalid\n' >&2; exit 73; }
+[ "$root_missing" = false ] || sync -f "$(dirname -- "$claim_root")" || { printf 'Host claim root creation is not durable\n' >&2; exit 73; }
+for child in "$claim_root"/* "$claim_root"/.[!.]* "$claim_root"/..?*; do
+  [ -e "$child" ] || [ -L "$child" ] || continue
+  case "$(basename -- "$child")" in claim|claim-acquiring|claim-retiring) [ -d "$child" ] && [ ! -L "$child" ] || { printf 'Host claim child is invalid\n' >&2; exit 73; } ;; *) printf 'Host claim root has an unknown child\n' >&2; exit 73 ;; esac
+done
+if [ -e "$retiring_dir" ] || [ -L "$retiring_dir" ]; then
+  printf 'Host claim retirement is incomplete\n' >&2
+  exit 73
+fi
+if { [ -e "$claim_dir" ] || [ -L "$claim_dir" ]; } && { [ -e "$acquiring_dir" ] || [ -L "$acquiring_dir" ]; }; then printf 'Host claim acquisition is ambiguous\n' >&2; exit 73; fi
+recover_acquiring() {
+  [ -d "$acquiring_dir" ] && [ ! -L "$acquiring_dir" ] || { printf 'Host claim acquisition is invalid\n' >&2; exit 73; }
+  [ "$(stat -c '%u:%a:%h' "$acquiring_dir")" = 0:700:2 ] || { printf 'Host claim acquisition custody is invalid\n' >&2; exit 73; }
+  has_run=false; has_token=false
+  for member in "$acquiring_dir"/* "$acquiring_dir"/.[!.]* "$acquiring_dir"/..?*; do
+    [ -e "$member" ] || [ -L "$member" ] || continue
+    [ -f "$member" ] && [ ! -L "$member" ] && [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'Host claim acquisition member is invalid\n' >&2; exit 73; }
+    case "$(basename -- "$member")" in run-id) has_run=true ;; token) has_token=true ;; *) printf 'Host claim acquisition has an unknown member\n' >&2; exit 73 ;; esac
+  done
+  "$has_token" && ! "$has_run" && { printf 'Host claim acquisition suffix is invalid\n' >&2; exit 73; }
+  if "$has_token"; then rm -- "$acquiring_dir/token"; sync -f "$acquiring_dir"; fi
+  if "$has_run"; then rm -- "$acquiring_dir/run-id"; sync -f "$acquiring_dir"; fi
+  rmdir "$acquiring_dir" || { printf 'Host claim acquisition cleanup is incomplete\n' >&2; exit 73; }
+  sync -f "$claim_root"
+}
+if [ -e "$acquiring_dir" ] || [ -L "$acquiring_dir" ]; then recover_acquiring; fi
+if [ -e "$claim_dir" ] || [ -L "$claim_dir" ]; then
+  [ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir")" = 0:700:2 ] &&
+    [ -f "$claim_dir/run-id" ] && [ ! -L "$claim_dir/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir/run-id")" = 0:600:1 ] &&
+    [ -f "$claim_dir/token" ] && [ ! -L "$claim_dir/token" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir/token")" = 0:600:1 ] || { printf 'Host claim custody is invalid\n' >&2; exit 73; }
+  for member in "$claim_dir"/* "$claim_dir"/.[!.]* "$claim_dir"/..?*; do
+    [ -e "$member" ] || [ -L "$member" ] || continue
+    [ -f "$member" ] && [ ! -L "$member" ] || { printf 'Host claim member is invalid\n' >&2; exit 73; }
+    case "$(basename -- "$member")" in run-id|token) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || exit 73 ;; *) printf 'Host claim response-loss closure is invalid\n' >&2; exit 73 ;; esac
+  done
+  if [ "$(cat "$claim_dir/run-id")" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim_dir/token")" = ${shellSingleQuote(token)} ]; then printf 'owned\n'; exit 0; fi
+  printf 'Host already claimed by another Release E2E run\n' >&2; exit 73
+fi
+if ! mkdir -m 0700 "$acquiring_dir" 2>/dev/null; then
   printf 'Host already claimed by another Release E2E run\n' >&2
   exit 73
 fi
-cleanup_rejected_claim() { rm -f -- "$claim_dir/run-id" "$claim_dir/token"; rmdir "$claim_dir" 2>/dev/null || true; rmdir "$claim_root" 2>/dev/null || true; }
+cleanup_rejected_claim() { rm -f -- "$acquiring_dir/run-id" "$acquiring_dir/token"; rmdir "$acquiring_dir" 2>/dev/null || true; }
 trap cleanup_rejected_claim EXIT HUP INT TERM
-( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$claim_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$claim_dir/token" )
+( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$acquiring_dir/run-id"; sync -f "$acquiring_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$acquiring_dir/token"; sync -f "$acquiring_dir/token"; sync -f "$acquiring_dir" )
 # enoki-release-e2e:claim-empty-recheck
 residue=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do
@@ -4446,6 +4818,8 @@ if [ -n "$residue" ]; then
   printf 'Release Test Host became non-empty before claim:%s\n' "$residue" >&2
   exit 74
 fi
+mv -- "$acquiring_dir" "$claim_dir"
+sync -f "$claim_root"
 trap - EXIT HUP INT TERM
 printf 'owned\n'
 `;
@@ -4464,39 +4838,78 @@ function recordRunResourcesScript(runId, token) {
   });
 }
 
-function renewRunResourcesScript(runId, token) {
+function captureRunResourcesSnapshotScript(runId, token) {
+  return `# enoki-release-e2e:capture-resources-snapshot
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
+[ -d "$claim" ]
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
+${resourceFingerprintFunction()}
+fingerprint
+`;
+}
+
+function renewRunResourcesScript(runId, token, assertedSnapshot = null) {
+  const expectedSnapshot =
+    assertedSnapshot === null
+      ? null
+      : Buffer.from(assertedSnapshot).toString("base64");
   return `# enoki-release-e2e:renew-resources
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ -f "$claim/resources" ]
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.renew.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
+[ ! -e "$claim/resources.next" ] && [ ! -L "$claim/resources.next" ] || { printf 'run resource renewal is pending\n' >&2; exit 75; }
+temporary="$claim/resources.next"
+${resourceTemporaryCreatePrelude()}
+${
+  expectedSnapshot === null
+    ? 'fingerprint > "$temporary"'
+    : `expected_snapshot=$(printf '%s' ${shellSingleQuote(expectedSnapshot)} | base64 -d)
+actual_snapshot=$(fingerprint)
+[ "$actual_snapshot" = "$expected_snapshot" ] || { printf 'asserted resource snapshot changed\n' >&2; exit 75; }
+printf '%s\n' "$actual_snapshot" > "$temporary"`
+}
+sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
+sync -f "$claim"
 printf 'renewed\\n'
 `;
 }
 
-function verifyRunResourcesScript(runId, token) {
+function verifyRunResourcesScript(runId, token, allowRemainingSubset = false) {
   return resourceFingerprintScript({
     header: "verify-resources",
     runId,
     token,
+    allowRemainingSubset,
     verify: true,
   });
 }
 
-function resourceFingerprintScript({ header, runId, token, verify }) {
+function resourceFingerprintScript({
+  header,
+  runId,
+  token,
+  verify,
+  allowRemainingSubset = false,
+}) {
   const action = verify
-    ? String.raw`temporary=$(mktemp "$claim/resources.verify.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    ? String.raw`temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource verification is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }
+${allowRemainingSubset ? String.raw`while IFS= read -r entry; do grep -Fqx -- "$entry" "$claim/resources" || { rm -- "$temporary"; sync -f "$claim"; printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }; done < "$temporary"` : String.raw`cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }`}
+rm -- "$temporary"
+sync -f "$claim"
 printf 'owned\n'`
     : String.raw`[ ! -e "$claim/resources" ] || { printf 'run resource evidence already exists\n' >&2; exit 76; }
 if ! ( umask 077; fingerprint > "$claim/resources" ); then
@@ -4504,14 +4917,19 @@ if ! ( umask 077; fingerprint > "$claim/resources" ); then
   printf 'could not fingerprint installed Probe resources\n' >&2
   exit 75
 fi
+[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || { rm -f -- "$claim/resources"; sync -f "$claim"; printf 'could not persist run-owned resource evidence\n' >&2; exit 75; }
+sync -f "$claim/resources"
+sync -f "$claim"
 printf 'recorded\n'`;
   return `# enoki-release-e2e:${header}
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-${resourceFingerprintFunction()}
+${resourceFingerprintFunction(allowRemainingSubset)}
 ${action}
 `;
 }
@@ -4520,6 +4938,8 @@ function beginUpgradeOwnershipScript(runId, token, targetProbeVersion) {
   return `# enoki-release-e2e:begin-upgrade-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4536,6 +4956,8 @@ function bindUpgradeOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:bind-upgrade-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4556,6 +4978,8 @@ function armPostReplacementRestartFaultScript(
   return `# enoki-release-e2e:arm-post-replacement-fault
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 dropin_dir=/etc/systemd/system/enoki-probe.service.d
 dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ -d "$claim" ]
@@ -4627,6 +5051,8 @@ function removePostReplacementRestartFaultScript(runId, token) {
   return `# enoki-release-e2e:remove-post-replacement-fault
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 dropin_dir=/etc/systemd/system/enoki-probe.service.d
 dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ -d "$claim" ]
@@ -4646,6 +5072,8 @@ function completeUpgradeOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:complete-upgrade-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4655,11 +5083,13 @@ claim=/var/lib/enoki-release-e2e/claim
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.upgrade.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource upgrade renewal is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
+sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
+sync -f "$claim"
 rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
 printf 'owned\n'
 `;
@@ -4669,6 +5099,8 @@ function completeRepairOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:complete-repair-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4680,18 +5112,26 @@ cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
 [ "$metadata_schema" = bootstrap-v2 ]
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.repair.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource repair renewal is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
+sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
+sync -f "$claim"
 rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
 printf 'owned\n'
 `;
 }
 
-function resourceFingerprintFunction() {
-  return renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources);
+function resourceFingerprintFunction(allowRemainingSubset = false) {
+  return `${renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources)}
+allow_remaining_subset=${allowRemainingSubset ? "true" : "false"}`;
+}
+
+function resourceTemporaryCreatePrelude() {
+  return String.raw`( umask 077; : > "$temporary" )
+[ -f "$temporary" ] && [ ! -L "$temporary" ] && [ "$(stat -c '%u:%a:%h' "$temporary")" = 0:600:1 ] || { printf 'run resource temporary custody is invalid\n' >&2; exit 75; }`;
 }
 
 export function renderReleaseE2EResourceFingerprint(resources) {
@@ -4731,6 +5171,7 @@ export function renderReleaseE2EResourceFingerprint(resources) {
     type=symlink
     content_hash=$(readlink -- "$path" | sha256sum | awk '{print $1}') || return 1
   elif [ -f "$path" ]; then
+    [ "$(stat -c %h -- "$path")" = 1 ] || return 1
     type=file
     content_hash=$(sha256sum -- "$path" | awk '{print $1}') || return 1
   elif [ -d "$path" ]; then
@@ -4796,28 +5237,42 @@ fingerprint_systemd_state_directory() {
   [ "$(stat -c %u -- "$public_parent")" = 0 ] || return 1
   [ "$(stat -c %g -- "$public_parent")" = 0 ] || return 1
   [ "$(stat -c %a -- "$public_parent")" = 755 ] || return 1
-  [ -L "$public" ] || return 1
-  [ "$(stat -c %u -- "$public")" = 0 ] || return 1
-  [ "$(stat -c %g -- "$public")" = 0 ] || return 1
-  [ "$(stat -c %a -- "$public")" = 777 ] || return 1
-  [ "$(stat -c %h -- "$public")" = 1 ] || return 1
-  [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
+  if [ -e "$public" ] || [ -L "$public" ]; then
+    [ -L "$public" ] || return 1
+    [ "$(stat -c %u -- "$public")" = 0 ] || return 1
+    [ "$(stat -c %g -- "$public")" = 0 ] || return 1
+    [ "$(stat -c %a -- "$public")" = 777 ] || return 1
+    [ "$(stat -c %h -- "$public")" = 1 ] || return 1
+    [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
+    fingerprint_path "$public" || return 1
+  elif [ "$allow_remaining_subset" != true ]; then
+    return 1
+  fi
   [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 1
   [ "$(stat -c %u -- "$private_parent")" = 0 ] || return 1
   [ "$(stat -c %g -- "$private_parent")" = 0 ] || return 1
   [ "$(stat -c %a -- "$private_parent")" = 700 ] || return 1
+  if [ ! -e "$private_state" ] && [ ! -L "$private_state" ]; then
+    [ "$allow_remaining_subset" = true ] || return 1
+    return 0
+  fi
   [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 1
   state_uid=$(stat -c %u -- "$private_state") || return 1
   state_gid=$(stat -c %g -- "$private_state") || return 1
   [ "$(stat -c %a -- "$private_state")" = 750 ] || return 1
   [ "$(stat -c %h -- "$private_state")" -ge 2 ] || return 1
-  [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
-  [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
-  [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
-  [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
-  [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
-  [ "$(stat -Lc %d:%i -- "$public")" = "$(stat -c %d:%i -- "$private_state")" ] || return 1
-  fingerprint_path "$public" || return 1
+  if [ -e "$identity" ] || [ -L "$identity" ]; then
+    [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
+    [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
+    [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
+    [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
+    [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
+  elif [ "$allow_remaining_subset" != true ]; then
+    return 1
+  fi
+  if [ -e "$public" ] || [ -L "$public" ]; then
+    [ "$(stat -Lc %d:%i -- "$public")" = "$(stat -c %d:%i -- "$private_state")" ] || return 1
+  fi
   fingerprint_directory "$private_state" || return 1
 }
 ${legacyInstallMetadataValidationFragment()}
@@ -4872,7 +5327,10 @@ fingerprint() {
       fi
     else
       private_candidate="$(dirname -- "$candidate")/private/$(basename -- "$candidate")"
-      [ ! -e "$private_candidate" ] && [ ! -L "$private_candidate" ] || return 1
+      if [ -e "$private_candidate" ] || [ -L "$private_candidate" ]; then
+        [ "$allow_remaining_subset" = true ] || return 1
+        fingerprint_systemd_state_directory "$candidate" || return 1
+      fi
     fi
   done
   for account in ${users}; do
@@ -4915,11 +5373,107 @@ metadata_schema=bootstrap-v2`;
 }
 
 function removeClaimScript(runId, token) {
-  return `# enoki-release-e2e:remove-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]\nrm -f -- "$claim/resources" "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id" "$claim/post-replacement-fault"\nrm -- "$claim/run-id" "$claim/token"\nrmdir "$claim"\nrmdir /var/lib/enoki-release-e2e 2>/dev/null || true\n`;
+  const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
+  const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
+  return `# enoki-release-e2e:remove-claim
+set -eu
+claim_root=/var/lib/enoki-release-e2e
+claim="$claim_root/claim"
+retiring="$claim_root/claim-retiring"
+${claimLockPrelude()}
+fail() { printf '%s\\n' "$1" >&2; exit 79; }
+is_exact_owner() {
+  [ -d "$1" ] && [ ! -L "$1" ] &&
+    [ "$(stat -c '%u:%a:%h' "$1")" = 0:700:2 ] &&
+    [ -f "$1/run-id" ] && [ ! -L "$1/run-id" ] &&
+    [ -f "$1/token" ] && [ ! -L "$1/token" ] &&
+    [ "$(stat -c '%u:%a:%h' "$1/run-id")" = 0:600:1 ] &&
+    [ "$(stat -c '%u:%a:%h' "$1/token")" = 0:600:1 ] &&
+    [ "$(cat "$1/run-id")" = ${shellSingleQuote(runId)} ] &&
+    [ "$(cat "$1/token")" = ${shellSingleQuote(token)} ]
+}
+check_members() {
+  directory=$1
+  for member in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    [ -e "$member" ] || [ -L "$member" ] || continue
+    [ ! -L "$member" ] || fail 'release E2E claim member is not a regular file'
+    [ -f "$member" ] || fail 'release E2E claim member is not a regular file'
+    [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E claim member custody is invalid'
+    case "$(basename -- "$member")" in
+      run-id|token|resources) ;;
+      *) fail 'release E2E claim has an unknown member' ;;
+    esac
+  done
+}
+if [ -e "$claim" ] || [ -L "$claim" ] || [ -e "$retiring" ] || [ -L "$retiring" ]; then
+  [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || fail 'release E2E claim root custody is invalid'
+fi
+if [ -e "$claim" ] || [ -L "$claim" ]; then
+  [ ! -e "$retiring" ] && [ ! -L "$retiring" ] || fail 'release E2E claim retirement is ambiguous'
+  is_exact_owner "$claim" || fail 'release E2E run claim changed'
+  [ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] || fail 'release E2E resource evidence is missing'
+  [ ! -e "$claim/observation-runtime-original" ] && [ ! -L "$claim/observation-runtime-original" ] || fail 'Runtime custody remains held'
+  check_members "$claim"
+  residue=
+  for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || residue=present; done
+  for account in ${users}; do getent passwd "$account" >/dev/null 2>&1 && residue=present || true; done
+  for account in ${groups}; do getent group "$account" >/dev/null 2>&1 && residue=present || true; done
+  units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
+  [ -z "$residue$units" ] || fail 'canonical Product is not empty before claim retirement'
+  mv -- "$claim" "$retiring"
+  sync -f "$claim_root" || fail 'could not persist release E2E claim retirement'
+fi
+if [ -e "$retiring" ] || [ -L "$retiring" ]; then
+  [ -d "$retiring" ] && [ ! -L "$retiring" ] || fail 'release E2E retiring claim changed'
+  [ "$(stat -c '%u:%a:%h' "$retiring")" = 0:700:2 ] || fail 'release E2E retiring claim custody is invalid'
+  [ ! -e "$retiring/observation-runtime-original" ] && [ ! -L "$retiring/observation-runtime-original" ] || fail 'Runtime custody remains held'
+  check_members "$retiring"
+  has_run=false; has_token=false; has_resources=false
+  [ -f "$retiring/run-id" ] && has_run=true
+  [ -f "$retiring/token" ] && has_token=true
+  [ -f "$retiring/resources" ] && has_resources=true
+  if "$has_resources"; then
+    "$has_run" && "$has_token" || fail 'release E2E retiring claim suffix is invalid'
+    rm -- "$retiring/resources"
+    sync -f "$retiring"
+    has_resources=false
+  fi
+  if "$has_run" && "$has_token"; then
+    rm -- "$retiring/token"
+    sync -f "$retiring"
+    has_token=false
+  fi
+  if "$has_run"; then rm -- "$retiring/run-id"; sync -f "$retiring"; has_run=false; fi
+  if "$has_token"; then rm -- "$retiring/token"; sync -f "$retiring"; has_token=false; fi
+  rmdir "$retiring"
+  sync -f "$claim_root" || fail 'could not persist release E2E claim release'
+fi
+if [ -e "$claim_root" ] || [ -L "$claim_root" ]; then
+  [ -d "$claim_root" ] && [ ! -L "$claim_root" ] || fail 'release E2E claim root custody is invalid'
+  for child in "$claim_root"/* "$claim_root"/.[!.]* "$claim_root"/..?*; do [ -e "$child" ] || [ -L "$child" ] || continue; fail 'release E2E claim root is not empty'; done
+fi
+if rmdir "$claim_root" 2>/dev/null; then
+  sync -f "$(dirname -- "$claim_root")" || fail 'could not persist release E2E claim root removal'
+fi
+printf 'released\\n'
+`;
 }
 
 function inspectClaimScript(runId, token) {
-  return `# enoki-release-e2e:inspect-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\nif [ ! -e "$claim" ]; then printf 'absent\\n'; elif [ -d "$claim" ] && [ "$(cat "$claim/run-id" 2>/dev/null || true)" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim/token" 2>/dev/null || true)" = ${shellSingleQuote(token)} ]; then printf 'owned\\n'; else printf 'foreign\\n'; fi\n`;
+  return `# enoki-release-e2e:inspect-claim
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+retiring=/var/lib/enoki-release-e2e/claim-retiring
+owned() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(cat "$1/run-id" 2>/dev/null || true)" = ${shellSingleQuote(runId)} ] && [ "$(cat "$1/token" 2>/dev/null || true)" = ${shellSingleQuote(token)} ]; }
+if [ -e "$claim" ] || [ -L "$claim" ]; then
+  if [ -e "$retiring" ] || [ -L "$retiring" ]; then printf 'foreign\\n';
+  elif owned "$claim"; then printf 'owned\\n'; else printf 'foreign\\n'; fi
+elif [ -e "$retiring" ] || [ -L "$retiring" ]; then
+  if [ -d "$retiring" ] && [ ! -L "$retiring" ]; then printf 'retiring-owned\\n'; else printf 'foreign\\n'; fi
+else
+  printf 'absent\\n'
+fi
+`;
 }
 
 function releaseEmergencyCleanupScript(runId, token) {
@@ -4953,13 +5507,21 @@ function releaseEmergencyCleanupScript(runId, token) {
   return `# enoki-release-e2e:emergency-cleanup
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ -f "$claim/resources" ]
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+${resourceFingerprintFunction(true)}
+temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource cleanup recovery is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
+trap 'rm -f -- "$temporary"; sync -f "$claim"' EXIT HUP INT TERM
+fingerprint > "$temporary"
+while IFS= read -r entry; do grep -Fqx -- "$entry" "$claim/resources" || exit 75; done < "$temporary"
+rm -- "$temporary"
+sync -f "$claim"
 service_state() {
   service=$1
   if ! properties=$(LC_ALL=C systemctl show "$service" --no-pager --property=LoadState --property=ActiveState 2>/dev/null); then
@@ -4995,8 +5557,12 @@ for service in ${services}; do
   fi
   case "$state" in inactive|absent) ;; *) printf 'Probe service is not quiescent\\n' >&2; exit 75 ;; esac
 done
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }
+while IFS= read -r entry; do grep -Fqx -- "$entry" "$claim/resources" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }; done < "$temporary"
+rm -- "$temporary"
+sync -f "$claim"
+trap - EXIT HUP INT TERM
 rm -f -- ${files}
 rm -rf -- ${privateStateDirectories}
 rm -rf -- ${directories}
@@ -5017,6 +5583,20 @@ function inventoryResidue(inventory) {
   if (Array.isArray(inventory?.files)) residue.push(...inventory.files);
   if (Array.isArray(inventory?.units)) residue.push(...inventory.units);
   return residue.sort();
+}
+
+function hasCompleteInstalledInventory(residue) {
+  return [
+    "user:enoki-probe",
+    "group:enoki-probe",
+    "/usr/local/bin/enoki-probe",
+    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    "/var/lib/enoki-probe-bootstrap",
+    "/etc/enoki/probe-install.toml",
+    "/etc/systemd/system/enoki-probe.service",
+    "/var/lib/enoki-probe",
+    "enoki-probe.service",
+  ].every((entry) => residue.includes(entry));
 }
 
 function parseJson(value, label) {

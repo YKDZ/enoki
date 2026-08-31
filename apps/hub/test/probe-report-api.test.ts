@@ -1126,7 +1126,8 @@ describe("Probe report API", () => {
     if (!host) throw new Error("registered Host is missing");
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const hostProfile = sampleHostProfileSnapshot({
-      probeAssetBundleVersion: "0.1.0",
+      probeAssetBundleVersion: "v0.1.75",
+      probeVersion: "v0.1.75",
     });
     const snapshotHash = hashStableHostProfile(hostProfile);
     const send = (
@@ -1154,7 +1155,7 @@ describe("Probe report API", () => {
                 },
               ]
             : [],
-          probeAssetBundleVersion: sequence === 1 ? "0.1.0" : undefined,
+          probeAssetBundleVersion: sequence === 1 ? "v0.1.75" : undefined,
           probeConfigurationVersion: "default-v1",
           probeId: registration.probeId,
           sequenceEnd: sequence,
@@ -1203,7 +1204,7 @@ describe("Probe report API", () => {
           target_asset_set_digest, target_probe_version, status,
           managed_host_id, verification_deadline_at_ms
         ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, '0.1.0', ?, ?,
-          '0.1.0', 'verifying', ?, ?)`,
+          '0.1.75', 'verifying', ?, ?)`,
       )
       .run(
         currentRegistration.enrollmentId,
@@ -1276,8 +1277,22 @@ describe("Probe report API", () => {
         ),
     ).toEqual(beforeWrongEnrollment);
     expect((await send(currentRegistration, 2, false, true)).status).toBe(400);
-    expect((await send(currentRegistration, 2, true, true)).status).toBe(200);
-    expect((await send(currentRegistration, 3, false, true)).status).toBe(200);
+    const fullProfile = await send(currentRegistration, 2, true, true);
+    expect(fullProfile.status).toBe(200);
+    expect(
+      database.sqlite
+        .prepare(
+          "select status, ready_at_ms as readyAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(currentRegistration.enrollmentId),
+    ).toEqual({ readyAtMs: nowMs, status: "ready" });
+    const compactProfile = await send(currentRegistration, 3, false, true);
+    expect(compactProfile.status).toBe(200);
+    expect(
+      root.enoki.v1.ProbeReportResponse.decode(
+        new Uint8Array(await compactProfile.arrayBuffer()),
+      ).currentProbeConfigurationVersion,
+    ).toBe("default-v1");
 
     database.close();
   });

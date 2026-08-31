@@ -93,7 +93,7 @@ impl RuntimeFailureSystemd for SystemRuntimeFailureSystemd {
     }
 }
 
-pub trait RuntimeRetrySystemd {
+pub trait RuntimeRetrySystemd: RuntimeFailureSystemd {
     fn retry_fixed_runtime(&mut self) -> std::io::Result<()>;
 }
 
@@ -411,10 +411,61 @@ fn retry_runtime_at(
     let epoch_path = rooted(root, EPOCH_PATH);
     let latch_path = rooted(root, LATCH_PATH);
     let receipt_path = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
-    let mut receipt = if receipt_path.exists() {
+    let epoch_present = path_present(&epoch_path)?;
+    let latch_present = path_present(&latch_path)?;
+    let mut receipt = if path_present(&receipt_path)? {
         let bytes = trusted_file(&receipt_path, expected_uid, 0o600)?;
         parse_local_retry_receipt(&bytes)?
     } else {
+        if !epoch_present && !latch_present {
+            if runtime_failure_creation_reserved_at(root, expected_uid)? {
+                return Err(std::io::Error::other("failure pair creation reserved"));
+            }
+            return systemd.retry_fixed_runtime();
+        }
+        let state = systemd.fixed_runtime_state()?;
+        if state.active_state != "failed" || state.result != "start-limit-hit" {
+            return Err(std::io::Error::other("failure pair is not terminal"));
+        }
+        match (epoch_present, latch_present) {
+            (true, false) => {
+                let (epoch, _, _) = current_epoch_binding_at(root, expected_uid)?;
+                if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
+                    || runtime_failure_creation_reserved_at(root, expected_uid)?
+                {
+                    return Err(std::io::Error::other("failure pair consumption pending"));
+                }
+                atomic_write(
+                    &latch_path,
+                    epoch.generation.as_bytes(),
+                    0o600,
+                    Some((expected_uid, expected_uid)),
+                )?;
+            }
+            (false, true) => {
+                let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
+                let generation = std::str::from_utf8(&latch)
+                    .ok()
+                    .filter(|value| decode_lower_hex_32(value).is_some())
+                    .ok_or_else(|| std::io::Error::other("failure latch invalid"))?;
+                if runtime_failure_consumption_pending_at(root, expected_uid, generation)?
+                    || runtime_failure_creation_reserved_at(root, expected_uid)?
+                {
+                    return Err(std::io::Error::other("failure pair consumption pending"));
+                }
+                let epoch = build_current_epoch(root, expected_uid, &state, generation)?;
+                let encoded = toml::to_string(&epoch)
+                    .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
+                atomic_write(
+                    &epoch_path,
+                    encoded.as_bytes(),
+                    0o600,
+                    Some((expected_uid, expected_uid)),
+                )?;
+            }
+            (true, true) => {}
+            (false, false) => unreachable!(),
+        }
         let (epoch, _, epoch_bytes) = current_epoch_at_locked(root, expected_uid)?;
         if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
             || runtime_failure_creation_reserved_at(root, expected_uid)?
@@ -434,15 +485,23 @@ fn retry_runtime_at(
     };
 
     if receipt.progress == LocalRetryProgress::RetryInvoked {
-        if epoch_path.exists() || latch_path.exists() {
+        if path_present(&epoch_path)? || path_present(&latch_path)? {
             return Err(std::io::Error::other("local retry receipt binding invalid"));
+        }
+        if runtime_failure_creation_reserved_at(root, expected_uid)? {
+            return Err(std::io::Error::other("failure pair creation reserved"));
         }
         return systemd.retry_fixed_runtime();
     }
 
     if receipt.progress == LocalRetryProgress::Committed {
-        if epoch_path.exists() {
+        let epoch_present = path_present(&epoch_path)?;
+        let latch_present = path_present(&latch_path)?;
+        if epoch_present {
             let (epoch, _, epoch_bytes) = current_epoch_binding_at(root, expected_uid)?;
+            if !latch_present {
+                return Err(std::io::Error::other("local retry receipt binding invalid"));
+            }
             let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
             if epoch.generation != receipt.generation
                 || sha256(&epoch_bytes) != receipt.epoch_sha256
@@ -453,7 +512,7 @@ fn retry_runtime_at(
             remove_regular_file(&epoch_path, 0o600, Some((expected_uid, expected_uid)))?;
             #[cfg(test)]
             local_retry_crash_after(LocalRetryCrashPoint::EpochUnlinked)?;
-        } else {
+        } else if latch_present {
             let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
             if latch != receipt.generation.as_bytes() {
                 return Err(std::io::Error::other("local retry receipt binding invalid"));
@@ -466,7 +525,7 @@ fn retry_runtime_at(
     }
 
     if receipt.progress == LocalRetryProgress::EpochRemoved {
-        if epoch_path.exists() {
+        if path_present(&epoch_path)? {
             return Err(std::io::Error::other("local retry receipt binding invalid"));
         }
         match trusted_file(&latch_path, expected_uid, 0o600) {
@@ -487,12 +546,23 @@ fn retry_runtime_at(
     if receipt.progress != LocalRetryProgress::LatchRemoved {
         return Err(std::io::Error::other("local retry recovery invalid"));
     }
+    if runtime_failure_creation_reserved_at(root, expected_uid)? {
+        return Err(std::io::Error::other("failure pair creation reserved"));
+    }
     let retry_result = systemd.retry_fixed_runtime();
     #[cfg(test)]
     local_retry_crash_after(LocalRetryCrashPoint::SystemdInvoked)?;
     receipt.progress = LocalRetryProgress::RetryInvoked;
     write_local_retry_receipt(root, expected_uid, &receipt)?;
     retry_result
+}
+
+fn path_present(path: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn write_local_retry_receipt(
@@ -716,7 +786,7 @@ fn record_runtime_failure_at(
         &rooted(root, IDENTITY_PATH),
     )?;
     let creation_reserved = runtime_failure_creation_reserved_at(root, expected_uid)?;
-    match (epoch_path.exists(), latch_path.exists()) {
+    match (path_present(&epoch_path)?, path_present(&latch_path)?) {
         (true, true) => {
             let (epoch, _, _) = current_epoch_at_locked(root, expected_uid)?;
             if creation_reserved
@@ -771,7 +841,7 @@ fn record_runtime_failure_at(
     }
 
     let retry_receipt = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
-    if retry_receipt.exists() {
+    if path_present(&retry_receipt)? {
         let bytes = trusted_file(&retry_receipt, expected_uid, 0o600)?;
         let receipt = parse_local_retry_receipt(&bytes)?;
         if receipt.progress != LocalRetryProgress::RetryInvoked {
@@ -780,7 +850,7 @@ fn record_runtime_failure_at(
         remove_regular_file(&retry_receipt, 0o600, Some((expected_uid, expected_uid)))?;
     }
 
-    if failure_dir.exists() {
+    if path_present(&failure_dir)? {
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
     } else {
         ensure_directory(&failure_dir, 0o700, Some((expected_uid, expected_uid)))?;
@@ -894,7 +964,7 @@ fn runtime_failure_consumption_pending_at(
                     "absent-pair upgrade intent retained a failure pair",
                 ));
             }
-            UpgradeRuntimeFailureProgress::NoneConsumed => return Ok(false),
+            UpgradeRuntimeFailureProgress::NoneConsumed => return Ok(intent.phase != "activated"),
         }
     }
     Ok(false)
@@ -912,17 +982,10 @@ fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::
         )
         .map_err(|_| std::io::Error::other("repair intent invalid"))?
         .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
-        if matches!(
-            intent.state,
-            installed_bundle_repair::InstalledBundleRepairProgress::Admitted
-                | installed_bundle_repair::InstalledBundleRepairProgress::ValidationPending
-                | installed_bundle_repair::InstalledBundleRepairProgress::TemporaryRuntimeHealthy
-                | installed_bundle_repair::InstalledBundleRepairProgress::ProbeActive
-                | installed_bundle_repair::InstalledBundleRepairProgress::InvalidationCommitted
-                | installed_bundle_repair::InstalledBundleRepairProgress::EpochRemoved
-        ) {
-            return Ok(true);
-        }
+        // validated Repair intent 在其 durable retirement 删除文件前始终独占消费权。
+        // progress 不是释放信号：pair-none Local Retry 不能在此窗口启动 Runtime。
+        let _ = intent;
+        return Ok(true);
     }
     let Some(bytes) =
         trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
@@ -933,11 +996,11 @@ fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::
     if intent.phase == "aborted" {
         return Ok(false);
     }
-    Ok(matches!(
-        intent.progress,
-        None | Some(UpgradeRuntimeFailureProgress::None)
-            | Some(UpgradeRuntimeFailureProgress::Bound)
-            | Some(UpgradeRuntimeFailureProgress::EpochRemoved)
+    Ok(!matches!(
+        (&intent.phase, intent.progress),
+        (phase, Some(UpgradeRuntimeFailureProgress::NoneConsumed))
+            | (phase, Some(UpgradeRuntimeFailureProgress::LatchRemoved))
+            if phase == "activated"
     ))
 }
 
@@ -1435,6 +1498,14 @@ pub(super) mod tests {
     }
     #[derive(Default)]
     struct RetrySystemd(usize);
+    impl RuntimeFailureSystemd for RetrySystemd {
+        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
+            Ok(RuntimeUnitState {
+                active_state: "failed".into(),
+                result: "start-limit-hit".into(),
+            })
+        }
+    }
     impl RuntimeRetrySystemd for RetrySystemd {
         fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
             self.0 += 1;
@@ -1807,6 +1878,88 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn completed_local_retry_receipt_rechecks_active_upgrade_reservation_before_systemd() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(5))
+            .unwrap();
+        retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).unwrap();
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+
+        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
+        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
+            0o600,
+        );
+
+        let mut retry = RetrySystemd::default();
+        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+        assert_eq!(retry.0, 0);
+    }
+
+    #[test]
+    fn pending_local_retry_receipt_rechecks_active_upgrade_reservation_before_systemd() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(6))
+            .unwrap();
+        fail_local_retry_after(LocalRetryCrashPoint::LatchRemovedReceipt);
+        assert!(retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err());
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+
+        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
+        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
+            0o600,
+        );
+
+        let mut retry = RetrySystemd::default();
+        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+        assert_eq!(retry.0, 0);
+    }
+
+    #[test]
+    fn fixed_retry_reconciles_clean_and_legal_partial_pair_states() {
+        let uid = unsafe { libc::geteuid() };
+
+        let clean = fixture();
+        let mut clean_systemd = FailedRuntime(0);
+        retry_runtime_at(clean.path(), uid, &mut clean_systemd).unwrap();
+        assert_eq!(clean_systemd.0, 1);
+
+        for missing in [EPOCH_PATH, LATCH_PATH] {
+            let root = fixture();
+            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(19))
+                .unwrap();
+            remove_regular_file(&rooted(root.path(), missing), 0o600, Some((uid, uid))).unwrap();
+
+            let mut restarted_systemd = FailedRuntime(0);
+            retry_runtime_at(root.path(), uid, &mut restarted_systemd).unwrap();
+            assert_eq!(restarted_systemd.0, 1, "missing {missing}");
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    100,
+                    60_100,
+                    "request_nonce_partial_retry",
+                )
+                .is_err(),
+                "missing {missing}",
+            );
+        }
+    }
+
+    #[test]
     fn recorder_reconciles_exact_single_file_publish_windows_and_rejects_corrupt_latch() {
         let root = fixture();
         let uid = unsafe { libc::geteuid() };
@@ -2041,16 +2194,25 @@ pub(super) mod tests {
                 .as_bytes(),
             0o600,
         );
-        assert_eq!(
+        assert!(
             record_runtime_failure_at(
                 root.path(),
                 uid,
                 &mut FailedRuntime(0),
                 &mut Generation(61),
             )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::Latched,
+            .is_err(),
+            "none-consumed cannot release a non-terminal Upgrade reservation",
         );
+
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            upgrade_journal_fixture("activated", true, 21, 21, "none-consumed", None).as_bytes(),
+            0o600,
+        );
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(62))
+            .unwrap();
 
         write_fixture(
             root.path(),
