@@ -4084,6 +4084,11 @@ printf covered > '${covered}'
         command.includes("# enoki-release-e2e:emergency-cleanup"),
       ),
     ).toBe(true);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:verify-resources"),
+      ),
+    ).toBe(true);
     const emergency = commands.find((command) =>
       command.includes("# enoki-release-e2e:emergency-cleanup"),
     );
