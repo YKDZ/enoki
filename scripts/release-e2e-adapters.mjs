@@ -1577,6 +1577,13 @@ export function createDockerHubController({
       currentRuntimeEnvironment = {
         hubOwnerUrl,
         hubPublicUrl,
+        legacyBaselinePublicHubUrl:
+          hubMode === "baseline" &&
+          candidateManifest.releaseBaseline?.kind ===
+            "enoki-trust-epoch-migration-baseline" &&
+          candidateManifest.releaseBaseline.tag === "v0.1.74"
+            ? hubPublicUrl
+            : null,
         operationSigningSecret,
         ownerPassword,
         ownerPort,
@@ -2308,6 +2315,12 @@ export function createDockerHubController({
         `OWNER_PASSWORD=${currentRuntimeEnvironment.ownerPassword}`,
         `ENOKI_MANAGEMENT_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
         `ENOKI_PROBE_API_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
+        ...(runtime.name === "baseline" &&
+        currentRuntimeEnvironment.legacyBaselinePublicHubUrl !== null
+          ? [
+              `ENOKI_PUBLIC_HUB_URL=${currentRuntimeEnvironment.legacyBaselinePublicHubUrl}`,
+            ]
+          : []),
         `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET=${currentRuntimeEnvironment.operationSigningSecret}`,
         ...(currentRuntimeEnvironment.probeOperationRunningTimeoutSeconds ===
         null
