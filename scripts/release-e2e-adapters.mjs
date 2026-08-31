@@ -1928,6 +1928,7 @@ export function createDockerHubController({
         currentRuntimeEnvironment.legacyBaselinePublicHubUrl !== null
           ? [
               `ENOKI_PUBLIC_HUB_URL=${currentRuntimeEnvironment.legacyBaselinePublicHubUrl}`,
+              "ENOKI_TRUSTED_PROXY_HEADERS=true",
             ]
           : []),
         `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET=${currentRuntimeEnvironment.operationSigningSecret}`,

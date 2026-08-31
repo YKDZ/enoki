@@ -1,9 +1,11 @@
+import { createHash, createSign, createVerify } from "node:crypto";
 import { createServer, get, request } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
 import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.mjs";
+import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const ReportRequest = enoki.v1.ProbeReportRequest;
 const ReportResponse = enoki.v1.ProbeReportResponse;
@@ -124,6 +126,55 @@ describe("canonical Probe report response-loss evidence", () => {
     expect(JSON.stringify(evidence)).not.toMatch(
       /signed-request|authorization|body|private|token/i,
     );
+  });
+
+  it("forwards the verified listening public origin to trusted v0.1.74 signature validation", async () => {
+    const identity = rsa4096TestKeyPair("canonical-report-legacy-origin");
+    const probeId = "probe-legacy-origin-01";
+    const upstream = await listen(async (incoming, response) => {
+      const body = await readBody(incoming);
+      const accepted = legacyV0174ReportAuthenticated({
+        body,
+        headers: incoming.headers,
+        privateOrigin: upstream.origin,
+        probeId,
+        publicKey: identity.publicKey,
+        requestPath: incoming.url,
+      });
+      response.statusCode = accepted ? 200 : 401;
+      response.end(accepted ? "accepted" : "probe_identity_required");
+    });
+    close.push(upstream.close);
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+    close.push(() => transport.close());
+    const report = reportBytes({
+      bootId: "boot-legacy-origin-01",
+      probeAssetBundleVersion: "1.2.3",
+      probeId,
+      sequence: 1,
+    });
+
+    const response = await fetch(`${started.origin}/api/probe/report`, {
+      body: report,
+      headers: {
+        ...signedLegacyV0174Headers({
+          body: report,
+          origin: started.origin,
+          privateKey: identity.privateKey,
+          probeId,
+        }),
+        "content-type": "application/x-protobuf",
+        "x-forwarded-host": "attacker.invalid",
+        "x-forwarded-proto": "https",
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
   });
 
   it("rejects an oversized chunked report before forwarding it upstream", async () => {
@@ -448,6 +499,62 @@ const canonicalAuthHeaders = Object.freeze({
   "x-enoki-signature": "b".repeat(128),
   "x-enoki-timestamp-ms": "1725000000000",
 });
+
+function signedLegacyV0174Headers({ body, origin, privateKey, probeId }) {
+  const bodySha256 = createHash("sha256").update(body).digest("hex");
+  const nonce = "33333333333333333333333333333333";
+  const timestampMs = "1725000000000";
+  const payload = [
+    "POST",
+    `${origin}/api/probe/report`,
+    timestampMs,
+    nonce,
+    bodySha256,
+  ].join("\n");
+  const signer = createSign("RSA-SHA256");
+  signer.update(payload);
+  signer.end();
+  return {
+    "x-enoki-body-sha256": bodySha256,
+    "x-enoki-nonce": nonce,
+    "x-enoki-probe-id": probeId,
+    "x-enoki-signature": signer.sign(privateKey).toString("hex"),
+    "x-enoki-timestamp-ms": timestampMs,
+  };
+}
+
+function legacyV0174ReportAuthenticated({
+  body,
+  headers,
+  privateOrigin,
+  probeId,
+  publicKey,
+  requestPath,
+}) {
+  const forwardedProto = headers["x-forwarded-proto"]?.split(",")[0]?.trim();
+  const forwardedHost = headers["x-forwarded-host"]?.split(",")[0]?.trim();
+  const privateUrl = new URL(requestPath, privateOrigin);
+  const origin =
+    forwardedProto && forwardedHost
+      ? `${forwardedProto.toLowerCase()}://${forwardedHost.toLowerCase()}`
+      : privateUrl.origin;
+  const payload = [
+    "POST",
+    `${origin}${privateUrl.pathname}${privateUrl.search}`,
+    headers["x-enoki-timestamp-ms"],
+    headers["x-enoki-nonce"],
+    headers["x-enoki-body-sha256"],
+  ].join("\n");
+  const verifier = createVerify("RSA-SHA256");
+  verifier.update(payload);
+  verifier.end();
+  return (
+    headers["x-enoki-probe-id"] === probeId &&
+    headers["x-enoki-body-sha256"] ===
+      createHash("sha256").update(body).digest("hex") &&
+    verifier.verify(publicKey, Buffer.from(headers["x-enoki-signature"], "hex"))
+  );
+}
 
 async function protobufUpstream() {
   return listen(async (request, response) => {

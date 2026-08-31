@@ -30,11 +30,13 @@ describe("Release E2E legacy public-origin adapter", () => {
     expect(docker.envFiles).toEqual([
       expect.arrayContaining([
         "ENOKI_PUBLIC_HUB_URL=http://127.0.0.1:33000",
+        "ENOKI_TRUSTED_PROXY_HEADERS=true",
         "ENOKI_MANAGEMENT_ORIGIN=http://127.0.0.1:33000",
         "ENOKI_PROBE_API_ORIGIN=http://127.0.0.1:33000",
       ]),
       expect.not.arrayContaining([
         "ENOKI_PUBLIC_HUB_URL=http://127.0.0.1:33000",
+        "ENOKI_TRUSTED_PROXY_HEADERS=true",
       ]),
     ]);
     expect(docker.envFiles[1]).toEqual(
@@ -42,6 +44,9 @@ describe("Release E2E legacy public-origin adapter", () => {
         "ENOKI_MANAGEMENT_ORIGIN=http://127.0.0.1:33000",
         "ENOKI_PROBE_API_ORIGIN=http://127.0.0.1:33000",
       ]),
+    );
+    expect(docker.envFiles[1]).toEqual(
+      expect.not.arrayContaining(["ENOKI_TRUSTED_PROXY_HEADERS=true"]),
     );
   });
 
@@ -75,6 +80,7 @@ describe("Release E2E legacy public-origin adapter", () => {
       expect(docker.envFiles[0]).toEqual(
         expect.not.arrayContaining([
           "ENOKI_PUBLIC_HUB_URL=http://127.0.0.1:33000",
+          "ENOKI_TRUSTED_PROXY_HEADERS=true",
         ]),
       );
     }
