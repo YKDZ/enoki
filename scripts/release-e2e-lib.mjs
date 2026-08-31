@@ -2901,7 +2901,6 @@ export function createProbeHostHarness({
   }
   let runOwnsMutation = false;
   let canonicalRuntimeUnavailableArmed = false;
-  let installedBundleRepairNeedsResourceRenewal = false;
   let postReplacementFaultArmed = false;
   let readyForReinstallation = false;
   let sharedDependenciesBefore = null;
@@ -3076,14 +3075,151 @@ export function createProbeHostHarness({
     };
   }
 
+  async function assertInstalledBoundary(runId, expectedProbeVersion) {
+    assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+    if (
+      !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+        expectedProbeVersion ?? "",
+      )
+    ) {
+      throw new Error("Candidate Probe version is invalid");
+    }
+    const [
+      inspected,
+      serviceResult,
+      sudoersResult,
+      binaryVersionResult,
+      generationResult,
+    ] = await Promise.all([
+      inventory(),
+      execute(serviceBoundaryScript()),
+      execute(sudoersBoundaryScript(), { root: true }),
+      execute(binaryVersionScript()),
+      execute(bootstrapGenerationStateScript(), { root: true }),
+    ]);
+    const residue = inventoryResidue(inspected);
+    const required = [
+      "user:enoki-probe",
+      "group:enoki-probe",
+      "/usr/local/bin/enoki-probe",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+      "/var/lib/enoki-probe-bootstrap",
+      "/etc/enoki/probe-install.toml",
+      "/etc/systemd/system/enoki-probe.service",
+      "/var/lib/enoki-probe",
+      "enoki-probe.service",
+    ];
+    const missing = required.filter((entry) => !residue.includes(entry));
+    if (missing.length > 0) {
+      throw new Error(
+        `Probe installation is incomplete: missing ${missing.join(", ")}`,
+      );
+    }
+    if (serviceResult.code !== 0) {
+      throw new Error(
+        `Probe service inspection failed: ${serviceResult.stderr}`,
+      );
+    }
+    const service = parseKeyValues(serviceResult.stdout);
+    if (
+      service.LoadState !== "loaded" ||
+      service.ActiveState !== "active" ||
+      service.User !== "enoki-probe" ||
+      service.Group !== "enoki-probe" ||
+      service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
+    ) {
+      throw new Error(
+        `Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
+      );
+    }
+    if (sudoersResult.code !== 0 || sudoersResult.stdout.trim() !== "") {
+      throw new Error(
+        "Probe Bootstrap schema 2 installation must not retain Probe sudoers",
+      );
+    }
+    const generation = generationResult.stdout.trim();
+    if (generationResult.code !== 0 || !/^[1-9]\d*$/.test(generation)) {
+      throw new Error(
+        "Probe Bootstrap delegation generation state is missing or invalid",
+      );
+    }
+    const probeVersion =
+      binaryVersionResult.code === 0
+        ? binaryVersionResult.stdout
+            .trim()
+            .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
+        : null;
+    if (probeVersion !== expectedProbeVersion) {
+      throw new Error(
+        `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
+      );
+    }
+    return {
+      inventory: inspected,
+      probeVersion,
+      service,
+      sudoers: sudoersResult.stdout,
+      delegationGeneration: Number(generation),
+    };
+  }
+
+  async function completeRuntimeRecoveryCustody(
+    runId,
+    expectedBundleVersion = null,
+  ) {
+    const recovered = await installedBundleFailureRepair.cleanup(runId);
+    if (!recovered.recoveredBundleVersion) return null;
+    if (
+      expectedBundleVersion !== null &&
+      recovered.recoveredBundleVersion !== expectedBundleVersion
+    ) {
+      throw new Error("Recovered Probe version changed during Runtime custody");
+    }
+    const bundleVersion =
+      expectedBundleVersion ?? recovered.recoveredBundleVersion;
+    const boundary = await assertInstalledBoundary(runId, bundleVersion);
+    const renewed = await execute(
+      renewRunResourcesScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (renewed.code !== 0 || renewed.stdout.trim() !== "renewed") {
+      throw new Error(
+        `Could not renew run-owned Probe resources after Installed Bundle Failure Repair: ${renewed.stderr || renewed.stdout}`,
+      );
+    }
+    const verified = await execute(
+      verifyRunResourcesScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (verified.code !== 0 || verified.stdout.trim() !== "owned") {
+      throw new Error(
+        `Could not verify run-owned Probe resources after Installed Bundle Failure Repair: ${verified.stderr || verified.stdout}`,
+      );
+    }
+    await installedBundleFailureRepair.retireCustody(runId);
+    return { boundary, bundleVersion };
+  }
+
   return {
     async repairInstalledBundleFailure(runId, expectedBundleVersion) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
       const result = await installedBundleFailureRepair.repair(
         runId,
         expectedBundleVersion,
       );
-      installedBundleRepairNeedsResourceRenewal = true;
-      return result;
+      await completeRuntimeRecoveryCustody(runId, expectedBundleVersion);
+      return {
+        failure: result.failure,
+        repair: {
+          failureEpochRemoved: result.repair.failureEpochRemoved,
+          faultRemoved: true,
+          latchRemoved: result.repair.latchRemoved,
+          output: result.repair.output,
+          runtimeSha256: result.repair.runtimeSha256,
+          sameBundle: result.repair.sameBundle,
+          unit: result.repair.unit,
+        },
+      };
     },
     async assertReleaseTestHost(expected) {
       if (
@@ -3166,120 +3302,7 @@ export function createProbeHostHarness({
     },
 
     async assertInstalled(runId, expectedProbeVersion) {
-      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
-      if (
-        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-          expectedProbeVersion ?? "",
-        )
-      ) {
-        throw new Error("Candidate Probe version is invalid");
-      }
-      const [
-        inspected,
-        serviceResult,
-        sudoersResult,
-        binaryVersionResult,
-        generationResult,
-      ] = await Promise.all([
-        inventory(),
-        execute(serviceBoundaryScript()),
-        execute(sudoersBoundaryScript(), { root: true }),
-        execute(binaryVersionScript()),
-        execute(bootstrapGenerationStateScript(), { root: true }),
-      ]);
-      const residue = inventoryResidue(inspected);
-      const required = [
-        "user:enoki-probe",
-        "group:enoki-probe",
-        "/usr/local/bin/enoki-probe",
-        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        "/var/lib/enoki-probe-bootstrap",
-        "/etc/enoki/probe-install.toml",
-        "/etc/systemd/system/enoki-probe.service",
-        "/var/lib/enoki-probe",
-        "enoki-probe.service",
-      ];
-      const missing = required.filter((entry) => !residue.includes(entry));
-      if (missing.length > 0) {
-        throw new Error(
-          `Probe installation is incomplete: missing ${missing.join(", ")}`,
-        );
-      }
-      if (serviceResult.code !== 0) {
-        throw new Error(
-          `Probe service inspection failed: ${serviceResult.stderr}`,
-        );
-      }
-      const service = parseKeyValues(serviceResult.stdout);
-      if (
-        service.LoadState !== "loaded" ||
-        service.ActiveState !== "active" ||
-        service.User !== "enoki-probe" ||
-        service.Group !== "enoki-probe" ||
-        service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
-      ) {
-        throw new Error(
-          `Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
-        );
-      }
-      if (sudoersResult.code !== 0 || sudoersResult.stdout.trim() !== "") {
-        throw new Error(
-          "Probe Bootstrap schema 2 installation must not retain Probe sudoers",
-        );
-      }
-      const generation = generationResult.stdout.trim();
-      if (generationResult.code !== 0 || !/^[1-9]\d*$/.test(generation)) {
-        throw new Error(
-          "Probe Bootstrap delegation generation state is missing or invalid",
-        );
-      }
-      const probeVersion =
-        binaryVersionResult.code === 0
-          ? binaryVersionResult.stdout
-              .trim()
-              .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
-          : null;
-      if (probeVersion !== expectedProbeVersion) {
-        throw new Error(
-          `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
-        );
-      }
-      if (installedBundleRepairNeedsResourceRenewal) {
-        const runtimeFailureCustody =
-          await installedBundleFailureRepair.inspectCustody(runId);
-        if (!runtimeFailureCustody.present) {
-          throw new Error(
-            "Observation Runtime failure custody disappeared before ownership renewal",
-          );
-        }
-        const renewed = await execute(
-          renewRunResourcesScript(runId, ownershipToken),
-          { root: true },
-        );
-        if (renewed.code !== 0 || renewed.stdout.trim() !== "renewed") {
-          throw new Error(
-            `Could not renew run-owned Probe resources after Installed Bundle Failure Repair: ${renewed.stderr || renewed.stdout}`,
-          );
-        }
-        const verified = await execute(
-          verifyRunResourcesScript(runId, ownershipToken),
-          { root: true },
-        );
-        if (verified.code !== 0 || verified.stdout.trim() !== "owned") {
-          throw new Error(
-            `Could not verify run-owned Probe resources after Installed Bundle Failure Repair: ${verified.stderr || verified.stdout}`,
-          );
-        }
-        await installedBundleFailureRepair.retireCustody(runId);
-        installedBundleRepairNeedsResourceRenewal = false;
-      }
-      return {
-        inventory: inspected,
-        probeVersion,
-        service,
-        sudoers: sudoersResult.stdout,
-        delegationGeneration: Number(generation),
-      };
+      return assertInstalledBoundary(runId, expectedProbeVersion);
     },
 
     async assertLegacyReleaseBaselineInstalled(runId, expectedProbeVersion) {
@@ -3767,7 +3790,47 @@ export function createProbeHostHarness({
     async cleanup(runId) {
       assertRunId(runId);
       if (disposableRunId !== runId || !runOwnsMutation) {
-        return { clean: true, skipped: "run_did_not_mutate_host" };
+        const activeClaim = await execute(
+          verifyClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (activeClaim.code === 0 && activeClaim.stdout.trim() === "owned") {
+          disposableRunId = runId;
+          runOwnsMutation = true;
+        } else {
+          const claim = await execute(
+            inspectClaimScript(runId, ownershipToken),
+            {
+              root: true,
+            },
+          );
+          if (claim.code !== 0 || claim.stdout.trim() !== "retiring-owned") {
+            return { clean: true, skipped: "run_did_not_mutate_host" };
+          }
+          const released = await execute(
+            removeClaimScript(runId, ownershipToken),
+            {
+              root: true,
+            },
+          );
+          if (released.code !== 0 || released.stdout.trim() !== "released") {
+            throw new Error(
+              `Could not resume retiring run claim: ${released.stderr}`,
+            );
+          }
+          const completed = await execute(
+            inspectClaimScript(runId, ownershipToken),
+            {
+              root: true,
+            },
+          );
+          if (completed.code !== 0 || completed.stdout.trim() !== "absent") {
+            throw new Error("Run claim remains after retirement recovery");
+          }
+          return { clean: true, removedPartialInstallation: false };
+        }
       }
       const errors = [];
       const attempt = async (operation) => {
@@ -3779,17 +3842,61 @@ export function createProbeHostHarness({
         }
       };
       let claimOwned = false;
+      let claimRetiring = false;
       await attempt(async () => {
         const claim = await execute(verifyClaimScript(runId, ownershipToken), {
           root: true,
         });
-        if (claim.code !== 0 || claim.stdout.trim() !== "owned") {
+        if (claim.code === 0 && claim.stdout.trim() === "owned") {
+          claimOwned = true;
+          return;
+        }
+        const inspected = await execute(
+          inspectClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (
+          inspected.code === 0 &&
+          inspected.stdout.trim() === "retiring-owned"
+        ) {
+          claimOwned = true;
+          claimRetiring = true;
+          return;
+        }
+        {
           throw new Error(
             `Refusing cleanup because Host state is not attributable to run ${runId}: ${claim.stderr}`,
           );
         }
-        claimOwned = true;
       });
+
+      if (claimRetiring) {
+        const released = await execute(
+          removeClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (released.code !== 0 || released.stdout.trim() !== "released") {
+          throw new Error(
+            `Could not resume retiring run claim: ${released.stderr}`,
+          );
+        }
+        const completed = await execute(
+          inspectClaimScript(runId, ownershipToken),
+          {
+            root: true,
+          },
+        );
+        if (completed.code !== 0 || completed.stdout.trim() !== "absent") {
+          throw new Error("Run claim remains after retirement recovery");
+        }
+        runOwnsMutation = false;
+        readyForReinstallation = false;
+        return { clean: true, removedPartialInstallation: false };
+      }
 
       if (postReplacementFaultArmed) {
         await attempt(async () => {
@@ -3820,27 +3927,22 @@ export function createProbeHostHarness({
         });
       }
 
-      const runtimeFailureCleanup = await attempt(() =>
-        installedBundleFailureRepair.cleanup(runId),
-      );
-      let runtimeFailureCustodyIncomplete = false;
-      if (runtimeFailureCleanup?.recoveredBundleVersion) {
-        installedBundleRepairNeedsResourceRenewal = true;
-        const errorCountBeforeInstalledBoundary = errors.length;
-        await attempt(() =>
-          this.assertInstalled(
-            runId,
-            runtimeFailureCleanup.recoveredBundleVersion,
-          ),
+      try {
+        await completeRuntimeRecoveryCustody(runId);
+      } catch (error) {
+        errors.push(error);
+        const aggregate = new AggregateError(
+          errors,
+          `Release Test Host cleanup failed before Runtime custody completed: ${errors.map((item) => item.message).join("; ")}`,
         );
-        runtimeFailureCustodyIncomplete =
-          errors.length > errorCountBeforeInstalledBoundary;
+        aggregate.code = "release_test_host_cleanup_failed";
+        throw aggregate;
       }
 
       let inspected = await attempt(() => inventory());
       let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
-      if (!runtimeFailureCustodyIncomplete && residue?.length > 0) {
+      if (residue?.length > 0) {
         const verifiedResources = await execute(
           verifyRunResourcesScript(runId, ownershipToken),
           { root: true },
@@ -3886,12 +3988,7 @@ export function createProbeHostHarness({
         }
       }
 
-      if (
-        !runtimeFailureCustodyIncomplete &&
-        claimOwned &&
-        Array.isArray(residue) &&
-        residue.length === 0
-      ) {
+      if (claimOwned && Array.isArray(residue) && residue.length === 0) {
         await attempt(async () => {
           const released = await execute(
             removeClaimScript(runId, ownershipToken),
@@ -4476,7 +4573,12 @@ function claimRunScript(runId, token) {
 set -eu
 claim_root=/var/lib/enoki-release-e2e
 claim_dir="$claim_root/claim"
+retiring_dir="$claim_root/claim-retiring"
 install -d -m 0700 "$claim_root"
+if [ -e "$retiring_dir" ] || [ -L "$retiring_dir" ]; then
+  printf 'Host claim retirement is incomplete\n' >&2
+  exit 73
+fi
 if ! mkdir -m 0700 "$claim_dir" 2>/dev/null; then
   printf 'Host already claimed by another Release E2E run\n' >&2
   exit 73
@@ -4970,11 +5072,70 @@ metadata_schema=bootstrap-v2`;
 }
 
 function removeClaimScript(runId, token) {
-  return `# enoki-release-e2e:remove-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]\nrm -f -- "$claim/resources" "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id" "$claim/post-replacement-fault"\nrm -- "$claim/run-id" "$claim/token"\nrmdir "$claim"\nrmdir /var/lib/enoki-release-e2e 2>/dev/null || true\n`;
+  return `# enoki-release-e2e:remove-claim
+set -eu
+claim_root=/var/lib/enoki-release-e2e
+claim="$claim_root/claim"
+retiring="$claim_root/claim-retiring"
+fail() { printf '%s\\n' "$1" >&2; exit 79; }
+is_exact_owner() {
+  [ -d "$1" ] && [ ! -L "$1" ] &&
+    [ -f "$1/run-id" ] && [ ! -L "$1/run-id" ] &&
+    [ -f "$1/token" ] && [ ! -L "$1/token" ] &&
+    [ "$(stat -c '%u:%a:%h' "$1/run-id")" = 0:600:1 ] &&
+    [ "$(stat -c '%u:%a:%h' "$1/token")" = 0:600:1 ] &&
+    [ "$(cat "$1/run-id")" = ${shellSingleQuote(runId)} ] &&
+    [ "$(cat "$1/token")" = ${shellSingleQuote(token)} ]
+}
+check_members() {
+  directory=$1
+  for member in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    [ -e "$member" ] || [ -L "$member" ] || continue
+    [ ! -L "$member" ] || fail 'release E2E claim member is not a regular file'
+    [ -f "$member" ] || fail 'release E2E claim member is not a regular file'
+    [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E claim member custody is invalid'
+    case "$(basename -- "$member")" in
+      run-id|token|resources|upgrade-before-resources|upgrade-target|upgrade-operation-id|post-replacement-fault) ;;
+      *) fail 'release E2E claim has an unknown member' ;;
+    esac
+  done
+}
+if [ -e "$claim" ] || [ -L "$claim" ]; then
+  [ ! -e "$retiring" ] && [ ! -L "$retiring" ] || fail 'release E2E claim retirement is ambiguous'
+  is_exact_owner "$claim" || fail 'release E2E run claim changed'
+  [ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] || fail 'release E2E resource evidence is missing'
+  [ ! -e "$claim/observation-runtime-original" ] && [ ! -L "$claim/observation-runtime-original" ] || fail 'Runtime custody remains held'
+  check_members "$claim"
+  mv -- "$claim" "$retiring"
+  sync -f "$claim_root" || fail 'could not persist release E2E claim retirement'
+fi
+is_exact_owner "$retiring" || fail 'release E2E retiring claim changed'
+[ ! -e "$retiring/observation-runtime-original" ] && [ ! -L "$retiring/observation-runtime-original" ] || fail 'Runtime custody remains held'
+check_members "$retiring"
+rm -f -- "$retiring/resources" "$retiring/upgrade-before-resources" "$retiring/upgrade-target" "$retiring/upgrade-operation-id" "$retiring/post-replacement-fault"
+rm -- "$retiring/run-id" "$retiring/token"
+rmdir "$retiring"
+sync -f "$claim_root" || fail 'could not persist release E2E claim release'
+rmdir "$claim_root" 2>/dev/null || true
+printf 'released\\n'
+`;
 }
 
 function inspectClaimScript(runId, token) {
-  return `# enoki-release-e2e:inspect-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\nif [ ! -e "$claim" ]; then printf 'absent\\n'; elif [ -d "$claim" ] && [ "$(cat "$claim/run-id" 2>/dev/null || true)" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim/token" 2>/dev/null || true)" = ${shellSingleQuote(token)} ]; then printf 'owned\\n'; else printf 'foreign\\n'; fi\n`;
+  return `# enoki-release-e2e:inspect-claim
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+retiring=/var/lib/enoki-release-e2e/claim-retiring
+owned() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(cat "$1/run-id" 2>/dev/null || true)" = ${shellSingleQuote(runId)} ] && [ "$(cat "$1/token" 2>/dev/null || true)" = ${shellSingleQuote(token)} ]; }
+if [ -e "$claim" ] || [ -L "$claim" ]; then
+  if [ -e "$retiring" ] || [ -L "$retiring" ]; then printf 'foreign\\n';
+  elif owned "$claim"; then printf 'owned\\n'; else printf 'foreign\\n'; fi
+elif [ -e "$retiring" ] || [ -L "$retiring" ]; then
+  if owned "$retiring"; then printf 'retiring-owned\\n'; else printf 'foreign\\n'; fi
+else
+  printf 'absent\\n'
+fi
+`;
 }
 
 function releaseEmergencyCleanupScript(runId, token) {

@@ -488,13 +488,10 @@ set -eu
 claim=/var/lib/enoki-release-e2e/claim
 runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
-epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
-latch=/var/lib/enoki-probe/runtime-failure/latch
 companion=/usr/local/bin/enoki-probe-lifecycle-companion
 unit=${shellSingleQuote(observationRuntimeUnit)}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
 ${systemdUnitStateFunctions()}
-path_exists() { [ -e "$1" ] || [ -L "$1" ]; }
 recovered_bundle_version=
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
@@ -506,9 +503,6 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   stop_unit enoki-observation-runtime.socket
   require_stopped_unit enoki-probe.service
   require_stopped_unit enoki-observation-runtime.socket
-  if path_exists "$epoch" && ! path_exists "$latch"; then
-    "$companion" record-runtime-failure || fail 'could not complete partial Runtime failure pair'
-  fi
   stop_unit "$unit"
   stop_unit enoki-observation-runtime-failure.service
   require_stopped_unit "$unit"
@@ -516,31 +510,26 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"
   [ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'restored Observation Runtime boundary is invalid'
   [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'restored Observation Runtime digest changed'
-  if path_exists "$epoch" || path_exists "$latch"; then
-    "$companion" retry-runtime || fail 'could not consume Runtime failure pair'
-  else
-    systemctl reset-failed "$unit" >/dev/null 2>&1 || fail 'could not reset Observation Runtime failure state'
-    systemctl reset-failed enoki-observation-runtime-failure.service >/dev/null 2>&1 || fail 'could not reset Runtime recorder failure state'
-  fi
+  "$companion" retry-runtime || fail 'could not reconcile and retry fixed Runtime'
   systemctl start enoki-observation-runtime.socket >/dev/null 2>&1 || fail 'could not restart Observation Runtime socket'
   systemctl start enoki-probe.service >/dev/null 2>&1 || fail 'could not restart canonical Probe'
   wait_for_unit_state enoki-observation-runtime.socket active listening
   wait_for_unit_state enoki-probe.service active running
   wait_for_unit_state "$unit" active running
   require_stopped_unit enoki-observation-runtime-failure.service
-  [ ! -e "$epoch" ] && [ ! -e "$latch" ] || fail 'Runtime failure state remained after recovery'
   [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'recovered Observation Runtime digest changed'
   version_output=$(/usr/local/bin/enoki-probe --version) || fail 'could not read recovered Probe version'
   recovered_bundle_version=\${version_output#"enoki-probe "}
   recovered_bundle_version=\${recovered_bundle_version#v}
   printf '%s\n' "$recovered_bundle_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'recovered Probe version is invalid'
-elif path_exists "$backup"; then
+elif [ -e "$backup" ] || [ -L "$backup" ]; then
   fail 'run-owned Runtime backup boundary is invalid'
-elif path_exists "$epoch" || path_exists "$latch"; then
-  printf 'failure state exists without the run-owned Runtime backup\n' >&2
-  exit 79
+elif [ -x /usr/local/bin/enoki-probe ]; then
+  version_output=$(/usr/local/bin/enoki-probe --version) || fail 'could not read installed Probe version'
+  recovered_bundle_version=\${version_output#"enoki-probe "}
+  recovered_bundle_version=\${recovered_bundle_version#v}
+  printf '%s\n' "$recovered_bundle_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'installed Probe version is invalid'
 fi
-[ -f "$backup" ] || { [ ! -e "$epoch" ] && [ ! -e "$latch" ]; }
 if [ -n "$recovered_bundle_version" ]; then
   printf 'recovered=%s\n' "$recovered_bundle_version"
 else

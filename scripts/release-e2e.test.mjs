@@ -2788,6 +2788,13 @@ printf covered > '${covered}'
           return successfulCommandText("present\n");
         }
         if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("recovered=1.2.3\n");
+        }
+        if (
           command.includes("# enoki-release-e2e:retire-runtime-failure-custody")
         ) {
           return successfulCommandText("retired\n");
@@ -2821,14 +2828,13 @@ printf covered > '${covered}'
         unit: "enoki-observation-runtime.service",
       },
       repair: {
-        custodyRetained: true,
         failureEpochRemoved: true,
+        faultRemoved: true,
         latchRemoved: true,
         runtimeSha256,
         sameBundle: true,
       },
     });
-    await harness.assertInstalled("run-runtime-repair", "1.2.3");
 
     const exhausted = commands.find(({ command }) =>
       command.includes(
@@ -2941,9 +2947,7 @@ printf covered > '${covered}'
           )
         ) {
           expect(productState).toBe("epoch-only");
-          expect(
-            command.indexOf('"$companion" record-runtime-failure'),
-          ).toBeLessThan(command.indexOf('stop_unit "$unit"'));
+          expect(command).not.toContain("record-runtime-failure");
           expect(command.indexOf('"$companion" retry-runtime')).toBeGreaterThan(
             command.indexOf(
               'cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"',
@@ -2994,7 +2998,13 @@ printf covered > '${covered}'
       expect(cleanup.command).toContain(`require_stopped_unit ${unit}`);
     }
     expect(cleanup.command).toContain('"$companion" retry-runtime');
-    expect(cleanup.command).toContain('"$companion" record-runtime-failure');
+    expect(cleanup.command).not.toContain("record-runtime-failure");
+    expect(cleanup.command).not.toContain(
+      "/var/lib/enoki-probe/runtime-failure/epoch.toml",
+    );
+    expect(cleanup.command).not.toContain(
+      "/var/lib/enoki-probe/runtime-failure/latch",
+    );
     expect(cleanup.command).toContain(
       "systemctl start enoki-observation-runtime.socket",
     );
@@ -3008,9 +3018,6 @@ printf covered > '${covered}'
     expect(cleanup.command).toContain(
       'wait_for_unit_state "$unit" active running',
     );
-    const recordPartialPair = cleanup.command.indexOf(
-      '"$companion" record-runtime-failure',
-    );
     const stopRuntime = cleanup.command.indexOf('stop_unit "$unit"');
     const runtimeRecovered = cleanup.command.indexOf(
       'wait_for_unit_state "$unit" active running',
@@ -3019,14 +3026,13 @@ printf covered > '${covered}'
       "require_stopped_unit enoki-observation-runtime-failure.service",
     );
     const cleaned = cleanup.command.indexOf("printf 'cleaned");
-    expect(recordPartialPair).toBeGreaterThan(-1);
-    expect(recordPartialPair).toBeLessThan(stopRuntime);
     expect(runtimeRecovered).toBeGreaterThan(stopRuntime);
     expect(recorderRecovered).toBeGreaterThan(runtimeRecovered);
     expect(cleaned).toBeGreaterThan(recorderRecovered);
     expect(cleanup.command).not.toContain('rm -- "$backup"');
-    expect(cleanup.command).not.toContain('[ -f "$epoch" ] && [ -f "$latch" ]');
-    expect(cleanup.command).not.toMatch(/runtime-failure\/(?:retry|receipt)/);
+    expect(cleanup.command).not.toMatch(
+      /runtime-failure\/(?:epoch|latch|retry|receipt)/,
+    );
     expect(cleanup.command).not.toMatch(/systemctl stop[^\n]*\|\| true/);
     expect(cleanup.command).not.toMatch(
       /rm .*runtime-failure\/(?:epoch|latch)/,
@@ -3357,6 +3363,79 @@ printf covered > '${covered}'
     expect(
       commands.some((command) =>
         command.includes("# enoki-release-e2e:retire-runtime-failure-custody"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not cross the custody gate when Runtime cleanup commits but its response is lost", async () => {
+    const commands = [];
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
+              : {
+                  accounts: { group: true, user: true },
+                  files: ["/usr/local/bin/enoki-probe"],
+                  units: ["enoki-probe.service"],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return {
+            code: 255,
+            stderr: "connection lost after remote recovery effect\n",
+            stdout: "",
+          };
+        }
+        if (command.includes("# enoki-release-e2e:verify-resources")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("enk_enroll_secret")) {
+          return successfulCommandText(productInstallerOutput());
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-response-loss");
+    await harness.install(officialEnrollment(), "run-runtime-response-loss");
+    await expect(harness.cleanup("run-runtime-response-loss")).rejects.toThrow(
+      /connection lost after remote recovery effect/,
+    );
+    expect(inventoryCount).toBe(1);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:emergency-cleanup"),
+      ),
+    ).toBe(false);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:remove-claim"),
       ),
     ).toBe(false);
   });
@@ -4228,6 +4307,119 @@ exit 0
         command.includes("# enoki-release-e2e:daemon-reload"),
       ),
     ).toHaveLength(1);
+
+    const retireClaim = commands.find((command) =>
+      command.includes("# enoki-release-e2e:remove-claim"),
+    );
+    const root = await mkdtemp(path.join(os.tmpdir(), "enoki-claim-retire-"));
+    const claimRoot = path.join(root, "var", "lib", "enoki-release-e2e");
+    const activeClaim = path.join(claimRoot, "claim");
+    const retiringClaim = path.join(claimRoot, "claim-retiring");
+    const mapped = retireClaim.replaceAll("/var/lib/", `${root}/var/lib/`);
+    const token = retireClaim.match(/\$\(cat "\$1\/token"\)" = '([^']+)'/)?.[1];
+    expect(token).toMatch(/^[0-9a-f-]{36}$/);
+    const writeClaim = async (directory, { unknown = false } = {}) => {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      for (const [name, value] of [
+        ["run-id", "run-clean-release\n"],
+        ["token", `${token}\n`],
+        ["resources", "exact-resource-evidence\n"],
+      ]) {
+        const target = path.join(directory, name);
+        await writeFile(target, value, "utf8");
+        await chmod(target, 0o600);
+      }
+      if (unknown) {
+        const target = path.join(directory, "foreign-member");
+        await writeFile(target, "foreign\n", "utf8");
+        await chmod(target, 0o600);
+      }
+    };
+    try {
+      await writeClaim(activeClaim);
+      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+        stdout: "released\n",
+      });
+      await expect(lstat(activeClaim)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(lstat(retiringClaim)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await writeClaim(retiringClaim);
+      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+        stdout: "released\n",
+      });
+      await expect(lstat(retiringClaim)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await writeClaim(activeClaim, { unknown: true });
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 79,
+      });
+      await expect(
+        readFile(path.join(activeClaim, "run-id"), "utf8"),
+      ).resolves.toBe("run-clean-release\n");
+
+      await rm(activeClaim, { force: true, recursive: true });
+      await writeClaim(activeClaim);
+      await writeClaim(retiringClaim);
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 79,
+      });
+      await expect(
+        readFile(path.join(activeClaim, "token"), "utf8"),
+      ).resolves.toBe(`${token}\n`);
+      await expect(
+        readFile(path.join(retiringClaim, "token"), "utf8"),
+      ).resolves.toBe(`${token}\n`);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("reenters an atomically retired claim through the existing cleanup action", async () => {
+    const commands = [];
+    let retiring = true;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return { code: 1, stderr: "active claim is absent\n", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText(
+            retiring ? "retiring-owned\n" : "absent\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:remove-claim")) {
+          retiring = false;
+          return successfulCommandText("released\n");
+        }
+        throw new Error("unexpected Host action after claim retirement");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(harness.cleanup("run-retiring-claim")).resolves.toEqual({
+      clean: true,
+      removedPartialInstallation: false,
+    });
+    expect(retiring).toBe(false);
+    expect(
+      commands.some((command) =>
+        command.includes(
+          "# enoki-release-e2e:cleanup-observation-runtime-failure",
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:emergency-cleanup"),
+      ),
+    ).toBe(false);
   });
 
   it("aggregates a cleanup failure while continuing run-owned fault removal, uninstall, residue verification, and claim release", async () => {
@@ -4257,6 +4449,13 @@ exit 0
         }
         if (command.includes("# enoki-release-e2e:verify-claim")) {
           return successfulCommandText("owned\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
         }
         if (
           command.includes("# enoki-release-e2e:arm-post-replacement-fault")
@@ -4335,6 +4534,13 @@ exit 0
         }
         if (command.includes("# enoki-release-e2e:verify-claim")) {
           return successfulCommandText("owned\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
         }
         if (command.includes("# enoki-release-e2e:verify-resources")) {
           return {
