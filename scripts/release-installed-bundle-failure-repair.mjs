@@ -471,9 +471,8 @@ epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
 latch=/var/lib/enoki-probe/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
 ${runtimeClaimLockPrelude()}
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]
+fail() { printf '%s\n' "$1" >&2; exit 79; }
+${runtimeClaimPreflight(runId, ownershipToken)}
 [ -f "$backup" ] && [ -f "$epoch" ] && [ -f "$latch" ]
 runtime_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1)
 repair_output=$(/usr/local/bin/enoki-probe repair)
@@ -512,9 +511,7 @@ unit=${shellSingleQuote(observationRuntimeUnit)}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
 ${systemdUnitStateFunctions()}
 recovered_bundle_version=
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]
+${runtimeClaimPreflight(runId, ownershipToken)}
 if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   [ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'run-owned Runtime backup boundary is invalid'
   backup_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1) || fail 'could not read run-owned Runtime backup'
@@ -590,9 +587,7 @@ runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
 ${runtimeClaimLockPrelude()}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
-[ -d "$claim" ] || fail 'release E2E ownership claim is missing'
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
-[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
+${runtimeClaimPreflight(runId, ownershipToken)}
 if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
   printf '${retire ? "retired" : "absent"}\n'
   exit 0
@@ -619,6 +614,22 @@ flock -x 9
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody changed\n' >&2; exit 79; }
 [ "$(stat -Lc '%d:%i' "$lock_path")" = "$(stat -Lc '%d:%i' "/proc/$$/fd/9")" ] || { printf 'release E2E lock inode changed\n' >&2; exit 79; }
 `;
+}
+
+function runtimeClaimPreflight(runId, ownershipToken) {
+  return `claim_root=/var/lib/enoki-release-e2e
+[ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || fail 'release E2E claim root custody is invalid'
+[ -d "$claim" ] && [ ! -L "$claim" ] && [ "$(stat -c '%u:%a:%h' "$claim")" = 0:700:2 ] || fail 'release E2E ownership claim is invalid'
+for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
+  [ -e "$member" ] || [ -L "$member" ] || continue
+  [ -f "$member" ] && [ ! -L "$member" ] || fail 'release E2E claim member is invalid'
+  case "$(basename -- "$member")" in run-id|token|resources|observation-runtime-original) ;; *) fail 'release E2E claim has an unknown member' ;; esac
+done
+[ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] || fail 'release E2E run claim is invalid'
+[ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] || fail 'release E2E ownership token is invalid'
+[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
+[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'`;
 }
 
 function systemdUnitStateFunctions() {
