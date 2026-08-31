@@ -3088,6 +3088,11 @@ export function createProbeHostHarness({
     ) {
       throw new Error("Candidate Probe version is invalid");
     }
+    const snapshotBefore = captureAssertionSnapshot
+      ? execute(captureRunResourcesSnapshotScript(runId, ownershipToken), {
+          root: true,
+        })
+      : null;
     const [
       inspected,
       serviceResult,
@@ -3166,13 +3171,19 @@ export function createProbeHostHarness({
       delegationGeneration: Number(generation),
     };
     if (!captureAssertionSnapshot) return boundary;
+    const before = await snapshotBefore;
     const snapshot = await execute(
       captureRunResourcesSnapshotScript(runId, ownershipToken),
       { root: true },
     );
-    if (snapshot.code !== 0 || snapshot.stdout.trim() === "") {
+    if (
+      before.code !== 0 ||
+      snapshot.code !== 0 ||
+      before.stdout.trim() === "" ||
+      before.stdout.trim() !== snapshot.stdout.trim()
+    ) {
       throw new Error(
-        `Could not capture asserted Probe resource snapshot: ${snapshot.stderr || snapshot.stdout}`,
+        `Asserted Probe resource closure changed: ${before.stderr || snapshot.stderr || snapshot.stdout}`,
       );
     }
     return { boundary, assertionSnapshot: snapshot.stdout.trim() };
