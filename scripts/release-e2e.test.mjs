@@ -4359,6 +4359,15 @@ exit 0
     };
     try {
       await writeClaim(activeClaim);
+      const mappedProduct = path.join(root, "var", "lib", "enoki-probe");
+      await mkdir(mappedProduct, { recursive: true, mode: 0o750 });
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 79,
+      });
+      await expect(
+        readFile(path.join(activeClaim, "resources"), "utf8"),
+      ).resolves.toBe("exact-resource-evidence\n");
+      await rm(mappedProduct, { force: true, recursive: true });
       await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
         stdout: "released\n",
       });
