@@ -4375,6 +4375,15 @@ exit 1
             "stage=post-uninstall\nLoadState=not-found\nActiveState=inactive\nunitCount=0\nfailedUnitCount=0\n",
           );
         }
+        if (
+          command.includes(
+            "# enoki-release-e2e:lifecycle-companion-diagnostics",
+          )
+        ) {
+          return successfulCommandText(
+            "capture=pre-cleanup\nsocket.before.LoadState=loaded\ninstance=enoki-probe-lifecycle-companion@0-1-2.service\ninstance.Result=success\njournal=enoki.lifecycle.diagnostic role=companion phase=response_flush outcome=ok\n",
+          );
+        }
         if (command.includes("# enoki-release-e2e:journald")) {
           return successfulCommandText("retained Probe journal\n");
         }
@@ -4388,6 +4397,12 @@ exit 1
     });
 
     await expect(harness.collectEvidence("run-evidence")).resolves.toEqual({
+      lifecycleCompanion: {
+        code: 0,
+        stderr: "",
+        stdout:
+          "capture=pre-cleanup\nsocket.before.LoadState=loaded\ninstance=enoki-probe-lifecycle-companion@0-1-2.service\ninstance.Result=success\njournal=enoki.lifecycle.diagnostic role=companion phase=response_flush outcome=ok\n",
+      },
       inventory: {
         accounts: { group: false, user: false },
         files: [],

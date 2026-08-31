@@ -44,6 +44,7 @@ use crate::{
 };
 use prost::Message;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
 type FinalizedObservationBatch = (
@@ -1024,23 +1025,111 @@ fn request_lifecycle_companion_at(
     socket_path: &std::path::Path,
     request: &LifecycleRequest,
 ) -> Result<LifecycleResponse, ()> {
-    let mut stream = UnixStream::connect(socket_path).map_err(|_| ())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(90)))
-        .map_err(|_| ())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|_| ())?;
-    stream
-        .write_all(&request.encode().map_err(|_| ())?)
-        .map_err(|_| ())?;
-    stream.shutdown(Shutdown::Write).map_err(|_| ())?;
+    let request_frame = match request.encode() {
+        Ok(frame) => frame,
+        Err(_) => {
+            lifecycle_probe_diagnostic("phase=request_encode outcome=error");
+            return Err(());
+        }
+    };
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(stream) => {
+            lifecycle_probe_diagnostic("phase=connect outcome=ok");
+            stream
+        }
+        Err(error) => {
+            lifecycle_probe_diagnostic(&format!(
+                "phase=connect outcome=error {}",
+                lifecycle_io_error_summary(&error)
+            ));
+            return Err(());
+        }
+    };
+    if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(90))) {
+        lifecycle_probe_diagnostic(&format!(
+            "phase=read_timeout outcome=error {}",
+            lifecycle_io_error_summary(&error)
+        ));
+        return Err(());
+    }
+    if let Err(error) = stream.set_write_timeout(Some(Duration::from_secs(5))) {
+        lifecycle_probe_diagnostic(&format!(
+            "phase=write_timeout outcome=error {}",
+            lifecycle_io_error_summary(&error)
+        ));
+        return Err(());
+    }
+    if let Err(error) = stream.write_all(&request_frame) {
+        lifecycle_probe_diagnostic(&format!(
+            "phase=request_write outcome=error {}",
+            lifecycle_io_error_summary(&error)
+        ));
+        return Err(());
+    }
+    lifecycle_probe_diagnostic("phase=request_write outcome=ok");
+    if let Err(error) = stream.shutdown(Shutdown::Write) {
+        lifecycle_probe_diagnostic(&format!(
+            "phase=request_eof outcome=error {}",
+            lifecycle_io_error_summary(&error)
+        ));
+        return Err(());
+    }
+    lifecycle_probe_diagnostic("phase=request_eof outcome=ok");
     let mut bytes = Vec::new();
-    stream
+    if let Err(error) = stream
         .take(MAX_LIFECYCLE_REQUEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    LifecycleResponse::decode(&bytes).map_err(|_| ())
+    {
+        lifecycle_probe_diagnostic(&format!(
+            "phase=response_read outcome=error {}",
+            lifecycle_io_error_summary(&error)
+        ));
+        return Err(());
+    }
+    lifecycle_probe_diagnostic(&format!(
+        "phase=response_eof outcome=ok bytes={} sha256={:x}",
+        bytes.len(),
+        Sha256::digest(&bytes)
+    ));
+    match LifecycleResponse::decode(&bytes) {
+        Ok(response) => {
+            lifecycle_probe_diagnostic("phase=response_decode outcome=ok");
+            Ok(response)
+        }
+        Err(_) => {
+            lifecycle_probe_diagnostic("phase=response_decode outcome=error");
+            Err(())
+        }
+    }
+}
+
+fn lifecycle_probe_diagnostic(event: &str) {
+    eprintln!("enoki.lifecycle.diagnostic role=probe {event}");
+}
+
+fn lifecycle_io_error_summary(error: &std::io::Error) -> String {
+    let class = match error.kind() {
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::ConnectionRefused => "connection_refused",
+        std::io::ErrorKind::ConnectionReset => "connection_reset",
+        std::io::ErrorKind::ConnectionAborted => "connection_aborted",
+        std::io::ErrorKind::NotConnected => "not_connected",
+        std::io::ErrorKind::BrokenPipe => "broken_pipe",
+        std::io::ErrorKind::AlreadyExists => "already_exists",
+        std::io::ErrorKind::WouldBlock => "would_block",
+        std::io::ErrorKind::InvalidInput => "invalid_input",
+        std::io::ErrorKind::InvalidData => "invalid_data",
+        std::io::ErrorKind::TimedOut => "timed_out",
+        std::io::ErrorKind::WriteZero => "write_zero",
+        std::io::ErrorKind::Interrupted => "interrupted",
+        std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+        _ => "other",
+    };
+    match error.raw_os_error() {
+        Some(errno) => format!("class={class} errno={errno}"),
+        None => format!("class={class} errno=none"),
+    }
 }
 
 pub fn request_local_probe_uninstall() -> Result<(), &'static str> {

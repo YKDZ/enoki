@@ -4134,18 +4134,21 @@ export function createProbeHostHarness({
 
     async collectEvidence(runId) {
       assertRunId(runId);
-      const [inventoryResult, service, journald, sudoers] = await Promise.all([
-        execute(hostInventoryScript()),
-        execute(systemdEvidenceScript()),
-        execute(journaldEvidenceScript(), { root: true }),
-        execute(sudoersEvidenceScript(), { root: true }),
-      ]);
+      const [inventoryResult, lifecycleCompanion, service, journald, sudoers] =
+        await Promise.all([
+          execute(hostInventoryScript()),
+          execute(lifecycleCompanionDiagnosticsScript(), { root: true }),
+          execute(systemdEvidenceScript()),
+          execute(journaldEvidenceScript(), { root: true }),
+          execute(sudoersEvidenceScript(), { root: true }),
+        ]);
       return {
         inventory:
           inventoryResult.code === 0
             ? parseJson(inventoryResult.stdout, "Release Test Host inventory")
             : commandEvidence(inventoryResult),
         journald: commandEvidence(journald),
+        lifecycleCompanion: commandEvidence(lifecycleCompanion),
         runClaimed: disposableRunId === runId && runOwnsMutation,
         sudoers: commandEvidence(sudoers),
         systemd: commandEvidence(service),
@@ -4618,6 +4621,28 @@ function journaldEvidenceScript() {
   return String.raw`# enoki-release-e2e:journald
 set -eu
 journalctl --unit=enoki-probe.service --no-pager --lines=200 --output=short-iso
+`;
+}
+
+function lifecycleCompanionDiagnosticsScript() {
+  return String.raw`# enoki-release-e2e:lifecycle-companion-diagnostics
+set -eu
+socket=enoki-probe-lifecycle-companion.socket
+printf 'capture=pre-cleanup\n'
+for property in LoadState ActiveState SubState Result; do
+  value=$(systemctl show "$socket" --no-pager --property="$property" --value 2>/dev/null || printf 'unavailable')
+  printf 'socket.before.%s=%s\n' "$property" "$value"
+done
+instances=$(systemctl list-units --all --full --plain 'enoki-probe-lifecycle-companion@*.service' --no-legend --no-pager 2>/dev/null | awk 'NF { print $1 }')
+count=0
+for unit in $instances; do
+  count=$((count + 1))
+  printf 'instance=%s\n' "$unit"
+  systemctl show "$unit" --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainCode --property=ExecMainStatus 2>/dev/null || true
+  journalctl --unit="$unit" --no-pager --lines=200 --output=short-iso 2>/dev/null | grep -F 'enoki.lifecycle.diagnostic' || true
+done
+printf 'instanceCount=%s\n' "$count"
+journalctl --unit='enoki-probe-lifecycle-companion@*.service' --no-pager --lines=200 --output=short-iso 2>/dev/null | grep -F 'enoki.lifecycle.diagnostic' || true
 `;
 }
 
