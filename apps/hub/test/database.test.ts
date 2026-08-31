@@ -1764,6 +1764,74 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("keeps manual-reinstall Readiness verifying for non-equivalent Probe versions", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    const cases = [
+      { bundleVersion: "0.1.75", probeVersion: "0.1.74" },
+      { bundleVersion: "0.1.75", probeVersion: "" },
+      { bundleVersion: "0.1.75", probeVersion: "not-semver" },
+      { bundleVersion: "0.1.75", probeVersion: "0.1.75-beta.1" },
+      { bundleVersion: "0.1.75", probeVersion: " 0.1.75" },
+      { bundleVersion: "0.1.74", probeVersion: "0.1.75" },
+    ];
+
+    for (const [index, versions] of cases.entries()) {
+      const hostId = 100 + index;
+      const enrollmentId = `enr_readiness_version_${index}`;
+      createHost(database, { id: hostId, probeId: `probe-version-${index}` });
+      database.sqlite
+        .prepare(
+          `insert into enrollment_tokens (
+            enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+            target_kind, target_host_id, expected_hub_origin, expected_probe_id,
+            expected_probe_version, source_probe_sha256_json,
+            target_asset_set_digest, target_probe_version, status,
+            managed_host_id, verification_deadline_at_ms
+          ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, '0.1.0', ?, ?,
+            '0.1.75', 'verifying', ?, ?)`,
+        )
+        .run(
+          enrollmentId,
+          `token-version-${index}`,
+          1_725_000_000_000,
+          1_725_000_600_000,
+          1_725_000_000_000,
+          hostId,
+          "https://hub.example.test",
+          `probe-before-version-${index}`,
+          JSON.stringify(["a".repeat(64)]),
+          `sha256:${"b".repeat(64)}`,
+          hostId,
+          1_725_000_600_000,
+        );
+
+      expect(
+        database.enrollments.resolveStartupReport({
+          enrollmentId,
+          hostId,
+          probeAssetBundleVersion: versions.bundleVersion,
+          probeVersion: versions.probeVersion,
+          producedCurrentHostProfile: true,
+          reportedAtMs: 1_725_000_001_000,
+        }),
+      ).toEqual(expect.objectContaining({ status: "verifying" }));
+      expect(
+        database.sqlite
+          .prepare(
+            "select status, ready_at_ms as readyAtMs from enrollment_tokens where enrollment_id = ?",
+          )
+          .get(enrollmentId),
+      ).toEqual({ readyAtMs: null, status: "verifying" });
+    }
+
+    database.close();
+  });
+
   it("creates and inspects an independent terminal replacement recovery without Host version truth", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);

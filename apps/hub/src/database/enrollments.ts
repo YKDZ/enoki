@@ -699,8 +699,14 @@ export function createEnrollmentRepository(
           enrollment.targetKind === "manual_reinstall" &&
           (!input.producedCurrentHostProfile ||
             !enrollment.targetProbeVersion ||
-            input.probeVersion !== enrollment.targetProbeVersion ||
-            input.probeAssetBundleVersion !== enrollment.targetProbeVersion)
+            !sameProbeAssetVersion(
+              input.probeVersion,
+              enrollment.targetProbeVersion,
+            ) ||
+            !sameProbeAssetVersion(
+              input.probeAssetBundleVersion,
+              enrollment.targetProbeVersion,
+            ))
         ) {
           return { enrollment, status: "verifying" };
         }
@@ -1415,6 +1421,9 @@ function sameProbeAssetVersion(
   left: string | null | undefined,
   right: string | null | undefined,
 ) {
+  if (left?.trim() !== left || right?.trim() !== right) {
+    return false;
+  }
   const normalizedLeft = normalizeSemVer(left);
   const normalizedRight = normalizeSemVer(right);
   return normalizedLeft !== null && normalizedLeft === normalizedRight;
