@@ -1355,6 +1355,9 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:record-resources")) {
           return successfulCommandText("recorded\n");
         }
+        if (command.includes("# enoki-release-e2e:local-probe-uninstall")) {
+          return successfulCommandText("Local Probe Uninstall completed.\n");
+        }
         if (
           command.includes("# enoki-release-e2e:canonical-runtime-unavailable")
         ) {
@@ -3183,6 +3186,9 @@ printf covered > '${covered}'
         }
         if (command.includes("# enoki-release-e2e:record-resources")) {
           return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:local-probe-uninstall")) {
+          return successfulCommandText("Local Probe Uninstall completed.\n");
         }
         if (command.includes("enk_enroll_secret")) {
           return successfulCommandText(productInstallerOutput());

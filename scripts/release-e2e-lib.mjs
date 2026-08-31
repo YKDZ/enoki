@@ -3989,6 +3989,27 @@ export function createProbeHostHarness({
       let inspected = await attempt(() => inventory());
       let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
+      if (completedCustody && residue?.length > 0) {
+        const uninstalled = await execute(
+          "# enoki-release-e2e:local-probe-uninstall\n/usr/local/bin/enoki-probe uninstall\n",
+          { root: true },
+        );
+        if (
+          uninstalled.code !== 0 ||
+          uninstalled.stdout.trim() !== "Local Probe Uninstall completed."
+        ) {
+          throw new Error(
+            `Local Probe Uninstall after Runtime custody failed: ${uninstalled.stderr || uninstalled.stdout}`,
+          );
+        }
+        inspected = await inventory();
+        residue = inventoryResidue(inspected);
+        if (residue.length > 0) {
+          throw new Error(
+            `Local Probe Uninstall after Runtime custody left residue: ${residue.join(", ")}`,
+          );
+        }
+      }
       if (residue?.length > 0) {
         if (hasCompleteInstalledInventory(residue) && !completedCustody) {
           errors.push(
