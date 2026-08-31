@@ -2952,6 +2952,42 @@ printf covered > '${covered}'
     }
   });
 
+  it("keeps the fresh canonical Runtime backup target through claim preflight", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-fresh-backup-target-",
+    );
+    let exhaustResult = null;
+    try {
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun() {},
+        async execute(command) {
+          const result = await fixture.runHostScript(command);
+          if (
+            command.includes(
+              "# enoki-release-e2e:exhaust-observation-runtime-budget",
+            )
+          ) {
+            exhaustResult = result;
+          }
+          return result;
+        },
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+
+      await expect(
+        driver.repair("run-runtime-custody", "1.2.3"),
+      ).rejects.toThrow(/durable Observation Runtime failure eligibility/i);
+      expect(exhaustResult.stderr).not.toContain(
+        "cp: cannot create regular file '': No such file or directory",
+      );
+      await expect(readFile(fixture.paths.backup, "utf8")).resolves.toBe(
+        "canonical runtime\n",
+      );
+    } finally {
+      await fixture.remove();
+    }
+  });
+
   it("discards a partial fixed backup-publication temp before atomically publishing fresh custody", async () => {
     const fixture = await createRuntimeFailureCustodyFixture(
       "enoki-runtime-backup-publication-temp-",
