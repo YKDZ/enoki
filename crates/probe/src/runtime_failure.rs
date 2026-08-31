@@ -488,6 +488,9 @@ fn retry_runtime_at(
         if path_present(&epoch_path)? || path_present(&latch_path)? {
             return Err(std::io::Error::other("local retry receipt binding invalid"));
         }
+        if runtime_failure_creation_reserved_at(root, expected_uid)? {
+            return Err(std::io::Error::other("failure pair creation reserved"));
+        }
         return systemd.retry_fixed_runtime();
     }
 
@@ -542,6 +545,9 @@ fn retry_runtime_at(
 
     if receipt.progress != LocalRetryProgress::LatchRemoved {
         return Err(std::io::Error::other("local retry recovery invalid"));
+    }
+    if runtime_failure_creation_reserved_at(root, expected_uid)? {
+        return Err(std::io::Error::other("failure pair creation reserved"));
     }
     let retry_result = systemd.retry_fixed_runtime();
     #[cfg(test)]
@@ -1869,6 +1875,55 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(receipt.progress, LocalRetryProgress::RetryInvoked);
+    }
+
+    #[test]
+    fn completed_local_retry_receipt_rechecks_active_upgrade_reservation_before_systemd() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(5))
+            .unwrap();
+        retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).unwrap();
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+
+        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
+        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
+            0o600,
+        );
+
+        let mut retry = RetrySystemd::default();
+        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+        assert_eq!(retry.0, 0);
+    }
+
+    #[test]
+    fn pending_local_retry_receipt_rechecks_active_upgrade_reservation_before_systemd() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(6))
+            .unwrap();
+        fail_local_retry_after(LocalRetryCrashPoint::LatchRemovedReceipt);
+        assert!(retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err());
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+
+        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
+        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
+            0o600,
+        );
+
+        let mut retry = RetrySystemd::default();
+        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
+        assert_eq!(retry.0, 0);
     }
 
     #[test]
