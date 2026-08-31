@@ -5296,18 +5296,34 @@ describe("Hub Lifecycle Client", () => {
     });
   });
 
-  it("以精确 Hub Origin 请求卸载探针", async () => {
+  it("经 Owner transport 以 public management Origin 请求卸载探针", async () => {
     const requests = [];
     const client = createHubLifecycleClient({
-      baseUrl: "https://hub.example:8443",
+      baseUrl: "http://127.0.0.1:33001",
+      managementOrigin: "http://127.0.0.1:33000",
       fetch: async (url, init = {}) => {
         const parsed = new URL(url);
         requests.push({
+          cookie: new Headers(init.headers).get("cookie"),
           method: init.method ?? "GET",
           origin: new Headers(init.headers).get("origin"),
           pathname: parsed.pathname,
+          url: parsed.toString(),
         });
+        if (parsed.pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
         if (parsed.pathname === "/api/web/hosts/7") {
+          if (
+            new Headers(init.headers).get("origin") !== "http://127.0.0.1:33000"
+          ) {
+            return new Response("Forbidden", {
+              headers: { "content-type": "text/plain" },
+              status: 403,
+            });
+          }
           return jsonResponse(
             {
               probeUninstallRequest: {
@@ -5329,6 +5345,7 @@ describe("Hub Lifecycle Client", () => {
       },
     });
 
+    await client.authenticate("owner-password");
     await expect(client.requestProbeUninstall(7)).resolves.toMatchObject({
       hostId: 7,
       id: 42,
@@ -5337,11 +5354,39 @@ describe("Hub Lifecycle Client", () => {
     });
     expect(requests).toEqual([
       {
+        cookie: null,
+        method: "POST",
+        origin: null,
+        pathname: "/api/web/auth/login",
+        url: "http://127.0.0.1:33001/api/web/auth/login",
+      },
+      {
         method: "DELETE",
-        origin: "https://hub.example:8443",
+        cookie: "enoki_owner_session=session-1",
+        origin: "http://127.0.0.1:33000",
         pathname: "/api/web/hosts/7",
+        url: "http://127.0.0.1:33001/api/web/hosts/7",
       },
     ]);
+  });
+
+  it("在 public management Origin 缺失或非法时不发送卸载探针请求", async () => {
+    for (const managementOrigin of [undefined, "https://hub.example/path"]) {
+      let fetchCalls = 0;
+      const client = createHubLifecycleClient({
+        baseUrl: "http://127.0.0.1:33001",
+        fetch: async () => {
+          fetchCalls += 1;
+          throw new Error("request must not be sent");
+        },
+        managementOrigin,
+      });
+
+      await expect(client.requestProbeUninstall(7)).rejects.toThrow(
+        "Hub public management Origin is invalid",
+      );
+      expect(fetchCalls).toBe(0);
+    }
   });
 
   it("reads the terminal typed rejection for the matching Enrollment", async () => {
@@ -5570,6 +5615,7 @@ describe("Hub Lifecycle Client", () => {
     let deletes = 0;
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
+      managementOrigin: "https://hub.example",
       fetch: async (url, init = {}) => {
         const path = new URL(url).pathname;
         if (path === "/api/web/auth/login") {
@@ -5703,6 +5749,7 @@ describe("Hub Lifecycle Client", () => {
   it("rejects a polled Probe Operation that is not the requested uninstall", async () => {
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
+      managementOrigin: "https://hub.example",
       fetch: async (url, init = {}) => {
         const path = new URL(url).pathname;
         if (path === "/api/web/auth/login") {
@@ -5807,6 +5854,7 @@ describe("Hub Lifecycle Client", () => {
     };
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
+      managementOrigin: "https://hub.example",
       fetch: fetch_,
       sleep: async () => {},
     });
@@ -11690,6 +11738,7 @@ function migrationBaselineEnvironment(
 function operationPollingClient(observe) {
   return createHubLifecycleClient({
     baseUrl: "https://hub.example",
+    managementOrigin: "https://hub.example",
     fetch: async (url, init = {}) => {
       const path = new URL(url).pathname;
       if (path === "/api/web/auth/login") {

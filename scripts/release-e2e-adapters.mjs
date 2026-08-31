@@ -941,6 +941,7 @@ export function createReleaseEnvironment({
       }
       const lifecycle = createHubLifecycleClient({
         baseUrl: hubOwnerUrl,
+        managementOrigin: new URL(hubPublicUrl).origin,
         replacementSourceProbeSha256: () => {
           const transition =
             releaseTransitionForValidatedCandidate(candidateManifest);
