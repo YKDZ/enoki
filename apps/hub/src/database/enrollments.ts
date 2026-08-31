@@ -3,6 +3,7 @@ import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
+import { normalizeSemVer } from "../probe/asset-set.js";
 import { createAuditRepository } from "./audit.js";
 import type { HostProfilePersistenceValues } from "./host-profiles.js";
 import {
@@ -315,7 +316,10 @@ export function createEnrollmentRepository(
           !validLegacyOrdinaryImmutableFields(pending, sourceProbeSha256) ||
           !host ||
           host.probeId !== pending.expectedProbeId ||
-          host.probeVersion !== pending.expectedProbeVersion ||
+          !sameProbeAssetVersion(
+            host.probeVersion,
+            pending.expectedProbeVersion,
+          ) ||
           pending.targetAssetSetDigest !== input.closure.targetAssetSetDigest ||
           pending.targetProbeVersion !== input.closure.targetProbeVersion ||
           JSON.stringify(sourceProbeSha256) !==
@@ -414,7 +418,10 @@ export function createEnrollmentRepository(
           !host ||
           host.probeId !== pending.expectedProbeId ||
           (predecessorCorrelation.kind === "ordinary" &&
-            host.probeVersion !== pending.expectedProbeVersion) ||
+            !sameProbeAssetVersion(
+              host.probeVersion,
+              pending.expectedProbeVersion,
+            )) ||
           (predecessorCorrelation.kind === "terminal" &&
             !terminalReplacementPredecessorMatches(transaction, {
               currentProbeId: host.probeId,
@@ -527,7 +534,10 @@ export function createEnrollmentRepository(
           !host ||
           host.probeId !== pending.expectedProbeId ||
           (predecessorCorrelation.kind === "ordinary" &&
-            host.probeVersion !== pending.expectedProbeVersion) ||
+            !sameProbeAssetVersion(
+              host.probeVersion,
+              pending.expectedProbeVersion,
+            )) ||
           (predecessorCorrelation.kind === "terminal" &&
             !terminalReplacementPredecessorMatches(database, {
               currentProbeId: host.probeId,
@@ -892,7 +902,10 @@ export function createEnrollmentRepository(
             !target ||
             target.probeId !== input.target.expectedProbeId ||
             (predecessorCorrelation.kind === "ordinary" &&
-              target.probeVersion !== input.target.expectedProbeVersion) ||
+              !sameProbeAssetVersion(
+                target.probeVersion,
+                input.target.expectedProbeVersion,
+              )) ||
             (predecessorCorrelation.kind === "terminal" &&
               !terminalReplacementPredecessorMatches(transaction, {
                 currentProbeId: target.probeId,
@@ -1142,7 +1155,10 @@ export function createEnrollmentRepository(
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
               (predecessorCorrelation.kind === "ordinary" &&
-                existingHost.probeVersion !== pending.expectedProbeVersion) ||
+                !sameProbeAssetVersion(
+                  existingHost.probeVersion,
+                  pending.expectedProbeVersion,
+                )) ||
               (predecessorCorrelation.kind === "terminal" &&
                 !terminalReplacementPredecessorMatches(transaction, {
                   currentProbeId: existingHost.probeId,
@@ -1393,6 +1409,15 @@ function validProbeId(value: string | null) {
 
 function validSemver(value: string | null) {
   return /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value ?? "");
+}
+
+function sameProbeAssetVersion(
+  left: string | null | undefined,
+  right: string | null | undefined,
+) {
+  const normalizedLeft = normalizeSemVer(left);
+  const normalizedRight = normalizeSemVer(right);
+  return normalizedLeft !== null && normalizedLeft === normalizedRight;
 }
 
 function parseSourceProbeSha256(value: string) {

@@ -4,10 +4,14 @@ import {
   chmod,
   chown,
   copyFile,
+  lchown,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -46,6 +50,52 @@ import { createInstalledBundleFailureRepairHostDriver } from "./release-installe
 import { createMatrixGateResult } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
+
+async function createSystemdStateDirectoryFixture(prefix) {
+  const root = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const publicParent = path.join(root, "var", "lib");
+  const privateParent = path.join(publicParent, "private");
+  const publicState = path.join(publicParent, "enoki-probe");
+  const privateState = path.join(privateParent, "enoki-probe");
+  const identity = path.join(privateState, "identity");
+  const config = path.join(identity, "probe-bootstrap.toml");
+  const resources = [
+    {
+      kind: "directory",
+      path: publicState,
+      systemdStateDirectoryProjection: true,
+    },
+  ];
+  await mkdir(identity, { recursive: true });
+  await chmod(publicParent, 0o755);
+  await chmod(privateParent, 0o700);
+  await chmod(privateState, 0o750);
+  await chmod(identity, 0o700);
+  await writeFile(config, "identity", "utf8");
+  await chmod(config, 0o600);
+  await symlink("private/enoki-probe", publicState);
+  return {
+    config,
+    privateParent,
+    privateState,
+    publicParent,
+    publicState,
+    async fingerprint(environment = process.env) {
+      const result = await execFileAsync(
+        "sh",
+        [
+          "-c",
+          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+        ],
+        { env: environment },
+      );
+      return result.stdout;
+    },
+    async remove() {
+      await rm(root, { force: true, recursive: true });
+    },
+  };
+}
 
 describe("Release E2E business assertions", () => {
   it("transfers cleanup ownership when the existing runner enters environment start", async () => {
@@ -1243,6 +1293,153 @@ describe("Probe Host Harness", () => {
       await rm(root, { force: true, recursive: true });
     }
   });
+
+  it("fingerprints the canonical systemd StateDirectory projection as one logical directory", async () => {
+    const fixture = await createSystemdStateDirectoryFixture(
+      "enoki-e2e-state-directory-",
+    );
+
+    try {
+      const baseline = await fixture.fingerprint();
+      expect(baseline).toContain("\tsymlink\t");
+      expect(baseline).toContain("\tdirectory\t");
+      expect(baseline).toContain("\tfile\t");
+
+      await writeFile(fixture.config, "changed identity", "utf8");
+      await expect(fixture.fingerprint()).resolves.not.toBe(baseline);
+      await writeFile(fixture.config, "identity", "utf8");
+      await expect(fixture.fingerprint()).resolves.toBe(baseline);
+
+      const member = path.join(fixture.privateState, "unexpected");
+      await writeFile(member, "new member", "utf8");
+      await expect(fixture.fingerprint()).resolves.not.toBe(baseline);
+      await rm(member);
+      await expect(fixture.fingerprint()).resolves.toBe(baseline);
+
+      await chmod(fixture.config, 0o640);
+      await expect(fixture.fingerprint()).resolves.not.toBe(baseline);
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("uses one fail-closed directory snapshot for ambiguous members", async () => {
+    const outcomes = {};
+
+    for (const effect of ["fail", "insert"]) {
+      const fixture = await createSystemdStateDirectoryFixture(
+        `enoki-e2e-state-directory-${effect}-`,
+      );
+      const fakeBin = path.join(fixture.privateState, "fake-bin");
+      const calls = path.join(fixture.privateState, "find-calls");
+      const fakeFind = path.join(fakeBin, "find");
+      await mkdir(fakeBin);
+      await writeFile(
+        fakeFind,
+        `#!/bin/sh
+count=$(cat "$ENOKI_FIND_CALLS" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s' "$count" > "$ENOKI_FIND_CALLS"
+/usr/bin/find "$@"
+status=$?
+if [ "$ENOKI_FIND_EFFECT" = insert ] && [ "$count" -eq 1 ]; then
+  printf hidden > "$ENOKI_FIND_INSERT_PATH"
+fi
+case " $* " in *' -print0 '*) nul_snapshot=true ;; *) nul_snapshot=false ;; esac
+if [ "$ENOKI_FIND_EFFECT" = fail ] && { [ "$count" -eq 2 ] || [ "$nul_snapshot" = true ]; }; then
+  exit 1
+fi
+exit "$status"
+`,
+        "utf8",
+      );
+      await chmod(fakeFind, 0o755);
+      await writeFile(path.join(fixture.privateState, "a"), "visible", "utf8");
+      const environment = {
+        ...process.env,
+        ENOKI_FIND_CALLS: calls,
+        ENOKI_FIND_EFFECT: effect,
+        ENOKI_FIND_INSERT_PATH: path.join(fixture.privateState, "a\n."),
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      };
+
+      try {
+        outcomes[effect] = await fixture.fingerprint(environment).then(
+          () => "resolved",
+          (error) => `rejected:${error.code}`,
+        );
+        outcomes[`${effect}Calls`] = await readFile(calls, "utf8");
+        if (effect === "insert") {
+          outcomes.insertFollowUp = await fixture.fingerprint().then(
+            () => "resolved",
+            (error) => `rejected:${error.code}`,
+          );
+        }
+      } finally {
+        await fixture.remove();
+      }
+    }
+
+    expect(outcomes).toEqual({
+      fail: "rejected:1",
+      failCalls: "1",
+      insert: "resolved",
+      insertCalls: "1",
+      insertFollowUp: "rejected:1",
+    });
+  });
+
+  it.each([
+    ["an ordinary directory symlink", "ordinary-link"],
+    ["a non-canonical link target", "link-target"],
+    ["public link custody", "public-link-owner"],
+    ["public parent custody", "public-parent"],
+    ["private parent custody", "private-parent"],
+    ["private StateDirectory mode", "state-mode"],
+    ["identity custody", "identity-owner"],
+    ["a symlinked private referent", "private-state-link"],
+  ])(
+    "rejects %s in a systemd StateDirectory projection",
+    async (_label, tamper) => {
+      const fixture = await createSystemdStateDirectoryFixture(
+        "enoki-e2e-state-directory-tamper-",
+      );
+
+      try {
+        if (tamper === "ordinary-link") {
+          await rm(fixture.publicState);
+          await symlink(fixture.privateState, fixture.publicState);
+        } else if (tamper === "link-target") {
+          await rm(fixture.publicState);
+          await symlink("private/../private/enoki-probe", fixture.publicState);
+        } else if (tamper === "public-link-owner") {
+          await lchown(fixture.publicState, 65534, 65534);
+        } else if (tamper === "public-parent") {
+          await chmod(fixture.publicParent, 0o750);
+        } else if (tamper === "private-parent") {
+          await chmod(fixture.privateParent, 0o755);
+        } else if (tamper === "state-mode") {
+          await chmod(fixture.privateState, 0o700);
+        } else if (tamper === "identity-owner") {
+          await chown(fixture.privateState, 65534, 65534);
+        } else if (tamper === "private-state-link") {
+          const referent = path.join(
+            fixture.privateParent,
+            "enoki-probe-referent",
+          );
+          await rename(fixture.privateState, referent);
+          await symlink("enoki-probe-referent", fixture.privateState);
+        }
+
+        await expect(fixture.fingerprint()).rejects.toMatchObject({
+          code: 1,
+          stderr: "",
+        });
+      } finally {
+        await fixture.remove();
+      }
+    },
+  );
 
   it("proves the declared Ubuntu architecture and host systemd boundary", async () => {
     const harness = createProbeHostHarness({
@@ -2702,6 +2899,167 @@ describe("Probe Host Harness", () => {
     ).toBe(false);
   });
 
+  it("only removes a run-owned StateDirectory after the service is quiescent", async () => {
+    const outcomes = [];
+    for (const scenario of [
+      "normal",
+      "query-failure",
+      "stop-failure",
+      "insert-after-stop",
+    ]) {
+      const root = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-e2e-emergency-cleanup-"),
+      );
+      const fakeBin = path.join(root, "fake-bin");
+      const publicParent = path.join(root, "var", "lib");
+      const privateParent = path.join(publicParent, "private");
+      const publicState = path.join(publicParent, "enoki-probe");
+      const privateState = path.join(privateParent, "enoki-probe");
+      const identity = path.join(privateState, "identity");
+      const adjacent = path.join(privateParent, "external", "data");
+      const serviceState = path.join(root, "service-state");
+      const insertedMember = path.join(privateState, "inserted-after-stop");
+      const environment = {
+        ...process.env,
+        ENOKI_INSERTED_MEMBER: insertedMember,
+        ENOKI_SERVICE_SCENARIO: scenario,
+        ENOKI_SERVICE_STATE: serviceState,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      };
+      const mapHostPaths = (command) =>
+        command
+          .replaceAll("/var/lib/", `${root}/var/lib/`)
+          .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
+          .replaceAll("/etc/", `${root}/etc/`)
+          .replaceAll("/run/", `${root}/run/`);
+      const runHostScript = async (command) => {
+        try {
+          const result = await execFileAsync(
+            "sh",
+            ["-c", mapHostPaths(command)],
+            { env: environment },
+          );
+          return successfulCommandText(result.stdout);
+        } catch (error) {
+          return {
+            code: typeof error.code === "number" ? error.code : 1,
+            stderr: error.stderr ?? error.message,
+            stdout: error.stdout ?? "",
+          };
+        }
+      };
+
+      try {
+        await mkdir(fakeBin, { recursive: true });
+        for (const command of ["groupdel", "userdel"]) {
+          const executable = path.join(fakeBin, command);
+          await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
+          await chmod(executable, 0o755);
+        }
+        const systemctl = path.join(fakeBin, "systemctl");
+        await writeFile(
+          systemctl,
+          `#!/bin/sh
+case "$1" in
+  show)
+    [ "$ENOKI_SERVICE_SCENARIO" != query-failure ] || exit 1
+    printf 'LoadState=loaded\\nActiveState=%s\\n' "$(cat "$ENOKI_SERVICE_STATE")"
+    ;;
+  disable)
+    [ "$ENOKI_SERVICE_SCENARIO" != stop-failure ] || exit 1
+    if [ "$ENOKI_SERVICE_SCENARIO" = insert-after-stop ]; then
+      printf 'unrecorded' > "$ENOKI_INSERTED_MEMBER"
+    fi
+    printf inactive > "$ENOKI_SERVICE_STATE"
+    ;;
+esac
+exit 0
+`,
+          "utf8",
+        );
+        await chmod(systemctl, 0o755);
+        await writeFile(serviceState, "active", "utf8");
+        const harness = createProbeHostHarness({
+          execute: async (command) => {
+            if (command.includes("# enoki-release-e2e:dependencies")) {
+              return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+            }
+            if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+              await mkdir(identity, { recursive: true });
+              await mkdir(path.dirname(adjacent), { recursive: true });
+              await chmod(publicParent, 0o755);
+              await chmod(privateParent, 0o700);
+              await chmod(privateState, 0o750);
+              await chmod(identity, 0o700);
+              await writeFile(
+                path.join(identity, "probe-bootstrap.toml"),
+                "identity",
+                "utf8",
+              );
+              await chmod(path.join(identity, "probe-bootstrap.toml"), 0o600);
+              await writeFile(adjacent, "preserved", "utf8");
+              await symlink("private/enoki-probe", publicState);
+              return successfulCommandText(productInstallerOutput());
+            }
+            if (
+              command.includes(
+                "# enoki-release-e2e:cleanup-observation-runtime-failure",
+              )
+            ) {
+              return successfulCommandText("cleaned\n");
+            }
+            return runHostScript(command);
+          },
+        });
+
+        const runId = `run-private-state-cleanup-${scenario}`;
+        await harness.assertDisposable(runId);
+        await harness.install(officialEnrollment(), runId);
+        let clean = true;
+        try {
+          await harness.cleanup(runId);
+        } catch {
+          clean = false;
+        }
+        const present = (candidate) =>
+          lstat(candidate).then(
+            () => true,
+            (error) =>
+              error.code === "ENOENT" ? false : Promise.reject(error),
+          );
+        outcomes.push({
+          clean,
+          projection: await Promise.all([
+            present(publicState),
+            present(privateState),
+            present(identity),
+          ]),
+          scenario,
+          adjacent: await readFile(adjacent, "utf8"),
+        });
+      } finally {
+        await rm(root, { force: true, recursive: true });
+      }
+    }
+
+    expect(outcomes).toEqual([
+      {
+        adjacent: "preserved",
+        clean: true,
+        projection: [false, false, false],
+        scenario: "normal",
+      },
+      ...["query-failure", "stop-failure", "insert-after-stop"].map(
+        (scenario) => ({
+          adjacent: "preserved",
+          clean: false,
+          projection: [true, true, true],
+          scenario,
+        }),
+      ),
+    ]);
+  });
+
   it("retains successful installer evidence when run-resource recording fails", async () => {
     const harness = createProbeHostHarness({
       execute: async (command) => {
@@ -3155,7 +3513,7 @@ describe("Hub Lifecycle Client", () => {
     ]);
   });
 
-  it("creates Trust Epoch manual reinstall Enrollment through the production Owner API", async () => {
+  it("通过生产 Owner API 创建 Trust Epoch manual reinstall Enrollment", async () => {
     const requests = [];
     const sourceProbeSha256 = ["a", "b", "c", "d"].map((value) =>
       value.repeat(64),
@@ -3179,7 +3537,12 @@ describe("Hub Lifecycle Client", () => {
       baseUrl: "https://hub.example",
       fetch: async (url, init = {}) => {
         const pathname = new URL(url).pathname;
-        requests.push({ method: init.method ?? "GET", pathname });
+        requests.push({
+          body: init.body,
+          contentType: new Headers(init.headers).get("content-type"),
+          method: init.method ?? "GET",
+          pathname,
+        });
         if (pathname === "/api/web/auth/login") {
           return jsonResponse({ authenticated: true }, 200, {
             "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
@@ -3209,9 +3572,69 @@ describe("Hub Lifecycle Client", () => {
       }),
     );
     expect(requests).toContainEqual({
+      body: "{}",
+      contentType: "application/json",
       method: "POST",
       pathname: "/api/web/enrollments/manual-reinstall/7",
     });
+  });
+
+  it("Hub 在 JSON route 前拒绝请求时保留有界脱敏证据", async () => {
+    const secrets = {
+      apiKey: "plain-api-key-secret",
+      authorization: "plain-authorization-secret",
+      cookie: "plain-cookie-secret",
+      enrollmentToken: "enk_enroll_plain-token-secret",
+      secondaryCookie: "plain-secondary-cookie-secret",
+    };
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url) => {
+        if (new URL(url).pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": `enoki_owner_session=${secrets.cookie}; Path=/; HttpOnly`,
+          });
+        }
+        return new Response(
+          [
+            "Forbidden",
+            `Authorization: Bearer ${secrets.authorization}`,
+            `Cookie: session=${secrets.cookie}; csrf=${secrets.secondaryCookie}`,
+            `enrollmentToken=${secrets.enrollmentToken}`,
+            `"apiKey":"${secrets.apiKey}"`,
+            "x".repeat(1_024),
+          ].join("\n"),
+          {
+            headers: { "content-type": "text/plain; charset=UTF-8" },
+            status: 403,
+          },
+        );
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(client.createManualReinstallEnrollment(7)).rejects.toThrow(
+      /not valid JSON/,
+    );
+    const evidence = await client.collectEvidence();
+    const rejectedRequest = evidence.apiTimeline.at(-1);
+    expect(rejectedRequest).toEqual(
+      expect.objectContaining({
+        bodyPreview: expect.any(String),
+        contentType: "text/plain; charset=UTF-8",
+        method: "POST",
+        parseError: "response_body_not_json",
+        pathname: "/api/web/enrollments/manual-reinstall/7",
+        status: 403,
+      }),
+    );
+    expect(rejectedRequest.bodyPreview.length).toBeLessThanOrEqual(512);
+    expect(rejectedRequest.bodyPreview).toContain("Forbidden");
+    expect(rejectedRequest.bodyPreview).toContain("[REDACTED]");
+    const serializedEvidence = JSON.stringify(evidence);
+    for (const secret of Object.values(secrets)) {
+      expect(serializedEvidence).not.toContain(secret);
+    }
   });
 
   it("keeps the DELETE response in evidence when the first poll fails", async () => {

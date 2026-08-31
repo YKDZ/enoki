@@ -261,7 +261,9 @@ function probeAssetSetVersionResult(
   };
 }
 
-function normalizeSemVer(value: string | null | undefined) {
+export function normalizeSemVer(
+  value: string | null | undefined,
+): string | null {
   if (typeof value !== "string") {
     return null;
   }

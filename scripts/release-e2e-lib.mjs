@@ -27,7 +27,11 @@ const releaseE2EInfrastructureResources = Object.freeze([
     kind: "file",
     path: "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
   },
-  { kind: "directory", path: "/var/lib/enoki-probe" },
+  {
+    kind: "directory",
+    path: "/var/lib/enoki-probe",
+    systemdStateDirectoryProjection: true,
+  },
   { kind: "file", path: "/etc/sudoers.d/enoki-probe-operations" },
   {
     kind: "file",
@@ -39,11 +43,32 @@ const releaseE2EInfrastructureResources = Object.freeze([
   { kind: "service", name: "enoki-probe.service" },
 ]);
 
-const managedHostPaths = Object.freeze(
+const releaseE2ESystemdStateProjections = Object.freeze(
   releaseE2EInfrastructureResources
+    .filter(
+      (resource) =>
+        resource.kind === "directory" &&
+        resource.systemdStateDirectoryProjection === true,
+    )
+    .map((resource) => {
+      const separator = resource.path.lastIndexOf("/");
+      const parent = resource.path.slice(0, separator);
+      const name = resource.path.slice(separator + 1);
+      return Object.freeze({
+        privatePath: `${parent}/private/${name}`,
+        publicPath: resource.path,
+      });
+    }),
+);
+
+const managedHostPaths = Object.freeze([
+  ...releaseE2EInfrastructureResources
     .filter((resource) => "path" in resource)
     .map((resource) => resource.path),
-);
+  ...releaseE2ESystemdStateProjections.map(
+    (projection) => projection.privatePath,
+  ),
+]);
 
 const releaseE2EUsers = Object.freeze(
   releaseE2EInfrastructureResources
@@ -2494,14 +2519,29 @@ export function createHubLifecycleClient({
       ...init,
       headers,
     });
-    const text = await response.text();
-    const body = text ? parseJson(text, `Hub response for ${pathname}`) : null;
-    apiTimeline.push({
-      error: body?.error ?? null,
+    const timelineEntry = {
+      contentType: response.headers.get("content-type"),
+      error: null,
       method: init.method ?? "GET",
       pathname,
       status: response.status,
-    });
+    };
+    apiTimeline.push(timelineEntry);
+    const text = await response.text();
+    let body = null;
+    if (text) {
+      try {
+        body = parseJson(text, `Hub response for ${pathname}`);
+      } catch (error) {
+        timelineEntry.bodyPreview = redactedHubBodyPreview(
+          text,
+          requestSecrets(init, ownerCookie),
+        );
+        timelineEntry.parseError = "response_body_not_json";
+        throw error;
+      }
+    }
+    timelineEntry.error = body?.error ?? null;
     if (!response.ok && !allowedStatuses.includes(response.status)) {
       throw new HubApiError({
         body,
@@ -2581,7 +2621,7 @@ export function createHubLifecycleClient({
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(
         `/api/web/enrollments/manual-reinstall/${hostId}`,
-        { method: "POST" },
+        { body: JSON.stringify({}), method: "POST" },
       );
       if (
         typeof body?.enrollmentToken !== "string" ||
@@ -2814,6 +2854,36 @@ export function createHubLifecycleClient({
       throw error;
     },
   };
+}
+
+function redactedHubBodyPreview(value, secrets) {
+  return redactSensitiveText(value, secrets)
+    .replace(
+      /((?:["']?)(?:[a-z0-9_.-]*(?:authorization|cookie|password|secret|token)|(?:api|private|signing)[ ._-]?key)(?:["']?)\s*[:=])[^\r\n]*/gi,
+      "$1 [REDACTED]",
+    )
+    .slice(0, 512);
+}
+
+function requestSecrets(init, ownerCookie) {
+  const secrets = ownerCookie
+    ? [ownerCookie, ownerCookie.slice(ownerCookie.indexOf("=") + 1)]
+    : [];
+  if (typeof init.body !== "string") return secrets;
+  try {
+    collectStringValues(JSON.parse(init.body), secrets);
+  } catch {}
+  return secrets.filter((value) => value.length >= 4);
+}
+
+function collectStringValues(value, target) {
+  if (typeof value === "string") {
+    target.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectStringValues(item, target);
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) collectStringValues(item, target);
+  }
 }
 
 export function createProbeHostHarness({
@@ -4600,7 +4670,19 @@ export function renderReleaseE2EResourceFingerprint(resources) {
     .map((resource) => shellSingleQuote(resource.path))
     .join(" ");
   const directories = resources
-    .filter((resource) => resource.kind === "directory")
+    .filter(
+      (resource) =>
+        resource.kind === "directory" &&
+        resource.systemdStateDirectoryProjection !== true,
+    )
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const systemdStateDirectories = resources
+    .filter(
+      (resource) =>
+        resource.kind === "directory" &&
+        resource.systemdStateDirectoryProjection === true,
+    )
     .map((resource) => shellSingleQuote(resource.path))
     .join(" ");
   const users = resources
@@ -4632,11 +4714,81 @@ export function renderReleaseE2EResourceFingerprint(resources) {
 }
 fingerprint_directory() {
   directory=$1
-  members=$(find -P "$directory" -xdev -print | LC_ALL=C sort) || return 1
-  printf '%s\n' "$members" | while IFS= read -r member; do
+  snapshot=$(mktemp "/tmp/enoki-release-e2e-fingerprint.XXXXXX") || return 1
+  members=$(mktemp "/tmp/enoki-release-e2e-members.XXXXXX") || {
+    rm -f -- "$snapshot"
+    return 1
+  }
+  if ! find -P "$directory" -xdev -print0 > "$snapshot"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  if ! LC_ALL=C sort -z -o "$snapshot" "$snapshot"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  if ! od -An -t u1 "$snapshot" > "$members"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  record_count=$(awk '{ for (field = 1; field <= NF; field += 1) if ($field == 0) count += 1 } END { print count + 0 }' "$members") || {
+    rm -f -- "$snapshot" "$members"
+    return 1
+  }
+  if ! tr '\000' '\n' < "$snapshot" > "$members"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  line_count=$(wc -l < "$members") || {
+    rm -f -- "$snapshot" "$members"
+    return 1
+  }
+  if [ "$record_count" -ne "$line_count" ]; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  status=0
+  while IFS= read -r member; do
     [ -n "$member" ] || continue
-    fingerprint_path "$member" || exit 1
-  done
+    fingerprint_path "$member" || { status=1; break; }
+  done < "$members"
+  rm -f -- "$snapshot" "$members" || status=1
+  return "$status"
+}
+fingerprint_systemd_state_directory() {
+  public=$1
+  public_parent=$(dirname -- "$public") || return 1
+  public_name=$(basename -- "$public") || return 1
+  private_parent="$public_parent/private"
+  private_state="$private_parent/$public_name"
+  identity="$private_state/identity"
+  [ -d "$public_parent" ] && [ ! -L "$public_parent" ] || return 1
+  [ "$(stat -c %u -- "$public_parent")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$public_parent")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$public_parent")" = 755 ] || return 1
+  [ -L "$public" ] || return 1
+  [ "$(stat -c %u -- "$public")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$public")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$public")" = 777 ] || return 1
+  [ "$(stat -c %h -- "$public")" = 1 ] || return 1
+  [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
+  [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 1
+  [ "$(stat -c %u -- "$private_parent")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$private_parent")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$private_parent")" = 700 ] || return 1
+  [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 1
+  state_uid=$(stat -c %u -- "$private_state") || return 1
+  state_gid=$(stat -c %g -- "$private_state") || return 1
+  [ "$(stat -c %a -- "$private_state")" = 750 ] || return 1
+  [ "$(stat -c %h -- "$private_state")" -ge 2 ] || return 1
+  [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
+  [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
+  [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
+  [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
+  [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
+  [ "$(stat -Lc %d:%i -- "$public")" = "$(stat -c %d:%i -- "$private_state")" ] || return 1
+  fingerprint_path "$public" || return 1
+  fingerprint_directory "$private_state" || return 1
 }
 fingerprint() {
   for candidate in ${files}; do
@@ -4649,6 +4801,14 @@ fingerprint() {
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
       [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
       fingerprint_directory "$candidate" || return 1
+    fi
+  done
+  for candidate in ${systemdStateDirectories}; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      fingerprint_systemd_state_directory "$candidate" || return 1
+    else
+      private_candidate="$(dirname -- "$candidate")/private/$(basename -- "$candidate")"
+      [ ! -e "$private_candidate" ] && [ ! -L "$private_candidate" ] || return 1
     fi
   done
   for account in ${users}; do
@@ -4709,7 +4869,19 @@ function releaseEmergencyCleanupScript(runId, token) {
       .filter((resource) => resource.kind === kind)
       .map((resource) => shellSingleQuote(resource.name))
       .join(" ");
-  const files = pathsFor("file");
+  const files = releaseE2EInfrastructureResources
+    .filter(
+      (resource) =>
+        resource.kind === "file" &&
+        !releaseE2ESystemdStateProjections.some((projection) =>
+          resource.path.startsWith(`${projection.publicPath}/`),
+        ),
+    )
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const privateStateDirectories = releaseE2ESystemdStateProjections
+    .map((projection) => shellSingleQuote(projection.privatePath))
+    .join(" ");
   const directories = pathsFor("directory");
   const users = namesFor("user");
   const groups = namesFor("group");
@@ -4724,10 +4896,45 @@ claim=/var/lib/enoki-release-e2e/claim
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+service_state() {
+  service=$1
+  if ! properties=$(LC_ALL=C systemctl show "$service" --no-pager --property=LoadState --property=ActiveState 2>/dev/null); then
+    return 1
+  fi
+  property_count=$(printf '%s\\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || return 1
+  load_count=$(printf '%s\\n' "$properties" | awk -F= '$1 == "LoadState" { count += 1 } END { print count + 0 }') || return 1
+  active_count=$(printf '%s\\n' "$properties" | awk -F= '$1 == "ActiveState" { count += 1 } END { print count + 0 }') || return 1
+  [ "$property_count" -eq 2 ] && [ "$load_count" -eq 1 ] && [ "$active_count" -eq 1 ] || return 1
+  load_state=$(printf '%s\\n' "$properties" | awk -F= '$1 == "LoadState" { print substr($0, index($0, "=") + 1) }') || return 1
+  active_state=$(printf '%s\\n' "$properties" | awk -F= '$1 == "ActiveState" { print substr($0, index($0, "=") + 1) }') || return 1
+  case "$load_state:$active_state" in
+    loaded:inactive) printf 'inactive\\n' ;;
+    loaded:active|loaded:activating|loaded:deactivating|loaded:reloading) printf 'running\\n' ;;
+    not-found:inactive) printf 'absent\\n' ;;
+    *) return 1 ;;
+  esac
+}
+for service in ${services}; do
+  if ! state=$(service_state "$service"); then
+    printf 'could not prove Probe service state\\n' >&2
+    exit 75
+  fi
+  if [ "$state" != absent ]; then
+    if ! systemctl disable --now "$service" >/dev/null 2>&1; then
+      printf 'could not quiesce Probe service\\n' >&2
+      exit 75
+    fi
+  fi
+  if ! state=$(service_state "$service"); then
+    printf 'could not prove Probe service state after stop\\n' >&2
+    exit 75
+  fi
+  case "$state" in inactive|absent) ;; *) printf 'Probe service is not quiescent\\n' >&2; exit 75 ;; esac
+done
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\\n' >&2; exit 75; }
-systemctl disable --now ${services} >/dev/null 2>&1 || true
+cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }
 rm -f -- ${files}
+rm -rf -- ${privateStateDirectories}
 rm -rf -- ${directories}
 for account in ${users}; do userdel -- "$account" >/dev/null 2>&1 || true; done
 for account in ${groups}; do groupdel -- "$account" >/dev/null 2>&1 || true; done
