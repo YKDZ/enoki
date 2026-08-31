@@ -3075,7 +3075,11 @@ export function createProbeHostHarness({
     };
   }
 
-  async function assertInstalledBoundary(runId, expectedProbeVersion) {
+  async function assertInstalledBoundary(
+    runId,
+    expectedProbeVersion,
+    captureAssertionSnapshot = false,
+  ) {
     assertOwnedRun(runId, disposableRunId, runOwnsMutation);
     if (
       !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
@@ -3154,13 +3158,24 @@ export function createProbeHostHarness({
         `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
       );
     }
-    return {
+    const boundary = {
       inventory: inspected,
       probeVersion,
       service,
       sudoers: sudoersResult.stdout,
       delegationGeneration: Number(generation),
     };
+    if (!captureAssertionSnapshot) return boundary;
+    const snapshot = await execute(
+      captureRunResourcesSnapshotScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (snapshot.code !== 0 || snapshot.stdout.trim() === "") {
+      throw new Error(
+        `Could not capture asserted Probe resource snapshot: ${snapshot.stderr || snapshot.stdout}`,
+      );
+    }
+    return { boundary, assertionSnapshot: snapshot.stdout.trim() };
   }
 
   async function completeRuntimeRecoveryCustody(
@@ -3177,18 +3192,13 @@ export function createProbeHostHarness({
     }
     const bundleVersion =
       expectedBundleVersion ?? recovered.recoveredBundleVersion;
-    const boundary = await assertInstalledBoundary(runId, bundleVersion);
-    const snapshot = await execute(
-      captureRunResourcesSnapshotScript(runId, ownershipToken),
-      { root: true },
+    const { boundary, assertionSnapshot } = await assertInstalledBoundary(
+      runId,
+      bundleVersion,
+      true,
     );
-    if (snapshot.code !== 0 || snapshot.stdout.trim() === "") {
-      throw new Error(
-        `Could not capture asserted Probe resource snapshot: ${snapshot.stderr || snapshot.stdout}`,
-      );
-    }
     const renewed = await execute(
-      renewRunResourcesScript(runId, ownershipToken, snapshot.stdout.trim()),
+      renewRunResourcesScript(runId, ownershipToken, assertionSnapshot),
       { root: true },
     );
     if (renewed.code !== 0 || renewed.stdout.trim() !== "renewed") {
