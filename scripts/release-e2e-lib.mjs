@@ -43,11 +43,32 @@ const releaseE2EInfrastructureResources = Object.freeze([
   { kind: "service", name: "enoki-probe.service" },
 ]);
 
-const managedHostPaths = Object.freeze(
+const releaseE2ESystemdStateProjections = Object.freeze(
   releaseE2EInfrastructureResources
+    .filter(
+      (resource) =>
+        resource.kind === "directory" &&
+        resource.systemdStateDirectoryProjection === true,
+    )
+    .map((resource) => {
+      const separator = resource.path.lastIndexOf("/");
+      const parent = resource.path.slice(0, separator);
+      const name = resource.path.slice(separator + 1);
+      return Object.freeze({
+        privatePath: `${parent}/private/${name}`,
+        publicPath: resource.path,
+      });
+    }),
+);
+
+const managedHostPaths = Object.freeze([
+  ...releaseE2EInfrastructureResources
     .filter((resource) => "path" in resource)
     .map((resource) => resource.path),
-);
+  ...releaseE2ESystemdStateProjections.map(
+    (projection) => projection.privatePath,
+  ),
+]);
 
 const releaseE2EUsers = Object.freeze(
   releaseE2EInfrastructureResources
@@ -4740,6 +4761,9 @@ fingerprint() {
   for candidate in ${systemdStateDirectories}; do
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
       fingerprint_systemd_state_directory "$candidate" || return 1
+    else
+      private_candidate="$(dirname -- "$candidate")/private/$(basename -- "$candidate")"
+      [ ! -e "$private_candidate" ] && [ ! -L "$private_candidate" ] || return 1
     fi
   done
   for account in ${users}; do
@@ -4800,7 +4824,19 @@ function releaseEmergencyCleanupScript(runId, token) {
       .filter((resource) => resource.kind === kind)
       .map((resource) => shellSingleQuote(resource.name))
       .join(" ");
-  const files = pathsFor("file");
+  const files = releaseE2EInfrastructureResources
+    .filter(
+      (resource) =>
+        resource.kind === "file" &&
+        !releaseE2ESystemdStateProjections.some((projection) =>
+          resource.path.startsWith(`${projection.publicPath}/`),
+        ),
+    )
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const privateStateDirectories = releaseE2ESystemdStateProjections
+    .map((projection) => shellSingleQuote(projection.privatePath))
+    .join(" ");
   const directories = pathsFor("directory");
   const users = namesFor("user");
   const groups = namesFor("group");
@@ -4819,6 +4855,7 @@ fingerprint > "$temporary"
 cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\\n' >&2; exit 75; }
 systemctl disable --now ${services} >/dev/null 2>&1 || true
 rm -f -- ${files}
+rm -rf -- ${privateStateDirectories}
 rm -rf -- ${directories}
 for account in ${users}; do userdel -- "$account" >/dev/null 2>&1 || true; done
 for account in ${groups}; do groupdel -- "$account" >/dev/null 2>&1 || true; done

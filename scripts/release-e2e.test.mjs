@@ -5,6 +5,7 @@ import {
   chown,
   copyFile,
   lchown,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -2896,6 +2897,113 @@ exit "$status"
     expect(
       commands.some((command) => command.includes("ENOKI_UNINSTALL")),
     ).toBe(false);
+  });
+
+  it("removes a run-owned canonical StateDirectory projection without touching adjacent state", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-emergency-cleanup-"),
+    );
+    const fakeBin = path.join(root, "fake-bin");
+    const publicParent = path.join(root, "var", "lib");
+    const privateParent = path.join(publicParent, "private");
+    const publicState = path.join(publicParent, "enoki-probe");
+    const privateState = path.join(privateParent, "enoki-probe");
+    const identity = path.join(privateState, "identity");
+    const adjacent = path.join(privateParent, "external", "data");
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+    };
+    const mapHostPaths = (command) =>
+      command
+        .replaceAll("/var/lib/", `${root}/var/lib/`)
+        .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
+        .replaceAll("/etc/", `${root}/etc/`)
+        .replaceAll("/run/", `${root}/run/`);
+    const runHostScript = async (command) => {
+      try {
+        const result = await execFileAsync(
+          "sh",
+          ["-c", mapHostPaths(command)],
+          {
+            env: environment,
+          },
+        );
+        return successfulCommandText(result.stdout);
+      } catch (error) {
+        return {
+          code: typeof error.code === "number" ? error.code : 1,
+          stderr: error.stderr ?? error.message,
+          stdout: error.stdout ?? "",
+        };
+      }
+    };
+
+    try {
+      await mkdir(fakeBin, { recursive: true });
+      for (const command of ["groupdel", "systemctl", "userdel"]) {
+        const executable = path.join(fakeBin, command);
+        await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
+        await chmod(executable, 0o755);
+      }
+      const harness = createProbeHostHarness({
+        execute: async (command) => {
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+            await mkdir(identity, { recursive: true });
+            await mkdir(path.dirname(adjacent), { recursive: true });
+            await chmod(publicParent, 0o755);
+            await chmod(privateParent, 0o700);
+            await chmod(privateState, 0o750);
+            await chmod(identity, 0o700);
+            await writeFile(
+              path.join(identity, "probe-bootstrap.toml"),
+              "identity",
+              "utf8",
+            );
+            await chmod(path.join(identity, "probe-bootstrap.toml"), 0o600);
+            await writeFile(adjacent, "preserved", "utf8");
+            await symlink("private/enoki-probe", publicState);
+            return successfulCommandText(productInstallerOutput());
+          }
+          if (
+            command.includes(
+              "# enoki-release-e2e:cleanup-observation-runtime-failure",
+            )
+          ) {
+            return successfulCommandText("cleaned\n");
+          }
+          return runHostScript(command);
+        },
+      });
+
+      await harness.assertDisposable("run-private-state-cleanup");
+      await harness.install(officialEnrollment(), "run-private-state-cleanup");
+      await expect(
+        harness.cleanup("run-private-state-cleanup"),
+      ).resolves.toMatchObject({
+        clean: true,
+        removedPartialInstallation: true,
+      });
+
+      const present = (candidate) =>
+        lstat(candidate).then(
+          () => true,
+          (error) => (error.code === "ENOENT" ? false : Promise.reject(error)),
+        );
+      await expect(
+        Promise.all([
+          present(publicState),
+          present(privateState),
+          present(identity),
+        ]),
+      ).resolves.toEqual([false, false, false]);
+      await expect(readFile(adjacent, "utf8")).resolves.toBe("preserved");
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   });
 
   it("retains successful installer evidence when run-resource recording fails", async () => {
