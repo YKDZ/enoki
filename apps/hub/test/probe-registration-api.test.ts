@@ -3585,12 +3585,12 @@ describe("Probe registration API", () => {
 
 function installCommandEnrollment(command: string): unknown {
   const match =
-    /^ENOKI_HUB_URL='((?:[^'\r\n]|'"'"')*)' ENOKI_ENROLLMENT_TOKEN='((?:[^'\r\n]|'"'"')*)' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/.exec(
+    /^printf '%s\\n' '((?:[^'\r\n]|'"'"')*)' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin '((?:[^'\r\n]|'"'"')*)'$/.exec(
       command,
     );
   expect(match).not.toBeNull();
-  const hubOrigin = match![1]!.replaceAll("'\"'\"'", "'");
-  const enrollment: unknown = JSON.parse(match![2]!.replaceAll("'\"'\"'", "'"));
+  const enrollment: unknown = JSON.parse(match![1]!.replaceAll("'\"'\"'", "'"));
+  const hubOrigin = match![2]!.replaceAll("'\"'\"'", "'");
   expect((enrollment as { hubOrigin?: unknown }).hubOrigin).toBe(hubOrigin);
   return enrollment;
 }

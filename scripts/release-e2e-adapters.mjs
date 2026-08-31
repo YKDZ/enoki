@@ -293,7 +293,6 @@ function createReleaseInfrastructureAdapter({
         candidateDir: candidate.candidateDir,
         execute,
         manifest: candidate.manifest,
-        matrixCell,
         transferFile,
       });
       preparedRunId = runId;
@@ -329,177 +328,18 @@ function createCandidateBootstrapProvisioner({
   candidateDir,
   execute,
   manifest,
-  matrixCell,
   transferFile,
 }) {
   const recipe = selectCandidateBootstrapRecipe(manifest);
   const recipePath = path.join(candidateDir, "recipe", recipe.file);
   let provisioned = false;
   let provisionedRunId = null;
-  let binaryOwnership = null;
   let stageDir = null;
   const provision = async ({
-    installContract,
-    ownershipToken,
     recipe: requestedRecipe,
     runId,
     sourcePath,
   } = {}) => {
-    if (installContract?.kind === "production-bootstrap") {
-      if (stageDir) {
-        const removed = await execute(
-          removeCandidateBootstrapStagingScript(stageDir),
-          { sensitive: true },
-        );
-        if (removed.code !== 0 || removed.stdout.trim() !== "removed") {
-          throw new Error(
-            `Could not replace staged Candidate Bootstrap assets: ${removed.stderr}`,
-          );
-        }
-        stageDir = null;
-        provisioned = false;
-        provisionedRunId = null;
-      }
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
-        throw new Error("Release E2E infrastructure run ID is invalid");
-      }
-      if (!/^[0-9a-f-]{36}$/.test(ownershipToken ?? "")) {
-        throw new Error(
-          "Release E2E infrastructure ownership token is invalid",
-        );
-      }
-      const extracted = await extractCandidateBootstrapBinaries({
-        candidateDir,
-        manifest,
-        matrixCell,
-      });
-      binaryOwnership = {
-        assets: extracted.assets.map(({ sourcePath: _, ...asset }) => asset),
-        ownershipToken,
-        runId,
-      };
-      try {
-        const staged = await execute(stageCandidateBootstrapBinariesScript(), {
-          sensitive: true,
-        });
-        if (
-          staged.code !== 0 ||
-          !/^\/tmp\/enoki-release-e2e-bootstrap\.[A-Za-z0-9]+$/.test(
-            staged.stdout.trim(),
-          )
-        ) {
-          throw new Error(
-            `Could not stage Candidate Probe Bootstrap binaries as the non-root Host user: ${staged.stderr}`,
-          );
-        }
-        stageDir = staged.stdout.trim();
-        provisionedRunId = runId;
-        for (const asset of extracted.assets) {
-          await transferFile({
-            destination: path.join(stageDir, path.basename(asset.path)),
-            source: asset.sourcePath,
-          });
-        }
-        const installed = await execute(
-          installCandidateBootstrapBinariesScript({
-            archiveSha256: extracted.archiveSha256,
-            assets: extracted.assets,
-            ownershipToken,
-            runId,
-            stageDir,
-          }),
-          { root: true, sensitive: true },
-        );
-        const publication = installed.stdout.trim();
-        if (
-          installed.code !== 0 ||
-          (publication !== "installed" && publication !== "reused")
-        ) {
-          throw new Error(
-            `Could not install verified Candidate Probe Bootstrap binaries: ${installed.stderr}`,
-          );
-        }
-        stageDir = null;
-        provisionedRunId = null;
-        const reused = publication === "reused";
-        if (reused) binaryOwnership = null;
-        return {
-          complete: reused
-            ? async () => {}
-            : async () => {
-                const completed = await execute(
-                  completeCandidateBootstrapBinaryProvisionScript(
-                    binaryOwnership,
-                  ),
-                  { root: true, sensitive: true },
-                );
-                if (
-                  completed.code !== 0 ||
-                  completed.stdout.trim() !== "completed"
-                ) {
-                  throw new Error(
-                    `Could not complete Candidate Bootstrap run ownership: ${completed.stderr}`,
-                  );
-                }
-                binaryOwnership = null;
-              },
-          evidence: {
-            archiveSha256: extracted.archiveSha256,
-            assets: extracted.assets.map(
-              ({ sourcePath: _, ...asset }) => asset,
-            ),
-            kind: "enoki-release-e2e-candidate-bootstrap-binaries",
-            reused,
-            schemaVersion: 1,
-          },
-          workingDirectory: null,
-        };
-      } catch (error) {
-        const provisionCleanup = await execute(
-          cleanupCandidateBootstrapBinaryProvisionScript({
-            assets: extracted.assets,
-            ownershipToken,
-            runId,
-          }),
-          { root: true, sensitive: true },
-        ).catch((cleanupError) => ({
-          code: -1,
-          stderr: cleanupError.message,
-          stdout: "",
-        }));
-        if (
-          provisionCleanup.code !== 0 ||
-          provisionCleanup.stdout.trim() !== "removed"
-        ) {
-          error.provisionCleanupError = new Error(
-            `Could not recover failed Candidate Bootstrap binary publication: ${provisionCleanup.stderr}`,
-          );
-        } else {
-          binaryOwnership = null;
-        }
-        if (stageDir) {
-          const cleanup = await execute(
-            removeCandidateBootstrapStagingScript(stageDir),
-            { sensitive: true },
-          ).catch((cleanupError) => ({
-            code: -1,
-            stderr: cleanupError.message,
-            stdout: "",
-          }));
-          if (cleanup.code === 0 && cleanup.stdout.trim() === "removed") {
-            stageDir = null;
-            provisionedRunId = null;
-          } else {
-            error.cleanupError = new Error(
-              `Could not clean failed Candidate Bootstrap staging: ${cleanup.stderr}`,
-            );
-          }
-        }
-        throw error;
-      } finally {
-        await extracted.cleanup();
-      }
-    }
     const selectedRecipe = requestedRecipe ?? recipe;
     const selectedPath = sourcePath ?? recipePath;
     if (provisioned) {
@@ -579,38 +419,9 @@ function createCandidateBootstrapProvisioner({
       workingDirectory: stageDir,
     };
   };
-  provision.cleanupOwnedProvision = async ({ ownershipToken, runId }) => {
-    if (!binaryOwnership) return { clean: true, skipped: "binary_not_owned" };
-    if (
-      binaryOwnership.runId !== runId ||
-      binaryOwnership.ownershipToken !== ownershipToken
-    ) {
-      throw new Error("Candidate Bootstrap binary ownership does not match");
-    }
-    const removed = await execute(
-      cleanupCandidateBootstrapBinaryProvisionScript(binaryOwnership),
-      { root: true, sensitive: true },
-    );
-    if (removed.code !== 0 || removed.stdout.trim() !== "removed") {
-      throw new Error(
-        `Could not remove run-owned Candidate Bootstrap binaries: ${removed.stderr}`,
-      );
-    }
-    binaryOwnership = null;
-    return { clean: true };
-  };
   return {
     provision,
     async cleanup({ runId }) {
-      if (binaryOwnership) {
-        if (runId !== binaryOwnership.runId) {
-          throw new Error("Candidate Bootstrap binary run ID does not match");
-        }
-        await provision.cleanupOwnedProvision({
-          ownershipToken: binaryOwnership.ownershipToken,
-          runId,
-        });
-      }
       if (!stageDir) return { clean: true, skipped: "recipe_not_staged" };
       if (runId !== provisionedRunId) {
         throw new Error(
@@ -652,201 +463,12 @@ function stageCandidateBootstrapRecipeScript() {
   return `# enoki-release-e2e:candidate-bootstrap-recipe-stage\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=$(mktemp -d /tmp/enoki-release-e2e-recipe.XXXXXX)\nchmod 0700 "$stage_dir"\nprintf '%s\\n' "$stage_dir"\n`;
 }
 
-function stageCandidateBootstrapBinariesScript() {
-  return `# enoki-release-e2e:candidate-bootstrap-binary-stage\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=$(mktemp -d /tmp/enoki-release-e2e-bootstrap.XXXXXX)\nchmod 0700 "$stage_dir"\nprintf '%s\\n' "$stage_dir"\n`;
-}
-
-function installCandidateBootstrapBinariesScript({
-  archiveSha256,
-  assets,
-  ownershipToken,
-  runId,
-  stageDir,
-}) {
-  const byRole = Object.fromEntries(assets.map((asset) => [asset.role, asset]));
-  const acquirer = byRole["bootstrap-acquirer"];
-  const activator = byRole["bootstrap-activator"];
-  const intent = candidateBootstrapProvisionIntent(assets);
-  return `# enoki-release-e2e:candidate-bootstrap-binary-install\nset -eu\narchive_sha256=${shellSingleQuote(archiveSha256)}\nstage_dir=${shellSingleQuote(stageDir)}\nclaim=/var/lib/enoki-release-e2e/claim\nintent="$claim/bootstrap-provision-intent"\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\nexpected_intent=$(mktemp "$claim/.bootstrap-provision-intent.XXXXXX")\nprintf %s ${shellSingleQuote(intent)} > "$expected_intent"\ntrap 'rm -f -- "$expected_intent"' EXIT HUP INT TERM\nif [ -e "$intent" ]; then\n  [ -f "$intent" ] && [ ! -L "$intent" ] && [ "$(stat -c %u "$intent")" = 0 ] && [ "$(stat -c %g "$intent")" = 0 ] && [ "$(stat -c %a "$intent")" = 600 ] && [ "$(stat -c %h "$intent")" = 1 ]\n  cmp --silent "$expected_intent" "$intent"\n  # enoki-release-e2e:validate-partial-bootstrap-targets\n${candidateBootstrapInstalledOrAbsentChecks(assets)}\nelse\n  if [ -e /usr/local/bin/enoki-probe-bootstrap-acquire ] || [ -L /usr/local/bin/enoki-probe-bootstrap-acquire ] || [ -e /usr/local/bin/enoki-probe-bootstrap-activate ] || [ -L /usr/local/bin/enoki-probe-bootstrap-activate ]; then\n    [ -e /usr/local/bin/enoki-probe-bootstrap-acquire ]\n    [ -e /usr/local/bin/enoki-probe-bootstrap-activate ]\n    resources="$claim/resources"\n    [ -f "$resources" ] && [ ! -L "$resources" ] && [ "$(stat -c %u "$resources")" = 0 ] && [ "$(stat -c %g "$resources")" = 0 ] && [ "$(stat -c %a "$resources")" = 600 ] && [ "$(stat -c %h "$resources")" = 1 ]\n${candidateBootstrapInstalledFileChecks(assets)}\n${candidateBootstrapRunResourceChecks(assets)}\n    rm -f -- "$stage_dir/enoki-probe-bootstrap-acquire" "$stage_dir/enoki-probe-bootstrap-activate" "$expected_intent"\n    rmdir -- "$stage_dir"\n    trap - EXIT HUP INT TERM\n    printf 'reused\\n'\n    exit 0\n  fi\n  install --owner=root --group=root --mode=0600 -- "$expected_intent" "$intent"\nfi\nsource_acquirer="$stage_dir/enoki-probe-bootstrap-acquire"\nsource_activator="$stage_dir/enoki-probe-bootstrap-activate"\n[ -f "$source_acquirer" ] && [ ! -L "$source_acquirer" ] && [ "$(wc -c < "$source_acquirer" | tr -d ' ')" = ${shellSingleQuote(String(acquirer.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(acquirer.sha256)} "$source_acquirer" | sha256sum --check --status\n[ -f "$source_activator" ] && [ ! -L "$source_activator" ] && [ "$(wc -c < "$source_activator" | tr -d ' ')" = ${shellSingleQuote(String(activator.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(activator.sha256)} "$source_activator" | sha256sum --check --status\ntemporary_dir=$(mktemp -d /usr/local/bin/.enoki-release-e2e-bootstrap.XXXXXX)\ntrap 'rm -f -- "$expected_intent" "$temporary_dir/acquirer" "$temporary_dir/activator"; rmdir -- "$temporary_dir" 2>/dev/null || true' EXIT HUP INT TERM\ntemporary_acquirer="$temporary_dir/acquirer"\ntemporary_activator="$temporary_dir/activator"\ninstall --owner=root --group=root --mode=0555 -- "$source_acquirer" "$temporary_acquirer"\ninstall --owner=root --group=root --mode=0555 -- "$source_activator" "$temporary_activator"\nprintf '%s  %s\\n' ${shellSingleQuote(acquirer.sha256)} "$temporary_acquirer" | sha256sum --check --status\nprintf '%s  %s\\n' ${shellSingleQuote(activator.sha256)} "$temporary_activator" | sha256sum --check --status\nmv -- "$temporary_acquirer" /usr/local/bin/enoki-probe-bootstrap-acquire\nmv -- "$temporary_activator" /usr/local/bin/enoki-probe-bootstrap-activate\n${candidateBootstrapInstalledFileChecks(assets)}\nrm -f -- "$source_acquirer" "$source_activator" "$expected_intent"\nrmdir -- "$stage_dir"\nrmdir -- "$temporary_dir"\ntrap - EXIT HUP INT TERM\nprintf 'installed\\n'\n`;
-}
-
-function candidateBootstrapProvisionIntent(assets) {
-  return `schema_version=1\n${assets
-    .map(
-      (asset) =>
-        `${asset.role}_sha256=${asset.sha256}\n${asset.role}_size=${asset.size}`,
-    )
-    .join("\n")}\n`;
-}
-
-function candidateBootstrapInstalledFileChecks(assets) {
-  return assets
-    .map((asset) => {
-      const destination = `/usr/local/bin/${path.basename(asset.path)}`;
-      return `[ -f ${shellSingleQuote(destination)} ] && [ ! -L ${shellSingleQuote(destination)} ]\n[ "$(stat -c %h ${shellSingleQuote(destination)})" = 1 ]\n[ "$(stat -c %u ${shellSingleQuote(destination)})" = 0 ]\n[ "$(stat -c %g ${shellSingleQuote(destination)})" = 0 ]\n[ "$(stat -c %a ${shellSingleQuote(destination)})" = 555 ]\n[ "$(wc -c < ${shellSingleQuote(destination)} | tr -d ' ')" = ${shellSingleQuote(String(asset.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(asset.sha256)} ${shellSingleQuote(destination)} | sha256sum --check --status`;
-    })
-    .join("\n");
-}
-
-function candidateBootstrapRunResourceChecks(assets) {
-  const checks = assets
-    .map((asset) => {
-      const destination = `/usr/local/bin/${path.basename(asset.path)}`;
-      return `resource_owns_candidate ${shellSingleQuote(destination)} ${shellSingleQuote(asset.sha256)}`;
-    })
-    .join("\n");
-  return `resource_owns_candidate() {\n  candidate=$1\n  expected_sha256=$2\n  metadata=$(stat -c '%u\\t%g\\t%a\\t%d\\t%i\\t%s' -- "$candidate")\n  path_hash=$(printf '%s' "$candidate" | sha256sum | awk '{print $1}')\n  expected=$(printf 'path\\t%s\\tfile\\t%s\\t%s' "$path_hash" "$metadata" "$expected_sha256")\n  grep -Fxq "$expected" "$resources"\n}\n${checks}`;
-}
-
-function candidateBootstrapInstalledOrAbsentChecks(assets) {
-  return assets
-    .map((asset) => {
-      const destination = `/usr/local/bin/${path.basename(asset.path)}`;
-      return `if [ -e ${shellSingleQuote(destination)} ] || [ -L ${shellSingleQuote(destination)} ]; then\n${candidateBootstrapInstalledFileChecks([asset])}\nfi`;
-    })
-    .join("\n");
-}
-
-function cleanupCandidateBootstrapBinaryProvisionScript({
-  assets,
-  ownershipToken,
-  runId,
-}) {
-  const intent = candidateBootstrapProvisionIntent(assets);
-  return `# enoki-release-e2e:candidate-bootstrap-binary-cleanup\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\nintent="$claim/bootstrap-provision-intent"\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]\nif [ ! -e "$intent" ]; then printf 'removed\\n'; exit 0; fi\nexpected_intent=$(mktemp "$claim/.bootstrap-provision-intent.XXXXXX")\nprintf %s ${shellSingleQuote(intent)} > "$expected_intent"\ntrap 'rm -f -- "$expected_intent"' EXIT HUP INT TERM\n[ -f "$intent" ] && [ ! -L "$intent" ] && [ "$(stat -c %u "$intent")" = 0 ] && [ "$(stat -c %g "$intent")" = 0 ] && [ "$(stat -c %a "$intent")" = 600 ] && [ "$(stat -c %h "$intent")" = 1 ]\ncmp --silent "$expected_intent" "$intent"\n${candidateBootstrapInstalledOrAbsentChecks(assets)}\nrm -f -- /usr/local/bin/enoki-probe-bootstrap-acquire /usr/local/bin/enoki-probe-bootstrap-activate "$intent" "$expected_intent"\ntrap - EXIT HUP INT TERM\nprintf 'removed\\n'\n`;
-}
-
-function completeCandidateBootstrapBinaryProvisionScript({
-  assets,
-  ownershipToken,
-  runId,
-}) {
-  const intent = candidateBootstrapProvisionIntent(assets);
-  return `# enoki-release-e2e:candidate-bootstrap-binary-complete\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\nintent="$claim/bootstrap-provision-intent"\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]\nexpected_intent=$(mktemp "$claim/.bootstrap-provision-intent.XXXXXX")\nprintf %s ${shellSingleQuote(intent)} > "$expected_intent"\ntrap 'rm -f -- "$expected_intent"' EXIT HUP INT TERM\n[ -f "$intent" ] && [ ! -L "$intent" ] && [ "$(stat -c %u "$intent")" = 0 ] && [ "$(stat -c %g "$intent")" = 0 ] && [ "$(stat -c %a "$intent")" = 600 ] && [ "$(stat -c %h "$intent")" = 1 ]\ncmp --silent "$expected_intent" "$intent"\n${candidateBootstrapInstalledFileChecks(assets)}\nrm -- "$intent" "$expected_intent"\ntrap - EXIT HUP INT TERM\nprintf 'completed\\n'\n`;
-}
-
 function verifyCandidateBootstrapRecipeScript({ recipe, stageDir }) {
   return `# enoki-release-e2e:candidate-bootstrap-recipe-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\nrecipe="$stage_dir/${recipe.file}"\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n[ -f "$recipe" ] && [ ! -L "$recipe" ]\n[ "$(wc -c < "$recipe" | tr -d ' ')" = ${shellSingleQuote(String(recipe.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(recipe.sha256)} "$recipe" | sha256sum --check --status\nchmod 0500 "$recipe"\nprintf 'verified\\n'\n`;
 }
 
 function removeCandidateBootstrapStagingScript(stageDir) {
-  return `# enoki-release-e2e:candidate-bootstrap-staging-remove\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\ncase "$stage_dir" in /tmp/enoki-release-e2e-recipe.*|/tmp/enoki-release-e2e-bootstrap.*) ;; *) exit 1 ;; esac\nif [ ! -e "$stage_dir" ] && [ ! -L "$stage_dir" ]; then printf 'removed\\n'; exit 0; fi\nexpected_uid=$(id -u)\nexpected_gid=$(id -g)\n[ "$(find -P "$stage_dir" -maxdepth 0 -type d -links 2 -uid "$expected_uid" -gid "$expected_gid" -perm 0700 -print)" = "$stage_dir" ]\ninvalid=$(find -P "$stage_dir" -mindepth 1 -maxdepth 1 ! \\( -type f -links 1 -uid "$expected_uid" -gid "$expected_gid" \\( -perm 0500 -o -perm 0600 -o -perm 0755 \\) \\( -name enoki-probe-bootstrap.py -o -name enoki-probe-bootstrap-acquire -o -name enoki-probe-bootstrap-activate \\) \\) -print -quit)\n[ -z "$invalid" ]\nfind -P "$stage_dir" -mindepth 1 -maxdepth 1 -type f -links 1 -uid "$expected_uid" -gid "$expected_gid" \\( -perm 0500 -o -perm 0600 -o -perm 0755 \\) \\( -name enoki-probe-bootstrap.py -o -name enoki-probe-bootstrap-acquire -o -name enoki-probe-bootstrap-activate \\) -delete\nrmdir -- "$stage_dir"\nprintf 'removed\\n'\n`;
-}
-
-async function extractCandidateBootstrapBinaries({
-  candidateDir,
-  manifest,
-  matrixCell,
-}) {
-  if (
-    matrixCell?.architecture !== "x86_64" ||
-    matrixCell?.operatingSystem !== "ubuntu"
-  ) {
-    throw new Error("Candidate Bootstrap binary target is unsupported");
-  }
-  const archiveFile = "enoki-probe-x86_64-unknown-linux-gnu.tar.gz";
-  const descriptor = manifest?.probeAssetSet?.files?.find(
-    (file) => file.file === archiveFile,
-  );
-  if (
-    !descriptor ||
-    !/^[0-9a-f]{64}$/.test(descriptor.sha256 ?? "") ||
-    !Number.isSafeInteger(descriptor.size) ||
-    descriptor.size < 1
-  ) {
-    throw new Error("Validated Candidate has no exact Host Bootstrap bundle");
-  }
-  const archiveSource = path.join(
-    candidateDir,
-    manifest.probeAssetSet.directory,
-    archiveFile,
-  );
-  const archive = await readFile(archiveSource);
-  if (
-    archive.byteLength !== descriptor.size ||
-    sha256(archive) !== descriptor.sha256
-  ) {
-    throw new Error("Candidate Host Bootstrap bundle identity changed");
-  }
-  const extractionDir = await mkdtemp(
-    path.join(tmpdir(), "enoki-release-e2e-bootstrap-bundle."),
-  );
-  const archiveSnapshot = path.join(extractionDir, archiveFile);
-  await writeFile(archiveSnapshot, archive, { flag: "wx", mode: 0o600 });
-  try {
-    await execFileAsync("tar", [
-      "--extract",
-      "--gzip",
-      "--file",
-      archiveSnapshot,
-      "--directory",
-      extractionDir,
-      "bundle-manifest.json",
-      "bootstrap/enoki-probe-bootstrap-acquire",
-      "bootstrap/enoki-probe-bootstrap-activate",
-    ]);
-    const bundleManifest = JSON.parse(
-      await readFile(path.join(extractionDir, "bundle-manifest.json"), "utf8"),
-    );
-    if (
-      bundleManifest?.kind !== "enoki-probe-bundle" ||
-      bundleManifest?.version !== manifest.probeAssetSet.version ||
-      !Array.isArray(bundleManifest.bootstrapAssets) ||
-      bundleManifest.bootstrapAssets.length !== 2
-    ) {
-      throw new Error("Candidate Bootstrap bundle manifest is invalid");
-    }
-    const expected = [
-      {
-        path: "bootstrap/enoki-probe-bootstrap-acquire",
-        permissionProfile: "bootstrap-acquirer-v1",
-        role: "bootstrap-acquirer",
-      },
-      {
-        path: "bootstrap/enoki-probe-bootstrap-activate",
-        permissionProfile: "bootstrap-activator-v1",
-        role: "bootstrap-activator",
-      },
-    ];
-    const assets = [];
-    for (const expectedAsset of expected) {
-      const asset = bundleManifest?.bootstrapAssets?.find(
-        (candidate) => candidate.path === expectedAsset.path,
-      );
-      if (
-        asset?.role !== expectedAsset.role ||
-        asset?.permissionProfile !== expectedAsset.permissionProfile ||
-        asset?.version !== manifest.probeAssetSet.version ||
-        !/^[0-9a-f]{64}$/.test(asset?.sha256 ?? "") ||
-        !Number.isSafeInteger(asset?.size) ||
-        asset.size < 1
-      ) {
-        throw new Error("Candidate Bootstrap bundle role identity is invalid");
-      }
-      const sourcePath = path.join(extractionDir, expectedAsset.path);
-      const bytes = await readFile(sourcePath);
-      if (bytes.byteLength !== asset.size || sha256(bytes) !== asset.sha256) {
-        throw new Error("Candidate Bootstrap binary identity is invalid");
-      }
-      assets.push({
-        path: expectedAsset.path,
-        permissionProfile: expectedAsset.permissionProfile,
-        role: expectedAsset.role,
-        sha256: asset.sha256,
-        size: asset.size,
-        sourcePath,
-        version: asset.version,
-      });
-    }
-    return {
-      archiveSha256: descriptor.sha256,
-      assets,
-      cleanup: () => rm(extractionDir, { force: true, recursive: true }),
-    };
-  } catch (error) {
-    await rm(extractionDir, { force: true, recursive: true });
-    throw error;
-  }
+  return `# enoki-release-e2e:candidate-bootstrap-staging-remove\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\ncase "$stage_dir" in /tmp/enoki-release-e2e-recipe.*) ;; *) exit 1 ;; esac\nif [ ! -e "$stage_dir" ] && [ ! -L "$stage_dir" ]; then printf 'removed\\n'; exit 0; fi\nexpected_uid=$(id -u)\nexpected_gid=$(id -g)\n[ "$(find -P "$stage_dir" -maxdepth 0 -type d -links 2 -uid "$expected_uid" -gid "$expected_gid" -perm 0700 -print)" = "$stage_dir" ]\ninvalid=$(find -P "$stage_dir" -mindepth 1 -maxdepth 1 ! \\( -type f -links 1 -uid "$expected_uid" -gid "$expected_gid" \\( -perm 0500 -o -perm 0600 \\) -name enoki-probe-bootstrap.py \\) -print -quit)\n[ -z "$invalid" ]\nfind -P "$stage_dir" -mindepth 1 -maxdepth 1 -type f -links 1 -uid "$expected_uid" -gid "$expected_gid" \\( -perm 0500 -o -perm 0600 \\) -name enoki-probe-bootstrap.py -delete\nrmdir -- "$stage_dir"\nprintf 'removed\\n'\n`;
 }
 
 async function copyCandidateArchive({ source, destination }) {
@@ -1328,7 +950,6 @@ export function createReleaseEnvironment({
         },
       });
       const host = createProbeHostHarness({
-        cleanupPreparedInstall: bootstrapProvisioner?.cleanupOwnedProvision,
         execute,
         ownershipToken,
         async prepareInstall({ enrollment, installContract }) {
@@ -1349,18 +970,6 @@ export function createReleaseEnvironment({
             throw new Error(
               "Release E2E infrastructure cannot stage the active Hub Probe Bootstrap recipe",
             );
-          }
-          if (installContract.kind === "production-bootstrap") {
-            if (dockerResources?.activeHub !== "candidate") {
-              throw new Error(
-                "Production Probe Bootstrap binaries require the verified Candidate Hub",
-              );
-            }
-            return bootstrapProvisioner({
-              installContract,
-              ownershipToken,
-              runId,
-            });
           }
           const exported = await docker.exportActiveBootstrapRecipe({
             candidateManifest,
@@ -1577,6 +1186,13 @@ export function createDockerHubController({
       currentRuntimeEnvironment = {
         hubOwnerUrl,
         hubPublicUrl,
+        legacyBaselinePublicHubUrl:
+          hubMode === "baseline" &&
+          candidateManifest.releaseBaseline?.kind ===
+            "enoki-trust-epoch-migration-baseline" &&
+          candidateManifest.releaseBaseline.tag === "v0.1.74"
+            ? hubPublicUrl
+            : null,
         operationSigningSecret,
         ownerPassword,
         ownerPort,
@@ -2308,6 +1924,12 @@ export function createDockerHubController({
         `OWNER_PASSWORD=${currentRuntimeEnvironment.ownerPassword}`,
         `ENOKI_MANAGEMENT_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
         `ENOKI_PROBE_API_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
+        ...(runtime.name === "baseline" &&
+        currentRuntimeEnvironment.legacyBaselinePublicHubUrl !== null
+          ? [
+              `ENOKI_PUBLIC_HUB_URL=${currentRuntimeEnvironment.legacyBaselinePublicHubUrl}`,
+            ]
+          : []),
         `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET=${currentRuntimeEnvironment.operationSigningSecret}`,
         ...(currentRuntimeEnvironment.probeOperationRunningTimeoutSeconds ===
         null
