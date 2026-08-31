@@ -297,10 +297,10 @@ async function createRuntimeFailureCustodyFixture(prefix) {
       .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
       .replaceAll("/etc/", `${root}/etc/`)
       .replaceAll("/run/", `${root}/run/`);
-  const runHostScript = async (command) => {
+  const runHostScript = async (command, environmentOverrides = {}) => {
     try {
       const result = await execFileAsync("sh", ["-c", mapHostPaths(command)], {
-        env: environment,
+        env: { ...environment, ...environmentOverrides },
       });
       return successfulCommandText(result.stdout);
     } catch (error) {
@@ -2988,6 +2988,140 @@ printf covered > '${covered}'
     }
   });
 
+  it("uses a final real systemd start request to turn an exhausted Runtime into recorder eligibility", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-final-start-limit-",
+    );
+    const root = path.resolve(path.dirname(fixture.paths.runtime), "../../..");
+    const state = path.join(root, "runtime-state");
+    const startRequests = path.join(root, "runtime-start-requests");
+    const epoch = path.join(
+      root,
+      "var",
+      "lib",
+      "enoki-probe",
+      "runtime-failure",
+      "epoch.toml",
+    );
+    const latch = path.join(
+      root,
+      "var",
+      "lib",
+      "enoki-probe",
+      "runtime-failure",
+      "latch",
+    );
+    try {
+      await writeFile(
+        path.join(root, "fake-bin", "sleep"),
+        "#!/bin/sh\nexit 0\n",
+        "utf8",
+      );
+      await chmod(path.join(root, "fake-bin", "sleep"), 0o755);
+      await writeFile(
+        path.join(root, "fake-bin", "systemctl"),
+        `#!/bin/sh
+if [ "$1" = show ] && [ "$3" = --property=FragmentPath ]; then
+  printf '%s\\n' "$ENOKI_RUNTIME_UNIT"
+  exit 0
+fi
+if [ "$1" = show ] && [ "$3" = --property=DropInPaths ]; then exit 0; fi
+if [ "$1" = stop ] || [ "$1" = reset-failed ]; then exit 0; fi
+if [ "$1" = show ] && [ "$2" != enoki-observation-runtime.service ]; then
+  printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'
+  exit 0
+fi
+if [ "$1" = start ] && [ "$2" = enoki-observation-runtime.service ]; then
+  requests=$(cat "$ENOKI_START_REQUESTS" 2>/dev/null || printf 0)
+  requests=$((requests + 1))
+  printf '%s\\n' "$requests" > "$ENOKI_START_REQUESTS"
+  if [ "$requests" -eq 1 ]; then
+    printf 'auto-restarting\\n' > "$ENOKI_RUNTIME_STATE"
+    exit 0
+  fi
+  [ "$(cat "$ENOKI_RUNTIME_STATE")" = exit-code ] || exit 1
+  printf 'start-limit-hit\\n' > "$ENOKI_RUNTIME_STATE"
+  mkdir -p "$(dirname "$ENOKI_RUNTIME_EPOCH")"
+  unit_sha=$(sha256sum "$ENOKI_RUNTIME_UNIT" | cut -d ' ' -f 1)
+  cat > "$ENOKI_RUNTIME_EPOCH" <<EOF
+schema_version = 1
+generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+boot_id = "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51"
+unit = "enoki-observation-runtime.service"
+unit_sha256 = "$unit_sha"
+host_id = "7"
+probe_id = "probe_release_01"
+identity_receipt_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+install_state_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+bundle_version = "1.2.3"
+result = "start-limit-hit"
+EOF
+  printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$ENOKI_RUNTIME_LATCH"
+  chmod 0600 "$ENOKI_RUNTIME_EPOCH" "$ENOKI_RUNTIME_LATCH"
+  exit 1
+fi
+if [ "$1" = show ]; then
+  current=$(cat "$ENOKI_RUNTIME_STATE" 2>/dev/null || printf stopped)
+  if [ "$current" = auto-restarting ]; then
+    printf 'exit-code\\n' > "$ENOKI_RUNTIME_STATE"
+    current=exit-code
+  fi
+  case "$current" in
+    start-limit-hit) active=failed; result=start-limit-hit ;;
+    exit-code|auto-restarting) active=failed; result=exit-code ;;
+    *) active=inactive; result=success ;;
+  esac
+  case " $* " in
+    *" --property=ActiveState --value "*) printf '%s\\n' "$active" ;;
+    *" --property=Result --value "*) printf '%s\\n' "$result" ;;
+    *" --property=NRestarts --value "*) printf '2\\n' ;;
+    *) printf 'LoadState=loaded\\nActiveState=%s\\nSubState=dead\\n' "$active" ;;
+  esac
+  exit 0
+fi
+exit 1
+`,
+        "utf8",
+      );
+      await chmod(path.join(root, "fake-bin", "systemctl"), 0o755);
+      const runtimeSha256 = createHash("sha256")
+        .update(await readFile(fixture.paths.runtime))
+        .digest("hex");
+
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun() {},
+        async execute(command) {
+          if (
+            command.includes(
+              "# enoki-release-e2e:exhaust-observation-runtime-budget",
+            )
+          ) {
+            return await fixture.runHostScript(command, {
+              ENOKI_RUNTIME_EPOCH: epoch,
+              ENOKI_RUNTIME_LATCH: latch,
+              ENOKI_RUNTIME_STATE: state,
+              ENOKI_START_REQUESTS: startRequests,
+            });
+          }
+          return successfulCommandText(
+            `bundleVersion=1.2.3\nepochExists=0\nfaultBackupExists=1\nlatchExists=0\nrepairOutput=Probe repair completed.\nruntimeSha256=${runtimeSha256}\nunit=enoki-observation-runtime.service\n`,
+          );
+        },
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+
+      await expect(
+        driver.repair("run-runtime-custody", "1.2.3"),
+      ).resolves.toMatchObject({
+        failure: { result: "start-limit-hit", status: "latched" },
+      });
+      await expect(readFile(startRequests, "utf8")).resolves.toBe("2\n");
+    } finally {
+      await fixture.remove();
+    }
+  });
+
   it("discards a partial fixed backup-publication temp before atomically publishing fresh custody", async () => {
     const fixture = await createRuntimeFailureCustodyFixture(
       "enoki-runtime-backup-publication-temp-",
@@ -5162,18 +5296,34 @@ describe("Hub Lifecycle Client", () => {
     });
   });
 
-  it("以精确 Hub Origin 请求卸载探针", async () => {
+  it("经 Owner transport 以 public management Origin 请求卸载探针", async () => {
     const requests = [];
     const client = createHubLifecycleClient({
-      baseUrl: "https://hub.example:8443",
+      baseUrl: "http://127.0.0.1:33001",
+      managementOrigin: "http://127.0.0.1:33000",
       fetch: async (url, init = {}) => {
         const parsed = new URL(url);
         requests.push({
+          cookie: new Headers(init.headers).get("cookie"),
           method: init.method ?? "GET",
           origin: new Headers(init.headers).get("origin"),
           pathname: parsed.pathname,
+          url: parsed.toString(),
         });
+        if (parsed.pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
         if (parsed.pathname === "/api/web/hosts/7") {
+          if (
+            new Headers(init.headers).get("origin") !== "http://127.0.0.1:33000"
+          ) {
+            return new Response("Forbidden", {
+              headers: { "content-type": "text/plain" },
+              status: 403,
+            });
+          }
           return jsonResponse(
             {
               probeUninstallRequest: {
@@ -5195,6 +5345,7 @@ describe("Hub Lifecycle Client", () => {
       },
     });
 
+    await client.authenticate("owner-password");
     await expect(client.requestProbeUninstall(7)).resolves.toMatchObject({
       hostId: 7,
       id: 42,
@@ -5203,11 +5354,39 @@ describe("Hub Lifecycle Client", () => {
     });
     expect(requests).toEqual([
       {
+        cookie: null,
+        method: "POST",
+        origin: null,
+        pathname: "/api/web/auth/login",
+        url: "http://127.0.0.1:33001/api/web/auth/login",
+      },
+      {
         method: "DELETE",
-        origin: "https://hub.example:8443",
+        cookie: "enoki_owner_session=session-1",
+        origin: "http://127.0.0.1:33000",
         pathname: "/api/web/hosts/7",
+        url: "http://127.0.0.1:33001/api/web/hosts/7",
       },
     ]);
+  });
+
+  it("在 public management Origin 缺失或非法时不发送卸载探针请求", async () => {
+    for (const managementOrigin of [undefined, "https://hub.example/path"]) {
+      let fetchCalls = 0;
+      const client = createHubLifecycleClient({
+        baseUrl: "http://127.0.0.1:33001",
+        fetch: async () => {
+          fetchCalls += 1;
+          throw new Error("request must not be sent");
+        },
+        managementOrigin,
+      });
+
+      await expect(client.requestProbeUninstall(7)).rejects.toThrow(
+        "Hub public management Origin is invalid",
+      );
+      expect(fetchCalls).toBe(0);
+    }
   });
 
   it("reads the terminal typed rejection for the matching Enrollment", async () => {
@@ -5436,6 +5615,7 @@ describe("Hub Lifecycle Client", () => {
     let deletes = 0;
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
+      managementOrigin: "https://hub.example",
       fetch: async (url, init = {}) => {
         const path = new URL(url).pathname;
         if (path === "/api/web/auth/login") {
@@ -5569,6 +5749,7 @@ describe("Hub Lifecycle Client", () => {
   it("rejects a polled Probe Operation that is not the requested uninstall", async () => {
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
+      managementOrigin: "https://hub.example",
       fetch: async (url, init = {}) => {
         const path = new URL(url).pathname;
         if (path === "/api/web/auth/login") {
@@ -5673,6 +5854,7 @@ describe("Hub Lifecycle Client", () => {
     };
     const client = createHubLifecycleClient({
       baseUrl: "https://hub.example",
+      managementOrigin: "https://hub.example",
       fetch: fetch_,
       sleep: async () => {},
     });
@@ -11556,6 +11738,7 @@ function migrationBaselineEnvironment(
 function operationPollingClient(observe) {
   return createHubLifecycleClient({
     baseUrl: "https://hub.example",
+    managementOrigin: "https://hub.example",
     fetch: async (url, init = {}) => {
       const path = new URL(url).pathname;
       if (path === "/api/web/auth/login") {

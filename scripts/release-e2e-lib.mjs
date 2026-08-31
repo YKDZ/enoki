@@ -2501,6 +2501,7 @@ async function runFreshInstallUninstallScenario({
 export function createHubLifecycleClient({
   baseUrl,
   fetch: fetch_ = globalThis.fetch,
+  managementOrigin,
   replacementSourceProbeSha256,
   sleep = defaultSleep,
 }) {
@@ -2747,7 +2748,7 @@ export function createHubLifecycleClient({
     async requestProbeUninstall(hostId) {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(`/api/web/hosts/${hostId}`, {
-        headers: { origin: normalizedBaseUrl.origin },
+        headers: { origin: assertManagementOrigin(managementOrigin) },
         method: "DELETE",
       });
       const operation = body?.probeUninstallRequest;
@@ -5746,6 +5747,24 @@ function parseBootstrapEnrollmentAuthority(
     replacementMigration: migration,
     token: parsed.enrollmentToken,
   };
+}
+
+function assertManagementOrigin(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Hub public management Origin is invalid");
+  }
+  if (
+    url.origin !== value ||
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error("Hub public management Origin is invalid");
+  }
+  return url.origin;
 }
 
 function assertInstallHubOrigin(value) {
