@@ -90,6 +90,14 @@ fn is_live_upgrade_companion_unit(unit: &str) -> bool {
         "enoki-probe-lifecycle-upgrade.socket" | "enoki-probe-lifecycle-upgrade@*.service"
     )
 }
+
+fn require_absent_from_load_state(loaded: &command::BoundedOutput) -> Result<(), InstallError> {
+    if !loaded.status.success() || single_systemd_value(&loaded.stdout)? != "not-found" {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(())
+}
+
 impl SystemdPort for SystemSystemd {
     fn set_command_deadline(&mut self, deadline: Instant) {
         self.command_deadline = Some(deadline);
@@ -98,17 +106,6 @@ impl SystemdPort for SystemSystemd {
         let deadline = self
             .command_deadline
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-        let enabled = run_bounded(
-            "/usr/bin/systemctl",
-            &["is-enabled", "--full", "--no-pager", "enoki-probe.service"],
-            InstallError::Systemd,
-            deadline,
-            COMMAND_STEP_BUDGET,
-        )?;
-        let enabled_value = single_systemd_value(&enabled.stdout)?;
-        if enabled_value != "not-found" || !matches!(enabled.status.code(), Some(1) | Some(4)) {
-            return Err(InstallError::ExistingResidue);
-        }
         let loaded = run_bounded(
             "/usr/bin/systemctl",
             &[
@@ -121,10 +118,7 @@ impl SystemdPort for SystemSystemd {
             deadline,
             COMMAND_STEP_BUDGET,
         )?;
-        if !loaded.status.success() || single_systemd_value(&loaded.stdout)? != "not-found" {
-            return Err(InstallError::ExistingResidue);
-        }
-        Ok(())
+        require_absent_from_load_state(&loaded)
     }
     fn daemon_reload(&mut self) -> Result<(), InstallError> {
         require_success(
@@ -275,10 +269,62 @@ impl SystemdPort for SystemSystemd {
 mod tests {
     use super::{
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        attempt_all_fixed_units, canonical_restart_deadline, is_live_upgrade_companion_unit,
-        rollback_unit_is_absent,
+        attempt_all_fixed_units, canonical_restart_deadline, command,
+        is_live_upgrade_companion_unit, require_absent_from_load_state, rollback_unit_is_absent,
     };
+    use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn systemd_249_missing_unit_is_absent_when_load_state_is_not_found() {
+        let loaded = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"not-found\n".to_vec(),
+        };
+
+        assert_eq!(require_absent_from_load_state(&loaded), Ok(()));
+    }
+
+    #[test]
+    fn loaded_unit_is_existing_residue() {
+        let loaded = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: b"loaded\n".to_vec(),
+        };
+
+        assert_eq!(
+            require_absent_from_load_state(&loaded),
+            Err(InstallError::ExistingResidue)
+        );
+    }
+
+    #[test]
+    fn failed_load_state_query_fails_closed() {
+        let loaded = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: b"not-found\n".to_vec(),
+        };
+
+        assert_eq!(
+            require_absent_from_load_state(&loaded),
+            Err(InstallError::ExistingResidue)
+        );
+    }
+
+    #[test]
+    fn ambiguous_load_state_output_fails_closed() {
+        for stdout in [b"".as_slice(), b"not-found\nloaded\n", b"not-found\r\n"] {
+            let loaded = command::BoundedOutput {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: stdout.to_vec(),
+            };
+
+            assert_eq!(
+                require_absent_from_load_state(&loaded),
+                Err(InstallError::Systemd)
+            );
+        }
+    }
 
     #[test]
     fn canonical_restart_gets_a_new_bounded_deadline_after_install_deadline() {
