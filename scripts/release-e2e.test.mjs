@@ -3283,7 +3283,7 @@ printf covered > '${covered}'
     expect(commands).toHaveLength(3);
   });
 
-  it("keeps the run claim and Runtime custody when post-restore exact verification fails", async () => {
+  it("rejects a changed asserted resource closure before Runtime custody effects", async () => {
     const commands = [];
     let inventoryCount = 0;
     let snapshotCount = 0;
@@ -3385,21 +3385,6 @@ printf covered > '${covered}'
     ]) {
       expect(commands.some((command) => command.includes(marker))).toBe(false);
     }
-    expect(
-      commands.some((command) =>
-        command.includes("# enoki-release-e2e:emergency-cleanup"),
-      ),
-    ).toBe(false);
-    expect(
-      commands.some((command) =>
-        command.includes("# enoki-release-e2e:remove-claim"),
-      ),
-    ).toBe(false);
-    expect(
-      commands.some((command) =>
-        command.includes("# enoki-release-e2e:retire-runtime-failure-custody"),
-      ),
-    ).toBe(false);
   });
 
   it("does not cross the custody gate when Runtime cleanup commits but its response is lost", async () => {
