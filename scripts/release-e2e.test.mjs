@@ -6676,6 +6676,134 @@ describe("Release E2E command", () => {
     }
   });
 
+  it("cleans a run-owned 0600 recipe after transfer digest verification fails", async () => {
+    const candidateDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-digest-failure-"),
+    );
+    const recipeDir = path.join(candidateDir, "recipe");
+    const file = "enoki-probe-bootstrap.py";
+    const recipe = Buffer.from("verified candidate bootstrap recipe");
+    const externalDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-digest-external-"),
+    );
+    const externalRecipe = Buffer.from("external recipe must be preserved");
+    const hostIdentity =
+      process.getuid?.() === 0 ? { gid: 65534, uid: 65534 } : {};
+    let deferCleanup = false;
+    const runHostProcess = (command, arguments_, options) =>
+      deferCleanup &&
+      options.input.includes(
+        "# enoki-release-e2e:candidate-bootstrap-staging-remove",
+      )
+        ? Promise.resolve({
+            code: 1,
+            stderr: "simulated cleanup interruption",
+            stdout: "",
+          })
+        : new Promise((resolve) => {
+            const child = execFile(
+              command,
+              arguments_,
+              hostIdentity,
+              (error, stdout, stderr) => {
+                resolve({
+                  code: typeof error?.code === "number" ? error.code : 0,
+                  stderr,
+                  stdout,
+                });
+              },
+            );
+            child.stdin.end(options.input);
+          });
+    try {
+      await mkdir(recipeDir);
+      await writeFile(path.join(recipeDir, file), recipe);
+      await writeFile(path.join(externalDir, file), externalRecipe);
+      if (hostIdentity.uid !== undefined) {
+        await chown(externalDir, hostIdentity.uid, hostIdentity.gid);
+        await chown(
+          path.join(externalDir, file),
+          hostIdentity.uid,
+          hostIdentity.gid,
+        );
+      }
+      const adapter = createCiReleaseInfrastructureAdapter({
+        candidateManifestPath: path.join(
+          candidateDir,
+          "candidate-manifest.json",
+        ),
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_RUN_ATTEMPT: "2",
+          GITHUB_RUN_ID: "1234",
+          RUNNER_ARCH: "X64",
+          RUNNER_OS: "Linux",
+        },
+        loadCandidate: async () => ({
+          candidateDir,
+          manifest: {
+            ...candidateManifest(),
+            bootstrapRecipe: {
+              ...candidateManifest().bootstrapRecipe,
+              file,
+              sha256: createHash("sha256").update(recipe).digest("hex"),
+              size: recipe.byteLength,
+            },
+          },
+        }),
+        runProcess: runHostProcess,
+        transferFile: async ({ destination, source }) => {
+          await copyFile(source, destination);
+          await chmod(destination, 0o600);
+          if (hostIdentity.uid !== undefined) {
+            await chown(destination, hostIdentity.uid, hostIdentity.gid);
+          }
+          await writeFile(destination, "tampered recipe");
+        },
+      });
+      const prepared = await adapter.prepare({
+        matrixCell: freshMatrixCell(),
+        runId: "run-bootstrap-digest-failure",
+      });
+
+      const failure = await prepared
+        .provisionBootstrap({ runId: "run-bootstrap-digest-failure" })
+        .then(
+          () => null,
+          (error) => error,
+        );
+      expect(failure).toMatchObject({
+        message: expect.stringMatching(
+          /verify Candidate Probe Bootstrap recipe staging/,
+        ),
+      });
+      expect(failure).not.toHaveProperty("cleanupError");
+
+      deferCleanup = true;
+      const interruptedCleanup = await prepared
+        .provisionBootstrap({ runId: "run-bootstrap-digest-failure" })
+        .then(
+          () => null,
+          (error) => error,
+        );
+      expect(interruptedCleanup).toMatchObject({
+        cleanupError: expect.objectContaining({
+          message: expect.stringMatching(/simulated cleanup interruption/),
+        }),
+      });
+      deferCleanup = false;
+      await expect(
+        adapter.release({ runId: "run-bootstrap-digest-failure" }),
+      ).resolves.toMatchObject({ clean: true, recipe: { clean: true } });
+      await expect(readFile(path.join(externalDir, file))).resolves.toEqual(
+        externalRecipe,
+      );
+    } finally {
+      await rm(candidateDir, { force: true, recursive: true });
+      await rm(externalDir, { force: true, recursive: true });
+    }
+  });
+
   it("does not follow a replaced Bootstrap staging directory into external resources", async () => {
     const candidateDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-bootstrap-symlink-candidate-"),
