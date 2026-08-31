@@ -16,6 +16,35 @@ export function createInstalledBundleFailureRepairHostDriver({
   let faultMayBeActive = false;
 
   return Object.freeze({
+    async inspectCustody(runId) {
+      assertOwnedRun(runId);
+      const result = await execute(
+        inspectObservationRuntimeCustodyScript(runId, ownershipToken),
+        { root: true },
+      );
+      const state = result.stdout.trim();
+      if (result.code !== 0 || (state !== "present" && state !== "absent")) {
+        throw new Error(
+          `Observation Runtime failure custody inspection failed: ${result.stderr || result.stdout}`,
+        );
+      }
+      return { present: state === "present" };
+    },
+
+    async retireCustody(runId) {
+      assertOwnedRun(runId);
+      const result = await execute(
+        retireObservationRuntimeCustodyScript(runId, ownershipToken),
+        { root: true },
+      );
+      if (result.code !== 0 || result.stdout.trim() !== "retired") {
+        throw new Error(
+          `Observation Runtime failure custody retirement failed: ${result.stderr || result.stdout}`,
+        );
+      }
+      return { retired: true };
+    },
+
     async cleanup(runId) {
       assertOwnedRun(runId);
       const result = await execute(
@@ -137,9 +166,15 @@ export async function proveInstalledBundleFailureRepair({
     hostBoundary,
     identity: { after: identityAfter, before: identityBefore },
     repair: {
-      ...repair,
+      failureEpochRemoved: repair.failureEpochRemoved,
+      faultRemoved: true,
+      latchRemoved: repair.latchRemoved,
+      output: repair.output,
       probeId: identityAfter.probeId,
       repairedVersion: expectedBundleVersion,
+      runtimeSha256: repair.runtimeSha256,
+      sameBundle: repair.sameBundle,
+      unit: repair.unit,
     },
   };
 }
@@ -283,13 +318,13 @@ function parseRepairEvidence(
     values.runtimeSha256 !== originalRuntimeSha256 ||
     values.epochExists !== "0" ||
     values.latchExists !== "0" ||
-    values.faultBackupExists !== "0"
+    values.faultBackupExists !== "1"
   ) {
     throw new Error("Installed Bundle Failure Repair evidence is invalid");
   }
   return {
     failureEpochRemoved: true,
-    faultRemoved: true,
+    custodyRetained: true,
     latchRemoved: true,
     output: values.repairOutput,
     runtimeSha256: values.runtimeSha256,
@@ -438,12 +473,11 @@ repair_output=$(/usr/local/bin/enoki-probe repair)
 [ "$repair_output" = 'Probe repair completed.' ]
 [ ! -e "$epoch" ] && [ ! -e "$latch" ]
 [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$runtime_sha256" ]
-rm -- "$backup"
 version_output=$(/usr/local/bin/enoki-probe --version)
 bundle_version=\${version_output#"enoki-probe "}
 bundle_version=\${bundle_version#v}
 [ "$bundle_version" = ${shellSingleQuote(expectedBundleVersion)} ]
-printf 'bundleVersion=%s\nepochExists=0\nfaultBackupExists=0\nlatchExists=0\nrepairOutput=%s\nruntimeSha256=%s\nunit=%s\n' \\
+printf 'bundleVersion=%s\nepochExists=0\nfaultBackupExists=1\nlatchExists=0\nrepairOutput=%s\nruntimeSha256=%s\nunit=%s\n' \\
   "$bundle_version" "$repair_output" "$runtime_sha256" "$unit"
 `;
 }
@@ -456,9 +490,11 @@ runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
 epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
 latch=/var/lib/enoki-probe/runtime-failure/latch
+companion=/usr/local/bin/enoki-probe-lifecycle-companion
 unit=${shellSingleQuote(observationRuntimeUnit)}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
 ${systemdUnitStateFunctions()}
+path_exists() { [ -e "$1" ] || [ -L "$1" ]; }
 recovered_bundle_version=
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
@@ -468,18 +504,20 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   backup_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1) || fail 'could not read run-owned Runtime backup'
   stop_unit enoki-probe.service
   stop_unit enoki-observation-runtime.socket
-  stop_unit "$unit"
-  stop_unit enoki-observation-runtime-failure.service
   require_stopped_unit enoki-probe.service
   require_stopped_unit enoki-observation-runtime.socket
+  if path_exists "$epoch" && ! path_exists "$latch"; then
+    "$companion" record-runtime-failure || fail 'could not complete partial Runtime failure pair'
+  fi
+  stop_unit "$unit"
+  stop_unit enoki-observation-runtime-failure.service
   require_stopped_unit "$unit"
   require_stopped_unit enoki-observation-runtime-failure.service
   cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"
   [ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'restored Observation Runtime boundary is invalid'
   [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'restored Observation Runtime digest changed'
-  if [ -f "$epoch" ] || [ -f "$latch" ]; then
-    [ -f "$epoch" ] && [ -f "$latch" ]
-    /usr/local/bin/enoki-probe-lifecycle-companion retry-runtime
+  if path_exists "$epoch" || path_exists "$latch"; then
+    "$companion" retry-runtime || fail 'could not consume Runtime failure pair'
   else
     systemctl reset-failed "$unit" >/dev/null 2>&1 || fail 'could not reset Observation Runtime failure state'
     systemctl reset-failed enoki-observation-runtime-failure.service >/dev/null 2>&1 || fail 'could not reset Runtime recorder failure state'
@@ -496,17 +534,59 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   recovered_bundle_version=\${version_output#"enoki-probe "}
   recovered_bundle_version=\${recovered_bundle_version#v}
   printf '%s\n' "$recovered_bundle_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'recovered Probe version is invalid'
-  rm -- "$backup"
-elif [ -e "$epoch" ] || [ -e "$latch" ]; then
+elif path_exists "$backup"; then
+  fail 'run-owned Runtime backup boundary is invalid'
+elif path_exists "$epoch" || path_exists "$latch"; then
   printf 'failure state exists without the run-owned Runtime backup\n' >&2
   exit 79
 fi
-[ ! -e "$backup" ] && [ ! -e "$epoch" ] && [ ! -e "$latch" ]
+[ -f "$backup" ] || { [ ! -e "$epoch" ] && [ ! -e "$latch" ]; }
 if [ -n "$recovered_bundle_version" ]; then
   printf 'recovered=%s\n' "$recovered_bundle_version"
 else
   printf 'cleaned\n'
 fi
+`;
+}
+
+function inspectObservationRuntimeCustodyScript(runId, ownershipToken) {
+  return runtimeCustodyScript({
+    header: "inspect-runtime-failure-custody",
+    ownershipToken,
+    retire: false,
+    runId,
+  });
+}
+
+function retireObservationRuntimeCustodyScript(runId, ownershipToken) {
+  return runtimeCustodyScript({
+    header: "retire-runtime-failure-custody",
+    ownershipToken,
+    retire: true,
+    runId,
+  });
+}
+
+function runtimeCustodyScript({ header, ownershipToken, retire, runId }) {
+  return `# enoki-release-e2e:${header}
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+runtime=/usr/local/bin/enoki-observation-runtime
+backup="$claim/observation-runtime-original"
+fail() { printf '%s\n' "$1" >&2; exit 79; }
+[ -d "$claim" ] || fail 'release E2E ownership claim is missing'
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
+[ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
+if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
+  printf '${retire ? "retired" : "absent"}\n'
+  exit 0
+fi
+[ -f "$backup" ] && [ ! -L "$backup" ] || fail 'run-owned Runtime backup boundary is invalid'
+[ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'run-owned Runtime backup ownership is invalid'
+[ -f "$runtime" ] && [ ! -L "$runtime" ] || fail 'Observation Runtime binary boundary is invalid'
+[ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'Observation Runtime binary ownership is invalid'
+[ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$(sha256sum "$backup" | cut -d ' ' -f 1)" ] || fail 'Observation Runtime differs from run-owned custody'
+${retire ? "rm -- \"$backup\"\nprintf 'retired\\n'" : "printf 'present\\n'"}
 `;
 }
 

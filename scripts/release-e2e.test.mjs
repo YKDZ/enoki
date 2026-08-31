@@ -1826,6 +1826,13 @@ exit "$status"
         if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
           return successfulCommandText("1\n");
         }
+        if (
+          command.includes(
+            "# enoki-release-e2e:inspect-runtime-failure-custody",
+          )
+        ) {
+          return successfulCommandText("absent\n");
+        }
         if (command.includes("# enoki-release-e2e:probe-identity")) {
           return successfulCommand({
             identitySha256: "f".repeat(64),
@@ -1981,6 +1988,13 @@ exit "$status"
         }
         if (command.includes("# enoki-release-e2e:record-resources")) {
           return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:inspect-runtime-failure-custody",
+          )
+        ) {
+          return successfulCommandText("absent\n");
         }
         return successfulCommandText(productInstallerOutput());
       },
@@ -2757,7 +2771,7 @@ printf covered > '${covered}'
             [
               "bundleVersion=1.2.3",
               "epochExists=0",
-              "faultBackupExists=0",
+              "faultBackupExists=1",
               "latchExists=0",
               "repairOutput=Probe repair completed.",
               `runtimeSha256=${runtimeSha256}`,
@@ -2765,6 +2779,18 @@ printf covered > '${covered}'
               "",
             ].join("\n"),
           );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:inspect-runtime-failure-custody",
+          )
+        ) {
+          return successfulCommandText("present\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:retire-runtime-failure-custody")
+        ) {
+          return successfulCommandText("retired\n");
         }
         return successfulCommandText(
           command.includes("# enoki-release-e2e:record-resources")
@@ -2795,8 +2821,8 @@ printf covered > '${covered}'
         unit: "enoki-observation-runtime.service",
       },
       repair: {
+        custodyRetained: true,
         failureEpochRemoved: true,
-        faultRemoved: true,
         latchRemoved: true,
         runtimeSha256,
         sameBundle: true,
@@ -2869,6 +2895,7 @@ printf covered > '${covered}'
     expect(repaired.command).toContain("/usr/local/bin/enoki-probe repair");
     expect(repaired.command).toContain('[ ! -e "$epoch" ]');
     expect(repaired.command).toContain('[ ! -e "$latch" ]');
+    expect(repaired.command).not.toContain('rm -- "$backup"');
     await expect(
       execFileAsync("/bin/sh", ["-n", "-c", repaired.command]),
     ).resolves.toMatchObject({ stderr: "", stdout: "" });
@@ -2881,6 +2908,7 @@ printf covered > '${covered}'
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
     const commands = [];
+    let productState = "fresh";
     const driverInput = {
       assertOwnedRun(runId) {
         expect(runId).toBe("run-runtime-recovery");
@@ -2892,6 +2920,7 @@ printf covered > '${covered}'
             "# enoki-release-e2e:exhaust-observation-runtime-budget",
           )
         ) {
+          productState = "exact-pair";
           return successfulCommandText(durableRuntimeFailureEvidenceOutput());
         }
         if (
@@ -2899,6 +2928,7 @@ printf covered > '${covered}'
             "# enoki-release-e2e:repair-observation-runtime-failure",
           )
         ) {
+          productState = "epoch-only";
           return {
             code: 1,
             stderr: "repair interrupted after failure epoch admission",
@@ -2910,7 +2940,17 @@ printf covered > '${covered}'
             "# enoki-release-e2e:cleanup-observation-runtime-failure",
           )
         ) {
-          return successfulCommandText("cleaned\n");
+          expect(productState).toBe("epoch-only");
+          expect(
+            command.indexOf('"$companion" record-runtime-failure'),
+          ).toBeLessThan(command.indexOf('stop_unit "$unit"'));
+          expect(command.indexOf('"$companion" retry-runtime')).toBeGreaterThan(
+            command.indexOf(
+              'cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"',
+            ),
+          );
+          productState = "consumed";
+          return successfulCommandText("recovered=1.2.3\n");
         }
         throw new Error("unexpected production Host command");
       },
@@ -2926,7 +2966,9 @@ printf covered > '${covered}'
     const restarted = createInstalledBundleFailureRepairHostDriver(driverInput);
     await expect(restarted.cleanup("run-runtime-recovery")).resolves.toEqual({
       clean: true,
+      recoveredBundleVersion: "1.2.3",
     });
+    expect(productState).toBe("consumed");
     const cleanup = commands.find(({ command }) =>
       command.includes(
         "# enoki-release-e2e:cleanup-observation-runtime-failure",
@@ -2951,9 +2993,8 @@ printf covered > '${covered}'
       expect(cleanup.command).toContain(`stop_unit ${unit}`);
       expect(cleanup.command).toContain(`require_stopped_unit ${unit}`);
     }
-    expect(cleanup.command).toContain(
-      "/usr/local/bin/enoki-probe-lifecycle-companion retry-runtime",
-    );
+    expect(cleanup.command).toContain('"$companion" retry-runtime');
+    expect(cleanup.command).toContain('"$companion" record-runtime-failure');
     expect(cleanup.command).toContain(
       "systemctl start enoki-observation-runtime.socket",
     );
@@ -2967,7 +3008,10 @@ printf covered > '${covered}'
     expect(cleanup.command).toContain(
       'wait_for_unit_state "$unit" active running',
     );
-    const deleteBackup = cleanup.command.indexOf('rm -- "$backup"');
+    const recordPartialPair = cleanup.command.indexOf(
+      '"$companion" record-runtime-failure',
+    );
+    const stopRuntime = cleanup.command.indexOf('stop_unit "$unit"');
     const runtimeRecovered = cleanup.command.indexOf(
       'wait_for_unit_state "$unit" active running',
     );
@@ -2975,9 +3019,14 @@ printf covered > '${covered}'
       "require_stopped_unit enoki-observation-runtime-failure.service",
     );
     const cleaned = cleanup.command.indexOf("printf 'cleaned");
-    expect(deleteBackup).toBeGreaterThan(runtimeRecovered);
-    expect(deleteBackup).toBeGreaterThan(recorderRecovered);
-    expect(cleaned).toBeGreaterThan(deleteBackup);
+    expect(recordPartialPair).toBeGreaterThan(-1);
+    expect(recordPartialPair).toBeLessThan(stopRuntime);
+    expect(runtimeRecovered).toBeGreaterThan(stopRuntime);
+    expect(recorderRecovered).toBeGreaterThan(runtimeRecovered);
+    expect(cleaned).toBeGreaterThan(recorderRecovered);
+    expect(cleanup.command).not.toContain('rm -- "$backup"');
+    expect(cleanup.command).not.toContain('[ -f "$epoch" ] && [ -f "$latch" ]');
+    expect(cleanup.command).not.toMatch(/runtime-failure\/(?:retry|receipt)/);
     expect(cleanup.command).not.toMatch(/systemctl stop[^\n]*\|\| true/);
     expect(cleanup.command).not.toMatch(
       /rm .*runtime-failure\/(?:epoch|latch)/,
@@ -2990,7 +3039,7 @@ printf covered > '${covered}'
   it("keeps the claim-owned Runtime backup retryable until cleanup recovery succeeds", async () => {
     const cleanupCommands = [];
     let attempt = 0;
-    const driver = createInstalledBundleFailureRepairHostDriver({
+    const driverInput = {
       assertOwnedRun() {},
       async execute(command) {
         cleanupCommands.push(command);
@@ -3004,22 +3053,41 @@ printf covered > '${covered}'
           : successfulCommandText("recovered=1.2.3\n");
       },
       ownershipToken: "00000000-0000-4000-8000-000000000001",
-    });
+    };
+    const driver = createInstalledBundleFailureRepairHostDriver(driverInput);
 
     await expect(driver.cleanup("run-runtime-cleanup-retry")).rejects.toThrow(
       /could not restart canonical Probe/,
     );
-    await expect(driver.cleanup("run-runtime-cleanup-retry")).resolves.toEqual({
-      clean: true,
-      recoveredBundleVersion: "1.2.3",
-    });
+    const restarted = createInstalledBundleFailureRepairHostDriver(driverInput);
+    await expect(
+      restarted.cleanup("run-runtime-cleanup-retry"),
+    ).resolves.toEqual({ clean: true, recoveredBundleVersion: "1.2.3" });
     expect(cleanupCommands).toHaveLength(2);
     expect(cleanupCommands[1]).toBe(cleanupCommands[0]);
     const cleanup = cleanupCommands[0];
-    expect(cleanup.indexOf('rm -- "$backup"')).toBeGreaterThan(
-      cleanup.indexOf("systemctl start enoki-probe.service"),
-    );
+    expect(cleanup).not.toContain('rm -- "$backup"');
     expect(cleanup).not.toContain("# enoki-release-e2e:renew-resources");
+  });
+
+  it("reenters the fixed Runtime retry entrypoint for a latch with a durable private receipt", async () => {
+    let productState = "latch-with-retry-receipt";
+    const restarted = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        expect(productState).toBe("latch-with-retry-receipt");
+        expect(command).toContain('"$companion" retry-runtime');
+        expect(command).not.toMatch(/runtime-failure\/(?:retry|receipt)/);
+        productState = "consumed";
+        return successfulCommandText("recovered=1.2.3\n");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(
+      restarted.cleanup("run-runtime-private-receipt"),
+    ).resolves.toEqual({ clean: true, recoveredBundleVersion: "1.2.3" });
+    expect(productState).toBe("consumed");
   });
 
   it("renews run ownership only after recovered cleanup passes the installed boundary", async () => {
@@ -3082,6 +3150,18 @@ printf covered > '${covered}'
         if (command.includes("# enoki-release-e2e:renew-resources")) {
           return successfulCommandText("renewed\n");
         }
+        if (
+          command.includes(
+            "# enoki-release-e2e:inspect-runtime-failure-custody",
+          )
+        ) {
+          return successfulCommandText("present\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:retire-runtime-failure-custody")
+        ) {
+          return successfulCommandText("retired\n");
+        }
         if (command.includes("# enoki-release-e2e:verify-resources")) {
           return successfulCommandText("owned\n");
         }
@@ -3117,9 +3197,168 @@ printf covered > '${covered}'
     const verified = commands.findIndex((command) =>
       command.includes("# enoki-release-e2e:verify-resources"),
     );
+    const retired = commands.findIndex((command) =>
+      command.includes("# enoki-release-e2e:retire-runtime-failure-custody"),
+    );
     expect(installedBoundary).toBeGreaterThan(recovered);
     expect(renewed).toBeGreaterThan(installedBoundary);
     expect(verified).toBeGreaterThan(renewed);
+    expect(retired).toBeGreaterThan(verified);
+  });
+
+  it("rediscovers durable Runtime custody from a fresh Host driver after exact verification is interrupted", async () => {
+    const commands = [];
+    let custodyPresent = true;
+    const driverInput = {
+      assertOwnedRun(runId) {
+        expect(runId).toBe("run-runtime-custody");
+      },
+      async execute(command) {
+        commands.push(command);
+        if (
+          command.includes(
+            "# enoki-release-e2e:inspect-runtime-failure-custody",
+          )
+        ) {
+          return successfulCommandText(
+            custodyPresent ? "present\n" : "absent\n",
+          );
+        }
+        if (
+          command.includes("# enoki-release-e2e:retire-runtime-failure-custody")
+        ) {
+          custodyPresent = false;
+          return successfulCommandText("retired\n");
+        }
+        throw new Error("unexpected production Host command");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    };
+    const interrupted =
+      createInstalledBundleFailureRepairHostDriver(driverInput);
+    await expect(
+      interrupted.inspectCustody("run-runtime-custody"),
+    ).resolves.toEqual({
+      present: true,
+    });
+    // The exact claim verification response is lost, so custody is deliberately
+    // not retired by this process.
+    expect(custodyPresent).toBe(true);
+
+    const restarted = createInstalledBundleFailureRepairHostDriver(driverInput);
+    await expect(
+      restarted.inspectCustody("run-runtime-custody"),
+    ).resolves.toEqual({
+      present: true,
+    });
+    await expect(
+      restarted.retireCustody("run-runtime-custody"),
+    ).resolves.toEqual({
+      retired: true,
+    });
+    expect(custodyPresent).toBe(false);
+    expect(commands).toHaveLength(3);
+  });
+
+  it("keeps the run claim and Runtime custody when post-restore exact verification fails", async () => {
+    const commands = [];
+    let inventoryCount = 0;
+    const installedInventory = {
+      accounts: { group: true, user: true },
+      files: [
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        "/var/lib/enoki-probe-bootstrap",
+        "/etc/enoki/probe-install.toml",
+        "/etc/systemd/system/enoki-probe.service",
+        "/usr/local/bin/enoki-probe",
+        "/var/lib/enoki-probe",
+      ],
+      units: ["enoki-probe.service"],
+    };
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
+              : installedInventory,
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("recovered=1.2.3\n");
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:sudoers-boundary"))
+          return successfulCommandText("");
+        if (command.includes("# enoki-release-e2e:binary-version"))
+          return successfulCommandText("enoki-probe 1.2.3\n");
+        if (command.includes("# enoki-release-e2e:bootstrap-generation"))
+          return successfulCommandText("1\n");
+        if (
+          command.includes(
+            "# enoki-release-e2e:inspect-runtime-failure-custody",
+          )
+        )
+          return successfulCommandText("present\n");
+        if (command.includes("# enoki-release-e2e:renew-resources"))
+          return successfulCommandText("renewed\n");
+        if (command.includes("# enoki-release-e2e:verify-resources")) {
+          return {
+            code: 75,
+            stderr: "run-owned resource fingerprint changed\n",
+            stdout: "",
+          };
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim"))
+          return successfulCommandText("owned\n");
+        if (command.includes("# enoki-release-e2e:record-resources"))
+          return successfulCommandText("recorded\n");
+        if (command.includes("enk_enroll_secret"))
+          return successfulCommandText(productInstallerOutput());
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-custody-failure");
+    await harness.install(officialEnrollment(), "run-runtime-custody-failure");
+    await expect(
+      harness.cleanup("run-runtime-custody-failure"),
+    ).rejects.toThrow(/verify run-owned Probe resources/);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:emergency-cleanup"),
+      ),
+    ).toBe(false);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:remove-claim"),
+      ),
+    ).toBe(false);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:retire-runtime-failure-custody"),
+      ),
+    ).toBe(false);
   });
 
   it("proves exact uninstall residue while retaining journald and shared dependencies", async () => {

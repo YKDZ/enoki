@@ -3245,6 +3245,13 @@ export function createProbeHostHarness({
         );
       }
       if (installedBundleRepairNeedsResourceRenewal) {
+        const runtimeFailureCustody =
+          await installedBundleFailureRepair.inspectCustody(runId);
+        if (!runtimeFailureCustody.present) {
+          throw new Error(
+            "Observation Runtime failure custody disappeared before ownership renewal",
+          );
+        }
         const renewed = await execute(
           renewRunResourcesScript(runId, ownershipToken),
           { root: true },
@@ -3254,6 +3261,16 @@ export function createProbeHostHarness({
             `Could not renew run-owned Probe resources after Installed Bundle Failure Repair: ${renewed.stderr || renewed.stdout}`,
           );
         }
+        const verified = await execute(
+          verifyRunResourcesScript(runId, ownershipToken),
+          { root: true },
+        );
+        if (verified.code !== 0 || verified.stdout.trim() !== "owned") {
+          throw new Error(
+            `Could not verify run-owned Probe resources after Installed Bundle Failure Repair: ${verified.stderr || verified.stdout}`,
+          );
+        }
+        await installedBundleFailureRepair.retireCustody(runId);
         installedBundleRepairNeedsResourceRenewal = false;
       }
       return {
@@ -3806,20 +3823,24 @@ export function createProbeHostHarness({
       const runtimeFailureCleanup = await attempt(() =>
         installedBundleFailureRepair.cleanup(runId),
       );
+      let runtimeFailureCustodyIncomplete = false;
       if (runtimeFailureCleanup?.recoveredBundleVersion) {
         installedBundleRepairNeedsResourceRenewal = true;
+        const errorCountBeforeInstalledBoundary = errors.length;
         await attempt(() =>
           this.assertInstalled(
             runId,
             runtimeFailureCleanup.recoveredBundleVersion,
           ),
         );
+        runtimeFailureCustodyIncomplete =
+          errors.length > errorCountBeforeInstalledBoundary;
       }
 
       let inspected = await attempt(() => inventory());
       let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
-      if (residue?.length > 0) {
+      if (!runtimeFailureCustodyIncomplete && residue?.length > 0) {
         const verifiedResources = await execute(
           verifyRunResourcesScript(runId, ownershipToken),
           { root: true },
@@ -3865,7 +3886,12 @@ export function createProbeHostHarness({
         }
       }
 
-      if (claimOwned && Array.isArray(residue) && residue.length === 0) {
+      if (
+        !runtimeFailureCustodyIncomplete &&
+        claimOwned &&
+        Array.isArray(residue) &&
+        residue.length === 0
+      ) {
         await attempt(async () => {
           const released = await execute(
             removeClaimScript(runId, ownershipToken),
