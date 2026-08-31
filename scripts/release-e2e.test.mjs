@@ -1750,6 +1750,57 @@ exit "$status"
     expect(claim).toContain("mkdir -m 0700");
     expect(claim).toContain("# enoki-release-e2e:claim-empty-recheck");
     expect(claim).not.toContain("runs/run-claim");
+    const root = await mkdtemp(path.join(os.tmpdir(), "enoki-claim-acquire-"));
+    const mapped = claim
+      .replaceAll("/var/lib/", `${root}/var/lib/`)
+      .replaceAll("/run/", `${root}/run/`);
+    const token = claim.match(
+      /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/,
+    )?.[0];
+    expect(token).toMatch(/^[0-9a-f-]{36}$/);
+    const active = path.join(root, "var", "lib", "enoki-release-e2e", "claim");
+    const acquiring = path.join(
+      root,
+      "var",
+      "lib",
+      "enoki-release-e2e",
+      "claim-acquiring",
+    );
+    try {
+      await mkdir(active, { recursive: true, mode: 0o700 });
+      for (const [name, value] of [
+        ["run-id", "run-claim\n"],
+        ["token", `${token}\n`],
+      ]) {
+        await writeFile(path.join(active, name), value, "utf8");
+        await chmod(path.join(active, name), 0o600);
+      }
+      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+        stdout: "owned\n",
+      });
+      await mkdir(acquiring, { mode: 0o700 });
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 73,
+      });
+      await expect(lstat(active)).resolves.toBeDefined();
+      await expect(lstat(acquiring)).resolves.toBeDefined();
+      await rm(active, { force: true, recursive: true });
+      await rm(acquiring, { force: true, recursive: true });
+      const unknown = path.join(
+        root,
+        "var",
+        "lib",
+        "enoki-release-e2e",
+        "foreign",
+      );
+      await writeFile(unknown, "foreign\n", "utf8");
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 73,
+      });
+      await expect(lstat(unknown)).resolves.toBeDefined();
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   });
 
   it("refuses a Release Test Host with a pre-existing Enoki installation before mutation", async () => {
