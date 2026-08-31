@@ -882,6 +882,59 @@ describe("Host Metadata API", () => {
     ).pendingOperation;
     expect(pending?.id).toBe(String(uninstall.probeUninstallRequest.id));
 
+    const incompleteFailureBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-failed-uninstall",
+        operationAcknowledgements: [
+          { operationId: String(uninstall.probeUninstallRequest.id) },
+        ],
+        operationStatuses: [
+          {
+            failed: {
+              errorCode: "lifecycle.companion_unavailable",
+            },
+            operationId: String(uninstall.probeUninstallRequest.id),
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const incompleteFailureResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        incompleteFailureBody,
+      ),
+    );
+    expect(incompleteFailureResponse.status).toBe(400);
+    await expect(incompleteFailureResponse.json()).resolves.toEqual({
+      error: "malformed_probe_operation_status",
+    });
+    expect(
+      database.probeOperations.findById(uninstall.probeUninstallRequest.id),
+    ).toMatchObject({
+      acceptedAtMs: null,
+      completedAtMs: null,
+      failureCode: null,
+      failureMessage: null,
+      state: "pending",
+    });
+    const pendingOperationResponse = await app.request(
+      `/api/web/probe-operations/${uninstall.probeUninstallRequest.id}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(pendingOperationResponse.json()).resolves.toEqual({
+      probeOperation: expect.objectContaining({
+        completedAtMs: null,
+        failure: null,
+        state: "pending",
+      }),
+    });
+
     const failureBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-failed-uninstall",

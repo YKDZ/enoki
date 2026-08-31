@@ -19,7 +19,7 @@ import {
   type ProbeUpgradeRequest,
 } from "./operation.js";
 import { verifyProbeRepairEligibility } from "./repair-authority.js";
-import type { ProtoMessage } from "./report-validation.js";
+import { nonemptyString, type ProtoMessage } from "./report-validation.js";
 import { parseProbeOperationId } from "./route-http.js";
 import {
   defaultProbeOperationTokenSecret,
@@ -433,11 +433,13 @@ function decodeProbeOperationStatus(
   if (branches.filter(Boolean).length !== 1) return null;
 
   if (status.running) return { kind: "running" };
-  if (status.failed?.errorCode) {
+  const failureCode = nonemptyString(status.failed?.errorCode);
+  const failureMessage = nonemptyString(status.failed?.message);
+  if (failureCode && failureMessage) {
     return {
-      code: status.failed.errorCode,
+      code: failureCode,
       kind: "failed",
-      message: status.failed.message ?? "",
+      message: failureMessage,
     };
   }
   return status.succeeded ? { kind: "succeeded" } : null;
