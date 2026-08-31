@@ -4707,6 +4707,7 @@ if [ -e "$retiring_dir" ] || [ -L "$retiring_dir" ]; then
   printf 'Host claim retirement is incomplete\n' >&2
   exit 73
 fi
+if { [ -e "$claim_dir" ] || [ -L "$claim_dir" ]; } && { [ -e "$acquiring_dir" ] || [ -L "$acquiring_dir" ]; }; then printf 'Host claim acquisition is ambiguous\n' >&2; exit 73; fi
 recover_acquiring() {
   [ -d "$acquiring_dir" ] && [ ! -L "$acquiring_dir" ] || { printf 'Host claim acquisition is invalid\n' >&2; exit 73; }
   [ "$(stat -c '%u:%a:%h' "$acquiring_dir")" = 0:700:2 ] || { printf 'Host claim acquisition custody is invalid\n' >&2; exit 73; }
@@ -4730,7 +4731,7 @@ if [ -e "$claim_dir" ] || [ -L "$claim_dir" ]; then
   for member in "$claim_dir"/* "$claim_dir"/.[!.]* "$claim_dir"/..?*; do
     [ -e "$member" ] || [ -L "$member" ] || continue
     [ -f "$member" ] && [ ! -L "$member" ] || { printf 'Host claim member is invalid\n' >&2; exit 73; }
-    case "$(basename -- "$member")" in observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || exit 73 ;; run-id|token|resources) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || exit 73 ;; *) printf 'Host claim has an unknown member\n' >&2; exit 73 ;; esac
+    case "$(basename -- "$member")" in run-id|token) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || exit 73 ;; *) printf 'Host claim response-loss closure is invalid\n' >&2; exit 73 ;; esac
   done
   if [ "$(cat "$claim_dir/run-id")" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim_dir/token")" = ${shellSingleQuote(token)} ]; then printf 'owned\n'; exit 0; fi
   printf 'Host already claimed by another Release E2E run\n' >&2; exit 73
