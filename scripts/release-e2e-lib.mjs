@@ -14,6 +14,8 @@ import {
 // invoked by this test-only path.
 const releaseE2EInfrastructureResources = Object.freeze([
   { kind: "file", path: "/usr/local/bin/enoki-probe" },
+  { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-acquire" },
+  { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-activate" },
   {
     kind: "file",
     path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
@@ -2815,7 +2817,6 @@ export function createHubLifecycleClient({
 }
 
 export function createProbeHostHarness({
-  cleanupPreparedInstall,
   execute,
   ownershipToken = randomUUID(),
   prepareInstall,
@@ -2835,12 +2836,6 @@ export function createProbeHostHarness({
   let sharedDependenciesBefore = null;
   if (prepareInstall !== undefined && typeof prepareInstall !== "function") {
     throw new Error("Probe Host Harness install preparation is invalid");
-  }
-  if (
-    cleanupPreparedInstall !== undefined &&
-    typeof cleanupPreparedInstall !== "function"
-  ) {
-    throw new Error("Probe Host Harness install cleanup is invalid");
   }
   const installedBundleFailureRepair =
     createInstalledBundleFailureRepairHostDriver({
@@ -3221,6 +3216,8 @@ export function createProbeHostHarness({
         );
       }
       const unexpectedCandidateResources = [
+        "/usr/local/bin/enoki-probe-bootstrap-acquire",
+        "/usr/local/bin/enoki-probe-bootstrap-activate",
         "/var/lib/enoki-probe-bootstrap",
       ].filter((entry) => residue.includes(entry));
       if (unexpectedCandidateResources.length > 0) {
@@ -3688,10 +3685,6 @@ export function createProbeHostHarness({
         }
         claimOwned = true;
       });
-
-      if (claimOwned && cleanupPreparedInstall) {
-        await attempt(() => cleanupPreparedInstall({ ownershipToken, runId }));
-      }
 
       if (postReplacementFaultArmed) {
         await attempt(async () => {
