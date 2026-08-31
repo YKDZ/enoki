@@ -4592,14 +4592,22 @@ fd_inode=$(stat -Lc '%d:%i' "/proc/$$/fd/9")
 `;
 }
 
-function claimMutationPreflight(runId, token) {
+function claimMutationPreflight(runId, token, recoverResourcesNext = false) {
+  const resourcesNext = recoverResourcesNext
+    ? `[ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E resource recovery is invalid\\n' >&2; exit 75; }; rm -- "$member"; sync -f "$claim" || exit 75`
+    : `{ printf 'release E2E resource recovery is pending\\n' >&2; exit 75; }`;
   return `claim_root=/var/lib/enoki-release-e2e
 [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'release E2E claim root custody is invalid\n' >&2; exit 75; }
 [ -d "$claim" ] && [ ! -L "$claim" ] && [ "$(stat -c '%u:%a:%h' "$claim")" = 0:700:2 ] || { printf 'release E2E claim custody is invalid\n' >&2; exit 75; }
 for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
   [ -f "$member" ] && [ ! -L "$member" ] || { printf 'release E2E claim member is invalid\n' >&2; exit 75; }
-  case "$(basename -- "$member")" in run-id|token|resources|observation-runtime-original|upgrade-before-resources|upgrade-target|upgrade-operation-id|post-replacement-fault) ;; *) printf 'release E2E claim has an unknown member\n' >&2; exit 75 ;; esac
+  case "$(basename -- "$member")" in
+    observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || { printf 'release E2E Runtime custody is invalid\n' >&2; exit 75; } ;;
+    resources.next) ${resourcesNext} ;;
+    run-id|token|resources|upgrade-before-resources|upgrade-target|upgrade-operation-id|post-replacement-fault) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'release E2E claim evidence is invalid\n' >&2; exit 75; } ;;
+    *) printf 'release E2E claim has an unknown member\n' >&2; exit 75 ;;
+  esac
 done
 [ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] && [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || { printf 'release E2E run claim changed\n' >&2; exit 75; }
 [ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] && [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ] || { printf 'release E2E ownership token changed\n' >&2; exit 75; }`;
@@ -4705,7 +4713,7 @@ function renewRunResourcesScript(runId, token, assertedSnapshot = null) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
-${claimMutationPreflight(runId, token)}
+${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4759,7 +4767,7 @@ printf 'recorded\n'`;
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
-${claimMutationPreflight(runId, token)}
+${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -5304,7 +5312,7 @@ function releaseEmergencyCleanupScript(runId, token) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
-${claimMutationPreflight(runId, token)}
+${claimMutationPreflight(runId, token, true)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
