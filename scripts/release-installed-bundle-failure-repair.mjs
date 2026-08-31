@@ -351,9 +351,13 @@ trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 printf '#!/bin/sh\nexit 70\n' > "$temporary"
 chown 0:0 "$temporary"
 chmod 0755 "$temporary"
+systemctl stop enoki-probe.service
 systemctl stop enoki-observation-runtime.socket "$unit" enoki-observation-runtime-failure.service >/dev/null 2>&1 || true
+systemctl is-active --quiet enoki-probe.service && fail 'canonical Probe did not quiesce before Runtime fault injection'
+systemctl is-active --quiet "$unit" && fail 'Observation Runtime did not quiesce before fault injection'
 systemctl reset-failed "$unit" enoki-observation-runtime-failure.service
-mv -- "$temporary" "$runtime"
+cp --preserve=mode,ownership -- "$temporary" "$runtime"
+rm -- "$temporary"
 trap - EXIT HUP INT TERM
 runtime_fault_sha256=$(sha256sum "$runtime" | cut -d ' ' -f 1)
 [ "$runtime_fault_sha256" != "$runtime_sha256" ] || fail 'Observation Runtime fault was not installed'
@@ -445,8 +449,10 @@ unit=${shellSingleQuote(observationRuntimeUnit)}
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]
 if [ -f "$backup" ] && [ ! -L "$backup" ]; then
+  systemctl stop enoki-probe.service >/dev/null 2>&1 || true
   systemctl stop enoki-observation-runtime.socket "$unit" >/dev/null 2>&1 || true
-  mv -- "$backup" "$runtime"
+  cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"
+  rm -- "$backup"
   if [ -f "$epoch" ] || [ -f "$latch" ]; then
     [ -f "$epoch" ] && [ -f "$latch" ]
     /usr/local/bin/enoki-probe-lifecycle-companion retry-runtime
@@ -454,6 +460,7 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
     systemctl reset-failed "$unit" >/dev/null 2>&1 || true
   fi
   systemctl start enoki-observation-runtime.socket
+  systemctl start enoki-probe.service
 elif [ -e "$epoch" ] || [ -e "$latch" ]; then
   printf 'failure state exists without the run-owned Runtime backup\n' >&2
   exit 79

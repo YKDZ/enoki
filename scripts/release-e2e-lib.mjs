@@ -2901,6 +2901,7 @@ export function createProbeHostHarness({
   }
   let runOwnsMutation = false;
   let canonicalRuntimeUnavailableArmed = false;
+  let installedBundleRepairNeedsResourceRenewal = false;
   let postReplacementFaultArmed = false;
   let readyForReinstallation = false;
   let sharedDependenciesBefore = null;
@@ -3077,7 +3078,12 @@ export function createProbeHostHarness({
 
   return {
     async repairInstalledBundleFailure(runId, expectedBundleVersion) {
-      return installedBundleFailureRepair.repair(runId, expectedBundleVersion);
+      const result = await installedBundleFailureRepair.repair(
+        runId,
+        expectedBundleVersion,
+      );
+      installedBundleRepairNeedsResourceRenewal = true;
+      return result;
     },
     async assertReleaseTestHost(expected) {
       if (
@@ -3237,6 +3243,18 @@ export function createProbeHostHarness({
         throw new Error(
           `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
         );
+      }
+      if (installedBundleRepairNeedsResourceRenewal) {
+        const renewed = await execute(
+          renewRunResourcesScript(runId, ownershipToken),
+          { root: true },
+        );
+        if (renewed.code !== 0 || renewed.stdout.trim() !== "renewed") {
+          throw new Error(
+            `Could not renew run-owned Probe resources after Installed Bundle Failure Repair: ${renewed.stderr || renewed.stdout}`,
+          );
+        }
+        installedBundleRepairNeedsResourceRenewal = false;
       }
       return {
         inventory: inspected,
