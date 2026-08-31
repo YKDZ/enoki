@@ -446,6 +446,58 @@ function openWebSocket(
   });
 }
 
+let webSocketBarrierSequence = 0;
+
+async function sendAndSynchronizeWebSocketInput(
+  socket: WebSocket,
+  message: {
+    hostId: number;
+    type: "subscribe_host_detail" | "unsubscribe_host_detail";
+  },
+) {
+  socket.send(JSON.stringify(message));
+
+  const barrier = Buffer.from(
+    `enoki-test-input-barrier-${webSocketBarrierSequence++}`,
+  );
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      socket.off("close", onClose);
+      socket.off("error", onError);
+      socket.off("pong", onPong);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("WebSocket closed before it processed test input."));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onPong = (data: Buffer) => {
+      if (!data.equals(barrier)) {
+        return;
+      }
+
+      cleanup();
+      resolve();
+    };
+
+    socket.on("close", onClose);
+    socket.on("error", onError);
+    socket.on("pong", onPong);
+
+    try {
+      // The ws server handles an ordered text message before its following
+      // ping, then auto-pongs. This proves the Hub consumed the input above.
+      socket.ping(barrier);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
 function readWebSocketJson(socket: WebSocket) {
   return new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1289,12 +1341,10 @@ describe("WebSocket live updates", () => {
     );
     const hostTwoRegistration = await registerProbe(baseUrl, hostTwoEnrollment);
 
-    socket.send(
-      JSON.stringify({
-        hostId: 1,
-        type: "subscribe_host_detail",
-      }),
-    );
+    await sendAndSynchronizeWebSocketInput(socket, {
+      hostId: 1,
+      type: "subscribe_host_detail",
+    });
     const hostOneMessages = collectWebSocketJson(socket);
     await sendReport(baseUrl, hostOneRegistration, {
       bootId: "boot-host-one",
@@ -1380,12 +1430,10 @@ describe("WebSocket live updates", () => {
       }),
     ]);
 
-    socket.send(
-      JSON.stringify({
-        hostId: 1,
-        type: "unsubscribe_host_detail",
-      }),
-    );
+    await sendAndSynchronizeWebSocketInput(socket, {
+      hostId: 1,
+      type: "unsubscribe_host_detail",
+    });
     const unsubscribedMessages = collectWebSocketJson(socket);
     await sendReport(baseUrl, hostOneRegistration, {
       bootId: "boot-host-one",
@@ -1422,12 +1470,10 @@ describe("WebSocket live updates", () => {
       bootId: "boot-profile-live",
     });
 
-    socket.send(
-      JSON.stringify({
-        hostId: 1,
-        type: "subscribe_host_detail",
-      }),
-    );
+    await sendAndSynchronizeWebSocketInput(socket, {
+      hostId: 1,
+      type: "subscribe_host_detail",
+    });
     const messages = collectWebSocketJson(socket);
     await sendReport(baseUrl, registration, {
       bootId: "boot-profile-live",
