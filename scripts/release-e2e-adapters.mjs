@@ -1928,6 +1928,7 @@ export function createDockerHubController({
         currentRuntimeEnvironment.legacyBaselinePublicHubUrl !== null
           ? [
               `ENOKI_PUBLIC_HUB_URL=${currentRuntimeEnvironment.legacyBaselinePublicHubUrl}`,
+              "ENOKI_TRUSTED_PROXY_HEADERS=true",
             ]
           : []),
         `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET=${currentRuntimeEnvironment.operationSigningSecret}`,
@@ -1959,7 +1960,7 @@ export function createDockerHubController({
         "--env-file",
         envFile,
         "--publish",
-        `${currentRuntimeEnvironment.ownerPort}:3000`,
+        `127.0.0.1:${currentRuntimeEnvironment.ownerPort}:3000`,
         "--publish",
         requestedProbePort === null
           ? `127.0.0.1::${probeContainerPort}`

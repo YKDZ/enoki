@@ -23,6 +23,7 @@ export function createCanonicalReportEvidenceTransport({
   let armed = null;
   let completedEvidence = null;
   let failure = null;
+  let listenPublicOrigin = null;
   let server = null;
   let reportRequestCount = 0;
   let lastUpstreamStatus = null;
@@ -51,7 +52,11 @@ export function createCanonicalReportEvidenceTransport({
         rejectOversizedReport(incoming, outgoing);
         return;
       }
-      const headers = forwardedHeaders(incoming.headers, body.byteLength);
+      const headers = forwardedHeaders(
+        incoming.headers,
+        body.byteLength,
+        listenPublicOrigin,
+      );
       const observation =
         isReport && armed && !completedEvidence && !failure
           ? observeReport(body)
@@ -286,6 +291,7 @@ export function createCanonicalReportEvidenceTransport({
       });
       const address = server.address();
       const origin = `${listen.protocol}//${listen.hostname}:${address.port}`;
+      listenPublicOrigin = new URL(origin);
       return { origin };
     },
 
@@ -478,7 +484,10 @@ function validatedHttpOrigin(value, label) {
   return url;
 }
 
-function forwardedHeaders(source, length) {
+function forwardedHeaders(source, length, publicOrigin) {
+  if (!publicOrigin) {
+    throw new Error("canonical report evidence transport is not listening");
+  }
   const headers = new Headers();
   for (const [name, value] of Object.entries(source)) {
     if (
@@ -488,12 +497,16 @@ function forwardedHeaders(source, length) {
         "content-length",
         "host",
         "transfer-encoding",
+        "x-forwarded-host",
+        "x-forwarded-proto",
       ]).has(name.toLowerCase())
     ) {
       headers.set(name, Array.isArray(value) ? value.join(", ") : value);
     }
   }
   headers.set("content-length", String(length));
+  headers.set("x-forwarded-host", publicOrigin.host);
+  headers.set("x-forwarded-proto", publicOrigin.protocol.slice(0, -1));
   return headers;
 }
 
