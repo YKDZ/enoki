@@ -4773,6 +4773,7 @@ function beginUpgradeOwnershipScript(runId, token, targetProbeVersion) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4790,6 +4791,7 @@ function bindUpgradeOwnershipScript(runId, token, operation) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4811,6 +4813,7 @@ function armPostReplacementRestartFaultScript(
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 dropin_dir=/etc/systemd/system/enoki-probe.service.d
 dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ -d "$claim" ]
@@ -4883,6 +4886,7 @@ function removePostReplacementRestartFaultScript(runId, token) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 dropin_dir=/etc/systemd/system/enoki-probe.service.d
 dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ -d "$claim" ]
@@ -4903,6 +4907,7 @@ function completeUpgradeOwnershipScript(runId, token, operation) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4928,6 +4933,7 @@ function completeRepairOwnershipScript(runId, token, operation) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -5298,6 +5304,7 @@ function releaseEmergencyCleanupScript(runId, token) {
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 ${claimLockPrelude()}
+${claimMutationPreflight(runId, token)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
