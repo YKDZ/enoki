@@ -23,9 +23,15 @@ export function createInstalledBundleFailureRepairHostDriver({
         { root: true },
       );
       if (result.code !== 0 || result.stdout.trim() !== "cleaned") {
-        throw new Error(
-          `Observation Runtime failure cleanup failed: ${result.stderr || result.stdout}`,
-        );
+        const recovered = result.stdout.trim().match(/^recovered=(.+)$/);
+        if (result.code !== 0 || !recovered) {
+          throw new Error(
+            `Observation Runtime failure cleanup failed: ${result.stderr || result.stdout}`,
+          );
+        }
+        assertProbeVersion(recovered[1]);
+        faultMayBeActive = false;
+        return { clean: true, recoveredBundleVersion: recovered[1] };
       }
       faultMayBeActive = false;
       return { clean: true };
@@ -327,6 +333,7 @@ epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
 latch=/var/lib/enoki-probe/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
+${systemdUnitStateFunctions()}
 [ -d "$claim" ] || fail 'release E2E ownership claim is missing'
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
 [ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
@@ -351,11 +358,16 @@ trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
 printf '#!/bin/sh\nexit 70\n' > "$temporary"
 chown 0:0 "$temporary"
 chmod 0755 "$temporary"
-systemctl stop enoki-probe.service
-systemctl stop enoki-observation-runtime.socket "$unit" enoki-observation-runtime-failure.service >/dev/null 2>&1 || true
-systemctl is-active --quiet enoki-probe.service && fail 'canonical Probe did not quiesce before Runtime fault injection'
-systemctl is-active --quiet "$unit" && fail 'Observation Runtime did not quiesce before fault injection'
-systemctl reset-failed "$unit" enoki-observation-runtime-failure.service
+stop_unit enoki-probe.service
+stop_unit enoki-observation-runtime.socket
+stop_unit "$unit"
+stop_unit enoki-observation-runtime-failure.service
+require_stopped_unit enoki-probe.service
+require_stopped_unit enoki-observation-runtime.socket
+require_stopped_unit "$unit"
+require_stopped_unit enoki-observation-runtime-failure.service
+systemctl reset-failed "$unit" >/dev/null 2>&1 || fail 'could not reset Observation Runtime failure state'
+systemctl reset-failed enoki-observation-runtime-failure.service >/dev/null 2>&1 || fail 'could not reset Runtime recorder failure state'
 cp --preserve=mode,ownership -- "$temporary" "$runtime"
 rm -- "$temporary"
 trap - EXIT HUP INT TERM
@@ -445,29 +457,94 @@ backup="$claim/observation-runtime-original"
 epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
 latch=/var/lib/enoki-probe/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
+fail() { printf '%s\n' "$1" >&2; exit 79; }
+${systemdUnitStateFunctions()}
+recovered_bundle_version=
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ]
 if [ -f "$backup" ] && [ ! -L "$backup" ]; then
-  systemctl stop enoki-probe.service >/dev/null 2>&1 || true
-  systemctl stop enoki-observation-runtime.socket "$unit" >/dev/null 2>&1 || true
+  [ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'run-owned Runtime backup boundary is invalid'
+  backup_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1) || fail 'could not read run-owned Runtime backup'
+  stop_unit enoki-probe.service
+  stop_unit enoki-observation-runtime.socket
+  stop_unit "$unit"
+  stop_unit enoki-observation-runtime-failure.service
+  require_stopped_unit enoki-probe.service
+  require_stopped_unit enoki-observation-runtime.socket
+  require_stopped_unit "$unit"
+  require_stopped_unit enoki-observation-runtime-failure.service
   cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"
-  rm -- "$backup"
+  [ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'restored Observation Runtime boundary is invalid'
+  [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'restored Observation Runtime digest changed'
   if [ -f "$epoch" ] || [ -f "$latch" ]; then
     [ -f "$epoch" ] && [ -f "$latch" ]
     /usr/local/bin/enoki-probe-lifecycle-companion retry-runtime
   else
-    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || fail 'could not reset Observation Runtime failure state'
+    systemctl reset-failed enoki-observation-runtime-failure.service >/dev/null 2>&1 || fail 'could not reset Runtime recorder failure state'
   fi
-  systemctl start enoki-observation-runtime.socket
-  systemctl start enoki-probe.service
+  systemctl start enoki-observation-runtime.socket >/dev/null 2>&1 || fail 'could not restart Observation Runtime socket'
+  systemctl start enoki-probe.service >/dev/null 2>&1 || fail 'could not restart canonical Probe'
+  wait_for_unit_state enoki-observation-runtime.socket active listening
+  wait_for_unit_state enoki-probe.service active running
+  wait_for_unit_state "$unit" active running
+  require_stopped_unit enoki-observation-runtime-failure.service
+  [ ! -e "$epoch" ] && [ ! -e "$latch" ] || fail 'Runtime failure state remained after recovery'
+  [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'recovered Observation Runtime digest changed'
+  version_output=$(/usr/local/bin/enoki-probe --version) || fail 'could not read recovered Probe version'
+  recovered_bundle_version=\${version_output#"enoki-probe "}
+  recovered_bundle_version=\${recovered_bundle_version#v}
+  printf '%s\n' "$recovered_bundle_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail 'recovered Probe version is invalid'
+  rm -- "$backup"
 elif [ -e "$epoch" ] || [ -e "$latch" ]; then
   printf 'failure state exists without the run-owned Runtime backup\n' >&2
   exit 79
 fi
 [ ! -e "$backup" ] && [ ! -e "$epoch" ] && [ ! -e "$latch" ]
-printf 'cleaned\n'
+if [ -n "$recovered_bundle_version" ]; then
+  printf 'recovered=%s\n' "$recovered_bundle_version"
+else
+  printf 'cleaned\n'
+fi
 `;
+}
+
+function systemdUnitStateFunctions() {
+  return `read_unit_state() {
+  target=$1
+  properties=$(systemctl show "$target" --no-pager --property=LoadState --property=ActiveState --property=SubState) || return 1
+  property_count=$(printf '%s\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || return 1
+  load_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "LoadState" { count += 1 } END { print count + 0 }') || return 1
+  active_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "ActiveState" { count += 1 } END { print count + 0 }') || return 1
+  sub_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "SubState" { count += 1 } END { print count + 0 }') || return 1
+  [ "$property_count" -eq 3 ] && [ "$load_count" -eq 1 ] && [ "$active_count" -eq 1 ] && [ "$sub_count" -eq 1 ] || return 1
+  load_state=$(printf '%s\n' "$properties" | awk -F= '$1 == "LoadState" { print substr($0, index($0, "=") + 1) }') || return 1
+  active_state=$(printf '%s\n' "$properties" | awk -F= '$1 == "ActiveState" { print substr($0, index($0, "=") + 1) }') || return 1
+  sub_state=$(printf '%s\n' "$properties" | awk -F= '$1 == "SubState" { print substr($0, index($0, "=") + 1) }') || return 1
+  printf '%s %s %s\n' "$load_state" "$active_state" "$sub_state"
+}
+stop_unit() {
+  systemctl stop "$1" >/dev/null 2>&1 || fail "could not stop $1"
+}
+require_stopped_unit() {
+  expected_target=$1
+  observed_state=$(read_unit_state "$expected_target") || fail "could not query $expected_target state"
+  [ "$observed_state" = 'loaded inactive dead' ] || fail "$expected_target did not reach loaded/inactive/dead"
+}
+wait_for_unit_state() {
+  expected_target=$1
+  expected_active=$2
+  expected_sub=$3
+  state_remaining=20
+  while [ "$state_remaining" -gt 0 ]; do
+    observed_state=$(read_unit_state "$expected_target") || fail "could not query $expected_target state"
+    [ "$observed_state" = "loaded $expected_active $expected_sub" ] && return 0
+    sleep 1
+    state_remaining=$((state_remaining - 1))
+  done
+  fail "$expected_target did not reach loaded/$expected_active/$expected_sub"
+}`;
 }
 
 function assertProbeVersion(version) {

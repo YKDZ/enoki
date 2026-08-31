@@ -3803,7 +3803,18 @@ export function createProbeHostHarness({
         });
       }
 
-      await attempt(() => installedBundleFailureRepair.cleanup(runId));
+      const runtimeFailureCleanup = await attempt(() =>
+        installedBundleFailureRepair.cleanup(runId),
+      );
+      if (runtimeFailureCleanup?.recoveredBundleVersion) {
+        installedBundleRepairNeedsResourceRenewal = true;
+        await attempt(() =>
+          this.assertInstalled(
+            runId,
+            runtimeFailureCleanup.recoveredBundleVersion,
+          ),
+        );
+      }
 
       let inspected = await attempt(() => inventory());
       let residue = inspected ? inventoryResidue(inspected) : null;
