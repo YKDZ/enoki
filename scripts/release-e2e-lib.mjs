@@ -2519,14 +2519,29 @@ export function createHubLifecycleClient({
       ...init,
       headers,
     });
-    const text = await response.text();
-    const body = text ? parseJson(text, `Hub response for ${pathname}`) : null;
-    apiTimeline.push({
-      error: body?.error ?? null,
+    const timelineEntry = {
+      contentType: response.headers.get("content-type"),
+      error: null,
       method: init.method ?? "GET",
       pathname,
       status: response.status,
-    });
+    };
+    apiTimeline.push(timelineEntry);
+    const text = await response.text();
+    let body = null;
+    if (text) {
+      try {
+        body = parseJson(text, `Hub response for ${pathname}`);
+      } catch (error) {
+        timelineEntry.bodyPreview = redactedHubBodyPreview(
+          text,
+          requestSecrets(init, ownerCookie),
+        );
+        timelineEntry.parseError = "response_body_not_json";
+        throw error;
+      }
+    }
+    timelineEntry.error = body?.error ?? null;
     if (!response.ok && !allowedStatuses.includes(response.status)) {
       throw new HubApiError({
         body,
@@ -2606,7 +2621,7 @@ export function createHubLifecycleClient({
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(
         `/api/web/enrollments/manual-reinstall/${hostId}`,
-        { method: "POST" },
+        { body: JSON.stringify({}), method: "POST" },
       );
       if (
         typeof body?.enrollmentToken !== "string" ||
@@ -2839,6 +2854,36 @@ export function createHubLifecycleClient({
       throw error;
     },
   };
+}
+
+function redactedHubBodyPreview(value, secrets) {
+  return redactSensitiveText(value, secrets)
+    .replace(
+      /((?:["']?)(?:[a-z0-9_.-]*(?:authorization|cookie|password|secret|token)|(?:api|private|signing)[ ._-]?key)(?:["']?)\s*[:=])[^\r\n]*/gi,
+      "$1 [REDACTED]",
+    )
+    .slice(0, 512);
+}
+
+function requestSecrets(init, ownerCookie) {
+  const secrets = ownerCookie
+    ? [ownerCookie, ownerCookie.slice(ownerCookie.indexOf("=") + 1)]
+    : [];
+  if (typeof init.body !== "string") return secrets;
+  try {
+    collectStringValues(JSON.parse(init.body), secrets);
+  } catch {}
+  return secrets.filter((value) => value.length >= 4);
+}
+
+function collectStringValues(value, target) {
+  if (typeof value === "string") {
+    target.push(value);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectStringValues(item, target);
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) collectStringValues(item, target);
+  }
 }
 
 export function createProbeHostHarness({

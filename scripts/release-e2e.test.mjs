@@ -3459,7 +3459,7 @@ describe("Hub Lifecycle Client", () => {
     ]);
   });
 
-  it("creates Trust Epoch manual reinstall Enrollment through the production Owner API", async () => {
+  it("通过生产 Owner API 创建 Trust Epoch manual reinstall Enrollment", async () => {
     const requests = [];
     const sourceProbeSha256 = ["a", "b", "c", "d"].map((value) =>
       value.repeat(64),
@@ -3483,7 +3483,12 @@ describe("Hub Lifecycle Client", () => {
       baseUrl: "https://hub.example",
       fetch: async (url, init = {}) => {
         const pathname = new URL(url).pathname;
-        requests.push({ method: init.method ?? "GET", pathname });
+        requests.push({
+          body: init.body,
+          contentType: new Headers(init.headers).get("content-type"),
+          method: init.method ?? "GET",
+          pathname,
+        });
         if (pathname === "/api/web/auth/login") {
           return jsonResponse({ authenticated: true }, 200, {
             "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
@@ -3513,9 +3518,69 @@ describe("Hub Lifecycle Client", () => {
       }),
     );
     expect(requests).toContainEqual({
+      body: "{}",
+      contentType: "application/json",
       method: "POST",
       pathname: "/api/web/enrollments/manual-reinstall/7",
     });
+  });
+
+  it("Hub 在 JSON route 前拒绝请求时保留有界脱敏证据", async () => {
+    const secrets = {
+      apiKey: "plain-api-key-secret",
+      authorization: "plain-authorization-secret",
+      cookie: "plain-cookie-secret",
+      enrollmentToken: "enk_enroll_plain-token-secret",
+      secondaryCookie: "plain-secondary-cookie-secret",
+    };
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url) => {
+        if (new URL(url).pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": `enoki_owner_session=${secrets.cookie}; Path=/; HttpOnly`,
+          });
+        }
+        return new Response(
+          [
+            "Forbidden",
+            `Authorization: Bearer ${secrets.authorization}`,
+            `Cookie: session=${secrets.cookie}; csrf=${secrets.secondaryCookie}`,
+            `enrollmentToken=${secrets.enrollmentToken}`,
+            `"apiKey":"${secrets.apiKey}"`,
+            "x".repeat(1_024),
+          ].join("\n"),
+          {
+            headers: { "content-type": "text/plain; charset=UTF-8" },
+            status: 403,
+          },
+        );
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(client.createManualReinstallEnrollment(7)).rejects.toThrow(
+      /not valid JSON/,
+    );
+    const evidence = await client.collectEvidence();
+    const rejectedRequest = evidence.apiTimeline.at(-1);
+    expect(rejectedRequest).toEqual(
+      expect.objectContaining({
+        bodyPreview: expect.any(String),
+        contentType: "text/plain; charset=UTF-8",
+        method: "POST",
+        parseError: "response_body_not_json",
+        pathname: "/api/web/enrollments/manual-reinstall/7",
+        status: 403,
+      }),
+    );
+    expect(rejectedRequest.bodyPreview.length).toBeLessThanOrEqual(512);
+    expect(rejectedRequest.bodyPreview).toContain("Forbidden");
+    expect(rejectedRequest.bodyPreview).toContain("[REDACTED]");
+    const serializedEvidence = JSON.stringify(evidence);
+    for (const secret of Object.values(secrets)) {
+      expect(serializedEvidence).not.toContain(secret);
+    }
   });
 
   it("keeps the DELETE response in evidence when the first poll fails", async () => {
