@@ -297,10 +297,10 @@ async function createRuntimeFailureCustodyFixture(prefix) {
       .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
       .replaceAll("/etc/", `${root}/etc/`)
       .replaceAll("/run/", `${root}/run/`);
-  const runHostScript = async (command) => {
+  const runHostScript = async (command, environmentOverrides = {}) => {
     try {
       const result = await execFileAsync("sh", ["-c", mapHostPaths(command)], {
-        env: environment,
+        env: { ...environment, ...environmentOverrides },
       });
       return successfulCommandText(result.stdout);
     } catch (error) {
@@ -2983,6 +2983,140 @@ printf covered > '${covered}'
       await expect(readFile(fixture.paths.backup, "utf8")).resolves.toBe(
         "canonical runtime\n",
       );
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("uses a final real systemd start request to turn an exhausted Runtime into recorder eligibility", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-final-start-limit-",
+    );
+    const root = path.resolve(path.dirname(fixture.paths.runtime), "../../..");
+    const state = path.join(root, "runtime-state");
+    const startRequests = path.join(root, "runtime-start-requests");
+    const epoch = path.join(
+      root,
+      "var",
+      "lib",
+      "enoki-probe",
+      "runtime-failure",
+      "epoch.toml",
+    );
+    const latch = path.join(
+      root,
+      "var",
+      "lib",
+      "enoki-probe",
+      "runtime-failure",
+      "latch",
+    );
+    try {
+      await writeFile(
+        path.join(root, "fake-bin", "sleep"),
+        "#!/bin/sh\nexit 0\n",
+        "utf8",
+      );
+      await chmod(path.join(root, "fake-bin", "sleep"), 0o755);
+      await writeFile(
+        path.join(root, "fake-bin", "systemctl"),
+        `#!/bin/sh
+if [ "$1" = show ] && [ "$3" = --property=FragmentPath ]; then
+  printf '%s\\n' "$ENOKI_RUNTIME_UNIT"
+  exit 0
+fi
+if [ "$1" = show ] && [ "$3" = --property=DropInPaths ]; then exit 0; fi
+if [ "$1" = stop ] || [ "$1" = reset-failed ]; then exit 0; fi
+if [ "$1" = show ] && [ "$2" != enoki-observation-runtime.service ]; then
+  printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'
+  exit 0
+fi
+if [ "$1" = start ] && [ "$2" = enoki-observation-runtime.service ]; then
+  requests=$(cat "$ENOKI_START_REQUESTS" 2>/dev/null || printf 0)
+  requests=$((requests + 1))
+  printf '%s\\n' "$requests" > "$ENOKI_START_REQUESTS"
+  if [ "$requests" -eq 1 ]; then
+    printf 'auto-restarting\\n' > "$ENOKI_RUNTIME_STATE"
+    exit 0
+  fi
+  [ "$(cat "$ENOKI_RUNTIME_STATE")" = exit-code ] || exit 1
+  printf 'start-limit-hit\\n' > "$ENOKI_RUNTIME_STATE"
+  mkdir -p "$(dirname "$ENOKI_RUNTIME_EPOCH")"
+  unit_sha=$(sha256sum "$ENOKI_RUNTIME_UNIT" | cut -d ' ' -f 1)
+  cat > "$ENOKI_RUNTIME_EPOCH" <<EOF
+schema_version = 1
+generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+boot_id = "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51"
+unit = "enoki-observation-runtime.service"
+unit_sha256 = "$unit_sha"
+host_id = "7"
+probe_id = "probe_release_01"
+identity_receipt_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+install_state_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+bundle_version = "1.2.3"
+result = "start-limit-hit"
+EOF
+  printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$ENOKI_RUNTIME_LATCH"
+  chmod 0600 "$ENOKI_RUNTIME_EPOCH" "$ENOKI_RUNTIME_LATCH"
+  exit 1
+fi
+if [ "$1" = show ]; then
+  current=$(cat "$ENOKI_RUNTIME_STATE" 2>/dev/null || printf stopped)
+  if [ "$current" = auto-restarting ]; then
+    printf 'exit-code\\n' > "$ENOKI_RUNTIME_STATE"
+    current=exit-code
+  fi
+  case "$current" in
+    start-limit-hit) active=failed; result=start-limit-hit ;;
+    exit-code|auto-restarting) active=failed; result=exit-code ;;
+    *) active=inactive; result=success ;;
+  esac
+  case " $* " in
+    *" --property=ActiveState --value "*) printf '%s\\n' "$active" ;;
+    *" --property=Result --value "*) printf '%s\\n' "$result" ;;
+    *" --property=NRestarts --value "*) printf '2\\n' ;;
+    *) printf 'LoadState=loaded\\nActiveState=%s\\nSubState=dead\\n' "$active" ;;
+  esac
+  exit 0
+fi
+exit 1
+`,
+        "utf8",
+      );
+      await chmod(path.join(root, "fake-bin", "systemctl"), 0o755);
+      const runtimeSha256 = createHash("sha256")
+        .update(await readFile(fixture.paths.runtime))
+        .digest("hex");
+
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun() {},
+        async execute(command) {
+          if (
+            command.includes(
+              "# enoki-release-e2e:exhaust-observation-runtime-budget",
+            )
+          ) {
+            return await fixture.runHostScript(command, {
+              ENOKI_RUNTIME_EPOCH: epoch,
+              ENOKI_RUNTIME_LATCH: latch,
+              ENOKI_RUNTIME_STATE: state,
+              ENOKI_START_REQUESTS: startRequests,
+            });
+          }
+          return successfulCommandText(
+            `bundleVersion=1.2.3\nepochExists=0\nfaultBackupExists=1\nlatchExists=0\nrepairOutput=Probe repair completed.\nruntimeSha256=${runtimeSha256}\nunit=enoki-observation-runtime.service\n`,
+          );
+        },
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+
+      await expect(
+        driver.repair("run-runtime-custody", "1.2.3"),
+      ).resolves.toMatchObject({
+        failure: { result: "start-limit-hit", status: "latched" },
+      });
+      await expect(readFile(startRequests, "utf8")).resolves.toBe("2\n");
     } finally {
       await fixture.remove();
     }
