@@ -4,10 +4,13 @@ import {
   chmod,
   chown,
   copyFile,
+  lchown,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -46,6 +49,48 @@ import { createInstalledBundleFailureRepairHostDriver } from "./release-installe
 import { createMatrixGateResult } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
+
+async function createSystemdStateDirectoryFixture(prefix) {
+  const root = await mkdtemp(path.join(os.tmpdir(), prefix));
+  const publicParent = path.join(root, "var", "lib");
+  const privateParent = path.join(publicParent, "private");
+  const publicState = path.join(publicParent, "enoki-probe");
+  const privateState = path.join(privateParent, "enoki-probe");
+  const identity = path.join(privateState, "identity");
+  const config = path.join(identity, "probe-bootstrap.toml");
+  const resources = [
+    {
+      kind: "directory",
+      path: publicState,
+      systemdStateDirectoryProjection: true,
+    },
+  ];
+  await mkdir(identity, { recursive: true });
+  await chmod(publicParent, 0o755);
+  await chmod(privateParent, 0o700);
+  await chmod(privateState, 0o750);
+  await chmod(identity, 0o700);
+  await writeFile(config, "identity", "utf8");
+  await chmod(config, 0o600);
+  await symlink("private/enoki-probe", publicState);
+  return {
+    config,
+    privateParent,
+    privateState,
+    publicParent,
+    publicState,
+    async fingerprint() {
+      const result = await execFileAsync("sh", [
+        "-c",
+        `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+      ]);
+      return result.stdout;
+    },
+    async remove() {
+      await rm(root, { force: true, recursive: true });
+    },
+  };
+}
 
 describe("Release E2E business assertions", () => {
   it("transfers cleanup ownership when the existing runner enters environment start", async () => {
@@ -1243,6 +1288,87 @@ describe("Probe Host Harness", () => {
       await rm(root, { force: true, recursive: true });
     }
   });
+
+  it("fingerprints the canonical systemd StateDirectory projection as one logical directory", async () => {
+    const fixture = await createSystemdStateDirectoryFixture(
+      "enoki-e2e-state-directory-",
+    );
+
+    try {
+      const baseline = await fixture.fingerprint();
+      expect(baseline).toContain("\tsymlink\t");
+      expect(baseline).toContain("\tdirectory\t");
+      expect(baseline).toContain("\tfile\t");
+
+      await writeFile(fixture.config, "changed identity", "utf8");
+      await expect(fixture.fingerprint()).resolves.not.toBe(baseline);
+      await writeFile(fixture.config, "identity", "utf8");
+      await expect(fixture.fingerprint()).resolves.toBe(baseline);
+
+      const member = path.join(fixture.privateState, "unexpected");
+      await writeFile(member, "new member", "utf8");
+      await expect(fixture.fingerprint()).resolves.not.toBe(baseline);
+      await rm(member);
+      await expect(fixture.fingerprint()).resolves.toBe(baseline);
+
+      await chmod(fixture.config, 0o640);
+      await expect(fixture.fingerprint()).resolves.not.toBe(baseline);
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it.each([
+    ["an ordinary directory symlink", "ordinary-link"],
+    ["a non-canonical link target", "link-target"],
+    ["public link custody", "public-link-owner"],
+    ["public parent custody", "public-parent"],
+    ["private parent custody", "private-parent"],
+    ["private StateDirectory mode", "state-mode"],
+    ["identity custody", "identity-owner"],
+    ["a symlinked private referent", "private-state-link"],
+  ])(
+    "rejects %s in a systemd StateDirectory projection",
+    async (_label, tamper) => {
+      const fixture = await createSystemdStateDirectoryFixture(
+        "enoki-e2e-state-directory-tamper-",
+      );
+
+      try {
+        if (tamper === "ordinary-link") {
+          await rm(fixture.publicState);
+          await symlink(fixture.privateState, fixture.publicState);
+        } else if (tamper === "link-target") {
+          await rm(fixture.publicState);
+          await symlink("private/../private/enoki-probe", fixture.publicState);
+        } else if (tamper === "public-link-owner") {
+          await lchown(fixture.publicState, 65534, 65534);
+        } else if (tamper === "public-parent") {
+          await chmod(fixture.publicParent, 0o750);
+        } else if (tamper === "private-parent") {
+          await chmod(fixture.privateParent, 0o755);
+        } else if (tamper === "state-mode") {
+          await chmod(fixture.privateState, 0o700);
+        } else if (tamper === "identity-owner") {
+          await chown(fixture.privateState, 65534, 65534);
+        } else if (tamper === "private-state-link") {
+          const referent = path.join(
+            fixture.privateParent,
+            "enoki-probe-referent",
+          );
+          await rename(fixture.privateState, referent);
+          await symlink("enoki-probe-referent", fixture.privateState);
+        }
+
+        await expect(fixture.fingerprint()).rejects.toMatchObject({
+          code: 1,
+          stderr: "",
+        });
+      } finally {
+        await fixture.remove();
+      }
+    },
+  );
 
   it("proves the declared Ubuntu architecture and host systemd boundary", async () => {
     const harness = createProbeHostHarness({

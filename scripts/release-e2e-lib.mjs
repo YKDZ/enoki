@@ -27,7 +27,11 @@ const releaseE2EInfrastructureResources = Object.freeze([
     kind: "file",
     path: "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
   },
-  { kind: "directory", path: "/var/lib/enoki-probe" },
+  {
+    kind: "directory",
+    path: "/var/lib/enoki-probe",
+    systemdStateDirectoryProjection: true,
+  },
   { kind: "file", path: "/etc/sudoers.d/enoki-probe-operations" },
   {
     kind: "file",
@@ -4600,7 +4604,19 @@ export function renderReleaseE2EResourceFingerprint(resources) {
     .map((resource) => shellSingleQuote(resource.path))
     .join(" ");
   const directories = resources
-    .filter((resource) => resource.kind === "directory")
+    .filter(
+      (resource) =>
+        resource.kind === "directory" &&
+        resource.systemdStateDirectoryProjection !== true,
+    )
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const systemdStateDirectories = resources
+    .filter(
+      (resource) =>
+        resource.kind === "directory" &&
+        resource.systemdStateDirectoryProjection === true,
+    )
     .map((resource) => shellSingleQuote(resource.path))
     .join(" ");
   const users = resources
@@ -4638,6 +4654,41 @@ fingerprint_directory() {
     fingerprint_path "$member" || exit 1
   done
 }
+fingerprint_systemd_state_directory() {
+  public=$1
+  public_parent=$(dirname -- "$public") || return 1
+  public_name=$(basename -- "$public") || return 1
+  private_parent="$public_parent/private"
+  private_state="$private_parent/$public_name"
+  identity="$private_state/identity"
+  [ -d "$public_parent" ] && [ ! -L "$public_parent" ] || return 1
+  [ "$(stat -c %u -- "$public_parent")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$public_parent")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$public_parent")" = 755 ] || return 1
+  [ -L "$public" ] || return 1
+  [ "$(stat -c %u -- "$public")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$public")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$public")" = 777 ] || return 1
+  [ "$(stat -c %h -- "$public")" = 1 ] || return 1
+  [ "$(readlink -- "$public")" = "private/$public_name" ] || return 1
+  [ -d "$private_parent" ] && [ ! -L "$private_parent" ] || return 1
+  [ "$(stat -c %u -- "$private_parent")" = 0 ] || return 1
+  [ "$(stat -c %g -- "$private_parent")" = 0 ] || return 1
+  [ "$(stat -c %a -- "$private_parent")" = 700 ] || return 1
+  [ -d "$private_state" ] && [ ! -L "$private_state" ] || return 1
+  state_uid=$(stat -c %u -- "$private_state") || return 1
+  state_gid=$(stat -c %g -- "$private_state") || return 1
+  [ "$(stat -c %a -- "$private_state")" = 750 ] || return 1
+  [ "$(stat -c %h -- "$private_state")" -ge 2 ] || return 1
+  [ -d "$identity" ] && [ ! -L "$identity" ] || return 1
+  [ "$(stat -c %u -- "$identity")" = "$state_uid" ] || return 1
+  [ "$(stat -c %g -- "$identity")" = "$state_gid" ] || return 1
+  [ "$(stat -c %a -- "$identity")" = 700 ] || return 1
+  [ "$(stat -c %h -- "$identity")" -ge 2 ] || return 1
+  [ "$(stat -Lc %d:%i -- "$public")" = "$(stat -c %d:%i -- "$private_state")" ] || return 1
+  fingerprint_path "$public" || return 1
+  fingerprint_directory "$private_state" || return 1
+}
 fingerprint() {
   for candidate in ${files}; do
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
@@ -4649,6 +4700,11 @@ fingerprint() {
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
       [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
       fingerprint_directory "$candidate" || return 1
+    fi
+  done
+  for candidate in ${systemdStateDirectories}; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      fingerprint_systemd_state_directory "$candidate" || return 1
     fi
   done
   for account in ${users}; do
