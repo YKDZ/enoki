@@ -3194,7 +3194,7 @@ printf covered > '${covered}'
     await harness.assertDisposable("run-runtime-cleanup-renew");
     await harness.install(officialEnrollment(), "run-runtime-cleanup-renew");
     await expect(harness.cleanup("run-runtime-cleanup-renew")).resolves.toEqual(
-      { clean: true, removedPartialInstallation: true },
+      { clean: true, removedPartialInstallation: false },
     );
     const recovered = commands.findIndex((command) =>
       command.includes(

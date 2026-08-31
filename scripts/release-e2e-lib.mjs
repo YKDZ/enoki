@@ -3946,8 +3946,9 @@ export function createProbeHostHarness({
         });
       }
 
+      let completedCustody;
       try {
-        await completeRuntimeRecoveryCustody(runId);
+        completedCustody = await completeRuntimeRecoveryCustody(runId);
       } catch (error) {
         errors.push(error);
         const aggregate = new AggregateError(
@@ -3962,6 +3963,13 @@ export function createProbeHostHarness({
       let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
       if (residue?.length > 0) {
+        if (hasCompleteInstalledInventory(residue) && !completedCustody) {
+          errors.push(
+            new Error(
+              "Refusing cleanup of a complete backup-absent installation without this-call expected-version assertion",
+            ),
+          );
+        }
         const verifiedResources = await execute(
           verifyRunResourcesScript(runId, ownershipToken),
           { root: true },
@@ -3974,7 +3982,7 @@ export function createProbeHostHarness({
             ),
           );
         }
-        if (resourcesOwned) {
+        if (resourcesOwned && !hasCompleteInstalledInventory(residue)) {
           await attempt(async () => {
             const cleaned = await execute(
               releaseEmergencyCleanupScript(runId, ownershipToken),
@@ -5391,6 +5399,20 @@ function inventoryResidue(inventory) {
   if (Array.isArray(inventory?.files)) residue.push(...inventory.files);
   if (Array.isArray(inventory?.units)) residue.push(...inventory.units);
   return residue.sort();
+}
+
+function hasCompleteInstalledInventory(residue) {
+  return [
+    "user:enoki-probe",
+    "group:enoki-probe",
+    "/usr/local/bin/enoki-probe",
+    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    "/var/lib/enoki-probe-bootstrap",
+    "/etc/enoki/probe-install.toml",
+    "/etc/systemd/system/enoki-probe.service",
+    "/var/lib/enoki-probe",
+    "enoki-probe.service",
+  ].every((entry) => residue.includes(entry));
 }
 
 function parseJson(value, label) {
