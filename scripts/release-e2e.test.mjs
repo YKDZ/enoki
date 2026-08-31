@@ -79,11 +79,15 @@ async function createSystemdStateDirectoryFixture(prefix) {
     privateState,
     publicParent,
     publicState,
-    async fingerprint() {
-      const result = await execFileAsync("sh", [
-        "-c",
-        `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
-      ]);
+    async fingerprint(environment = process.env) {
+      const result = await execFileAsync(
+        "sh",
+        [
+          "-c",
+          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+        ],
+        { env: environment },
+      );
       return result.stdout;
     },
     async remove() {
@@ -1318,23 +1322,70 @@ describe("Probe Host Harness", () => {
     }
   });
 
-  it("rejects an ambiguous newline member in a systemd StateDirectory projection", async () => {
-    const fixture = await createSystemdStateDirectoryFixture(
-      "enoki-e2e-state-directory-newline-",
-    );
+  it("uses one fail-closed directory snapshot for ambiguous members", async () => {
+    const outcomes = {};
 
-    try {
-      await writeFile(path.join(fixture.privateState, "a"), "visible", "utf8");
+    for (const effect of ["fail", "insert"]) {
+      const fixture = await createSystemdStateDirectoryFixture(
+        `enoki-e2e-state-directory-${effect}-`,
+      );
+      const fakeBin = path.join(fixture.privateState, "fake-bin");
+      const calls = path.join(fixture.privateState, "find-calls");
+      const fakeFind = path.join(fakeBin, "find");
+      await mkdir(fakeBin);
       await writeFile(
-        path.join(fixture.privateState, "a\n."),
-        "hidden",
+        fakeFind,
+        `#!/bin/sh
+count=$(cat "$ENOKI_FIND_CALLS" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s' "$count" > "$ENOKI_FIND_CALLS"
+/usr/bin/find "$@"
+status=$?
+if [ "$ENOKI_FIND_EFFECT" = insert ] && [ "$count" -eq 1 ]; then
+  printf hidden > "$ENOKI_FIND_INSERT_PATH"
+fi
+case " $* " in *' -print0 '*) nul_snapshot=true ;; *) nul_snapshot=false ;; esac
+if [ "$ENOKI_FIND_EFFECT" = fail ] && { [ "$count" -eq 2 ] || [ "$nul_snapshot" = true ]; }; then
+  exit 1
+fi
+exit "$status"
+`,
         "utf8",
       );
+      await chmod(fakeFind, 0o755);
+      await writeFile(path.join(fixture.privateState, "a"), "visible", "utf8");
+      const environment = {
+        ...process.env,
+        ENOKI_FIND_CALLS: calls,
+        ENOKI_FIND_EFFECT: effect,
+        ENOKI_FIND_INSERT_PATH: path.join(fixture.privateState, "a\n."),
+        PATH: `${fakeBin}:${process.env.PATH}`,
+      };
 
-      await expect(fixture.fingerprint()).rejects.toMatchObject({ code: 1 });
-    } finally {
-      await fixture.remove();
+      try {
+        outcomes[effect] = await fixture.fingerprint(environment).then(
+          () => "resolved",
+          (error) => `rejected:${error.code}`,
+        );
+        outcomes[`${effect}Calls`] = await readFile(calls, "utf8");
+        if (effect === "insert") {
+          outcomes.insertFollowUp = await fixture.fingerprint().then(
+            () => "resolved",
+            (error) => `rejected:${error.code}`,
+          );
+        }
+      } finally {
+        await fixture.remove();
+      }
     }
+
+    expect(outcomes).toEqual({
+      fail: "rejected:1",
+      failCalls: "1",
+      insert: "resolved",
+      insertCalls: "1",
+      insertFollowUp: "rejected:1",
+    });
   });
 
   it.each([

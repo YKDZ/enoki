@@ -4648,15 +4648,46 @@ export function renderReleaseE2EResourceFingerprint(resources) {
 }
 fingerprint_directory() {
   directory=$1
-  newline='
-'
-  invalid=$(find -P "$directory" -xdev -name "*$newline*" -print) || return 1
-  [ -z "$invalid" ] || return 1
-  members=$(find -P "$directory" -xdev -print | LC_ALL=C sort) || return 1
-  printf '%s\n' "$members" | while IFS= read -r member; do
+  snapshot=$(mktemp "/tmp/enoki-release-e2e-fingerprint.XXXXXX") || return 1
+  members=$(mktemp "/tmp/enoki-release-e2e-members.XXXXXX") || {
+    rm -f -- "$snapshot"
+    return 1
+  }
+  if ! find -P "$directory" -xdev -print0 > "$snapshot"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  if ! LC_ALL=C sort -z -o "$snapshot" "$snapshot"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  if ! od -An -t u1 "$snapshot" > "$members"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  record_count=$(awk '{ for (field = 1; field <= NF; field += 1) if ($field == 0) count += 1 } END { print count + 0 }' "$members") || {
+    rm -f -- "$snapshot" "$members"
+    return 1
+  }
+  if ! tr '\000' '\n' < "$snapshot" > "$members"; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  line_count=$(wc -l < "$members") || {
+    rm -f -- "$snapshot" "$members"
+    return 1
+  }
+  if [ "$record_count" -ne "$line_count" ]; then
+    rm -f -- "$snapshot" "$members"
+    return 1
+  fi
+  status=0
+  while IFS= read -r member; do
     [ -n "$member" ] || continue
-    fingerprint_path "$member" || exit 1
-  done
+    fingerprint_path "$member" || { status=1; break; }
+  done < "$members"
+  rm -f -- "$snapshot" "$members" || status=1
+  return "$status"
 }
 fingerprint_systemd_state_directory() {
   public=$1
