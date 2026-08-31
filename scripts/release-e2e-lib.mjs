@@ -4579,11 +4579,13 @@ function claimLockPrelude() {
   return String.raw`lock_root=/run/enoki-release-e2e
 lock_path="$lock_root/claim.lock"
 install -d -m 0700 "$lock_root"
-[ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 75; }
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 75; }
 if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 75; }
 exec 9<>"$lock_path"
 flock -x 9
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory changed\n' >&2; exit 75; }
+[ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody changed\n' >&2; exit 75; }
 path_inode=$(stat -Lc '%d:%i' "$lock_path")
 fd_inode=$(stat -Lc '%d:%i' "/proc/$$/fd/9")
 [ "$path_inode" = "$fd_inode" ] || { printf 'release E2E lock inode changed\n' >&2; exit 75; }
@@ -4696,13 +4698,13 @@ ${claimLockPrelude()}
 ${resourceFingerprintFunction()}
 [ ! -e "$claim/resources.next" ] && [ ! -L "$claim/resources.next" ] || { printf 'run resource renewal is pending\n' >&2; exit 75; }
 temporary="$claim/resources.next"
-fingerprint > "$temporary"
 ${
   expectedSnapshot === null
-    ? ""
+    ? 'fingerprint > "$temporary"'
     : `expected_snapshot=$(printf '%s' ${shellSingleQuote(expectedSnapshot)} | base64 -d)
-[ "$(cat -- \"$temporary\")" = "$expected_snapshot" ] || { rm -- "$temporary"; sync -f "$claim"; printf 'asserted resource snapshot changed\n' >&2; exit 75; }
-`
+actual_snapshot=$(fingerprint)
+[ "$actual_snapshot" = "$expected_snapshot" ] || { printf 'asserted resource snapshot changed\n' >&2; exit 75; }
+printf '%s\n' "$actual_snapshot" > "$temporary"`
 }
 sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
@@ -4894,11 +4896,12 @@ ${claimLockPrelude()}
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.upgrade.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource upgrade renewal is pending\n' >&2; exit 75; }
 fingerprint > "$temporary"
+sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
+sync -f "$claim"
 rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
 printf 'owned\n'
 `;
@@ -4920,11 +4923,12 @@ cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
 [ "$metadata_schema" = bootstrap-v2 ]
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.repair.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource repair renewal is pending\n' >&2; exit 75; }
 fingerprint > "$temporary"
+sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
+sync -f "$claim"
 rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
 printf 'owned\n'
 `;

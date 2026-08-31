@@ -2910,7 +2910,7 @@ printf covered > '${covered}'
       command.includes("# enoki-release-e2e:renew-resources"),
     );
     expect(renewed.options).toEqual({ root: true });
-    expect(renewed.command).toContain('fingerprint > "$temporary"');
+    expect(renewed.command).toContain("actual_snapshot=$(fingerprint)");
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {

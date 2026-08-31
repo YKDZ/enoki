@@ -368,11 +368,13 @@ unit_file=/etc/systemd/system/enoki-observation-runtime.service
 epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
 latch=/var/lib/enoki-probe/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
+${runtimeClaimLockPrelude()}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
 ${systemdUnitStateFunctions()}
 [ -d "$claim" ] || fail 'release E2E ownership claim is missing'
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
 [ "$(cat "$claim/token")" = ${shellSingleQuote(ownershipToken)} ] || fail 'release E2E ownership token changed'
+[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || fail 'release E2E resource custody is invalid'
 [ -f "$runtime" ] && [ ! -L "$runtime" ] || fail 'Observation Runtime binary boundary is invalid'
 [ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'Observation Runtime binary ownership is invalid'
 [ -f "$unit_file" ] && [ ! -L "$unit_file" ] || fail 'Observation Runtime unit boundary is invalid'
@@ -388,6 +390,9 @@ start_limit_burst=$(sed -n 's/^StartLimitBurst=//p' "$unit_file")
 start_limit_interval=$(sed -n 's/^StartLimitIntervalSec=//p' "$unit_file")
 [ "$start_limit_burst" = 3 ] && [ "$start_limit_interval" = 60s ] || fail 'Observation Runtime recovery budget is not build-fixed'
 cp --preserve=mode,ownership,timestamps -- "$runtime" "$backup"
+[ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'Runtime backup custody is invalid'
+sync -f "$backup" || fail 'could not persist Runtime backup custody'
+sync -f "$claim" || fail 'could not persist Runtime backup publication'
 runtime_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1)
 temporary=$(mktemp /usr/local/bin/.enoki-observation-runtime.release-e2e.XXXXXX)
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -494,11 +499,13 @@ restore_tmp=/usr/local/bin/.enoki-observation-runtime.release-e2e.restore
 lock_root=/run/enoki-release-e2e
 lock_path="$lock_root/claim.lock"
 install -d -m 0700 "$lock_root"
-[ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 79; }
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 79; }
 if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 79; }
 exec 9<>"$lock_path"
 flock -x 9
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory changed\n' >&2; exit 79; }
+[ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody changed\n' >&2; exit 79; }
 [ "$(stat -Lc '%d:%i' "$lock_path")" = "$(stat -Lc '%d:%i' "/proc/$$/fd/9")" ] || { printf 'release E2E lock inode changed\n' >&2; exit 79; }
 companion=/usr/local/bin/enoki-probe-lifecycle-companion
 unit=${shellSingleQuote(observationRuntimeUnit)}
@@ -511,6 +518,12 @@ recovered_bundle_version=
 if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   [ "$(stat -c '%u:%a:%h' "$backup")" = 0:755:1 ] || fail 'run-owned Runtime backup boundary is invalid'
   backup_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1) || fail 'could not read run-owned Runtime backup'
+  if [ -e "$restore_tmp" ] || [ -L "$restore_tmp" ]; then
+    [ -f "$restore_tmp" ] && [ ! -L "$restore_tmp" ] && [ "$(stat -c '%u:%a:%h' "$restore_tmp")" = 0:755:1 ] || fail 'Runtime restore temporary residue is invalid'
+    [ "$(sha256sum "$restore_tmp" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'Runtime restore temporary digest changed'
+    rm -- "$restore_tmp"
+    sync -f /usr/local/bin || fail 'could not persist Runtime restore temporary cleanup'
+  fi
   stop_unit enoki-probe.service
   stop_unit enoki-observation-runtime.socket
   require_stopped_unit enoki-probe.service
@@ -597,11 +610,13 @@ function runtimeClaimLockPrelude() {
   return String.raw`lock_root=/run/enoki-release-e2e
 lock_path="$lock_root/claim.lock"
 install -d -m 0700 "$lock_root"
-[ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 79; }
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 79; }
 if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 79; }
 exec 9<>"$lock_path"
 flock -x 9
+[ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory changed\n' >&2; exit 79; }
+[ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody changed\n' >&2; exit 79; }
 [ "$(stat -Lc '%d:%i' "$lock_path")" = "$(stat -Lc '%d:%i' "/proc/$$/fd/9")" ] || { printf 'release E2E lock inode changed\n' >&2; exit 79; }
 `;
 }
