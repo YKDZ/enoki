@@ -497,9 +497,11 @@ backup="$claim/observation-runtime-original"
 restore_tmp=/usr/local/bin/.enoki-observation-runtime.release-e2e.restore
 lock_root=/run/enoki-release-e2e
 lock_path="$lock_root/claim.lock"
-install -d -m 0700 "$lock_root"
+lock_parent=$(dirname -- "$lock_root")
+[ -d "$lock_parent" ] || mkdir -p "$lock_parent"
+[ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] && { mkdir -m 0700 "$lock_root" && sync -f "$lock_parent"; }
 [ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 79; }
-if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
+[ ! -e "$lock_path" ] && [ ! -L "$lock_path" ] && ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; )
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 79; }
 exec 9<>"$lock_path"
 flock -x 9
@@ -604,9 +606,11 @@ ${retire ? "rm -- \"$backup\"\nsync -f \"$claim\" || fail 'could not persist Run
 function runtimeClaimLockPrelude() {
   return String.raw`lock_root=/run/enoki-release-e2e
 lock_path="$lock_root/claim.lock"
-install -d -m 0700 "$lock_root"
+lock_parent=$(dirname -- "$lock_root")
+[ -d "$lock_parent" ] || mkdir -p "$lock_parent"
+[ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] && { mkdir -m 0700 "$lock_root" && sync -f "$lock_parent"; }
 [ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 79; }
-if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
+[ ! -e "$lock_path" ] && [ ! -L "$lock_path" ] && ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; )
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 79; }
 exec 9<>"$lock_path"
 flock -x 9
@@ -623,7 +627,11 @@ function runtimeClaimPreflight(runId, ownershipToken) {
 for member in "$claim"/* "$claim"/.[!.]* "$claim"/..?*; do
   [ -e "$member" ] || [ -L "$member" ] || continue
   [ -f "$member" ] && [ ! -L "$member" ] || fail 'release E2E claim member is invalid'
-  case "$(basename -- "$member")" in run-id|token|resources|observation-runtime-original) ;; *) fail 'release E2E claim has an unknown member' ;; esac
+    case "$(basename -- "$member")" in
+      resources.next) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E resource recovery is invalid'; rm -- "$member"; sync -f "$claim" || fail 'could not persist release E2E resource recovery' ;;
+      run-id|token|resources|observation-runtime-original) ;;
+      *) fail 'release E2E claim has an unknown member' ;;
+    esac
 done
 [ -f "$claim/run-id" ] && [ ! -L "$claim/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim/run-id")" = 0:600:1 ] || fail 'release E2E run claim is invalid'
 [ -f "$claim/token" ] && [ ! -L "$claim/token" ] && [ "$(stat -c '%u:%a:%h' "$claim/token")" = 0:600:1 ] || fail 'release E2E ownership token is invalid'

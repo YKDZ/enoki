@@ -3080,6 +3080,11 @@ export function createProbeHostHarness({
     expectedProbeVersion,
     captureAssertionSnapshot = false,
   ) {
+    const incomplete = (message) => {
+      const error = new Error(message);
+      error.code = "installed_boundary_incomplete";
+      return error;
+    };
     assertOwnedRun(runId, disposableRunId, runOwnsMutation);
     if (
       !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
@@ -3120,7 +3125,7 @@ export function createProbeHostHarness({
     ];
     const missing = required.filter((entry) => !residue.includes(entry));
     if (missing.length > 0) {
-      throw new Error(
+      throw incomplete(
         `Probe installation is incomplete: missing ${missing.join(", ")}`,
       );
     }
@@ -3137,29 +3142,37 @@ export function createProbeHostHarness({
       service.Group !== "enoki-probe" ||
       service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
     ) {
-      throw new Error(
+      throw incomplete(
         `Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
       );
     }
-    if (sudoersResult.code !== 0 || sudoersResult.stdout.trim() !== "") {
-      throw new Error(
+    if (sudoersResult.code !== 0) {
+      throw new Error("Probe Bootstrap sudoers inspection failed");
+    }
+    if (sudoersResult.stdout.trim() !== "") {
+      throw incomplete(
         "Probe Bootstrap schema 2 installation must not retain Probe sudoers",
       );
     }
     const generation = generationResult.stdout.trim();
-    if (generationResult.code !== 0 || !/^[1-9]\d*$/.test(generation)) {
+    if (generationResult.code !== 0) {
       throw new Error(
         "Probe Bootstrap delegation generation state is missing or invalid",
       );
     }
-    const probeVersion =
-      binaryVersionResult.code === 0
-        ? binaryVersionResult.stdout
-            .trim()
-            .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
-        : null;
+    if (!/^[1-9]\d*$/.test(generation)) {
+      throw incomplete(
+        "Probe Bootstrap delegation generation state is missing or invalid",
+      );
+    }
+    if (binaryVersionResult.code !== 0) {
+      throw new Error("Installed Probe binary version inspection failed");
+    }
+    const probeVersion = binaryVersionResult.stdout
+      .trim()
+      .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1];
     if (probeVersion !== expectedProbeVersion) {
-      throw new Error(
+      throw incomplete(
         `Installed Probe binary version ${probeVersion ?? "unknown"} does not match Candidate ${expectedProbeVersion}`,
       );
     }
@@ -3225,9 +3238,9 @@ export function createProbeHostHarness({
     } catch (error) {
       if (
         claimBoundVersion !== null &&
-        error.message.startsWith("Probe installation is incomplete:")
+        error.code === "installed_boundary_incomplete"
       ) {
-        return null;
+        return { classification: "run_owned_partial" };
       }
       throw error;
     }
@@ -3997,7 +4010,9 @@ export function createProbeHostHarness({
       let inspected = await attempt(() => inventory());
       let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
-      if (completedCustody && residue?.length > 0) {
+      const runOwnedPartial =
+        completedCustody?.classification === "run_owned_partial";
+      if (completedCustody?.boundary && residue?.length > 0) {
         const uninstalled = await execute(
           "# enoki-release-e2e:local-probe-uninstall\n/usr/local/bin/enoki-probe uninstall\n",
           { root: true },
@@ -4019,7 +4034,11 @@ export function createProbeHostHarness({
         }
       }
       if (residue?.length > 0) {
-        if (hasCompleteInstalledInventory(residue) && !completedCustody) {
+        if (
+          hasCompleteInstalledInventory(residue) &&
+          !completedCustody &&
+          !runOwnedPartial
+        ) {
           errors.push(
             new Error(
               "Refusing cleanup of a complete backup-absent installation without this-call expected-version assertion",
@@ -4027,7 +4046,7 @@ export function createProbeHostHarness({
           );
         }
         const verifiedResources = await execute(
-          verifyRunResourcesScript(runId, ownershipToken),
+          verifyRunResourcesScript(runId, ownershipToken, true),
           { root: true },
         );
         const resourcesOwned = verifiedResources.code === 0;
@@ -4038,7 +4057,11 @@ export function createProbeHostHarness({
             ),
           );
         }
-        if (resourcesOwned && !hasCompleteInstalledInventory(residue)) {
+        if (
+          resourcesOwned &&
+          (runOwnedPartial ||
+            (!completedCustody && !hasCompleteInstalledInventory(residue)))
+        ) {
           await attempt(async () => {
             const cleaned = await execute(
               releaseEmergencyCleanupScript(runId, ownershipToken),
@@ -4652,9 +4675,11 @@ done
 function claimLockPrelude() {
   return String.raw`lock_root=/run/enoki-release-e2e
 lock_path="$lock_root/claim.lock"
-install -d -m 0700 "$lock_root"
+lock_parent=$(dirname -- "$lock_root")
+[ -d "$lock_parent" ] || mkdir -p "$lock_parent"
+[ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] && { mkdir -m 0700 "$lock_root" && sync -f "$lock_parent"; }
 [ -d "$lock_root" ] && [ ! -L "$lock_root" ] && [ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 75; }
-if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
+[ ! -e "$lock_path" ] && [ ! -L "$lock_path" ] && ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; )
 [ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 75; }
 exec 9<>"$lock_path"
 flock -x 9
@@ -4675,6 +4700,7 @@ ${claimMutationPreflight(runId, token, true)}
 [ -f "$claim/resources" ]
 ${resourceFingerprintFunction()}
 temporary="$claim/resources.next"
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
 cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; exit 75; }
 rm -- "$temporary"
@@ -4725,9 +4751,10 @@ acquiring_dir="$claim_root/claim-acquiring"
 ${claimLockPrelude()}
 root_missing=false
 [ -e "$claim_root" ] || [ -L "$claim_root" ] || root_missing=true
-install -d -m 0700 "$claim_root"
+[ -d "$(dirname -- "$claim_root")" ] || mkdir -p "$(dirname -- "$claim_root")"
+[ "$root_missing" = false ] || { mkdir -m 0700 "$claim_root" || { printf 'Host claim root creation failed\n' >&2; exit 73; }; }
 [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'Host claim root custody is invalid\n' >&2; exit 73; }
-[ "$root_missing" = false ] || sync -f /var/lib || { printf 'Host claim root creation is not durable\n' >&2; exit 73; }
+[ "$root_missing" = false ] || sync -f "$(dirname -- "$claim_root")" || { printf 'Host claim root creation is not durable\n' >&2; exit 73; }
 for child in "$claim_root"/* "$claim_root"/.[!.]* "$claim_root"/..?*; do
   [ -e "$child" ] || [ -L "$child" ] || continue
   case "$(basename -- "$child")" in claim|claim-acquiring|claim-retiring) [ -d "$child" ] && [ ! -L "$child" ] || { printf 'Host claim child is invalid\n' >&2; exit 73; } ;; *) printf 'Host claim root has an unknown child\n' >&2; exit 73 ;; esac
@@ -4840,6 +4867,7 @@ ${claimMutationPreflight(runId, token, true)}
 ${resourceFingerprintFunction()}
 [ ! -e "$claim/resources.next" ] && [ ! -L "$claim/resources.next" ] || { printf 'run resource renewal is pending\n' >&2; exit 75; }
 temporary="$claim/resources.next"
+${resourceTemporaryCreatePrelude()}
 ${
   expectedSnapshot === null
     ? 'fingerprint > "$temporary"'
@@ -4855,21 +4883,29 @@ printf 'renewed\\n'
 `;
 }
 
-function verifyRunResourcesScript(runId, token) {
+function verifyRunResourcesScript(runId, token, allowRemainingSubset = false) {
   return resourceFingerprintScript({
     header: "verify-resources",
     runId,
     token,
+    allowRemainingSubset,
     verify: true,
   });
 }
 
-function resourceFingerprintScript({ header, runId, token, verify }) {
+function resourceFingerprintScript({
+  header,
+  runId,
+  token,
+  verify,
+  allowRemainingSubset = false,
+}) {
   const action = verify
     ? String.raw`temporary="$claim/resources.next"
 [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource verification is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }
+${allowRemainingSubset ? String.raw`while IFS= read -r entry; do grep -Fqx -- "$entry" "$claim/resources" || { rm -- "$temporary"; sync -f "$claim"; printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }; done < "$temporary"` : String.raw`cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }`}
 rm -- "$temporary"
 sync -f "$claim"
 printf 'owned\n'`
@@ -4879,6 +4915,7 @@ if ! ( umask 077; fingerprint > "$claim/resources" ); then
   printf 'could not fingerprint installed Probe resources\n' >&2
   exit 75
 fi
+[ -f "$claim/resources" ] && [ ! -L "$claim/resources" ] && [ "$(stat -c '%u:%a:%h' "$claim/resources")" = 0:600:1 ] || { rm -f -- "$claim/resources"; sync -f "$claim"; printf 'could not persist run-owned resource evidence\n' >&2; exit 75; }
 sync -f "$claim/resources"
 sync -f "$claim"
 printf 'recorded\n'`;
@@ -5046,6 +5083,7 @@ ${knownProbeInstallMetadataScript()}
 ${resourceFingerprintFunction()}
 temporary="$claim/resources.next"
 [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource upgrade renewal is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
 sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
@@ -5074,6 +5112,7 @@ ${knownProbeInstallMetadataScript()}
 ${resourceFingerprintFunction()}
 temporary="$claim/resources.next"
 [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource repair renewal is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
 sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
@@ -5085,6 +5124,11 @@ printf 'owned\n'
 
 function resourceFingerprintFunction() {
   return renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources);
+}
+
+function resourceTemporaryCreatePrelude() {
+  return String.raw`( umask 077; : > "$temporary" )
+[ -f "$temporary" ] && [ ! -L "$temporary" ] && [ "$(stat -c '%u:%a:%h' "$temporary")" = 0:600:1 ] || { printf 'run resource temporary custody is invalid\n' >&2; exit 75; }`;
 }
 
 export function renderReleaseE2EResourceFingerprint(resources) {
@@ -5118,12 +5162,13 @@ export function renderReleaseE2EResourceFingerprint(resources) {
     .join(" ");
   return String.raw`fingerprint_path() {
   path=$1
-  metadata=$(stat -c '%u\t%g\t%a\t%d\t%i\t%s' -- "$path") || return 1
+  metadata=$(stat -c '%u\t%g\t%a\t%h\t%d\t%i\t%s' -- "$path") || return 1
   path_hash=$(printf '%s' "$path" | sha256sum | awk '{print $1}') || return 1
   if [ -L "$path" ]; then
     type=symlink
     content_hash=$(readlink -- "$path" | sha256sum | awk '{print $1}') || return 1
   elif [ -f "$path" ]; then
+    [ "$(stat -c %h -- "$path")" = 1 ] || return 1
     type=file
     content_hash=$(sha256sum -- "$path" | awk '{print $1}') || return 1
   elif [ -d "$path" ]; then
@@ -5451,7 +5496,12 @@ ${claimMutationPreflight(runId, token, true)}
 ${resourceFingerprintFunction()}
 temporary="$claim/resources.next"
 [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource cleanup recovery is pending\n' >&2; exit 75; }
+${resourceTemporaryCreatePrelude()}
 trap 'rm -f -- "$temporary"; sync -f "$claim"' EXIT HUP INT TERM
+fingerprint > "$temporary"
+while IFS= read -r entry; do grep -Fqx -- "$entry" "$claim/resources" || exit 75; done < "$temporary"
+rm -- "$temporary"
+sync -f "$claim"
 service_state() {
   service=$1
   if ! properties=$(LC_ALL=C systemctl show "$service" --no-pager --property=LoadState --property=ActiveState 2>/dev/null); then
@@ -5487,8 +5537,9 @@ for service in ${services}; do
   fi
   case "$state" in inactive|absent) ;; *) printf 'Probe service is not quiescent\\n' >&2; exit 75 ;; esac
 done
+${resourceTemporaryCreatePrelude()}
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }
+while IFS= read -r entry; do grep -Fqx -- "$entry" "$claim/resources" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }; done < "$temporary"
 rm -- "$temporary"
 sync -f "$claim"
 trap - EXIT HUP INT TERM

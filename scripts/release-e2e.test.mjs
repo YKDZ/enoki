@@ -5,6 +5,7 @@ import {
   chown,
   copyFile,
   lchown,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -1459,6 +1460,12 @@ describe("Probe Host Harness", () => {
       await expect(fingerprint()).resolves.not.toBe(baseline);
       await chmod(binary, 0o644);
       await expect(fingerprint()).resolves.toBe(baseline);
+
+      const externalHardlink = path.join(root, "external-hardlink");
+      await link(binary, externalHardlink);
+      await expect(fingerprint()).rejects.toBeDefined();
+      await unlink(externalHardlink);
+      await expect(fingerprint()).resolves.toBe(baseline);
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -1798,6 +1805,22 @@ exit "$status"
         code: 73,
       });
       await expect(lstat(unknown)).resolves.toBeDefined();
+      await rm(unknown);
+      const lockRoot = path.join(root, "run", "enoki-release-e2e");
+      await mkdir(lockRoot, { recursive: true, mode: 0o700 });
+      await chmod(lockRoot, 0o755);
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 75,
+      });
+      await expect(lstat(lockRoot)).resolves.toMatchObject({ mode: 0o40755 });
+      await rm(lockRoot, { force: true, recursive: true });
+      await chmod(path.dirname(active), 0o755);
+      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+        code: 73,
+      });
+      await expect(lstat(path.dirname(active))).resolves.toMatchObject({
+        mode: 0o40755,
+      });
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -4027,7 +4050,14 @@ printf covered > '${covered}'
             inventoryCount === 2 || inventoryCount === 3
               ? {
                   accounts: { group: true, user: true },
-                  files: ["/usr/local/bin/enoki-probe"],
+                  files: [
+                    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                    "/var/lib/enoki-probe-bootstrap",
+                    "/etc/enoki/probe-install.toml",
+                    "/etc/systemd/system/enoki-probe.service",
+                    "/usr/local/bin/enoki-probe",
+                    "/var/lib/enoki-probe",
+                  ],
                   units: ["enoki-probe.service"],
                 }
               : {
@@ -4057,6 +4087,11 @@ printf covered > '${covered}'
         }
         if (command.includes("# enoki-release-e2e:verify-resources")) {
           return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=inactive\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+          );
         }
         if (command.includes("# enoki-release-e2e:dependencies")) {
           return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
@@ -4095,7 +4130,6 @@ printf covered > '${covered}'
     expect(emergency).toContain('cat "$claim/run-id"');
     expect(emergency).toContain('cat "$claim/token"');
     expect(emergency).toContain('fingerprint > "$temporary"');
-    expect(emergency).toContain('cmp --silent "$claim/resources" "$temporary"');
     expect(emergency).toContain("sha256sum");
     expect(emergency).toContain("find -P");
     expect(emergency).toContain("stat -c");
