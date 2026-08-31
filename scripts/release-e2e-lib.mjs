@@ -4694,8 +4694,15 @@ claim_dir="$claim_root/claim"
 retiring_dir="$claim_root/claim-retiring"
 acquiring_dir="$claim_root/claim-acquiring"
 ${claimLockPrelude()}
+root_missing=false
+[ -e "$claim_root" ] || [ -L "$claim_root" ] || root_missing=true
 install -d -m 0700 "$claim_root"
 [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || { printf 'Host claim root custody is invalid\n' >&2; exit 73; }
+[ "$root_missing" = false ] || sync -f /var/lib || { printf 'Host claim root creation is not durable\n' >&2; exit 73; }
+for child in "$claim_root"/* "$claim_root"/.[!.]* "$claim_root"/..?*; do
+  [ -e "$child" ] || [ -L "$child" ] || continue
+  case "$(basename -- "$child")" in claim|claim-acquiring|claim-retiring) [ -d "$child" ] && [ ! -L "$child" ] || { printf 'Host claim child is invalid\n' >&2; exit 73; } ;; *) printf 'Host claim root has an unknown child\n' >&2; exit 73 ;; esac
+done
 if [ -e "$retiring_dir" ] || [ -L "$retiring_dir" ]; then
   printf 'Host claim retirement is incomplete\n' >&2
   exit 73
@@ -4720,6 +4727,11 @@ if [ -e "$claim_dir" ] || [ -L "$claim_dir" ]; then
   [ -d "$claim_dir" ] && [ ! -L "$claim_dir" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir")" = 0:700:2 ] &&
     [ -f "$claim_dir/run-id" ] && [ ! -L "$claim_dir/run-id" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir/run-id")" = 0:600:1 ] &&
     [ -f "$claim_dir/token" ] && [ ! -L "$claim_dir/token" ] && [ "$(stat -c '%u:%a:%h' "$claim_dir/token")" = 0:600:1 ] || { printf 'Host claim custody is invalid\n' >&2; exit 73; }
+  for member in "$claim_dir"/* "$claim_dir"/.[!.]* "$claim_dir"/..?*; do
+    [ -e "$member" ] || [ -L "$member" ] || continue
+    [ -f "$member" ] && [ ! -L "$member" ] || { printf 'Host claim member is invalid\n' >&2; exit 73; }
+    case "$(basename -- "$member")" in observation-runtime-original) [ "$(stat -c '%u:%a:%h' "$member")" = 0:755:1 ] || exit 73 ;; run-id|token|resources) [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || exit 73 ;; *) printf 'Host claim has an unknown member\n' >&2; exit 73 ;; esac
+  done
   if [ "$(cat "$claim_dir/run-id")" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim_dir/token")" = ${shellSingleQuote(token)} ]; then printf 'owned\n'; exit 0; fi
   printf 'Host already claimed by another Release E2E run\n' >&2; exit 73
 fi
