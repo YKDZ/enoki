@@ -958,7 +958,7 @@ fn runtime_failure_consumption_pending_at(
                     "absent-pair upgrade intent retained a failure pair",
                 ));
             }
-            UpgradeRuntimeFailureProgress::NoneConsumed => return Ok(false),
+            UpgradeRuntimeFailureProgress::NoneConsumed => return Ok(intent.phase != "activated"),
         }
     }
     Ok(false)
@@ -976,17 +976,10 @@ fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::
         )
         .map_err(|_| std::io::Error::other("repair intent invalid"))?
         .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
-        if matches!(
-            intent.state,
-            installed_bundle_repair::InstalledBundleRepairProgress::Admitted
-                | installed_bundle_repair::InstalledBundleRepairProgress::ValidationPending
-                | installed_bundle_repair::InstalledBundleRepairProgress::TemporaryRuntimeHealthy
-                | installed_bundle_repair::InstalledBundleRepairProgress::ProbeActive
-                | installed_bundle_repair::InstalledBundleRepairProgress::InvalidationCommitted
-                | installed_bundle_repair::InstalledBundleRepairProgress::EpochRemoved
-        ) {
-            return Ok(true);
-        }
+        // validated Repair intent 在其 durable retirement 删除文件前始终独占消费权。
+        // progress 不是释放信号：pair-none Local Retry 不能在此窗口启动 Runtime。
+        let _ = intent;
+        return Ok(true);
     }
     let Some(bytes) =
         trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
@@ -997,11 +990,11 @@ fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::
     if intent.phase == "aborted" {
         return Ok(false);
     }
-    Ok(matches!(
-        intent.progress,
-        None | Some(UpgradeRuntimeFailureProgress::None)
-            | Some(UpgradeRuntimeFailureProgress::Bound)
-            | Some(UpgradeRuntimeFailureProgress::EpochRemoved)
+    Ok(!matches!(
+        (&intent.phase, intent.progress),
+        (phase, Some(UpgradeRuntimeFailureProgress::NoneConsumed))
+            | (phase, Some(UpgradeRuntimeFailureProgress::LatchRemoved))
+            if phase == "activated"
     ))
 }
 
@@ -1889,13 +1882,8 @@ pub(super) mod tests {
 
         for missing in [EPOCH_PATH, LATCH_PATH] {
             let root = fixture();
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(19),
-            )
-            .unwrap();
+            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(19))
+                .unwrap();
             remove_regular_file(&rooted(root.path(), missing), 0o600, Some((uid, uid))).unwrap();
 
             let mut restarted_systemd = FailedRuntime(0);
@@ -2151,16 +2139,25 @@ pub(super) mod tests {
                 .as_bytes(),
             0o600,
         );
-        assert_eq!(
+        assert!(
             record_runtime_failure_at(
                 root.path(),
                 uid,
                 &mut FailedRuntime(0),
                 &mut Generation(61),
             )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::Latched,
+            .is_err(),
+            "none-consumed cannot release a non-terminal Upgrade reservation",
         );
+
+        write_fixture(
+            root.path(),
+            UPGRADE_ATTEMPT_PATH,
+            upgrade_journal_fixture("activated", true, 21, 21, "none-consumed", None).as_bytes(),
+            0o600,
+        );
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(62))
+            .unwrap();
 
         write_fixture(
             root.path(),

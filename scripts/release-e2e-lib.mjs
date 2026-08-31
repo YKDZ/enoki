@@ -3178,8 +3178,17 @@ export function createProbeHostHarness({
     const bundleVersion =
       expectedBundleVersion ?? recovered.recoveredBundleVersion;
     const boundary = await assertInstalledBoundary(runId, bundleVersion);
+    const snapshot = await execute(
+      captureRunResourcesSnapshotScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (snapshot.code !== 0 || snapshot.stdout.trim() === "") {
+      throw new Error(
+        `Could not capture asserted Probe resource snapshot: ${snapshot.stderr || snapshot.stdout}`,
+      );
+    }
     const renewed = await execute(
-      renewRunResourcesScript(runId, ownershipToken),
+      renewRunResourcesScript(runId, ownershipToken, snapshot.stdout.trim()),
       { root: true },
     );
     if (renewed.code !== 0 || renewed.stdout.trim() !== "renewed") {
@@ -4566,6 +4575,21 @@ done
 `;
 }
 
+function claimLockPrelude() {
+  return String.raw`lock_root=/run/enoki-release-e2e
+lock_path="$lock_root/claim.lock"
+install -d -m 0700 "$lock_root"
+[ "$(stat -c '%u:%a:%h' "$lock_root")" = 0:700:2 ] || { printf 'release E2E lock directory custody is invalid\n' >&2; exit 75; }
+if [ ! -e "$lock_path" ]; then ( umask 077; : > "$lock_path"; sync -f "$lock_path"; sync -f "$lock_root"; ); fi
+[ -f "$lock_path" ] && [ ! -L "$lock_path" ] && [ "$(stat -c '%u:%a:%h' "$lock_path")" = 0:600:1 ] || { printf 'release E2E lock custody is invalid\n' >&2; exit 75; }
+exec 9<>"$lock_path"
+flock -x 9
+path_inode=$(stat -Lc '%d:%i' "$lock_path")
+fd_inode=$(stat -Lc '%d:%i' "/proc/$$/fd/9")
+[ "$path_inode" = "$fd_inode" ] || { printf 'release E2E lock inode changed\n' >&2; exit 75; }
+`;
+}
+
 function claimRunScript(runId, token) {
   const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
   const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
@@ -4574,18 +4598,38 @@ set -eu
 claim_root=/var/lib/enoki-release-e2e
 claim_dir="$claim_root/claim"
 retiring_dir="$claim_root/claim-retiring"
+acquiring_dir="$claim_root/claim-acquiring"
+${claimLockPrelude()}
 install -d -m 0700 "$claim_root"
+[ "$(stat -c '%u:%a:%h' "$claim_root")" = 0:700:2 ] || { printf 'Host claim root custody is invalid\n' >&2; exit 73; }
+[ ! -e "$claim_dir" ] && [ ! -L "$claim_dir" ] || { printf 'Host already claimed by another Release E2E run\n' >&2; exit 73; }
 if [ -e "$retiring_dir" ] || [ -L "$retiring_dir" ]; then
   printf 'Host claim retirement is incomplete\n' >&2
   exit 73
 fi
-if ! mkdir -m 0700 "$claim_dir" 2>/dev/null; then
+recover_acquiring() {
+  [ -d "$acquiring_dir" ] && [ ! -L "$acquiring_dir" ] || { printf 'Host claim acquisition is invalid\n' >&2; exit 73; }
+  [ "$(stat -c '%u:%a:%h' "$acquiring_dir")" = 0:700:2 ] || { printf 'Host claim acquisition custody is invalid\n' >&2; exit 73; }
+  has_run=false; has_token=false
+  for member in "$acquiring_dir"/* "$acquiring_dir"/.[!.]* "$acquiring_dir"/..?*; do
+    [ -e "$member" ] || [ -L "$member" ] || continue
+    [ -f "$member" ] && [ ! -L "$member" ] && [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || { printf 'Host claim acquisition member is invalid\n' >&2; exit 73; }
+    case "$(basename -- "$member")" in run-id) has_run=true ;; token) has_token=true ;; *) printf 'Host claim acquisition has an unknown member\n' >&2; exit 73 ;; esac
+  done
+  "$has_token" && ! "$has_run" && { printf 'Host claim acquisition suffix is invalid\n' >&2; exit 73; }
+  if "$has_token"; then rm -- "$acquiring_dir/token"; sync -f "$acquiring_dir"; fi
+  if "$has_run"; then rm -- "$acquiring_dir/run-id"; sync -f "$acquiring_dir"; fi
+  rmdir "$acquiring_dir" || { printf 'Host claim acquisition cleanup is incomplete\n' >&2; exit 73; }
+  sync -f "$claim_root"
+}
+if [ -e "$acquiring_dir" ] || [ -L "$acquiring_dir" ]; then recover_acquiring; fi
+if ! mkdir -m 0700 "$acquiring_dir" 2>/dev/null; then
   printf 'Host already claimed by another Release E2E run\n' >&2
   exit 73
 fi
-cleanup_rejected_claim() { rm -f -- "$claim_dir/run-id" "$claim_dir/token"; rmdir "$claim_dir" 2>/dev/null || true; rmdir "$claim_root" 2>/dev/null || true; }
+cleanup_rejected_claim() { rm -f -- "$acquiring_dir/run-id" "$acquiring_dir/token"; rmdir "$acquiring_dir" 2>/dev/null || true; }
 trap cleanup_rejected_claim EXIT HUP INT TERM
-( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$claim_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$claim_dir/token" )
+( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$acquiring_dir/run-id"; sync -f "$acquiring_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$acquiring_dir/token"; sync -f "$acquiring_dir/token"; sync -f "$acquiring_dir" )
 # enoki-release-e2e:claim-empty-recheck
 residue=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do
@@ -4603,6 +4647,8 @@ if [ -n "$residue" ]; then
   printf 'Release Test Host became non-empty before claim:%s\n' "$residue" >&2
   exit 74
 fi
+mv -- "$acquiring_dir" "$claim_dir"
+sync -f "$claim_root"
 trap - EXIT HUP INT TERM
 printf 'owned\n'
 `;
@@ -4621,20 +4667,46 @@ function recordRunResourcesScript(runId, token) {
   });
 }
 
-function renewRunResourcesScript(runId, token) {
+function captureRunResourcesSnapshotScript(runId, token) {
+  return `# enoki-release-e2e:capture-resources-snapshot
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
+[ -d "$claim" ]
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
+${resourceFingerprintFunction()}
+fingerprint
+`;
+}
+
+function renewRunResourcesScript(runId, token, assertedSnapshot = null) {
+  const expectedSnapshot =
+    assertedSnapshot === null
+      ? null
+      : Buffer.from(assertedSnapshot).toString("base64");
   return `# enoki-release-e2e:renew-resources
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ -f "$claim/resources" ]
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.renew.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+[ ! -e "$claim/resources.next" ] && [ ! -L "$claim/resources.next" ] || { printf 'run resource renewal is pending\n' >&2; exit 75; }
+temporary="$claim/resources.next"
 fingerprint > "$temporary"
+${
+  expectedSnapshot === null
+    ? ""
+    : `expected_snapshot=$(printf '%s' ${shellSingleQuote(expectedSnapshot)} | base64 -d)
+[ "$(cat -- \"$temporary\")" = "$expected_snapshot" ] || { rm -- "$temporary"; sync -f "$claim"; printf 'asserted resource snapshot changed\n' >&2; exit 75; }
+`
+}
+sync -f "$temporary"
 mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
+sync -f "$claim"
 printf 'renewed\\n'
 `;
 }
@@ -4650,10 +4722,12 @@ function verifyRunResourcesScript(runId, token) {
 
 function resourceFingerprintScript({ header, runId, token, verify }) {
   const action = verify
-    ? String.raw`temporary=$(mktemp "$claim/resources.verify.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    ? String.raw`temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource verification is pending\n' >&2; exit 75; }
 fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }
+cmp --silent "$claim/resources" "$temporary" || { rm -- "$temporary"; sync -f "$claim"; printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }
+rm -- "$temporary"
+sync -f "$claim"
 printf 'owned\n'`
     : String.raw`[ ! -e "$claim/resources" ] || { printf 'run resource evidence already exists\n' >&2; exit 76; }
 if ! ( umask 077; fingerprint > "$claim/resources" ); then
@@ -4661,10 +4735,13 @@ if ! ( umask 077; fingerprint > "$claim/resources" ); then
   printf 'could not fingerprint installed Probe resources\n' >&2
   exit 75
 fi
+sync -f "$claim/resources"
+sync -f "$claim"
 printf 'recorded\n'`;
   return `# enoki-release-e2e:${header}
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4677,6 +4754,7 @@ function beginUpgradeOwnershipScript(runId, token, targetProbeVersion) {
   return `# enoki-release-e2e:begin-upgrade-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4693,6 +4771,7 @@ function bindUpgradeOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:bind-upgrade-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4713,6 +4792,7 @@ function armPostReplacementRestartFaultScript(
   return `# enoki-release-e2e:arm-post-replacement-fault
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 dropin_dir=/etc/systemd/system/enoki-probe.service.d
 dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ -d "$claim" ]
@@ -4784,6 +4864,7 @@ function removePostReplacementRestartFaultScript(runId, token) {
   return `# enoki-release-e2e:remove-post-replacement-fault
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 dropin_dir=/etc/systemd/system/enoki-probe.service.d
 dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ -d "$claim" ]
@@ -4803,6 +4884,7 @@ function completeUpgradeOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:complete-upgrade-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -4826,6 +4908,7 @@ function completeRepairOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:complete-repair-ownership
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
@@ -5077,9 +5160,11 @@ set -eu
 claim_root=/var/lib/enoki-release-e2e
 claim="$claim_root/claim"
 retiring="$claim_root/claim-retiring"
+${claimLockPrelude()}
 fail() { printf '%s\\n' "$1" >&2; exit 79; }
 is_exact_owner() {
   [ -d "$1" ] && [ ! -L "$1" ] &&
+    [ "$(stat -c '%u:%a:%h' "$1")" = 0:700:2 ] &&
     [ -f "$1/run-id" ] && [ ! -L "$1/run-id" ] &&
     [ -f "$1/token" ] && [ ! -L "$1/token" ] &&
     [ "$(stat -c '%u:%a:%h' "$1/run-id")" = 0:600:1 ] &&
@@ -5095,11 +5180,14 @@ check_members() {
     [ -f "$member" ] || fail 'release E2E claim member is not a regular file'
     [ "$(stat -c '%u:%a:%h' "$member")" = 0:600:1 ] || fail 'release E2E claim member custody is invalid'
     case "$(basename -- "$member")" in
-      run-id|token|resources|upgrade-before-resources|upgrade-target|upgrade-operation-id|post-replacement-fault) ;;
+      run-id|token|resources) ;;
       *) fail 'release E2E claim has an unknown member' ;;
     esac
   done
 }
+if [ -e "$claim" ] || [ -L "$claim" ] || [ -e "$retiring" ] || [ -L "$retiring" ]; then
+  [ -d "$claim_root" ] && [ ! -L "$claim_root" ] && [ "$(stat -c '%u:%a' "$claim_root")" = 0:700 ] || fail 'release E2E claim root custody is invalid'
+fi
 if [ -e "$claim" ] || [ -L "$claim" ]; then
   [ ! -e "$retiring" ] && [ ! -L "$retiring" ] || fail 'release E2E claim retirement is ambiguous'
   is_exact_owner "$claim" || fail 'release E2E run claim changed'
@@ -5109,14 +5197,34 @@ if [ -e "$claim" ] || [ -L "$claim" ]; then
   mv -- "$claim" "$retiring"
   sync -f "$claim_root" || fail 'could not persist release E2E claim retirement'
 fi
-is_exact_owner "$retiring" || fail 'release E2E retiring claim changed'
-[ ! -e "$retiring/observation-runtime-original" ] && [ ! -L "$retiring/observation-runtime-original" ] || fail 'Runtime custody remains held'
-check_members "$retiring"
-rm -f -- "$retiring/resources" "$retiring/upgrade-before-resources" "$retiring/upgrade-target" "$retiring/upgrade-operation-id" "$retiring/post-replacement-fault"
-rm -- "$retiring/run-id" "$retiring/token"
-rmdir "$retiring"
-sync -f "$claim_root" || fail 'could not persist release E2E claim release'
-rmdir "$claim_root" 2>/dev/null || true
+if [ -e "$retiring" ] || [ -L "$retiring" ]; then
+  [ -d "$retiring" ] && [ ! -L "$retiring" ] || fail 'release E2E retiring claim changed'
+  [ "$(stat -c '%u:%a:%h' "$retiring")" = 0:700:2 ] || fail 'release E2E retiring claim custody is invalid'
+  [ ! -e "$retiring/observation-runtime-original" ] && [ ! -L "$retiring/observation-runtime-original" ] || fail 'Runtime custody remains held'
+  check_members "$retiring"
+  has_run=false; has_token=false; has_resources=false
+  [ -f "$retiring/run-id" ] && has_run=true
+  [ -f "$retiring/token" ] && has_token=true
+  [ -f "$retiring/resources" ] && has_resources=true
+  if "$has_resources"; then
+    "$has_run" && "$has_token" || fail 'release E2E retiring claim suffix is invalid'
+    rm -- "$retiring/resources"
+    sync -f "$retiring"
+    has_resources=false
+  fi
+  if "$has_run" && "$has_token"; then
+    rm -- "$retiring/token"
+    sync -f "$retiring"
+    has_token=false
+  fi
+  if "$has_run"; then rm -- "$retiring/run-id"; sync -f "$retiring"; has_run=false; fi
+  if "$has_token"; then rm -- "$retiring/token"; sync -f "$retiring"; has_token=false; fi
+  rmdir "$retiring"
+  sync -f "$claim_root" || fail 'could not persist release E2E claim release'
+fi
+if rmdir "$claim_root" 2>/dev/null; then
+  sync -f "$(dirname -- "$claim_root")" || fail 'could not persist release E2E claim root removal'
+fi
 printf 'released\\n'
 `;
 }
@@ -5131,7 +5239,7 @@ if [ -e "$claim" ] || [ -L "$claim" ]; then
   if [ -e "$retiring" ] || [ -L "$retiring" ]; then printf 'foreign\\n';
   elif owned "$claim"; then printf 'owned\\n'; else printf 'foreign\\n'; fi
 elif [ -e "$retiring" ] || [ -L "$retiring" ]; then
-  if owned "$retiring"; then printf 'retiring-owned\\n'; else printf 'foreign\\n'; fi
+  if [ -d "$retiring" ] && [ ! -L "$retiring" ]; then printf 'retiring-owned\\n'; else printf 'foreign\\n'; fi
 else
   printf 'absent\\n'
 fi
@@ -5169,13 +5277,15 @@ function releaseEmergencyCleanupScript(runId, token) {
   return `# enoki-release-e2e:emergency-cleanup
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
+${claimLockPrelude()}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ -f "$claim/resources" ]
 ${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+temporary="$claim/resources.next"
+[ ! -e "$temporary" ] && [ ! -L "$temporary" ] || { printf 'run resource cleanup recovery is pending\n' >&2; exit 75; }
+trap 'rm -f -- "$temporary"; sync -f "$claim"' EXIT HUP INT TERM
 service_state() {
   service=$1
   if ! properties=$(LC_ALL=C systemctl show "$service" --no-pager --property=LoadState --property=ActiveState 2>/dev/null); then
@@ -5213,6 +5323,9 @@ for service in ${services}; do
 done
 fingerprint > "$temporary"
 cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed after service quiescence\\n' >&2; exit 75; }
+rm -- "$temporary"
+sync -f "$claim"
+trap - EXIT HUP INT TERM
 rm -f -- ${files}
 rm -rf -- ${privateStateDirectories}
 rm -rf -- ${directories}

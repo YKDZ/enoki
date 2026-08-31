@@ -12,6 +12,7 @@ import {
   rename,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -2986,8 +2987,9 @@ printf covered > '${covered}'
       cleanup.command.indexOf('if [ -f "$backup" ]'),
     );
     expect(cleanup.command).toContain(
-      'cp --preserve=mode,ownership,timestamps -- "$backup" "$runtime"',
+      'cp --preserve=mode,ownership,timestamps -- "$backup" "$restore_tmp"',
     );
+    expect(cleanup.command).toContain("sync -f /usr/local/bin");
     for (const unit of [
       "enoki-probe.service",
       "enoki-observation-runtime.socket",
@@ -3152,6 +3154,11 @@ printf covered > '${covered}'
         }
         if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
           return successfulCommandText("1\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:capture-resources-snapshot")
+        ) {
+          return successfulCommandText("asserted-resource-snapshot\n");
         }
         if (command.includes("# enoki-release-e2e:renew-resources")) {
           return successfulCommandText("renewed\n");
@@ -3320,6 +3327,8 @@ printf covered > '${covered}'
           return successfulCommandText("enoki-probe 1.2.3\n");
         if (command.includes("# enoki-release-e2e:bootstrap-generation"))
           return successfulCommandText("1\n");
+        if (command.includes("# enoki-release-e2e:capture-resources-snapshot"))
+          return successfulCommandText("asserted-resource-snapshot\n");
         if (
           command.includes(
             "# enoki-release-e2e:inspect-runtime-failure-custody",
@@ -4315,7 +4324,9 @@ exit 0
     const claimRoot = path.join(root, "var", "lib", "enoki-release-e2e");
     const activeClaim = path.join(claimRoot, "claim");
     const retiringClaim = path.join(claimRoot, "claim-retiring");
-    const mapped = retireClaim.replaceAll("/var/lib/", `${root}/var/lib/`);
+    const mapped = retireClaim
+      .replaceAll("/var/lib/", `${root}/var/lib/`)
+      .replaceAll("/run/", `${root}/run/`);
     const token = retireClaim.match(/\$\(cat "\$1\/token"\)" = '([^']+)'/)?.[1];
     expect(token).toMatch(/^[0-9a-f-]{36}$/);
     const writeClaim = async (directory, { unknown = false } = {}) => {
@@ -4348,6 +4359,27 @@ exit 0
       });
 
       await writeClaim(retiringClaim);
+      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+        stdout: "released\n",
+      });
+      await expect(lstat(retiringClaim)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      // 重启时 slot 已经落在合法后缀，仍只能继续既定删除顺序。
+      await writeClaim(retiringClaim);
+      await unlink(path.join(retiringClaim, "resources"));
+      await unlink(path.join(retiringClaim, "token"));
+      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+        stdout: "released\n",
+      });
+      await expect(lstat(retiringClaim)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+
+      await writeClaim(retiringClaim);
+      await unlink(path.join(retiringClaim, "resources"));
+      await unlink(path.join(retiringClaim, "run-id"));
       await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
         stdout: "released\n",
       });
