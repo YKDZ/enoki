@@ -4069,9 +4069,16 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_companion_owns_only_the_fixed_runtime_repair_drop_in() {
+    fn ordinary_lifecycle_companion_owns_repair_drop_in_without_replacement_registration_custody()
+    {
         let lifecycle = lifecycle_companion_unit();
         let socket = lifecycle_companion_socket_unit();
+        let write_paths = lifecycle
+            .lines()
+            .filter_map(|line| line.strip_prefix("ReadWritePaths="))
+            .flat_map(str::split_ascii_whitespace)
+            .map(|path| path.strip_prefix('-').unwrap_or(path))
+            .collect::<Vec<_>>();
 
         assert!(lifecycle.contains(
             "RuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\n"
@@ -4083,14 +4090,10 @@ mod tests {
         assert!(socket.contains(
             "ExecStopPost=/usr/bin/rm -rf -- /run/systemd/system/enoki-observation-runtime.service.d\n"
         ));
-        assert!(lifecycle
-            .lines()
-            .filter_map(|line| line.strip_prefix("ReadWritePaths="))
-            .flat_map(str::split_ascii_whitespace)
-            .map(|path| path.strip_prefix('-').unwrap_or(path))
-            .all(|path| {
-                path != "/run/systemd/system" && !path.starts_with("/run/systemd/system/")
-            }));
+        assert!(!write_paths.contains(&"/var/lib/enoki-probe-registration"));
+        assert!(write_paths.iter().all(|path| {
+            *path != "/run/systemd/system" && !path.starts_with("/run/systemd/system/")
+        }));
     }
 
     #[test]
