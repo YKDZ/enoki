@@ -741,7 +741,7 @@ mod tests {
         let identity = fs::read_to_string(paths.identity()).unwrap();
         let unit = fs::read(paths.observation_runtime_unit()).unwrap();
         let epoch = format!(
-            "schema_version = 1\ngeneration = {generation:?}\nboot_id = \"boot-01\"\nunit = \"enoki-observation-runtime.service\"\nunit_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nprobe_id = {:?}\nidentity_receipt_sha256 = {:?}\ninstall_state_sha256 = {:?}\nmanifest_sha256 = {:?}\nbundle_version = {:?}\nresult = \"start-limit-hit\"\n",
+            "schema_version = 1\ngeneration = {generation:?}\nboot_id = \"boot-01\"\nunit = \"enoki-observation-runtime.service\"\nunit_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nprobe_id = {:?}\nidentity_receipt_sha256 = {:?}\ninstall_state_sha256 = {:?}\nmanifest_sha256 = {:?}\nbundle_version = {:?}\nresult = \"exit-code\"\n",
             format!("{:x}", Sha256::digest(&unit)),
             upgrade::metadata_string(&metadata, "hub_url").unwrap(),
             upgrade::metadata_string(&identity, "host_id").unwrap(),
@@ -1525,6 +1525,17 @@ mod tests {
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
         write_runtime_failure_pair_fixture(&paths, &"17".repeat(32));
         assert!(upgrade::current_runtime_failure_epoch_binding(&paths).is_ok());
+        let epoch = fs::read_to_string(paths.runtime_failure_epoch()).unwrap();
+        fs::write(
+            paths.runtime_failure_epoch(),
+            epoch.replacen("result = \"exit-code\"", "result = \"start-limit-hit\"", 1),
+        )
+        .unwrap();
+        assert_eq!(
+            upgrade::current_runtime_failure_epoch_binding(&paths),
+            Err(InstallError::ExistingResidue),
+        );
+        fs::write(paths.runtime_failure_epoch(), epoch).unwrap();
         let mut target_bundle = bundle().with_test_complete_receipts(5);
         target_bundle.version = "1.2.4".to_owned();
         target_bundle.manifest_sha256 = "d".repeat(64);
@@ -3850,6 +3861,7 @@ mod tests {
             "Type=oneshot",
             "User=root",
             "Group=root",
+            "RefuseManualStart=yes",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
             "CapabilityBoundingSet=",

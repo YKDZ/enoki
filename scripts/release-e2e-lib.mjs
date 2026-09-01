@@ -3280,9 +3280,7 @@ export function createProbeHostHarness({
       return {
         failure: result.failure,
         repair: {
-          failureEpochRemoved: result.repair.failureEpochRemoved,
           faultRemoved: true,
-          latchRemoved: result.repair.latchRemoved,
           output: result.repair.output,
           runtimeSha256: result.repair.runtimeSha256,
           sameBundle: result.repair.sameBundle,

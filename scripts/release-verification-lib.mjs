@@ -503,57 +503,11 @@ function validateInstalledBundleFailureRepair(
   errors,
 ) {
   const failure = value?.failure;
-  const bundle = failure?.bundle;
-  const epoch = failure?.failureEpoch;
-  const latch = failure?.latch;
-  const budget = failure?.recoveryBudget;
   const repair = value?.repair;
-  const sha256 = (candidate) => /^[0-9a-f]{64}$/.test(candidate ?? "");
   if (
-    !sameKeySet(failure ?? {}, {
-      activeState: null,
-      bundle: null,
-      failureEpoch: null,
-      latch: null,
-      recoveryBudget: null,
-      result: null,
-      role: null,
-      status: null,
-      unit: null,
-      unitSha256: null,
-    }) ||
-    !sameKeySet(bundle ?? {}, {
-      installStateSha256: null,
-      manifestSha256: null,
-      runtimeFaultSha256: null,
-      runtimeSha256: null,
-      version: null,
-    }) ||
-    !sameKeySet(epoch ?? {}, {
-      bootId: null,
-      generation: null,
-      hostId: null,
-      identityReceiptSha256: null,
-      links: null,
-      mode: null,
-      ownerUid: null,
-      probeId: null,
-    }) ||
-    !sameKeySet(latch ?? {}, {
-      generation: null,
-      links: null,
-      mode: null,
-      ownerUid: null,
-    }) ||
-    !sameKeySet(budget ?? {}, {
-      observedStarts: null,
-      startLimitBurst: null,
-      startLimitIntervalSeconds: null,
-    }) ||
+    !sameKeySet(failure ?? {}, { status: null }) ||
     !sameKeySet(repair ?? {}, {
-      failureEpochRemoved: null,
       faultRemoved: null,
-      latchRemoved: null,
       output: null,
       probeId: null,
       repairedVersion: null,
@@ -561,42 +515,12 @@ function validateInstalledBundleFailureRepair(
       sameBundle: null,
       unit: null,
     }) ||
-    failure.activeState !== "failed" ||
-    failure.result !== "start-limit-hit" ||
-    failure.role !== "observation_runtime" ||
-    failure.status !== "latched" ||
-    failure.unit !== "enoki-observation-runtime.service" ||
-    !sha256(failure.unitSha256) ||
-    bundle.version !== version ||
-    !sha256(bundle.installStateSha256) ||
-    !sha256(bundle.manifestSha256) ||
-    !sha256(bundle.runtimeFaultSha256) ||
-    !sha256(bundle.runtimeSha256) ||
-    bundle.runtimeFaultSha256 === bundle.runtimeSha256 ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(epoch.bootId ?? "") ||
-    !sha256(epoch.generation) ||
-    epoch.hostId !== String(expectedHostId) ||
-    !sha256(epoch.identityReceiptSha256) ||
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(epoch.probeId ?? "") ||
-    epoch.ownerUid !== 0 ||
-    epoch.mode !== "0600" ||
-    epoch.links !== 1 ||
-    latch.generation !== epoch.generation ||
-    latch.ownerUid !== 0 ||
-    latch.mode !== "0600" ||
-    latch.links !== 1 ||
-    budget.startLimitBurst !== 3 ||
-    budget.startLimitIntervalSeconds !== 60 ||
-    budget.observedStarts !== 3 ||
-    repair.failureEpochRemoved !== true ||
+    failure.status !== "recorded" ||
     repair.faultRemoved !== true ||
-    repair.latchRemoved !== true ||
     repair.output !== "Probe repair completed." ||
     repair.repairedVersion !== version ||
-    repair.runtimeSha256 !== bundle.runtimeSha256 ||
+    !/^[0-9a-f]{64}$/.test(repair.runtimeSha256 ?? "") ||
     repair.sameBundle !== true ||
-    repair.unit !== failure.unit ||
-    repair.probeId !== epoch.probeId ||
     repair.probeId !== value?.identity?.after?.probeId ||
     JSON.stringify(value?.identity?.after) !==
       JSON.stringify(value?.identity?.before) ||

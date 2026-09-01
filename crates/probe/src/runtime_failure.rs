@@ -7,6 +7,8 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
+    thread,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -19,9 +21,11 @@ use enoki_probe_bootstrap::lifecycle::{
 use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
+const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
 const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
+const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
@@ -48,52 +52,450 @@ pub(crate) use installed_bundle_repair::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeUnitState {
+pub(crate) struct RuntimeUnitState {
     pub active_state: String,
     pub result: String,
 }
 
-pub trait RuntimeFailureSystemd {
-    fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState>;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecorderUnitSnapshot {
+    invocation_id: String,
+    main_pid: String,
+    fragment_path: String,
+    drop_in_paths: String,
+    need_daemon_reload: String,
+    refuse_manual_start: String,
 }
 
-pub struct SystemRuntimeFailureSystemd;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeUnitSnapshot {
+    load_state: String,
+    active_state: String,
+    sub_state: String,
+    result: String,
+    restart_count: String,
+    main_pid: String,
+    control_pid: String,
+    job: String,
+    invocation_id: String,
+    state_change_monotonic: String,
+    exec_start_monotonic: String,
+    exec_exit_monotonic: String,
+    fragment_path: String,
+    drop_in_paths: String,
+    need_daemon_reload: String,
+    restart: String,
+    restart_usec: String,
+    start_limit_burst: String,
+    start_limit_interval_usec: String,
+    on_failure: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeFailureSnapshot {
+    recorder: RecorderUnitSnapshot,
+    runtime: RuntimeUnitSnapshot,
+    observed_monotonic_usec: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConfirmedFixedRuntimeBudgetExhaustion {
+    result: String,
+}
+
+pub(crate) trait RuntimeFailureSystemd {
+    fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState>;
+
+    fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+        Err(std::io::Error::other(
+            "runtime failure snapshot unavailable",
+        ))
+    }
+
+    fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+        thread::sleep(Duration::from_secs(5));
+        Ok(())
+    }
+}
+
+pub(crate) struct SystemRuntimeFailureSystemd;
 
 impl RuntimeFailureSystemd for SystemRuntimeFailureSystemd {
     fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-        let output = Command::new("/usr/bin/systemctl")
-            .args(["show", RUNTIME_UNIT, "--property=ActiveState,Result"])
-            .output()?;
-        if !output.status.success() || !output.stderr.is_empty() {
-            return Err(std::io::Error::other("systemd state unavailable"));
-        }
-        let text = std::str::from_utf8(&output.stdout)
-            .map_err(|_| std::io::Error::other("systemd state invalid"))?;
-        let mut active_state = None;
-        let mut result = None;
-        for line in text.lines() {
-            if let Some(value) = line.strip_prefix("ActiveState=") {
-                active_state = Some(value.to_owned());
-            } else if let Some(value) = line.strip_prefix("Result=") {
-                result = Some(value.to_owned());
-            } else {
-                return Err(std::io::Error::other("systemd state invalid"));
-            }
-        }
-        let active_state = active_state
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| std::io::Error::other("systemd state invalid"))?;
-        let result = result
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| std::io::Error::other("systemd state invalid"))?;
+        let snapshot = self.fixed_runtime_snapshot()?;
         Ok(RuntimeUnitState {
-            active_state,
-            result,
+            active_state: snapshot.runtime.active_state,
+            result: snapshot.runtime.result,
+        })
+    }
+
+    fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+        let recorder = parse_recorder_unit_snapshot(&systemctl_show(
+            RECORDER_UNIT,
+            &[
+                "InvocationID",
+                "MainPID",
+                "FragmentPath",
+                "DropInPaths",
+                "NeedDaemonReload",
+                "RefuseManualStart",
+            ],
+        )?)?;
+        let runtime = parse_runtime_unit_snapshot(&systemctl_show(
+            RUNTIME_UNIT,
+            &[
+                "LoadState",
+                "ActiveState",
+                "SubState",
+                "Result",
+                "NRestarts",
+                "MainPID",
+                "ControlPID",
+                "Job",
+                "InvocationID",
+                "StateChangeTimestampMonotonic",
+                "ExecMainStartTimestampMonotonic",
+                "ExecMainExitTimestampMonotonic",
+                "FragmentPath",
+                "DropInPaths",
+                "NeedDaemonReload",
+                "Restart",
+                "RestartUSec",
+                "StartLimitBurst",
+                "StartLimitIntervalUSec",
+                "OnFailure",
+            ],
+        )?)?;
+        Ok(RuntimeFailureSnapshot {
+            recorder,
+            runtime,
+            observed_monotonic_usec: monotonic_usec()?,
         })
     }
 }
 
-pub trait RuntimeRetrySystemd: RuntimeFailureSystemd {
+fn systemctl_show(unit: &str, properties: &[&str]) -> std::io::Result<String> {
+    let mut arguments = vec!["show", unit];
+    for property in properties {
+        arguments.push("--property");
+        arguments.push(property);
+    }
+    let output = Command::new("/usr/bin/systemctl")
+        .args(arguments)
+        .output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(std::io::Error::other("systemd state unavailable"));
+    }
+    String::from_utf8(output.stdout).map_err(|_| std::io::Error::other("systemd state invalid"))
+}
+
+fn exact_systemd_properties<'a>(
+    text: &'a str,
+    expected: &[&str],
+) -> std::io::Result<std::collections::BTreeMap<&'a str, &'a str>> {
+    let mut values = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| std::io::Error::other("systemd state invalid"))?;
+        if !expected.contains(&key) || values.insert(key, value).is_some() {
+            return Err(std::io::Error::other("systemd state invalid"));
+        }
+    }
+    if values.len() != expected.len() {
+        return Err(std::io::Error::other("systemd state invalid"));
+    }
+    Ok(values)
+}
+
+fn property<'a>(
+    values: &std::collections::BTreeMap<&'a str, &'a str>,
+    name: &str,
+) -> std::io::Result<String> {
+    values
+        .get(name)
+        .map(|value| (*value).to_owned())
+        .ok_or_else(|| std::io::Error::other("systemd state invalid"))
+}
+
+fn parse_recorder_unit_snapshot(text: &str) -> std::io::Result<RecorderUnitSnapshot> {
+    let values = exact_systemd_properties(
+        text,
+        &[
+            "InvocationID",
+            "MainPID",
+            "FragmentPath",
+            "DropInPaths",
+            "NeedDaemonReload",
+            "RefuseManualStart",
+        ],
+    )?;
+    Ok(RecorderUnitSnapshot {
+        invocation_id: property(&values, "InvocationID")?,
+        main_pid: property(&values, "MainPID")?,
+        fragment_path: property(&values, "FragmentPath")?,
+        drop_in_paths: property(&values, "DropInPaths")?,
+        need_daemon_reload: property(&values, "NeedDaemonReload")?,
+        refuse_manual_start: property(&values, "RefuseManualStart")?,
+    })
+}
+
+fn parse_runtime_unit_snapshot(text: &str) -> std::io::Result<RuntimeUnitSnapshot> {
+    let values = exact_systemd_properties(
+        text,
+        &[
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "Result",
+            "NRestarts",
+            "MainPID",
+            "ControlPID",
+            "Job",
+            "InvocationID",
+            "StateChangeTimestampMonotonic",
+            "ExecMainStartTimestampMonotonic",
+            "ExecMainExitTimestampMonotonic",
+            "FragmentPath",
+            "DropInPaths",
+            "NeedDaemonReload",
+            "Restart",
+            "RestartUSec",
+            "StartLimitBurst",
+            "StartLimitIntervalUSec",
+            "OnFailure",
+        ],
+    )?;
+    Ok(RuntimeUnitSnapshot {
+        load_state: property(&values, "LoadState")?,
+        active_state: property(&values, "ActiveState")?,
+        sub_state: property(&values, "SubState")?,
+        result: property(&values, "Result")?,
+        restart_count: property(&values, "NRestarts")?,
+        main_pid: property(&values, "MainPID")?,
+        control_pid: property(&values, "ControlPID")?,
+        job: property(&values, "Job")?,
+        invocation_id: property(&values, "InvocationID")?,
+        state_change_monotonic: property(&values, "StateChangeTimestampMonotonic")?,
+        exec_start_monotonic: property(&values, "ExecMainStartTimestampMonotonic")?,
+        exec_exit_monotonic: property(&values, "ExecMainExitTimestampMonotonic")?,
+        fragment_path: property(&values, "FragmentPath")?,
+        drop_in_paths: property(&values, "DropInPaths")?,
+        need_daemon_reload: property(&values, "NeedDaemonReload")?,
+        restart: property(&values, "Restart")?,
+        restart_usec: property(&values, "RestartUSec")?,
+        start_limit_burst: property(&values, "StartLimitBurst")?,
+        start_limit_interval_usec: property(&values, "StartLimitIntervalUSec")?,
+        on_failure: property(&values, "OnFailure")?,
+    })
+}
+
+fn monotonic_usec() -> std::io::Result<u64> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    u64::try_from(value.tv_sec)
+        .ok()
+        .and_then(|seconds| {
+            u64::try_from(value.tv_nsec)
+                .ok()
+                .map(|nanos| seconds * 1_000_000 + nanos / 1_000)
+        })
+        .ok_or_else(|| std::io::Error::other("monotonic clock invalid"))
+}
+
+fn restart_eligible_result(value: &str) -> bool {
+    matches!(
+        value,
+        "exit-code"
+            | "signal"
+            | "core-dump"
+            | "watchdog"
+            | "timeout"
+            | "protocol"
+            | "resources"
+            | "oom-kill"
+    )
+}
+
+fn canonical_u64(value: &str) -> Option<u64> {
+    if value == "0"
+        || (!value.is_empty()
+            && !value.starts_with('0')
+            && value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        value.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn canonical_invocation_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn fixed_runtime_unit_bytes() -> std::io::Result<Vec<u8>> {
+    enoki_probe_bootstrap::install::fixed_execution_role_units()
+        .into_iter()
+        .find_map(|(role, bytes)| (role == "observation-runtime-v4").then_some(bytes))
+        .ok_or_else(|| std::io::Error::other("fixed runtime unit unavailable"))
+}
+
+fn fixed_recorder_unit_bytes() -> std::io::Result<Vec<u8>> {
+    enoki_probe_bootstrap::install::fixed_observation_unit_contents()
+        .into_iter()
+        .last()
+        .ok_or_else(|| std::io::Error::other("fixed recorder unit unavailable"))
+}
+
+fn valid_fixed_unit_closure(
+    root: &Path,
+    expected_uid: u32,
+    snapshot: &RuntimeFailureSnapshot,
+) -> std::io::Result<()> {
+    if snapshot.recorder.fragment_path != RECORDER_UNIT_PATH
+        || !snapshot.recorder.drop_in_paths.is_empty()
+        || snapshot.recorder.need_daemon_reload != "no"
+        || snapshot.recorder.refuse_manual_start != "yes"
+        || snapshot.runtime.fragment_path != UNIT_PATH
+        || !snapshot.runtime.drop_in_paths.is_empty()
+        || snapshot.runtime.need_daemon_reload != "no"
+        || snapshot.runtime.load_state != "loaded"
+        || snapshot.runtime.restart != "on-failure"
+        || snapshot.runtime.restart_usec != "5s"
+        || snapshot.runtime.start_limit_burst != "3"
+        || snapshot.runtime.start_limit_interval_usec != "1min"
+        || snapshot.runtime.on_failure != RECORDER_UNIT
+    {
+        return Err(std::io::Error::other("fixed systemd closure invalid"));
+    }
+    if trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)? != fixed_runtime_unit_bytes()?
+        || trusted_file(&rooted(root, RECORDER_UNIT_PATH), expected_uid, 0o644)?
+            != fixed_recorder_unit_bytes()?
+    {
+        return Err(std::io::Error::other("fixed systemd unit binding invalid"));
+    }
+    Ok(())
+}
+
+fn valid_fixed_terminal_snapshot(
+    root: &Path,
+    expected_uid: u32,
+    snapshot: &RuntimeFailureSnapshot,
+) -> std::io::Result<bool> {
+    valid_fixed_unit_closure(root, expected_uid, snapshot)?;
+    let runtime = &snapshot.runtime;
+    let state_change = canonical_u64(&runtime.state_change_monotonic)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| std::io::Error::other("runtime timestamp invalid"))?;
+    for timestamp in [&runtime.exec_start_monotonic, &runtime.exec_exit_monotonic] {
+        if canonical_u64(timestamp)
+            .filter(|value| *value > 0)
+            .is_none()
+        {
+            return Err(std::io::Error::other("runtime timestamp invalid"));
+        }
+    }
+    if snapshot.observed_monotonic_usec < state_change
+        || snapshot.observed_monotonic_usec - state_change >= 60_000_000
+        || runtime.active_state != "failed"
+        || runtime.sub_state != "failed"
+        || runtime.main_pid != "0"
+        || runtime.control_pid != "0"
+        || !runtime.job.is_empty()
+        || runtime.restart_count != "3"
+        || !restart_eligible_result(&runtime.result)
+        || !canonical_invocation_id(&runtime.invocation_id)
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn confirm_fixed_runtime_budget_exhaustion(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    recorder_invocation_id: &str,
+    recorder_pid: u32,
+) -> std::io::Result<Option<ConfirmedFixedRuntimeBudgetExhaustion>> {
+    if !canonical_invocation_id(recorder_invocation_id) {
+        return Ok(None);
+    }
+    let first = systemd.fixed_runtime_snapshot()?;
+    if !valid_fixed_terminal_snapshot(root, expected_uid, &first)? {
+        return Ok(None);
+    }
+    if first.recorder.invocation_id != recorder_invocation_id
+        || first.recorder.main_pid != recorder_pid.to_string()
+        || !canonical_invocation_id(&first.recorder.invocation_id)
+    {
+        return Ok(None);
+    }
+    systemd.wait_for_fixed_restart_interval()?;
+    let second = systemd.fixed_runtime_snapshot()?;
+    if !valid_fixed_terminal_snapshot(root, expected_uid, &second)? {
+        return Ok(None);
+    }
+    if second.recorder != first.recorder
+        || second.runtime != first.runtime
+        || second.observed_monotonic_usec < first.observed_monotonic_usec
+        || second.observed_monotonic_usec - first.observed_monotonic_usec < 5_000_000
+    {
+        return Ok(None);
+    }
+    Ok(Some(ConfirmedFixedRuntimeBudgetExhaustion {
+        result: second.runtime.result,
+    }))
+}
+
+fn valid_current_failure_evidence_snapshot(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    epoch_result: &str,
+) -> std::io::Result<()> {
+    let snapshot = systemd.fixed_runtime_snapshot()?;
+    valid_fixed_unit_closure(root, expected_uid, &snapshot)?;
+    let runtime = &snapshot.runtime;
+    if runtime.active_state != "failed"
+        || runtime.sub_state != "failed"
+        || runtime.main_pid != "0"
+        || runtime.control_pid != "0"
+        || !runtime.job.is_empty()
+        || runtime.result != epoch_result
+        || !restart_eligible_result(&runtime.result)
+    {
+        return Err(std::io::Error::other("failure epoch is no longer current"));
+    }
+    Ok(())
+}
+
+fn recorder_caller_identity() -> std::io::Result<(String, u32)> {
+    let invocation_id = std::env::var("INVOCATION_ID")
+        .map_err(|_| std::io::Error::other("recorder invocation unavailable"))?;
+    if !canonical_invocation_id(&invocation_id) {
+        return Err(std::io::Error::other("recorder invocation invalid"));
+    }
+    Ok((invocation_id, std::process::id()))
+}
+
+#[cfg(test)]
+fn test_recorder_caller_identity() -> (String, u32) {
+    (
+        "0123456789abcdef0123456789abcdef".to_owned(),
+        std::process::id(),
+    )
+}
+
+pub(crate) trait RuntimeRetrySystemd: RuntimeFailureSystemd {
     fn retry_fixed_runtime(&mut self) -> std::io::Result<()>;
 }
 
@@ -382,11 +784,14 @@ pub fn record_runtime_failure() -> std::io::Result<RuntimeFailureRecordOutcome> 
             "root required",
         ));
     }
-    record_runtime_failure_at(
+    let (recorder_invocation_id, recorder_pid) = recorder_caller_identity()?;
+    record_runtime_failure_at_with_caller(
         Path::new("/"),
         0,
         &mut SystemRuntimeFailureSystemd,
         &mut KernelFailureGenerationSource,
+        &recorder_invocation_id,
+        recorder_pid,
     )
 }
 
@@ -424,7 +829,7 @@ fn retry_runtime_at(
             return systemd.retry_fixed_runtime();
         }
         let state = systemd.fixed_runtime_state()?;
-        if state.active_state != "failed" || state.result != "start-limit-hit" {
+        if state.active_state != "failed" || !restart_eligible_result(&state.result) {
             return Err(std::io::Error::other("failure pair is not terminal"));
         }
         match (epoch_present, latch_present) {
@@ -613,11 +1018,8 @@ fn issue_installed_bundle_failure_evidence_at_locked(
     {
         return Err(std::io::Error::other("failure evidence lifetime invalid"));
     }
-    let state = systemd.fixed_runtime_state()?;
-    if state.active_state != "failed" || state.result != "start-limit-hit" {
-        return Err(std::io::Error::other("failure epoch is no longer current"));
-    }
     let (epoch, metadata, _) = current_epoch_at_locked(root, expected_uid)?;
+    valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result)?;
     if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
         || runtime_failure_creation_reserved_at(root, expected_uid)?
     {
@@ -746,7 +1148,7 @@ fn current_epoch_binding_at(
     )
     .map_err(|_| std::io::Error::other("identity receipt invalid"))?;
     if epoch.schema_version != 1
-        || epoch.result != "start-limit-hit"
+        || !restart_eligible_result(&epoch.result)
         || epoch.unit != RUNTIME_UNIT
         || decode_lower_hex_32(&epoch.generation).is_none()
         || epoch.boot_id != boot_id.trim()
@@ -767,17 +1169,36 @@ fn current_epoch_binding_at(
     Ok((epoch, metadata, epoch_bytes))
 }
 
+#[cfg(test)]
 fn record_runtime_failure_at(
     root: &Path,
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
     generations: &mut impl FailureGenerationSource,
 ) -> std::io::Result<RuntimeFailureRecordOutcome> {
+    #[cfg(test)]
+    let (recorder_invocation_id, recorder_pid) = test_recorder_caller_identity();
+    #[cfg(not(test))]
+    let (recorder_invocation_id, recorder_pid) = recorder_caller_identity()?;
+    record_runtime_failure_at_with_caller(
+        root,
+        expected_uid,
+        systemd,
+        generations,
+        &recorder_invocation_id,
+        recorder_pid,
+    )
+}
+
+fn record_runtime_failure_at_with_caller(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    generations: &mut impl FailureGenerationSource,
+    recorder_invocation_id: &str,
+    recorder_pid: u32,
+) -> std::io::Result<RuntimeFailureRecordOutcome> {
     let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
-    let state = systemd.fixed_runtime_state()?;
-    if state.active_state != "failed" || state.result != "start-limit-hit" {
-        return Ok(RuntimeFailureRecordOutcome::Ignored);
-    }
     let failure_dir = rooted(root, FAILURE_DIR);
     let epoch_path = rooted(root, EPOCH_PATH);
     let latch_path = rooted(root, LATCH_PATH);
@@ -797,7 +1218,20 @@ fn record_runtime_failure_at(
             return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
         }
         (true, false) => {
+            let Some(confirmation) = confirm_fixed_runtime_budget_exhaustion(
+                root,
+                expected_uid,
+                systemd,
+                recorder_invocation_id,
+                recorder_pid,
+            )?
+            else {
+                return Ok(RuntimeFailureRecordOutcome::Ignored);
+            };
             let (epoch, _, _) = current_epoch_binding_at(root, expected_uid)?;
+            if epoch.result != confirmation.result {
+                return Ok(RuntimeFailureRecordOutcome::Ignored);
+            }
             if creation_reserved
                 || runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
             {
@@ -812,6 +1246,16 @@ fn record_runtime_failure_at(
             return Ok(RuntimeFailureRecordOutcome::Latched);
         }
         (false, true) => {
+            let Some(confirmation) = confirm_fixed_runtime_budget_exhaustion(
+                root,
+                expected_uid,
+                systemd,
+                recorder_invocation_id,
+                recorder_pid,
+            )?
+            else {
+                return Ok(RuntimeFailureRecordOutcome::Ignored);
+            };
             let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
             let generation = std::str::from_utf8(&latch)
                 .ok()
@@ -822,7 +1266,15 @@ fn record_runtime_failure_at(
             {
                 return Err(std::io::Error::other("failure pair consumption pending"));
             }
-            let epoch = build_current_epoch(root, expected_uid, &state, generation)?;
+            let epoch = build_current_epoch(
+                root,
+                expected_uid,
+                &RuntimeUnitState {
+                    active_state: "failed".to_owned(),
+                    result: confirmation.result,
+                },
+                generation,
+            )?;
             let encoded = toml::to_string(&epoch)
                 .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
             atomic_write(
@@ -839,6 +1291,17 @@ fn record_runtime_failure_at(
     if creation_reserved {
         return Err(std::io::Error::other("failure pair creation reserved"));
     }
+
+    let Some(confirmation) = confirm_fixed_runtime_budget_exhaustion(
+        root,
+        expected_uid,
+        systemd,
+        recorder_invocation_id,
+        recorder_pid,
+    )?
+    else {
+        return Ok(RuntimeFailureRecordOutcome::Ignored);
+    };
 
     let retry_receipt = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
     if path_present(&retry_receipt)? {
@@ -858,7 +1321,15 @@ fn record_runtime_failure_at(
     }
     let mut generation = [0_u8; 32];
     generations.fill_generation(&mut generation)?;
-    let epoch = build_current_epoch(root, expected_uid, &state, &hex(&generation))?;
+    let epoch = build_current_epoch(
+        root,
+        expected_uid,
+        &RuntimeUnitState {
+            active_state: "failed".to_owned(),
+            result: confirmation.result,
+        },
+        &hex(&generation),
+    )?;
     let encoded =
         toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
     atomic_write(
@@ -1293,7 +1764,7 @@ fn build_current_epoch(
     if decode_lower_hex_32(generation).is_none() {
         return Err(std::io::Error::other("failure generation invalid"));
     }
-    if state.active_state != "failed" || state.result != "start-limit-hit" {
+    if state.active_state != "failed" || !restart_eligible_result(&state.result) {
         return Err(std::io::Error::other("Runtime failure is not terminal"));
     }
     let metadata = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
@@ -1483,10 +1954,39 @@ pub(super) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    thread_local! {
+        static TEST_SNAPSHOT_AFTER_WAIT: std::cell::Cell<bool> = const {
+            std::cell::Cell::new(false)
+        };
+    }
+
+    fn test_snapshot_after_wait() {
+        TEST_SNAPSHOT_AFTER_WAIT.with(|after_wait| after_wait.set(true));
+    }
+
+    fn scheduled_test_runtime_snapshot(state: RuntimeUnitState) -> RuntimeFailureSnapshot {
+        let mut snapshot = test_runtime_snapshot(state);
+        TEST_SNAPSHOT_AFTER_WAIT.with(|after_wait| {
+            if after_wait.replace(false) {
+                snapshot.observed_monotonic_usec = 6_000_000;
+            }
+        });
+        snapshot
+    }
+
     struct State(RuntimeUnitState);
     impl RuntimeFailureSystemd for State {
         fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
             Ok(self.0.clone())
+        }
+
+        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+            Ok(scheduled_test_runtime_snapshot(self.0.clone()))
+        }
+
+        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+            test_snapshot_after_wait();
+            Ok(())
         }
     }
     struct Generation(u8);
@@ -1502,8 +2002,17 @@ pub(super) mod tests {
         fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
             Ok(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             })
+        }
+
+        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+            Ok(scheduled_test_runtime_snapshot(self.fixed_runtime_state()?))
+        }
+
+        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+            test_snapshot_after_wait();
+            Ok(())
         }
     }
     impl RuntimeRetrySystemd for RetrySystemd {
@@ -1517,8 +2026,17 @@ pub(super) mod tests {
         fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
             Ok(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             })
+        }
+
+        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+            Ok(scheduled_test_runtime_snapshot(self.fixed_runtime_state()?))
+        }
+
+        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+            test_snapshot_after_wait();
+            Ok(())
         }
     }
     impl RuntimeRetrySystemd for FailedRuntime {
@@ -1532,8 +2050,91 @@ pub(super) mod tests {
         fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
             Ok(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             })
+        }
+
+        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+            Ok(scheduled_test_runtime_snapshot(self.fixed_runtime_state()?))
+        }
+
+        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+            test_snapshot_after_wait();
+            Ok(())
+        }
+    }
+
+    fn test_runtime_snapshot(state: RuntimeUnitState) -> RuntimeFailureSnapshot {
+        let (invocation_id, pid) = test_recorder_caller_identity();
+        RuntimeFailureSnapshot {
+            recorder: RecorderUnitSnapshot {
+                invocation_id,
+                main_pid: pid.to_string(),
+                fragment_path: RECORDER_UNIT_PATH.to_owned(),
+                drop_in_paths: String::new(),
+                need_daemon_reload: "no".to_owned(),
+                refuse_manual_start: "yes".to_owned(),
+            },
+            runtime: RuntimeUnitSnapshot {
+                load_state: "loaded".to_owned(),
+                active_state: state.active_state,
+                sub_state: "failed".to_owned(),
+                result: state.result,
+                restart_count: "3".to_owned(),
+                main_pid: "0".to_owned(),
+                control_pid: "0".to_owned(),
+                job: String::new(),
+                invocation_id: "abcdef0123456789abcdef0123456789".to_owned(),
+                state_change_monotonic: "1000000".to_owned(),
+                exec_start_monotonic: "900000".to_owned(),
+                exec_exit_monotonic: "950000".to_owned(),
+                fragment_path: UNIT_PATH.to_owned(),
+                drop_in_paths: String::new(),
+                need_daemon_reload: "no".to_owned(),
+                restart: "on-failure".to_owned(),
+                restart_usec: "5s".to_owned(),
+                start_limit_burst: "3".to_owned(),
+                start_limit_interval_usec: "1min".to_owned(),
+                on_failure: RECORDER_UNIT.to_owned(),
+            },
+            observed_monotonic_usec: 1_000_000,
+        }
+    }
+
+    struct SnapshotSequence {
+        snapshots: std::collections::VecDeque<RuntimeFailureSnapshot>,
+        waits: usize,
+    }
+
+    impl RuntimeFailureSystemd for SnapshotSequence {
+        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
+            let snapshot = self
+                .snapshots
+                .front()
+                .ok_or_else(|| std::io::Error::other("test snapshot exhausted"))?;
+            Ok(RuntimeUnitState {
+                active_state: snapshot.runtime.active_state.clone(),
+                result: snapshot.runtime.result.clone(),
+            })
+        }
+
+        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
+            self.snapshots
+                .pop_front()
+                .ok_or_else(|| std::io::Error::other("test snapshot exhausted"))
+        }
+
+        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+            self.waits += 1;
+            Ok(())
+        }
+    }
+
+    struct NoSystemdObservation;
+
+    impl RuntimeFailureSystemd for NoSystemdObservation {
+        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
+            Err(std::io::Error::other("exact pair must not inspect systemd"))
         }
     }
     impl RuntimeRetrySystemd for RejectedRepair {
@@ -1589,6 +2190,11 @@ pub(super) mod tests {
             .unwrap()
             .1;
         write_fixture(root.path(), UNIT_PATH, &unit, 0o644);
+        let recorder_unit = enoki_probe_bootstrap::install::fixed_observation_unit_contents()
+            .into_iter()
+            .last()
+            .unwrap();
+        write_fixture(root.path(), RECORDER_UNIT_PATH, &recorder_unit, 0o644);
         write_fixture(root.path(), BOOT_ID_PATH, b"boot-01\n", 0o444);
         root
     }
@@ -1672,6 +2278,138 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn recorder_requires_two_stable_fixed_snapshots_and_authenticated_caller() {
+        let uid = unsafe { libc::geteuid() };
+        let root = fixture();
+        let first = test_runtime_snapshot(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "exit-code".into(),
+        });
+        let mut second = test_runtime_snapshot(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "exit-code".into(),
+        });
+        second.observed_monotonic_usec = 6_000_000;
+        let mut stable = SnapshotSequence {
+            snapshots: [first, second].into(),
+            waits: 0,
+        };
+        let (caller, pid) = test_recorder_caller_identity();
+        assert_eq!(
+            record_runtime_failure_at_with_caller(
+                root.path(),
+                uid,
+                &mut stable,
+                &mut Generation(71),
+                &caller,
+                pid,
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        assert_eq!(stable.waits, 1);
+        let epoch = fs::read_to_string(rooted(root.path(), EPOCH_PATH)).unwrap();
+        assert!(epoch.contains("result = \"exit-code\""));
+
+        let unstable_root = fixture();
+        let first_unstable = test_runtime_snapshot(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "exit-code".into(),
+        });
+        let mut changed = test_runtime_snapshot(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "exit-code".into(),
+        });
+        changed.observed_monotonic_usec = 6_000_000;
+        changed.runtime.job = "42".to_owned();
+        let mut unstable = SnapshotSequence {
+            snapshots: [first_unstable, changed].into(),
+            waits: 0,
+        };
+        assert_eq!(
+            record_runtime_failure_at_with_caller(
+                unstable_root.path(),
+                uid,
+                &mut unstable,
+                &mut Generation(72),
+                &caller,
+                pid,
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert_eq!(unstable.waits, 1);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                unstable_root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "unstable_runtime_snapshot",
+            )
+            .is_err()
+        );
+
+        let direct_root = fixture();
+        let direct_first = test_runtime_snapshot(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "exit-code".into(),
+        });
+        let mut direct_second = test_runtime_snapshot(RuntimeUnitState {
+            active_state: "failed".into(),
+            result: "exit-code".into(),
+        });
+        direct_second.observed_monotonic_usec = 6_000_000;
+        let mut direct = SnapshotSequence {
+            snapshots: [direct_first, direct_second].into(),
+            waits: 0,
+        };
+        assert_eq!(
+            record_runtime_failure_at_with_caller(
+                direct_root.path(),
+                uid,
+                &mut direct,
+                &mut Generation(73),
+                "ffffffffffffffffffffffffffffffff",
+                pid,
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert_eq!(direct.waits, 0);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                direct_root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "direct_runtime_recorder",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_pair_does_not_replay_the_temporal_horizon() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(74))
+            .unwrap();
+        assert_eq!(
+            record_runtime_failure_at(
+                root.path(),
+                uid,
+                &mut NoSystemdObservation,
+                &mut Generation(75),
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::AlreadyLatched
+        );
+    }
+
+    #[test]
     fn legacy_identity_without_authenticated_host_id_cannot_create_failure_evidence() {
         let root = fixture();
         write_fixture(
@@ -1686,7 +2424,7 @@ pub(super) mod tests {
                 unsafe { libc::geteuid() },
                 &mut State(RuntimeUnitState {
                     active_state: "failed".into(),
-                    result: "start-limit-hit".into(),
+                    result: "exit-code".into(),
                 }),
                 &mut Generation(2),
             )
@@ -1704,7 +2442,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(3),
         )
@@ -1808,14 +2546,14 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn systemd_255_only_latches_the_terminal_start_limit_hit() {
+    fn systemd_255_latches_the_terminal_exit_code_and_rejects_start_limit_hit() {
         let root = fixture();
         let ignored = record_runtime_failure_at(
             root.path(),
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "exit-code".into(),
+                result: "start-limit-hit".into(),
             }),
             &mut Generation(1),
         )
@@ -1826,7 +2564,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(2),
         )
@@ -1843,7 +2581,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(3),
         )
@@ -1860,7 +2598,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(4),
         )
@@ -1965,7 +2703,7 @@ pub(super) mod tests {
         let uid = unsafe { libc::geteuid() };
         let mut terminal = State(RuntimeUnitState {
             active_state: "failed".into(),
-            result: "start-limit-hit".into(),
+            result: "exit-code".into(),
         });
         record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(20)).unwrap();
         let generation = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
@@ -2657,7 +3395,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(5),
         )
@@ -2791,7 +3529,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(6),
         )
@@ -2853,7 +3591,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(7),
         )
@@ -3383,7 +4121,7 @@ pub(super) mod tests {
             unsafe { libc::geteuid() },
             &mut State(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             }),
             &mut Generation(generation_byte),
         )
