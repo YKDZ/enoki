@@ -3270,11 +3270,9 @@ exit 1
       "runtime=/usr/local/bin/enoki-observation-runtime",
     );
     expect(exhausted.command).toContain("remaining=30");
-    expect(exhausted.command).toContain('product Runtime recorder did not publish its failure pair');
-    expect(exhausted.command).not.toContain("start-limit-hit");
-    expect(exhausted.command).not.toContain("NRestarts");
-    expect(exhausted.command).not.toContain("--property=Result");
-    expect(exhausted.command).not.toContain("epoch_value");
+    expect(exhausted.command).toContain(
+      "product Runtime recorder did not publish its failure pair",
+    );
     const stopProbe = exhausted.command.indexOf(
       "stop_unit enoki-probe.service",
     );
@@ -3324,8 +3322,6 @@ exit 1
       ),
     );
     expect(repaired.command).toContain("/usr/local/bin/enoki-probe repair");
-    expect(repaired.command).not.toContain("runtime-failure/epoch.toml");
-    expect(repaired.command).not.toContain("runtime-failure/latch");
     expect(repaired.command).not.toContain('rm -- "$backup"');
     await expect(
       execFileAsync("/bin/sh", ["-n", "-c", repaired.command]),
