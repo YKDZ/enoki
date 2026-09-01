@@ -359,6 +359,7 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   require_stopped_unit enoki-observation-runtime.socket
   stop_unit "$unit"
   stop_unit enoki-observation-runtime-failure.service
+  reset_quiescent_failed_unit "$unit"
   require_stopped_unit "$unit"
   require_stopped_unit enoki-observation-runtime-failure.service
   [ ! -e "$restore_tmp" ] && [ ! -L "$restore_tmp" ] || fail 'Runtime restore temporary residue is invalid'
@@ -495,6 +496,27 @@ function systemdUnitStateFunctions() {
 }
 stop_unit() {
   systemctl stop "$1" >/dev/null 2>&1 || fail "could not stop $1"
+}
+reset_quiescent_failed_unit() {
+  expected_target=$1
+  properties=$(systemctl show "$expected_target" --no-pager --property=LoadState --property=ActiveState --property=SubState --property=MainPID --property=ControlPID --property=Job) || fail "could not query $expected_target quiescence"
+  property_count=$(printf '%s\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  load_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "LoadState" { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  active_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "ActiveState" { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  sub_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "SubState" { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  main_pid_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "MainPID" { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  control_pid_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "ControlPID" { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  job_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "Job" { count += 1 } END { print count + 0 }') || fail "could not query $expected_target quiescence"
+  [ "$property_count" -eq 6 ] && [ "$load_count" -eq 1 ] && [ "$active_count" -eq 1 ] && [ "$sub_count" -eq 1 ] && [ "$main_pid_count" -eq 1 ] && [ "$control_pid_count" -eq 1 ] && [ "$job_count" -eq 1 ] || fail "$expected_target quiescence is invalid"
+  load_state=$(printf '%s\n' "$properties" | awk -F= '$1 == "LoadState" { print substr($0, index($0, "=") + 1) }') || fail "could not query $expected_target quiescence"
+  active_state=$(printf '%s\n' "$properties" | awk -F= '$1 == "ActiveState" { print substr($0, index($0, "=") + 1) }') || fail "could not query $expected_target quiescence"
+  sub_state=$(printf '%s\n' "$properties" | awk -F= '$1 == "SubState" { print substr($0, index($0, "=") + 1) }') || fail "could not query $expected_target quiescence"
+  main_pid=$(printf '%s\n' "$properties" | awk -F= '$1 == "MainPID" { print substr($0, index($0, "=") + 1) }') || fail "could not query $expected_target quiescence"
+  control_pid=$(printf '%s\n' "$properties" | awk -F= '$1 == "ControlPID" { print substr($0, index($0, "=") + 1) }') || fail "could not query $expected_target quiescence"
+  job=$(printf '%s\n' "$properties" | awk -F= '$1 == "Job" { print substr($0, index($0, "=") + 1) }') || fail "could not query $expected_target quiescence"
+  [ "$load_state" = loaded ] && [ "$active_state" = failed ] && [ "$sub_state" = failed ] || return 0
+  [ "$main_pid" = 0 ] && [ "$control_pid" = 0 ] && [ -z "$job" ] || fail "$expected_target failed state is not quiescent"
+  systemctl reset-failed "$expected_target" >/dev/null 2>&1 || fail "could not reset $expected_target failure state"
 }
 require_stopped_unit() {
   expected_target=$1
