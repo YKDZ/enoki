@@ -27,6 +27,7 @@ const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const BOOT_ID_PATH: &str = "/run/enoki-probe/runtime-failure-boot-id";
+const HOST_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
@@ -834,7 +835,7 @@ fn retry_runtime_at(
         }
         match (epoch_present, latch_present) {
             (true, false) => {
-                let (epoch, _, _) = current_epoch_binding_at(root, expected_uid)?;
+                let (epoch, _, _) = current_epoch_binding_for_local_retry_at(root, expected_uid)?;
                 if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
                     || runtime_failure_creation_reserved_at(root, expected_uid)?
                 {
@@ -858,7 +859,8 @@ fn retry_runtime_at(
                 {
                     return Err(std::io::Error::other("failure pair consumption pending"));
                 }
-                let epoch = build_current_epoch(root, expected_uid, &state, generation)?;
+                let epoch =
+                    build_current_epoch_for_local_retry(root, expected_uid, &state, generation)?;
                 let encoded = toml::to_string(&epoch)
                     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
                 atomic_write(
@@ -871,7 +873,7 @@ fn retry_runtime_at(
             (true, true) => {}
             (false, false) => unreachable!(),
         }
-        let (epoch, _, epoch_bytes) = current_epoch_at_locked(root, expected_uid)?;
+        let (epoch, _, epoch_bytes) = current_epoch_for_local_retry_at_locked(root, expected_uid)?;
         if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
             || runtime_failure_creation_reserved_at(root, expected_uid)?
         {
@@ -903,7 +905,8 @@ fn retry_runtime_at(
         let epoch_present = path_present(&epoch_path)?;
         let latch_present = path_present(&latch_path)?;
         if epoch_present {
-            let (epoch, _, epoch_bytes) = current_epoch_binding_at(root, expected_uid)?;
+            let (epoch, _, epoch_bytes) =
+                current_epoch_binding_for_local_retry_at(root, expected_uid)?;
             if !latch_present {
                 return Err(std::io::Error::other("local retry receipt binding invalid"));
             }
@@ -1106,7 +1109,27 @@ fn current_epoch_at_locked(
     root: &Path,
     expected_uid: u32,
 ) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    let (epoch, metadata, epoch_bytes) = current_epoch_binding_at(root, expected_uid)?;
+    current_epoch_with_boot_id_source_at_locked(
+        root,
+        expected_uid,
+        FixedBootIdSource::NamespaceAlias,
+    )
+}
+
+fn current_epoch_for_local_retry_at_locked(
+    root: &Path,
+    expected_uid: u32,
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
+    current_epoch_with_boot_id_source_at_locked(root, expected_uid, FixedBootIdSource::HostProc)
+}
+
+fn current_epoch_with_boot_id_source_at_locked(
+    root: &Path,
+    expected_uid: u32,
+    boot_id_source: FixedBootIdSource,
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
+    let (epoch, metadata, epoch_bytes) =
+        current_epoch_binding_with_boot_id_source(root, expected_uid, boot_id_source)?;
     let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)?;
     if latch != epoch.generation.as_bytes() {
         return Err(std::io::Error::other("failure epoch binding invalid"));
@@ -1117,6 +1140,21 @@ fn current_epoch_at_locked(
 fn current_epoch_binding_at(
     root: &Path,
     expected_uid: u32,
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
+    current_epoch_binding_with_boot_id_source(root, expected_uid, FixedBootIdSource::NamespaceAlias)
+}
+
+fn current_epoch_binding_for_local_retry_at(
+    root: &Path,
+    expected_uid: u32,
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
+    current_epoch_binding_with_boot_id_source(root, expected_uid, FixedBootIdSource::HostProc)
+}
+
+fn current_epoch_binding_with_boot_id_source(
+    root: &Path,
+    expected_uid: u32,
+    boot_id_source: FixedBootIdSource,
 ) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
     trusted_state_directory(
         &rooted(root, "/var/lib/enoki-probe"),
@@ -1131,7 +1169,7 @@ fn current_epoch_binding_at(
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
     let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
-    let boot_id = trusted_fixed_boot_id(root, expected_uid)?;
+    let boot_id = trusted_fixed_boot_id(root, expected_uid, boot_id_source)?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata_bytes)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -1756,6 +1794,37 @@ fn build_current_epoch(
     state: &RuntimeUnitState,
     generation: &str,
 ) -> std::io::Result<RuntimeFailureEpoch> {
+    build_current_epoch_with_boot_id_source(
+        root,
+        expected_uid,
+        state,
+        generation,
+        FixedBootIdSource::NamespaceAlias,
+    )
+}
+
+fn build_current_epoch_for_local_retry(
+    root: &Path,
+    expected_uid: u32,
+    state: &RuntimeUnitState,
+    generation: &str,
+) -> std::io::Result<RuntimeFailureEpoch> {
+    build_current_epoch_with_boot_id_source(
+        root,
+        expected_uid,
+        state,
+        generation,
+        FixedBootIdSource::HostProc,
+    )
+}
+
+fn build_current_epoch_with_boot_id_source(
+    root: &Path,
+    expected_uid: u32,
+    state: &RuntimeUnitState,
+    generation: &str,
+    boot_id_source: FixedBootIdSource,
+) -> std::io::Result<RuntimeFailureEpoch> {
     if decode_lower_hex_32(generation).is_none() {
         return Err(std::io::Error::other("failure generation invalid"));
     }
@@ -1772,7 +1841,7 @@ fn build_current_epoch(
     if unit != expected_unit {
         return Err(std::io::Error::other("runtime unit binding mismatch"));
     }
-    let boot_id = trusted_fixed_boot_id(root, expected_uid)?;
+    let boot_id = trusted_fixed_boot_id(root, expected_uid, boot_id_source)?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -1839,8 +1908,24 @@ fn trusted_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn trusted_fixed_boot_id(root: &Path, expected_uid: u32) -> std::io::Result<String> {
-    let path = rooted(root, BOOT_ID_PATH);
+#[derive(Clone, Copy)]
+enum FixedBootIdSource {
+    NamespaceAlias,
+    HostProc,
+}
+
+fn trusted_fixed_boot_id(
+    root: &Path,
+    expected_uid: u32,
+    source: FixedBootIdSource,
+) -> std::io::Result<String> {
+    let path = rooted(
+        root,
+        match source {
+            FixedBootIdSource::NamespaceAlias => BOOT_ID_PATH,
+            FixedBootIdSource::HostProc => HOST_BOOT_ID_PATH,
+        },
+    );
     let metadata = fs::symlink_metadata(&path)?;
     let valid = |metadata: &fs::Metadata| {
         metadata.is_file()
@@ -2231,6 +2316,7 @@ pub(super) mod tests {
             .unwrap();
         write_fixture(root.path(), RECORDER_UNIT_PATH, &recorder_unit, 0o644);
         write_fixture(root.path(), BOOT_ID_PATH, b"boot-01\n", 0o444);
+        write_fixture(root.path(), HOST_BOOT_ID_PATH, b"boot-01\n", 0o444);
         root
     }
 
@@ -2648,6 +2734,30 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(receipt.progress, LocalRetryProgress::RetryInvoked);
+    }
+
+    #[test]
+    fn production_local_retry_uses_host_boot_id_without_namespace_alias() {
+        let root = fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(
+            root.path(),
+            uid,
+            &mut State(RuntimeUnitState {
+                active_state: "failed".into(),
+                result: "exit-code".into(),
+            }),
+            &mut Generation(4),
+        )
+        .unwrap();
+        fs::remove_file(rooted(root.path(), BOOT_ID_PATH)).unwrap();
+
+        let mut systemd = RetrySystemd::default();
+        retry_runtime_at(root.path(), uid, &mut systemd).unwrap();
+
+        assert_eq!(systemd.0, 1);
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
     }
 
     #[test]

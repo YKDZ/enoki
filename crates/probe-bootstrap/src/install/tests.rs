@@ -735,6 +735,11 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(paths.boot_id().parent().unwrap()).unwrap();
+        fs::set_permissions(
+            paths.boot_id().parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::write(paths.boot_id(), b"boot-01\n").unwrap();
         fs::set_permissions(paths.boot_id(), fs::Permissions::from_mode(0o444)).unwrap();
         let metadata = fs::read_to_string(paths.metadata()).unwrap();
@@ -3763,6 +3768,9 @@ mod tests {
         assert!(disk_provider.contains("BindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl"));
         assert!(upgrade_socket.contains("ListenStream=/run/enoki-probe-lifecycle-upgrade.sock"));
         assert!(upgrade_socket.contains("SocketGroup=enoki-probe-ipc"));
+        assert!(upgrade.contains(
+            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+        ));
         assert!(
             upgrade.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade")
         );
@@ -4033,6 +4041,9 @@ mod tests {
         assert!(lifecycle.contains("SocketBindDeny=ipv4:any"));
         assert!(lifecycle.contains("RuntimeDirectory=enoki-probe"));
         assert!(lifecycle.contains("RuntimeDirectoryPreserve=yes"));
+        assert!(lifecycle.contains(
+            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+        ));
         assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
