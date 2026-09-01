@@ -26,7 +26,7 @@ const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
-const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+const BOOT_ID_PATH: &str = "/run/enoki-probe/runtime-failure-boot-id";
 const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
@@ -1131,12 +1131,7 @@ fn current_epoch_binding_at(
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
     let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
-    let boot_id = String::from_utf8(trusted_file(
-        &rooted(root, BOOT_ID_PATH),
-        expected_uid,
-        0o444,
-    )?)
-    .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    let boot_id = trusted_fixed_boot_id(root, expected_uid)?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata_bytes)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -1777,12 +1772,7 @@ fn build_current_epoch(
     if unit != expected_unit {
         return Err(std::io::Error::other("runtime unit binding mismatch"));
     }
-    let boot_id = String::from_utf8(trusted_file(
-        &rooted(root, BOOT_ID_PATH),
-        expected_uid,
-        0o444,
-    )?)
-    .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    let boot_id = trusted_fixed_boot_id(root, expected_uid)?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -1847,6 +1837,51 @@ fn trusted_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Vec<u8>> {
         return Err(std::io::Error::other("trusted file changed"));
     }
     Ok(bytes)
+}
+
+fn trusted_fixed_boot_id(root: &Path, expected_uid: u32) -> std::io::Result<String> {
+    let path = rooted(root, BOOT_ID_PATH);
+    let metadata = fs::symlink_metadata(&path)?;
+    let valid = |metadata: &fs::Metadata| {
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == expected_uid
+            && metadata.mode() & 0o7777 == 0o444
+            && metadata.nlink() == 1
+    };
+    if !valid(&metadata) {
+        return Err(std::io::Error::other("boot binding invalid"));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let opened = file.metadata()?;
+    if !valid(&opened)
+        || opened.dev() != metadata.dev()
+        || opened.ino() != metadata.ino()
+        || opened.uid() != metadata.uid()
+        || opened.mode() != metadata.mode()
+        || opened.nlink() != metadata.nlink()
+    {
+        return Err(std::io::Error::other("boot binding changed"));
+    }
+    let mut bytes = Vec::new();
+    file.take(65).read_to_end(&mut bytes)?;
+    if bytes.len() > 64 {
+        return Err(std::io::Error::other("boot binding invalid"));
+    }
+    let current = fs::symlink_metadata(&path)?;
+    if !valid(&current)
+        || current.dev() != opened.dev()
+        || current.ino() != opened.ino()
+        || current.uid() != opened.uid()
+        || current.mode() != opened.mode()
+        || current.nlink() != opened.nlink()
+    {
+        return Err(std::io::Error::other("boot binding changed"));
+    }
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("boot binding invalid"))
 }
 
 fn trusted_identity_file(path: &Path) -> std::io::Result<Vec<u8>> {

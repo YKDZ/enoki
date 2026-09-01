@@ -3873,6 +3873,7 @@ mod tests {
             "RuntimeDirectory=enoki-probe",
             "RuntimeDirectoryMode=0700",
             "RuntimeDirectoryPreserve=yes",
+            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id",
             "ReadWritePaths=/var/lib/enoki-probe/runtime-failure /run/enoki-probe",
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
