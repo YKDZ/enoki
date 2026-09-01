@@ -576,7 +576,7 @@ mod tests {
         fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
             Ok(RuntimeUnitState {
                 active_state: "failed".into(),
-                result: "start-limit-hit".into(),
+                result: "exit-code".into(),
             })
         }
     }

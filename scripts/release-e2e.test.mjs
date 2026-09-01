@@ -2771,29 +2771,10 @@ exit "$status"
     await harness.install(officialEnrollment(), "run-repair-eligibility");
     await expect(
       harness.repairInstalledBundleFailure("run-repair-eligibility", "1.2.3"),
-    ).rejects.toThrow(/durable Observation Runtime failure eligibility/i);
+    ).rejects.toThrow(/recorder did not publish/i);
   });
 
-  it.each([
-    [
-      "active service state",
-      durableRuntimeFailureEvidenceOutput()
-        .replace("activeState=failed", "activeState=active")
-        .replace("result=start-limit-hit", "result=success")
-        .replace("restartCount=2", "restartCount=0"),
-    ],
-    [
-      "ordinary failed result",
-      durableRuntimeFailureEvidenceOutput().replace(
-        "result=start-limit-hit",
-        "result=exit-code",
-      ),
-    ],
-    [
-      "free-form failure text",
-      `${durableRuntimeFailureEvidenceOutput()}message=start-limit-hit\n`,
-    ],
-  ])("does not derive Repair authority from %s", async (_label, evidence) => {
+  it("does not run Repair unless the product recorder reports its pair", async () => {
     const driver = createInstalledBundleFailureRepairHostDriver({
       assertOwnedRun() {},
       async execute(command) {
@@ -2802,7 +2783,7 @@ exit "$status"
             "# enoki-release-e2e:exhaust-observation-runtime-budget",
           )
         ) {
-          return successfulCommandText(evidence);
+          return successfulCommandText("not-recorded\n");
         }
         throw new Error("Repair must not run without the exact durable epoch");
       },
@@ -2811,7 +2792,7 @@ exit "$status"
 
     await expect(
       driver.repair("run-runtime-negative", "1.2.3"),
-    ).rejects.toThrow(/durable Observation Runtime failure eligibility/i);
+    ).rejects.toThrow(/recorder did not publish/i);
   });
 
   it.each(["stop", "query"])(
@@ -3039,52 +3020,13 @@ if [ "$1" = start ] && [ "$2" = enoki-observation-runtime.service ]; then
     printf 'interrupted\\n' > "$ENOKI_RUNTIME_STATE"
     exit 1
   }
-  printf '0\\n' > "$ENOKI_RUNTIME_STATE"
+  mkdir -p "$(dirname "$ENOKI_RUNTIME_EPOCH")"
+  : > "$ENOKI_RUNTIME_EPOCH"
+  : > "$ENOKI_RUNTIME_LATCH"
   exit 0
 fi
 if [ "$1" = show ]; then
-  poll=$(cat "$ENOKI_RUNTIME_STATE" 2>/dev/null || printf interrupted)
-  case " $* " in
-    *" --property=ActiveState --value "*)
-      [ "$poll" != interrupted ] || { printf 'failed\\n'; exit 0; }
-      poll=$((poll + 1))
-      printf '%s\\n' "$poll" > "$ENOKI_RUNTIME_STATE"
-      if [ "$poll" -ge 5 ]; then active=failed
-      elif [ $((poll % 2)) -eq 1 ]; then active=failed
-      else active=activating
-      fi
-      printf '%s\\n' "$active"
-      ;;
-    *" --property=Result --value "*)
-      [ "$poll" != interrupted ] || { printf 'exit-code\\n'; exit 0; }
-      if [ "$poll" -ge 5 ]; then result=start-limit-hit
-      else result=exit-code
-      fi
-      printf '%s\\n' "$result"
-      ;;
-    *" --property=NRestarts --value "*) printf '2\\n' ;;
-    *) printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'; exit 0 ;;
-  esac
-  if [ "$poll" -ge 5 ] && [ ! -f "$ENOKI_RUNTIME_EPOCH" ]; then
-    mkdir -p "$(dirname "$ENOKI_RUNTIME_EPOCH")"
-    unit_sha=$(sha256sum "$ENOKI_RUNTIME_UNIT" | cut -d ' ' -f 1)
-    cat > "$ENOKI_RUNTIME_EPOCH" <<EOF
-schema_version = 1
-generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-boot_id = "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51"
-unit = "enoki-observation-runtime.service"
-unit_sha256 = "$unit_sha"
-host_id = "7"
-probe_id = "probe_release_01"
-identity_receipt_sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-install_state_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-manifest_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-bundle_version = "1.2.3"
-result = "start-limit-hit"
-EOF
-    printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$ENOKI_RUNTIME_LATCH"
-    chmod 0600 "$ENOKI_RUNTIME_EPOCH" "$ENOKI_RUNTIME_LATCH"
-  fi
+  printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'
   exit 0
 fi
 exit 1
@@ -3112,7 +3054,7 @@ exit 1
             });
           }
           return successfulCommandText(
-            `bundleVersion=1.2.3\nepochExists=0\nfaultBackupExists=1\nlatchExists=0\nrepairOutput=Probe repair completed.\nruntimeSha256=${runtimeSha256}\nunit=enoki-observation-runtime.service\n`,
+            `bundleVersion=1.2.3\nfaultBackupExists=1\nrepairOutput=Probe repair completed.\nruntimeSha256=${runtimeSha256}\nunit=enoki-observation-runtime.service\n`,
           );
         },
         ownershipToken: "00000000-0000-4000-8000-000000000001",
@@ -3121,7 +3063,7 @@ exit 1
       await expect(
         driver.repair("run-runtime-custody", "1.2.3"),
       ).resolves.toMatchObject({
-        failure: { result: "start-limit-hit", status: "latched" },
+        failure: { status: "recorded" },
       });
       await expect(readFile(startRequests, "utf8")).resolves.toBe("1\n");
     } finally {
@@ -3257,36 +3199,7 @@ exit 1
             "# enoki-release-e2e:exhaust-observation-runtime-budget",
           )
         ) {
-          return successfulCommandText(
-            [
-              "activeState=failed",
-              "bootId=4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
-              "bundleVersion=1.2.3",
-              `epochGeneration=${"b".repeat(64)}`,
-              "epochLinks=1",
-              "epochMode=600",
-              "epochOwner=0",
-              "hostId=7",
-              `identityReceiptSha256=${"c".repeat(64)}`,
-              `installStateSha256=${"d".repeat(64)}`,
-              `latchGeneration=${"b".repeat(64)}`,
-              "latchLinks=1",
-              "latchMode=600",
-              "latchOwner=0",
-              `manifestSha256=${"e".repeat(64)}`,
-              "probeId=probe_release_01",
-              "result=start-limit-hit",
-              "restartCount=2",
-              "role=observation_runtime",
-              `runtimeFaultSha256=${"f".repeat(64)}`,
-              `runtimeSha256=${runtimeSha256}`,
-              "startLimitBurst=3",
-              "startLimitIntervalSec=60",
-              "unit=enoki-observation-runtime.service",
-              `unitSha256=${"1".repeat(64)}`,
-              "",
-            ].join("\n"),
-          );
+          return successfulCommandText("recorded\n");
         }
         if (
           command.includes(
@@ -3296,9 +3209,7 @@ exit 1
           return successfulCommandText(
             [
               "bundleVersion=1.2.3",
-              "epochExists=0",
               "faultBackupExists=1",
-              "latchExists=0",
               "repairOutput=Probe repair completed.",
               `runtimeSha256=${runtimeSha256}`,
               "unit=enoki-observation-runtime.service",
@@ -3338,25 +3249,9 @@ exit 1
     await expect(
       harness.repairInstalledBundleFailure("run-runtime-repair", "1.2.3"),
     ).resolves.toMatchObject({
-      failure: {
-        activeState: "failed",
-        bundle: { runtimeSha256, version: "1.2.3" },
-        failureEpoch: {
-          generation: "b".repeat(64),
-          hostId: "7",
-          ownerUid: 0,
-        },
-        latch: { generation: "b".repeat(64), ownerUid: 0 },
-        recoveryBudget: { observedStarts: 3, startLimitBurst: 3 },
-        result: "start-limit-hit",
-        role: "observation_runtime",
-        status: "latched",
-        unit: "enoki-observation-runtime.service",
-      },
+      failure: { status: "recorded" },
       repair: {
-        failureEpochRemoved: true,
         faultRemoved: true,
-        latchRemoved: true,
         runtimeSha256,
         sameBundle: true,
       },
@@ -3374,8 +3269,12 @@ exit 1
     expect(exhausted.command).toContain(
       "runtime=/usr/local/bin/enoki-observation-runtime",
     );
-    expect(exhausted.command).toContain("StartLimitBurst=");
-    expect(exhausted.command).toContain('$result" = start-limit-hit');
+    expect(exhausted.command).toContain("remaining=30");
+    expect(exhausted.command).toContain('product Runtime recorder did not publish its failure pair');
+    expect(exhausted.command).not.toContain("start-limit-hit");
+    expect(exhausted.command).not.toContain("NRestarts");
+    expect(exhausted.command).not.toContain("--property=Result");
+    expect(exhausted.command).not.toContain("epoch_value");
     const stopProbe = exhausted.command.indexOf(
       "stop_unit enoki-probe.service",
     );
@@ -3425,8 +3324,8 @@ exit 1
       ),
     );
     expect(repaired.command).toContain("/usr/local/bin/enoki-probe repair");
-    expect(repaired.command).toContain('[ ! -e "$epoch" ]');
-    expect(repaired.command).toContain('[ ! -e "$latch" ]');
+    expect(repaired.command).not.toContain("runtime-failure/epoch.toml");
+    expect(repaired.command).not.toContain("runtime-failure/latch");
     expect(repaired.command).not.toContain('rm -- "$backup"');
     await expect(
       execFileAsync("/bin/sh", ["-n", "-c", repaired.command]),
@@ -3453,7 +3352,7 @@ exit 1
           )
         ) {
           productState = "exact-pair";
-          return successfulCommandText(durableRuntimeFailureEvidenceOutput());
+          return successfulCommandText("recorded\n");
         }
         if (
           command.includes(
@@ -6593,21 +6492,9 @@ describe("Release E2E Orchestrator", () => {
       async repairInstalledBundleFailure() {
         calls.push("host.repairInstalledBundleFailure");
         return {
-          failure: {
-            activeState: "failed",
-            failureEpoch: {
-              hostId: "7",
-              probeId: "probe_release_01",
-            },
-            role: "observation_runtime",
-            status: "latched",
-            result: "start-limit-hit",
-            unit: "enoki-observation-runtime.service",
-          },
+          failure: { status: "recorded" },
           repair: {
-            failureEpochRemoved: true,
             faultRemoved: true,
-            latchRemoved: true,
             sameBundle: true,
           },
         };
@@ -6722,15 +6609,7 @@ describe("Release E2E Orchestrator", () => {
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
       installedBundleFailureRepair: {
-        failure: {
-          failureEpoch: {
-            hostId: "7",
-            probeId: "probe_release_01",
-          },
-          result: "start-limit-hit",
-          role: "observation_runtime",
-          status: "latched",
-        },
+        failure: { status: "recorded" },
         host: {
           hostProfile: { probeVersion: "1.2.3" },
           id: 7,
@@ -6741,9 +6620,7 @@ describe("Release E2E Orchestrator", () => {
           before: installedState.identity,
         },
         repair: {
-          failureEpochRemoved: true,
           faultRemoved: true,
-          latchRemoved: true,
           repairedVersion: "1.2.3",
           sameBundle: true,
         },
@@ -10703,37 +10580,6 @@ function successfulCommand(value) {
 
 function successfulCommandText(stdout) {
   return { code: 0, stderr: "", stdout };
-}
-
-function durableRuntimeFailureEvidenceOutput(runtimeSha256 = "a".repeat(64)) {
-  return [
-    "activeState=failed",
-    "bootId=4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
-    "bundleVersion=1.2.3",
-    `epochGeneration=${"b".repeat(64)}`,
-    "epochLinks=1",
-    "epochMode=600",
-    "epochOwner=0",
-    "hostId=7",
-    `identityReceiptSha256=${"c".repeat(64)}`,
-    `installStateSha256=${"d".repeat(64)}`,
-    `latchGeneration=${"b".repeat(64)}`,
-    "latchLinks=1",
-    "latchMode=600",
-    "latchOwner=0",
-    `manifestSha256=${"e".repeat(64)}`,
-    "probeId=probe_release_01",
-    "result=start-limit-hit",
-    "restartCount=2",
-    "role=observation_runtime",
-    `runtimeFaultSha256=${"f".repeat(64)}`,
-    `runtimeSha256=${runtimeSha256}`,
-    "startLimitBurst=3",
-    "startLimitIntervalSec=60",
-    "unit=enoki-observation-runtime.service",
-    `unitSha256=${"1".repeat(64)}`,
-    "",
-  ].join("\n");
 }
 
 function productInstallerOutput() {

@@ -407,11 +407,10 @@ pub(super) fn installed_bundle_failure_is_current_at(
     ) {
         return true;
     }
-    matches!(
-        systemd.fixed_runtime_state(),
-        Ok(RuntimeUnitState { active_state, result })
-            if active_state == "failed" && result == "start-limit-hit"
-    ) && current_epoch_at_locked(root, expected_uid).is_ok()
+    let Ok((epoch, _, _)) = current_epoch_at_locked(root, expected_uid) else {
+        return false;
+    };
+    valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result).is_ok()
 }
 
 pub(super) fn resume_installed_bundle_repair_at(

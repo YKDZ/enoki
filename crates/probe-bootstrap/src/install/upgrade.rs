@@ -2091,7 +2091,7 @@ pub(super) fn current_runtime_failure_epoch_binding(
         |key: &str| metadata_string(&identity, key).ok_or(InstallError::ExistingResidue);
     let generation = epoch_string("generation")?;
     if metadata_scalar(epoch_text, "schema_version").as_deref() != Some("1")
-        || epoch_string("result")? != "start-limit-hit"
+        || !fixed_restart_eligible_result(&epoch_string("result")?)
         || epoch_string("unit")? != "enoki-observation-runtime.service"
         || !valid_sha256(&generation)
         || epoch_string("boot_id")? != boot_id.trim()
@@ -2415,7 +2415,7 @@ fn legacy_upgrade_source_runtime_failure_epoch_binding(
         None => true,
     };
     if metadata_scalar(epoch_text, "schema_version").as_deref() != Some("1")
-        || epoch_string("result")? != "start-limit-hit"
+        || !fixed_restart_eligible_result(&epoch_string("result")?)
         || epoch_string("unit")? != "enoki-observation-runtime.service"
         || !valid_sha256(&generation)
         || epoch_string("boot_id")? != boot_id.trim()
@@ -2437,6 +2437,20 @@ fn legacy_upgrade_source_runtime_failure_epoch_binding(
         return Err(InstallError::ExistingResidue);
     }
     Ok((generation, format!("{:x}", Sha256::digest(&epoch))))
+}
+
+fn fixed_restart_eligible_result(result: &str) -> bool {
+    matches!(
+        result,
+        "exit-code"
+            | "signal"
+            | "core-dump"
+            | "watchdog"
+            | "timeout"
+            | "protocol"
+            | "resources"
+            | "oom-kill"
+    )
 }
 
 fn legacy_upgrade_target_runtime_failure_epoch_binding(

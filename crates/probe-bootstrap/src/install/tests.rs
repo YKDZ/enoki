@@ -735,13 +735,18 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(paths.boot_id().parent().unwrap()).unwrap();
+        fs::set_permissions(
+            paths.boot_id().parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::write(paths.boot_id(), b"boot-01\n").unwrap();
         fs::set_permissions(paths.boot_id(), fs::Permissions::from_mode(0o444)).unwrap();
         let metadata = fs::read_to_string(paths.metadata()).unwrap();
         let identity = fs::read_to_string(paths.identity()).unwrap();
         let unit = fs::read(paths.observation_runtime_unit()).unwrap();
         let epoch = format!(
-            "schema_version = 1\ngeneration = {generation:?}\nboot_id = \"boot-01\"\nunit = \"enoki-observation-runtime.service\"\nunit_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nprobe_id = {:?}\nidentity_receipt_sha256 = {:?}\ninstall_state_sha256 = {:?}\nmanifest_sha256 = {:?}\nbundle_version = {:?}\nresult = \"start-limit-hit\"\n",
+            "schema_version = 1\ngeneration = {generation:?}\nboot_id = \"boot-01\"\nunit = \"enoki-observation-runtime.service\"\nunit_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nprobe_id = {:?}\nidentity_receipt_sha256 = {:?}\ninstall_state_sha256 = {:?}\nmanifest_sha256 = {:?}\nbundle_version = {:?}\nresult = \"exit-code\"\n",
             format!("{:x}", Sha256::digest(&unit)),
             upgrade::metadata_string(&metadata, "hub_url").unwrap(),
             upgrade::metadata_string(&identity, "host_id").unwrap(),
@@ -1525,6 +1530,17 @@ mod tests {
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
         write_runtime_failure_pair_fixture(&paths, &"17".repeat(32));
         assert!(upgrade::current_runtime_failure_epoch_binding(&paths).is_ok());
+        let epoch = fs::read_to_string(paths.runtime_failure_epoch()).unwrap();
+        fs::write(
+            paths.runtime_failure_epoch(),
+            epoch.replacen("result = \"exit-code\"", "result = \"start-limit-hit\"", 1),
+        )
+        .unwrap();
+        assert_eq!(
+            upgrade::current_runtime_failure_epoch_binding(&paths),
+            Err(InstallError::ExistingResidue),
+        );
+        fs::write(paths.runtime_failure_epoch(), epoch).unwrap();
         let mut target_bundle = bundle().with_test_complete_receipts(5);
         target_bundle.version = "1.2.4".to_owned();
         target_bundle.manifest_sha256 = "d".repeat(64);
@@ -3756,6 +3772,9 @@ mod tests {
         assert!(disk_provider.contains("BindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl"));
         assert!(upgrade_socket.contains("ListenStream=/run/enoki-probe-lifecycle-upgrade.sock"));
         assert!(upgrade_socket.contains("SocketGroup=enoki-probe-ipc"));
+        assert!(upgrade.contains(
+            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+        ));
         assert!(
             upgrade.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade")
         );
@@ -3855,6 +3874,7 @@ mod tests {
             "Type=oneshot",
             "User=root",
             "Group=root",
+            "RefuseManualStart=yes",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
             "CapabilityBoundingSet=",
@@ -3866,6 +3886,7 @@ mod tests {
             "RuntimeDirectory=enoki-probe",
             "RuntimeDirectoryMode=0700",
             "RuntimeDirectoryPreserve=yes",
+            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id",
             "ReadWritePaths=/var/lib/enoki-probe/runtime-failure /run/enoki-probe",
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
@@ -4025,6 +4046,9 @@ mod tests {
         assert!(lifecycle.contains("SocketBindDeny=ipv4:any"));
         assert!(lifecycle.contains("RuntimeDirectory=enoki-probe"));
         assert!(lifecycle.contains("RuntimeDirectoryPreserve=yes"));
+        assert!(lifecycle.contains(
+            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+        ));
         assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
