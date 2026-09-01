@@ -131,6 +131,75 @@ impl PrivateAtomicFileCustody {
         self.verify_parent_namespace()
     }
 
+    /// Publishes one previously-absent fixed target and retracts only that
+    /// inode when the caller's read-only custody check no longer holds.
+    pub fn publish_absent_checked(
+        &self,
+        contents: &[u8],
+        mut postcondition: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.guard_absent_target()?;
+        postcondition()?;
+        let published = match self.publish_absent(contents) {
+            Ok(published) => published,
+            Err(PublishAbsentError::BeforePublish(error)) => return Err(error),
+            Err(PublishAbsentError::AfterPublish { published, error }) => {
+                return self.rollback_after(error, &[published]);
+            }
+        };
+        if let Err(error) = postcondition() {
+            return self.rollback_after(error, &[published]);
+        }
+        Ok(())
+    }
+
+    /// Publishes the fixed epoch then latch pair. Both targets must be absent;
+    /// a custody failure retracts this invocation's epoch before its latch.
+    pub fn publish_epoch_then_latch_absent_checked(
+        epoch: (&Self, &[u8]),
+        latch: (&Self, &[u8]),
+        mut postcondition: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<()> {
+        epoch.0.guard_absent_target()?;
+        latch.0.guard_absent_target()?;
+        postcondition()?;
+        let published_epoch = match epoch.0.publish_absent(epoch.1) {
+            Ok(published) => published,
+            Err(PublishAbsentError::BeforePublish(error)) => return Err(error),
+            Err(PublishAbsentError::AfterPublish { published, error }) => {
+                return rollback_pair_after(error, epoch.0, published, latch.0, None);
+            }
+        };
+        if let Err(error) = postcondition() {
+            return rollback_pair_after(error, epoch.0, published_epoch, latch.0, None);
+        }
+        let published_latch = match latch.0.publish_absent(latch.1) {
+            Ok(published) => published,
+            Err(PublishAbsentError::BeforePublish(error)) => {
+                return rollback_pair_after(error, epoch.0, published_epoch, latch.0, None);
+            }
+            Err(PublishAbsentError::AfterPublish { published, error }) => {
+                return rollback_pair_after(
+                    error,
+                    epoch.0,
+                    published_epoch,
+                    latch.0,
+                    Some(published),
+                );
+            }
+        };
+        if let Err(error) = postcondition() {
+            return rollback_pair_after(
+                error,
+                epoch.0,
+                published_epoch,
+                latch.0,
+                Some(published_latch),
+            );
+        }
+        Ok(())
+    }
+
     /// Removes only the exact private target in this held namespace.
     pub(crate) fn remove(&self) -> io::Result<()> {
         self.guard_residue()?;
@@ -176,6 +245,65 @@ impl PrivateAtomicFileCustody {
         self.verify_parent_namespace()
     }
 
+    fn guard_absent_target(&self) -> io::Result<()> {
+        self.guard_residue()?;
+        match stat_at(self.parent.raw(), &self.target) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "checked publication target already exists",
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn publish_absent(&self, contents: &[u8]) -> Result<PublishedInode, PublishAbsentError> {
+        let published = atomic_write_absent_at(
+            &self.parent,
+            &self.target,
+            &self.path,
+            contents,
+            self.mode,
+            self.owner,
+        )?;
+        if let Err(error) = private_atomic_after_publish_for_test(&self.path) {
+            return Err(PublishAbsentError::AfterPublish { published, error });
+        }
+        Ok(published)
+    }
+
+    fn rollback_after(&self, primary: io::Error, published: &[PublishedInode]) -> io::Result<()> {
+        let rollback = published
+            .iter()
+            .try_for_each(|published| self.remove_published_inode(*published));
+        match rollback {
+            Ok(()) => Err(primary),
+            Err(rollback) => Err(io::Error::other(format!(
+                "checked publication failed: {primary}; rollback failed: {rollback}"
+            ))),
+        }
+    }
+
+    fn remove_published_inode(&self, published: PublishedInode) -> io::Result<()> {
+        match stat_at(self.parent.raw(), &self.target) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(current)
+                if current.st_dev != published.device || current.st_ino != published.inode =>
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "checked publication target inode changed",
+                ));
+            }
+            Ok(_) => {}
+        }
+        unlink_at(self.parent.raw(), &self.target)?;
+        sync_directory(self.parent.raw())?;
+        secure_file_effect_crash(&self.path, "after-checked-unlink");
+        Ok(())
+    }
+
     fn verify_parent_namespace(&self) -> io::Result<()> {
         let held = stat_fd(self.parent.raw())?;
         let named = stat_at(self.container.raw(), &self.parent_name)?;
@@ -187,6 +315,42 @@ impl PrivateAtomicFileCustody {
             "private atomic parent namespace changed",
         ))
     }
+}
+
+#[derive(Clone, Copy)]
+struct PublishedInode {
+    device: libc::dev_t,
+    inode: libc::ino_t,
+}
+
+enum PublishAbsentError {
+    BeforePublish(io::Error),
+    AfterPublish {
+        published: PublishedInode,
+        error: io::Error,
+    },
+}
+
+fn rollback_pair_after(
+    primary: io::Error,
+    epoch: &PrivateAtomicFileCustody,
+    published_epoch: PublishedInode,
+    latch: &PrivateAtomicFileCustody,
+    published_latch: Option<PublishedInode>,
+) -> io::Result<()> {
+    if let Err(rollback) = epoch.remove_published_inode(published_epoch) {
+        return Err(io::Error::other(format!(
+            "checked publication failed: {primary}; epoch rollback failed: {rollback}"
+        )));
+    }
+    if let Some(published_latch) = published_latch
+        && let Err(rollback) = latch.remove_published_inode(published_latch)
+    {
+        return Err(io::Error::other(format!(
+            "checked publication failed: {primary}; latch rollback failed: {rollback}"
+        )));
+    }
+    Err(primary)
 }
 
 /// 在 systemd `DynamicUser` 管理的固定 Probe state directory 中原子替换 bootstrap config。
@@ -472,6 +636,90 @@ fn atomic_write_at(
         .map_err(|error| io::Error::new(error.kind(), format!("发布文件复验失败: {error}")))?;
     secure_file_effect_crash(path, "after-rename");
     Ok(())
+}
+
+fn atomic_write_absent_at(
+    parent: &DirectoryFd,
+    target: &CString,
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    owner: (u32, u32),
+) -> Result<PublishedInode, PublishAbsentError> {
+    verify_private_directory(parent.raw()).map_err(PublishAbsentError::BeforePublish)?;
+    let temporary = temporary_name(target).map_err(PublishAbsentError::BeforePublish)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.raw(),
+            temporary.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            mode,
+        )
+    };
+    if fd < 0 {
+        return Err(PublishAbsentError::BeforePublish(io::Error::last_os_error()));
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let staged = (|| {
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fchown(file.as_raw_fd(), owner.0, owner.1) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        let stat = stat_fd(file.as_raw_fd())?;
+        Ok(PublishedInode {
+            device: stat.st_dev,
+            inode: stat.st_ino,
+        })
+    })();
+    drop(file);
+    let published = match staged {
+        Ok(published) => published,
+        Err(error) => {
+            let _ = unlink_at(parent.raw(), &temporary);
+            return Err(PublishAbsentError::BeforePublish(error));
+        }
+    };
+    secure_file_effect_crash(path, "before-rename");
+    let renamed = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent.raw(),
+            temporary.as_ptr(),
+            parent.raw(),
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if renamed != 0 {
+        let error = io::Error::last_os_error();
+        let _ = unlink_at(parent.raw(), &temporary);
+        return Err(PublishAbsentError::BeforePublish(error));
+    }
+    if let Err(error) = sync_directory(parent.raw()) {
+        return Err(PublishAbsentError::AfterPublish { published, error });
+    }
+    let current = match stat_at(parent.raw(), target) {
+        Ok(current) => current,
+        Err(error) => return Err(PublishAbsentError::AfterPublish { published, error }),
+    };
+    if current.st_dev != published.device || current.st_ino != published.inode {
+        return Err(PublishAbsentError::AfterPublish {
+            published,
+            error: io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "checked publication target inode changed",
+            ),
+        });
+    }
+    if let Err(error) = verify_file(parent.raw(), target, mode, Some(owner)) {
+        return Err(PublishAbsentError::AfterPublish { published, error });
+    }
+    secure_file_effect_crash(path, "after-rename");
+    Ok(published)
 }
 
 fn open_systemd_probe_state_projection(
@@ -1027,7 +1275,7 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::{
-        atomic_write, atomic_write_systemd_probe_bootstrap_config_at,
+        PrivateAtomicFileCustody, atomic_write, atomic_write_systemd_probe_bootstrap_config_at,
         open_systemd_probe_state_projection_for_finalization,
         read_systemd_probe_bootstrap_config_at,
     };
@@ -1103,6 +1351,67 @@ mod tests {
             0o600
         );
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn checked_publication_rolls_back_the_exact_published_inode() {
+        let root = tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.path().join("epoch.toml");
+        let custody = PrivateAtomicFileCustody::open(
+            &target,
+            0o600,
+            (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+            unsafe { libc::geteuid() },
+        )
+        .unwrap();
+
+        let mut checks = 0;
+        assert!(
+            custody
+                .publish_absent_checked(b"epoch", || {
+                    checks += 1;
+                    if checks > 1 {
+                        Err(std::io::Error::other("boundary changed"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn checked_publication_never_deletes_a_replacement_target() {
+        let root = tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = root.path().join("epoch.toml");
+        let replacement = root.path().join("replacement");
+        let custody = PrivateAtomicFileCustody::open(
+            &target,
+            0o600,
+            (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
+            unsafe { libc::geteuid() },
+        )
+        .unwrap();
+
+        let mut checks = 0;
+        assert!(
+            custody
+                .publish_absent_checked(b"epoch", || {
+                    checks += 1;
+                    if checks == 1 {
+                        return Ok(());
+                    }
+                    fs::rename(&target, &replacement)?;
+                    fs::write(&target, b"unknown")?;
+                    Err(std::io::Error::other("boundary changed"))
+                })
+                .is_err()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"unknown");
+        assert_eq!(fs::read(&replacement).unwrap(), b"epoch");
     }
 
     #[test]

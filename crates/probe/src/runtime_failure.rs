@@ -14,6 +14,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -617,6 +620,83 @@ thread_local! {
     static LOCAL_RETRY_CRASH_POINT: std::cell::Cell<Option<LocalRetryCrashPoint>> = const {
         std::cell::Cell::new(None)
     };
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECORDER_POST_PUBLISH_CHILD_SWAP: std::cell::RefCell<Option<(PathBuf, u8)>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static RECORDER_POST_PUBLISH_IDENTITY_SWAP: std::cell::RefCell<Option<(PathBuf, u8)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn fail_recorder_after_latch_publish_with_child_swap(root: &Path) {
+    fail_recorder_after_publication_with_child_swap(root, 3);
+}
+
+#[cfg(test)]
+fn fail_recorder_after_publication_with_child_swap(root: &Path, at_check: u8) {
+    RECORDER_POST_PUBLISH_CHILD_SWAP.with(|swap| {
+        *swap.borrow_mut() = Some((root.to_owned(), at_check));
+    });
+}
+
+#[cfg(test)]
+fn fail_recorder_after_latch_publish_with_identity_swap(root: &Path) {
+    RECORDER_POST_PUBLISH_IDENTITY_SWAP.with(|swap| {
+        *swap.borrow_mut() = Some((root.to_owned(), 3));
+    });
+}
+
+#[cfg(test)]
+fn recorder_boundary_recheck_for_test() -> std::io::Result<()> {
+    let child = RECORDER_POST_PUBLISH_CHILD_SWAP.with(|swap| {
+        let mut swap = swap.borrow_mut();
+        let Some((root, checks)) = swap.as_mut() else {
+            return Ok(());
+        };
+        *checks -= 1;
+        if *checks != 0 {
+            return Ok(());
+        }
+        let root = root.clone();
+        *swap = None;
+        let private = rooted(&root, CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
+        let child = private.join("runtime-failure");
+        fs::rename(&child, root.join("replaced-runtime-failure"))?;
+        fs::create_dir(&child)?;
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o700))
+    });
+    child?;
+    RECORDER_POST_PUBLISH_IDENTITY_SWAP.with(|swap| {
+        let mut swap = swap.borrow_mut();
+        let Some((root, checks)) = swap.as_mut() else {
+            return Ok(());
+        };
+        *checks -= 1;
+        if *checks != 0 {
+            return Ok(());
+        }
+        let root = root.clone();
+        *swap = None;
+        let identity = rooted(
+            &root,
+            "/var/lib/private/enoki-probe/identity/probe-bootstrap.toml",
+        );
+        let replacement = root.join("replaced-identity");
+        let bytes = fs::read(&identity)?;
+        fs::rename(&identity, replacement)?;
+        fs::write(&identity, bytes)?;
+        fs::set_permissions(identity, fs::Permissions::from_mode(0o600))
+    })
+}
+
+#[cfg(not(test))]
+fn recorder_boundary_recheck_for_test() -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1290,21 +1370,15 @@ fn record_runtime_failure_at_with_caller(
                 (expected_uid, expected_uid),
                 expected_uid,
             )?;
-            recheck_runtime_failure_publication_boundary(
-                root,
-                &state_directory,
-                &failure_dir,
-                &failure_directory,
-                expected_uid,
-            )?;
-            custody.publish(epoch.generation.as_bytes())?;
-            recheck_runtime_failure_publication_boundary(
-                root,
-                &state_directory,
-                &failure_dir,
-                &failure_directory,
-                expected_uid,
-            )?;
+            custody.publish_absent_checked(epoch.generation.as_bytes(), || {
+                recheck_runtime_failure_publication_boundary(
+                    root,
+                    &state_directory,
+                    &failure_dir,
+                    &failure_directory,
+                    expected_uid,
+                )
+            })?;
             return Ok(RuntimeFailureRecordOutcome::Latched);
         }
         (false, true) => {
@@ -1346,21 +1420,15 @@ fn record_runtime_failure_at_with_caller(
                 (expected_uid, expected_uid),
                 expected_uid,
             )?;
-            recheck_runtime_failure_publication_boundary(
-                root,
-                &state_directory,
-                &failure_dir,
-                &failure_directory,
-                expected_uid,
-            )?;
-            custody.publish(encoded.as_bytes())?;
-            recheck_runtime_failure_publication_boundary(
-                root,
-                &state_directory,
-                &failure_dir,
-                &failure_directory,
-                expected_uid,
-            )?;
+            custody.publish_absent_checked(encoded.as_bytes(), || {
+                recheck_runtime_failure_publication_boundary(
+                    root,
+                    &state_directory,
+                    &failure_dir,
+                    &failure_directory,
+                    expected_uid,
+                )
+            })?;
             return Ok(RuntimeFailureRecordOutcome::Latched);
         }
         (false, false) => {}
@@ -1412,13 +1480,6 @@ fn record_runtime_failure_at_with_caller(
         (expected_uid, expected_uid),
         expected_uid,
     )?;
-    recheck_runtime_failure_publication_boundary(
-        root,
-        &state_directory,
-        &failure_dir,
-        &failure_directory,
-        expected_uid,
-    )?;
     let mut generation = [0_u8; 32];
     generations.fill_generation(&mut generation)?;
     let epoch = build_current_epoch(
@@ -1430,30 +1491,20 @@ fn record_runtime_failure_at_with_caller(
         },
         &hex(&generation),
     )?;
-    recheck_runtime_failure_publication_boundary(
-        root,
-        &state_directory,
-        &failure_dir,
-        &failure_directory,
-        expected_uid,
-    )?;
     let encoded =
         toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    epoch_custody.publish(encoded.as_bytes())?;
-    recheck_runtime_failure_publication_boundary(
-        root,
-        &state_directory,
-        &failure_dir,
-        &failure_directory,
-        expected_uid,
-    )?;
-    latch_custody.publish(epoch.generation.as_bytes())?;
-    recheck_runtime_failure_publication_boundary(
-        root,
-        &state_directory,
-        &failure_dir,
-        &failure_directory,
-        expected_uid,
+    PrivateAtomicFileCustody::publish_epoch_then_latch_absent_checked(
+        (&epoch_custody, encoded.as_bytes()),
+        (&latch_custody, epoch.generation.as_bytes()),
+        || {
+            recheck_runtime_failure_publication_boundary(
+                root,
+                &state_directory,
+                &failure_dir,
+                &failure_directory,
+                expected_uid,
+            )
+        },
     )?;
     Ok(RuntimeFailureRecordOutcome::Latched)
 }
@@ -2190,6 +2241,7 @@ fn recheck_runtime_failure_publication_boundary(
     expected_failure_directory: &fs::Metadata,
     expected_uid: u32,
 ) -> std::io::Result<()> {
+    recorder_boundary_recheck_for_test()?;
     if trusted_state_directory(root)? != *state_directory {
         return Err(std::io::Error::other("state directory boundary changed"));
     }
@@ -2673,6 +2725,121 @@ pub(super) mod tests {
             )
             .is_file()
         );
+    }
+
+    #[test]
+    fn canonical_fresh_pair_retracts_after_latch_publish_child_replacement() {
+        let root = canonical_dynamic_user_fixture();
+        let uid = unsafe { libc::geteuid() };
+        let sentinel = root.path().join("outside-sentinel");
+        fs::write(&sentinel, b"unchanged").unwrap();
+        fail_recorder_after_latch_publish_with_child_swap(root.path());
+
+        assert!(record_runtime_failure_at(
+            root.path(),
+            uid,
+            &mut FailedRuntime(0),
+            &mut Generation(82),
+        )
+        .is_err());
+        let current = rooted(root.path(), "/var/lib/private/enoki-probe/runtime-failure");
+        assert!(!current.join("epoch.toml").exists());
+        assert!(!current.join("latch").exists());
+        let replaced = root.path().join("replaced-runtime-failure");
+        assert!(!replaced.join("epoch.toml").exists());
+        assert!(!replaced.join("latch").exists());
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "post_publish_child_swap",
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn rollback_crash_after_epoch_removal_leaves_only_safe_latch_only_state() {
+        if let Some(root) = std::env::var_os("ENOKI_FORMAL44_ROLLBACK_CRASH_ROOT") {
+            let root = PathBuf::from(root);
+            let uid = unsafe { libc::geteuid() };
+            let epoch = rooted(
+                &root,
+                "/var/lib/private/enoki-probe/runtime-failure/epoch.toml",
+            );
+            // This process immediately aborts at the fixed crash seam.
+            unsafe {
+                std::env::set_var("ENOKI_TEST_SECURE_FILE_PATH", &epoch);
+                std::env::set_var("ENOKI_TEST_SECURE_FILE_CRASH_POINT", "after-checked-unlink");
+            }
+            fail_recorder_after_latch_publish_with_identity_swap(&root);
+            let _ =
+                record_runtime_failure_at(&root, uid, &mut FailedRuntime(0), &mut Generation(85));
+            panic!("rollback crash seam did not abort");
+        }
+
+        let root = canonical_dynamic_user_fixture();
+        let uid = unsafe { libc::geteuid() };
+        let sentinel = root.path().join("outside-sentinel");
+        fs::write(&sentinel, b"unchanged").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("runtime_failure::tests::rollback_crash_after_epoch_removal_leaves_only_safe_latch_only_state")
+            .arg("--nocapture")
+            .env("ENOKI_FORMAL44_ROLLBACK_CRASH_ROOT", root.path())
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        let failure = rooted(root.path(), "/var/lib/private/enoki-probe/runtime-failure");
+        assert!(!failure.join("epoch.toml").exists());
+        assert!(failure.join("latch").is_file());
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                uid,
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "rollback_crash_latch_only",
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn canonical_partial_completion_retracts_only_the_new_half_after_replacement() {
+        let uid = unsafe { libc::geteuid() };
+        for (missing, preserved) in [("epoch.toml", "latch"), ("latch", "epoch.toml")] {
+            let root = canonical_dynamic_user_fixture();
+            let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
+            let failure = private.join("runtime-failure");
+            let sentinel = root.path().join("outside-sentinel");
+            fs::write(&sentinel, b"unchanged").unwrap();
+            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(83))
+                .unwrap();
+            fs::remove_file(failure.join(missing)).unwrap();
+            fail_recorder_after_publication_with_child_swap(root.path(), 2);
+
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    uid,
+                    &mut FailedRuntime(0),
+                    &mut Generation(83),
+                )
+                .is_err(),
+                "missing {missing}"
+            );
+            let replaced = root.path().join("replaced-runtime-failure");
+            assert!(replaced.join(preserved).is_file(), "missing {missing}");
+            assert!(!replaced.join(missing).exists(), "missing {missing}");
+            assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
+        }
     }
 
     #[test]
@@ -3164,6 +3331,28 @@ pub(super) mod tests {
         let mut systemd = RetrySystemd::default();
         retry_runtime_at(root.path(), uid, &mut systemd).unwrap();
         assert_eq!(systemd.0, 1);
+    }
+
+    #[test]
+    fn canonical_repair_consumer_uses_the_same_concrete_runtime_failure_root() {
+        let root = canonical_dynamic_user_fixture();
+        let uid = unsafe { libc::geteuid() };
+        let authority =
+            repair_completion_fixture_at(&root, InstalledBundleRepairProgress::Admitted, 0x54);
+
+        let resumed = resume_installed_bundle_repair_at(root.path(), uid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.progress, InstalledBundleRepairProgress::Admitted);
+        assert_eq!(resumed.grant.authority(), &authority);
+        resumed
+            .grant
+            .persist_failure("canonical_repair_pending")
+            .unwrap();
+        let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
+        assert!(private.join("runtime-failure/repair-intent.json").is_file());
+        assert!(private.join("probe-operation-status.toml").is_file());
+        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
     }
 
     #[test]
@@ -4691,6 +4880,15 @@ pub(super) mod tests {
         generation_byte: u8,
     ) -> (tempfile::TempDir, InstalledBundleRepairAuthorityV1) {
         let root = fixture();
+        let authority = repair_completion_fixture_at(&root, progress, generation_byte);
+        (root, authority)
+    }
+
+    fn repair_completion_fixture_at(
+        root: &tempfile::TempDir,
+        progress: InstalledBundleRepairProgress,
+        generation_byte: u8,
+    ) -> InstalledBundleRepairAuthorityV1 {
         record_runtime_failure_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -4736,7 +4934,7 @@ pub(super) mod tests {
             },
         )
         .unwrap();
-        (root, authority)
+        authority
     }
 
     fn installed_authority(
