@@ -4067,6 +4067,31 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_companion_owns_only_the_fixed_runtime_repair_drop_in() {
+        let lifecycle = lifecycle_companion_unit();
+        let socket = lifecycle_companion_socket_unit();
+
+        assert!(lifecycle.contains(
+            "RuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\n"
+        ));
+        assert!(lifecycle.contains("ReadOnlyPaths=/run/systemd/system\n"));
+        assert!(lifecycle.contains(
+            "BindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\n"
+        ));
+        assert!(socket.contains(
+            "ExecStopPost=/usr/bin/rm -rf -- /run/systemd/system/enoki-observation-runtime.service.d\n"
+        ));
+        assert!(lifecycle
+            .lines()
+            .filter_map(|line| line.strip_prefix("ReadWritePaths="))
+            .flat_map(str::split_ascii_whitespace)
+            .map(|path| path.strip_prefix('-').unwrap_or(path))
+            .all(|path| {
+                path != "/run/systemd/system" && !path.starts_with("/run/systemd/system/")
+            }));
+    }
+
+    #[test]
     fn schema_four_omits_the_retired_operation_launcher_and_authority_path() {
         let config = bootstrap_config(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
