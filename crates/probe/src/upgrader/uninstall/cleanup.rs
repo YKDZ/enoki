@@ -201,7 +201,10 @@ pub(super) fn plan_committed_replacement_cleanup<'a>(
         validate_owned_bootstrap_role_for_recovery(
             install_metadata.bootstrap_activator_path.as_deref(),
         )?;
-        validate_owned_bootstrap_state(install_metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state(
+            install_metadata.bootstrap_state_dir.as_deref(),
+            install_metadata.bundle_version.as_deref(),
+        )?;
     }
     Ok(plan)
 }
@@ -267,6 +270,7 @@ fn validate_owned_bootstrap_assets_for_cleanup_with_repair(
         validate_owned_bootstrap_role(metadata.bootstrap_activator_path.as_deref())?;
         validate_owned_bootstrap_state_with_repair(
             metadata.bootstrap_state_dir.as_deref(),
+            metadata.bundle_version.as_deref(),
             has_unbound_repair_stage,
         )?;
     }
@@ -292,6 +296,7 @@ fn validate_owned_bootstrap_assets_for_recovery_with_repair(
         } else {
             validate_owned_bootstrap_state_with_repair(
                 metadata.bootstrap_state_dir.as_deref(),
+                metadata.bundle_version.as_deref(),
                 has_unbound_repair_stage,
             )?;
         }
@@ -501,7 +506,7 @@ pub(super) fn remove_probe_bootstrap_state(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        remove_owned_bootstrap_state(path)?;
+        remove_owned_bootstrap_state(path, plan.install_metadata.bundle_version.as_deref())?;
     }
     Ok(())
 }
@@ -999,12 +1004,14 @@ pub(super) fn validate_owned_bootstrap_role_for_recovery(
 
 pub(super) fn validate_owned_bootstrap_state(
     path: Option<&Path>,
+    expected_bundle_version: Option<&str>,
 ) -> Result<(), ProbeUpgraderRunError> {
-    validate_owned_bootstrap_state_with_repair(path, false)
+    validate_owned_bootstrap_state_with_repair(path, expected_bundle_version, false)
 }
 
 fn validate_owned_bootstrap_state_with_repair(
     path: Option<&Path>,
+    expected_bundle_version: Option<&str>,
     has_unbound_repair_stage: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -1044,6 +1051,9 @@ fn validate_owned_bootstrap_state_with_repair(
             Some("installed-bundle-repair-stage")
                 if has_unbound_repair_stage
                     && entry.path() == Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT) => {}
+            Some("current-layout") => {
+                validate_owned_bootstrap_current_layout(&entry.path(), expected_bundle_version)?;
+            }
             _ => {
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe Bootstrap state contains an unexpected entry",
@@ -1052,6 +1062,18 @@ fn validate_owned_bootstrap_state_with_repair(
         }
     }
     Ok(())
+}
+
+pub(super) fn validate_owned_bootstrap_state_for_recovery(
+    path: Option<&Path>,
+    expected_bundle_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
+    if path.is_some_and(|path| {
+        fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    }) {
+        return Ok(());
+    }
+    validate_owned_bootstrap_state(path, expected_bundle_version)
 }
 
 pub(super) fn validate_owned_bootstrap_directory(
@@ -1087,11 +1109,43 @@ pub(super) fn validate_owned_bootstrap_regular(
     }
     Ok(())
 }
-pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+fn validate_owned_bootstrap_current_layout(
+    path: &Path,
+    expected_bundle_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let expected_bundle_version =
+        expected_bundle_version.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap current layout receipt has no bound bundle version",
+        ))?;
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap current layout receipt is not a root-owned regular 0600 file",
+        ));
+    }
+    let expected = format!("schema_version=1\nversion={expected_bundle_version}\n");
+    if fs::read(path).map_err(ProbeUpgraderRunError::Io)? != expected.as_bytes() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap current layout receipt is invalid",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn remove_owned_bootstrap_state(
+    path: &Path,
+    expected_bundle_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
         return Ok(());
     }
-    validate_owned_bootstrap_state(Some(path))?;
+    validate_owned_bootstrap_state(Some(path), expected_bundle_version)?;
     fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
 }
 
@@ -1935,7 +1989,7 @@ mod tests {
         private_directory(&outside);
         symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&symlink_state)),
+            validate_owned_bootstrap_state(Some(&symlink_state), None),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "Probe Bootstrap state is not a root-owned private directory"
             ))
@@ -1950,7 +2004,7 @@ mod tests {
         fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
             .expect("unsafe hardlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&hardlink_state)),
+            validate_owned_bootstrap_state(Some(&hardlink_state), None),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "Probe Bootstrap state contains an unsafe entry"
             ))
@@ -1961,7 +2015,7 @@ mod tests {
         let extra_state = owned_state(extra_temp.path());
         fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&extra_state)),
+            validate_owned_bootstrap_state(Some(&extra_state), None),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "Probe Bootstrap state contains an unexpected entry"
             ))
