@@ -13,6 +13,7 @@ use enoki_probe::upgrader::{
 use enoki_probe_bootstrap::lifecycle::{
     LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, MAX_LIFECYCLE_REQUEST_BYTES,
 };
+use sha2::{Digest, Sha256};
 
 fn main() -> ExitCode {
     let mode = match std::env::args_os().skip(1).collect::<Vec<_>>().as_slice() {
@@ -50,12 +51,22 @@ fn run(mode: CompanionMode) -> ExitCode {
         return ExitCode::from(2);
     }
     let mut bytes = Vec::new();
-    if std::io::stdin()
+    if let Err(error) = std::io::stdin()
         .take(MAX_LIFECYCLE_REQUEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .is_err()
-        || bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES
     {
+        lifecycle_companion_diagnostic(&format!(
+            "phase=request_read outcome=error {}",
+            io_error_summary(&error)
+        ));
+        return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
+    }
+    lifecycle_companion_diagnostic(&format!(
+        "phase=request_read outcome=ok bytes={}",
+        bytes.len()
+    ));
+    if bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES {
+        lifecycle_companion_diagnostic("phase=request_size outcome=too_large");
         return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
     }
     let peer_uid = stdin_peer_uid();
@@ -67,8 +78,15 @@ fn run(mode: CompanionMode) -> ExitCode {
         }
         return write_lifecycle_response(resume_lifecycle_companion(&mut transport));
     }
-    let Ok(request) = LifecycleRequest::decode(&bytes) else {
-        return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
+    let request = match LifecycleRequest::decode(&bytes) {
+        Ok(request) => {
+            lifecycle_companion_diagnostic("phase=request_decode outcome=ok");
+            request
+        }
+        Err(_) => {
+            lifecycle_companion_diagnostic("phase=request_decode outcome=error");
+            return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
+        }
     };
     if !mode_accepts(mode, request.transition()) {
         return write_response(LifecycleResponse::not_enabled());
@@ -81,6 +99,11 @@ fn run(mode: CompanionMode) -> ExitCode {
     } else {
         run_lifecycle_companion_from_peer(&request, &mut transport, peer_uid)
     };
+    lifecycle_companion_diagnostic(&format!(
+        "phase=lifecycle_execute outcome=returned status={:?} code={}",
+        response.status(),
+        response.code()
+    ));
     if request.transition() == enoki_probe_bootstrap::lifecycle::LifecycleTransition::Repair {
         write_response(response)
     } else {
@@ -115,14 +138,43 @@ fn write_lifecycle_response_with(
     writer: &mut impl Write,
     finalize: impl FnOnce() -> bool,
 ) -> ExitCode {
+    write_lifecycle_response_with_diagnostics(
+        response,
+        writer,
+        finalize,
+        lifecycle_companion_diagnostic,
+    )
+}
+
+fn write_lifecycle_response_with_diagnostics(
+    response: LifecycleResponse,
+    writer: &mut impl Write,
+    finalize: impl FnOnce() -> bool,
+    mut diagnostic: impl FnMut(&str),
+) -> ExitCode {
     let frame = response.encode();
-    if writer.write_all(&frame).is_err() || writer.flush().is_err() {
+    diagnostic(&response_frame_summary("response_encoded", &frame));
+    if let Err(error) = writer.write_all(&frame) {
+        diagnostic(&format!(
+            "phase=response_write outcome=error {}",
+            io_error_summary(&error)
+        ));
         return ExitCode::from(1);
     }
+    diagnostic("phase=response_write outcome=ok");
+    if let Err(error) = writer.flush() {
+        diagnostic(&format!(
+            "phase=response_flush outcome=error {}",
+            io_error_summary(&error)
+        ));
+        return ExitCode::from(1);
+    }
+    diagnostic("phase=response_flush outcome=ok");
     if response != LifecycleResponse::succeeded() {
         return lifecycle_response_exit(&response);
     }
     if finalize() {
+        diagnostic("phase=companion_finalization outcome=ok");
         // unlink 成功后直接返回；这里之后没有 writer、filesystem 或其他
         // 可失败端口调用，客户端只在进程关闭形成 EOF 后观察到成功。
         return ExitCode::SUCCESS;
@@ -130,6 +182,7 @@ fn write_lifecycle_response_with(
     // binary 仍在，可由固定空 Resume 再试。追加 JSON 协议外字节并刷新，
     // 确保客户端不会把这次本机未完成误判为 canonical success。
     let _ = writer.write_all(b"\n").and_then(|()| writer.flush());
+    diagnostic("phase=companion_finalization outcome=error");
     ExitCode::from(1)
 }
 
@@ -173,10 +226,66 @@ fn stdin_peer_uid() -> Option<u32> {
 
 fn write_response(response: LifecycleResponse) -> ExitCode {
     let mut stdout = std::io::stdout();
-    if stdout.write_all(&response.encode()).is_err() || stdout.flush().is_err() {
+    let frame = response.encode();
+    lifecycle_companion_diagnostic(&response_frame_summary("response_encoded", &frame));
+    if let Err(error) = stdout.write_all(&frame) {
+        lifecycle_companion_diagnostic(&format!(
+            "phase=response_write outcome=error {}",
+            io_error_summary(&error)
+        ));
         return ExitCode::from(1);
     }
+    lifecycle_companion_diagnostic("phase=response_write outcome=ok");
+    if let Err(error) = stdout.flush() {
+        lifecycle_companion_diagnostic(&format!(
+            "phase=response_flush outcome=error {}",
+            io_error_summary(&error)
+        ));
+        return ExitCode::from(1);
+    }
+    lifecycle_companion_diagnostic("phase=response_flush outcome=ok");
     lifecycle_response_exit(&response)
+}
+
+fn lifecycle_companion_diagnostic(event: &str) {
+    write_lifecycle_companion_diagnostic(&mut std::io::stderr(), event);
+}
+
+fn write_lifecycle_companion_diagnostic(writer: &mut impl Write, event: &str) {
+    let _ = writeln!(writer, "enoki.lifecycle.diagnostic role=companion {event}");
+}
+
+fn response_frame_summary(phase: &str, frame: &[u8]) -> String {
+    format!(
+        "phase={phase} bytes={} sha256={:x}",
+        frame.len(),
+        Sha256::digest(frame)
+    )
+}
+
+fn io_error_summary(error: &std::io::Error) -> String {
+    let class = match error.kind() {
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::PermissionDenied => "permission_denied",
+        std::io::ErrorKind::ConnectionRefused => "connection_refused",
+        std::io::ErrorKind::ConnectionReset => "connection_reset",
+        std::io::ErrorKind::ConnectionAborted => "connection_aborted",
+        std::io::ErrorKind::NotConnected => "not_connected",
+        std::io::ErrorKind::BrokenPipe => "broken_pipe",
+        std::io::ErrorKind::AlreadyExists => "already_exists",
+        std::io::ErrorKind::WouldBlock => "would_block",
+        std::io::ErrorKind::InvalidInput => "invalid_input",
+        std::io::ErrorKind::InvalidData => "invalid_data",
+        std::io::ErrorKind::TimedOut => "timed_out",
+        std::io::ErrorKind::WriteZero => "write_zero",
+        std::io::ErrorKind::Interrupted => "interrupted",
+        std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+        _ => "other",
+    };
+    match error.raw_os_error() {
+        Some(errno) => format!("class={class} errno={errno}"),
+        None => format!("class={class} errno=none"),
+    }
 }
 
 fn lifecycle_response_exit(response: &LifecycleResponse) -> ExitCode {
@@ -244,6 +353,18 @@ mod tests {
             if self.fail_flush {
                 return Err(std::io::Error::other("ordinary flush failure"));
             }
+            Ok(())
+        }
+    }
+
+    struct FailingDiagnosticWriter;
+
+    impl Write for FailingDiagnosticWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("diagnostic sink unavailable"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
@@ -334,6 +455,94 @@ mod tests {
             assert_eq!(exit, ExitCode::from(1));
             assert!(!finalized);
         }
+    }
+
+    #[test]
+    fn response_write_failure_records_only_a_non_sensitive_phase_summary() {
+        let mut writer = RecordingWriter {
+            fail_write: true,
+            ..RecordingWriter::default()
+        };
+        let mut diagnostics = Vec::new();
+
+        let exit = write_lifecycle_response_with_diagnostics(
+            LifecycleResponse::succeeded(),
+            &mut writer,
+            || true,
+            |event| diagnostics.push(event.to_owned()),
+        );
+
+        assert_eq!(exit, ExitCode::from(1));
+        assert!(writer.bytes.is_empty());
+        assert_eq!(writer.calls, ["write"]);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|event| event.starts_with("phase=response_encoded bytes="))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|event| event == "phase=response_write outcome=error class=other errno=none")
+        );
+        assert!(diagnostics.iter().all(|event| !event.contains("token")));
+    }
+
+    #[test]
+    fn response_diagnostics_preserve_the_success_frame_and_finalization_order() {
+        let response = LifecycleResponse::succeeded();
+        let expected = response.encode();
+        let mut writer = RecordingWriter::default();
+        let mut diagnostics = Vec::new();
+        let mut events = Vec::new();
+
+        let exit = write_lifecycle_response_with_diagnostics(
+            response,
+            &mut writer,
+            || {
+                events.push("finalize");
+                true
+            },
+            |event| diagnostics.push(event.to_owned()),
+        );
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(writer.bytes, expected);
+        assert_eq!(writer.calls, ["write", "flush"]);
+        assert_eq!(events, ["finalize"]);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|event| event.starts_with("phase=response_encoded bytes="))
+        );
+        assert_eq!(
+            diagnostics.last().map(String::as_str),
+            Some("phase=companion_finalization outcome=ok")
+        );
+    }
+
+    #[test]
+    fn unavailable_diagnostic_sink_preserves_response_exit_and_finalization() {
+        let response = LifecycleResponse::succeeded();
+        let expected = response.encode();
+        let mut writer = RecordingWriter::default();
+        let mut diagnostic_sink = FailingDiagnosticWriter;
+        let mut finalized = false;
+
+        let exit = write_lifecycle_response_with_diagnostics(
+            response,
+            &mut writer,
+            || {
+                finalized = true;
+                true
+            },
+            |event| write_lifecycle_companion_diagnostic(&mut diagnostic_sink, event),
+        );
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(writer.bytes, expected);
+        assert_eq!(writer.calls, ["write", "flush"]);
+        assert!(finalized);
     }
 
     #[test]

@@ -15,7 +15,7 @@ use enoki_probe_bootstrap::replacement::{
     ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     commit_and_cleanup_replacement,
 };
-use std::{fs, os::unix::fs::MetadataExt, path::Path};
+use std::{fs, io::Write, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
@@ -493,22 +493,26 @@ pub(super) fn remove_lifecycle_companion_activation(
             &["enoki-probe-lifecycle-companion.socket"][..]
         };
         for companion_service in companion_services {
-            systemd.stop_service(companion_service).map_err(|error| {
-                probe_uninstall_cleanup_error(
+            lifecycle_cleanup_diagnostic("socket_stop", companion_service, "begin");
+            if let Err(error) = systemd.stop_service(companion_service) {
+                lifecycle_cleanup_diagnostic("socket_stop", companion_service, "error");
+                return Err(probe_uninstall_cleanup_error(
                     "probe_uninstall_service_stop_failed",
                     "stopping a lifecycle companion socket",
                     error,
-                )
-            })?;
-            systemd
-                .disable_service(companion_service)
-                .map_err(|error| {
-                    probe_uninstall_cleanup_error(
-                        "probe_uninstall_service_disable_failed",
-                        "disabling a lifecycle companion socket",
-                        error,
-                    )
-                })?;
+                ));
+            }
+            lifecycle_cleanup_diagnostic("socket_stop", companion_service, "ok");
+            lifecycle_cleanup_diagnostic("socket_disable", companion_service, "begin");
+            if let Err(error) = systemd.disable_service(companion_service) {
+                lifecycle_cleanup_diagnostic("socket_disable", companion_service, "error");
+                return Err(probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_disable_failed",
+                    "disabling a lifecycle companion socket",
+                    error,
+                ));
+            }
+            lifecycle_cleanup_diagnostic("socket_disable", companion_service, "ok");
         }
         for path in install_metadata
             .observation_unit_paths
@@ -517,33 +521,56 @@ pub(super) fn remove_lifecycle_companion_activation(
         {
             remove_path_if_exists(path)?;
         }
-        systemd.daemon_reload().map_err(|error| {
-            probe_uninstall_cleanup_error(
+        lifecycle_cleanup_diagnostic("daemon_reload", "systemd", "begin");
+        if let Err(error) = systemd.daemon_reload() {
+            lifecycle_cleanup_diagnostic("daemon_reload", "systemd", "error");
+            return Err(probe_uninstall_cleanup_error(
                 "probe_uninstall_daemon_reload_failed",
                 "reloading systemd after lifecycle companion removal",
                 error,
-            )
-        })?;
+            ));
+        }
+        lifecycle_cleanup_diagnostic("daemon_reload", "systemd", "ok");
         for companion_service in companion_services {
-            systemd.reset_failed(companion_service).map_err(|error| {
-                probe_uninstall_cleanup_error(
+            lifecycle_cleanup_diagnostic("socket_reset_failed", companion_service, "begin");
+            if let Err(error) = systemd.reset_failed(companion_service) {
+                lifecycle_cleanup_diagnostic("socket_reset_failed", companion_service, "error");
+                return Err(probe_uninstall_cleanup_error(
                     "probe_uninstall_service_reset_failed",
                     "resetting a lifecycle companion socket failed state",
                     error,
-                )
-            })?;
-            systemd
-                .verify_service_absent(companion_service)
-                .map_err(|error| {
-                    probe_uninstall_cleanup_error(
-                        "probe_uninstall_service_verification_failed",
-                        "verifying a lifecycle companion socket is absent",
-                        error,
-                    )
-                })?;
+                ));
+            }
+            lifecycle_cleanup_diagnostic("socket_reset_failed", companion_service, "ok");
+            lifecycle_cleanup_diagnostic("socket_absent_verify", companion_service, "begin");
+            if let Err(error) = systemd.verify_service_absent(companion_service) {
+                lifecycle_cleanup_diagnostic("socket_absent_verify", companion_service, "error");
+                return Err(probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying a lifecycle companion socket is absent",
+                    error,
+                ));
+            }
+            lifecycle_cleanup_diagnostic("socket_absent_verify", companion_service, "ok");
         }
     }
     Ok(())
+}
+
+fn lifecycle_cleanup_diagnostic(phase: &str, target: &str, outcome: &str) {
+    write_lifecycle_cleanup_diagnostic(&mut std::io::stderr(), phase, target, outcome);
+}
+
+fn write_lifecycle_cleanup_diagnostic(
+    writer: &mut impl Write,
+    phase: &str,
+    target: &str,
+    outcome: &str,
+) {
+    let _ = writeln!(
+        writer,
+        "enoki.lifecycle.diagnostic role=companion phase=cleanup_{phase} target={target} outcome={outcome}"
+    );
 }
 
 pub(super) fn remove_lifecycle_companion_binary(
