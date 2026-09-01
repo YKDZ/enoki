@@ -32,7 +32,9 @@ const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const BOOT_ID_PATH: &str = "/run/enoki-probe/runtime-failure-boot-id";
 const HOST_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+#[cfg(test)]
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
+#[cfg(test)]
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
 const STATE_DIRECTORY_PATH: &str = "/var/lib/enoki-probe";
 const CANONICAL_PRIVATE_STATE_DIRECTORY_PATH: &str = "/var/lib/private/enoki-probe";
@@ -820,9 +822,10 @@ fn retry_runtime_at(
     systemd: &mut impl RuntimeRetrySystemd,
 ) -> std::io::Result<()> {
     let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
-    let epoch_path = rooted(root, EPOCH_PATH);
-    let latch_path = rooted(root, LATCH_PATH);
-    let receipt_path = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
+    let paths = runtime_failure_paths(root)?;
+    let epoch_path = paths.epoch;
+    let latch_path = paths.latch;
+    let receipt_path = paths.local_retry_receipt;
     let epoch_present = path_present(&epoch_path)?;
     let latch_present = path_present(&latch_path)?;
     let mut receipt = if path_present(&receipt_path)? {
@@ -987,7 +990,7 @@ fn write_local_retry_receipt(
     let bytes = serde_json::to_vec(receipt)
         .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
     atomic_write(
-        &rooted(root, LOCAL_RETRY_RECEIPT_PATH),
+        &runtime_failure_paths(root)?.local_retry_receipt,
         &bytes,
         0o600,
         Some((expected_uid, expected_uid)),
@@ -1280,11 +1283,27 @@ fn record_runtime_failure_at_with_caller(
             {
                 return Err(std::io::Error::other("failure pair consumption pending"));
             }
-            atomic_write(
+            let failure_directory = fs::symlink_metadata(&failure_dir)?;
+            let custody = PrivateAtomicFileCustody::open(
                 &latch_path,
-                epoch.generation.as_bytes(),
                 0o600,
-                Some((expected_uid, expected_uid)),
+                (expected_uid, expected_uid),
+                expected_uid,
+            )?;
+            recheck_runtime_failure_publication_boundary(
+                root,
+                &state_directory,
+                &failure_dir,
+                &failure_directory,
+                expected_uid,
+            )?;
+            custody.publish(epoch.generation.as_bytes())?;
+            recheck_runtime_failure_publication_boundary(
+                root,
+                &state_directory,
+                &failure_dir,
+                &failure_directory,
+                expected_uid,
             )?;
             return Ok(RuntimeFailureRecordOutcome::Latched);
         }
@@ -1320,11 +1339,27 @@ fn record_runtime_failure_at_with_caller(
             )?;
             let encoded = toml::to_string(&epoch)
                 .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-            atomic_write(
+            let failure_directory = fs::symlink_metadata(&failure_dir)?;
+            let custody = PrivateAtomicFileCustody::open(
                 &epoch_path,
-                encoded.as_bytes(),
                 0o600,
-                Some((expected_uid, expected_uid)),
+                (expected_uid, expected_uid),
+                expected_uid,
+            )?;
+            recheck_runtime_failure_publication_boundary(
+                root,
+                &state_directory,
+                &failure_dir,
+                &failure_directory,
+                expected_uid,
+            )?;
+            custody.publish(encoded.as_bytes())?;
+            recheck_runtime_failure_publication_boundary(
+                root,
+                &state_directory,
+                &failure_dir,
+                &failure_directory,
+                expected_uid,
             )?;
             return Ok(RuntimeFailureRecordOutcome::Latched);
         }
@@ -1428,9 +1463,8 @@ fn runtime_failure_consumption_pending_at(
     expected_uid: u32,
     generation: &str,
 ) -> std::io::Result<bool> {
-    if let Some(bytes) =
-        trusted_optional_file(&rooted(root, LOCAL_RETRY_RECEIPT_PATH), expected_uid, 0o600)?
-    {
+    let paths = runtime_failure_paths(root)?;
+    if let Some(bytes) = trusted_optional_file(&paths.local_retry_receipt, expected_uid, 0o600)? {
         let receipt = parse_local_retry_receipt(&bytes)?;
         if receipt.generation != generation {
             return Err(std::io::Error::other("local retry receipt binding invalid"));
@@ -1443,11 +1477,7 @@ fn runtime_failure_consumption_pending_at(
         ));
     }
 
-    if let Some(_bytes) = trusted_optional_file(
-        &rooted(root, installed_bundle_repair::REPAIR_INTENT_PATH),
-        expected_uid,
-        0o600,
-    )? {
+    if let Some(_bytes) = trusted_optional_file(&paths.repair_intent, expected_uid, 0o600)? {
         let intent = installed_bundle_repair::load_validated_installed_bundle_repair_intent_at(
             root,
             expected_uid,
@@ -1518,11 +1548,8 @@ fn runtime_failure_consumption_pending_at(
 }
 
 fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::io::Result<bool> {
-    if let Some(_bytes) = trusted_optional_file(
-        &rooted(root, installed_bundle_repair::REPAIR_INTENT_PATH),
-        expected_uid,
-        0o600,
-    )? {
+    let paths = runtime_failure_paths(root)?;
+    if let Some(_bytes) = trusted_optional_file(&paths.repair_intent, expected_uid, 0o600)? {
         let intent = installed_bundle_repair::load_validated_installed_bundle_repair_intent_at(
             root,
             expected_uid,
@@ -2066,6 +2093,26 @@ struct RuntimeFailureStateDirectory {
     identity_directory_ino: u64,
     identity_dev: u64,
     identity_ino: u64,
+}
+
+struct RuntimeFailurePaths {
+    epoch: PathBuf,
+    latch: PathBuf,
+    local_retry_receipt: PathBuf,
+    repair_intent: PathBuf,
+    operation_status: PathBuf,
+}
+
+fn runtime_failure_paths(root: &Path) -> std::io::Result<RuntimeFailurePaths> {
+    let state = trusted_state_directory(root)?;
+    let failure = state.path.join("runtime-failure");
+    Ok(RuntimeFailurePaths {
+        epoch: failure.join("epoch.toml"),
+        latch: failure.join("latch"),
+        local_retry_receipt: failure.join("local-retry-receipt.json"),
+        repair_intent: failure.join("repair-intent.json"),
+        operation_status: state.path.join("probe-operation-status.toml"),
+    })
 }
 
 fn trusted_state_directory(root: &Path) -> std::io::Result<RuntimeFailureStateDirectory> {
@@ -3106,6 +3153,17 @@ pub(super) mod tests {
         )
         .unwrap();
         assert_eq!(receipt.progress, LocalRetryProgress::RetryInvoked);
+    }
+
+    #[test]
+    fn canonical_local_retry_consumes_the_existing_exact_pair() {
+        let root = canonical_dynamic_user_fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(4))
+            .unwrap();
+        let mut systemd = RetrySystemd::default();
+        retry_runtime_at(root.path(), uid, &mut systemd).unwrap();
+        assert_eq!(systemd.0, 1);
     }
 
     #[test]
