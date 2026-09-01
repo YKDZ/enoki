@@ -17,11 +17,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 use enoki_probe_bootstrap::lifecycle::{
     InstalledBundleFailureEvidenceV1, InstalledBundleRepairAuthorityV1,
 };
-
-use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
+use enoki_probe_bootstrap::secure_file::PrivateAtomicFileCustody;
 
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
 const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
@@ -1364,9 +1364,26 @@ fn record_runtime_failure_at_with_caller(
         ensure_directory(&failure_dir, 0o700, Some((expected_uid, expected_uid)))?;
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
     }
-    if trusted_state_directory(root)? != state_directory {
-        return Err(std::io::Error::other("state directory boundary changed"));
-    }
+    let failure_directory = fs::symlink_metadata(&failure_dir)?;
+    let epoch_custody = PrivateAtomicFileCustody::open(
+        &epoch_path,
+        0o600,
+        (expected_uid, expected_uid),
+        expected_uid,
+    )?;
+    let latch_custody = PrivateAtomicFileCustody::open(
+        &latch_path,
+        0o600,
+        (expected_uid, expected_uid),
+        expected_uid,
+    )?;
+    recheck_runtime_failure_publication_boundary(
+        root,
+        &state_directory,
+        &failure_dir,
+        &failure_directory,
+        expected_uid,
+    )?;
     let mut generation = [0_u8; 32];
     generations.fill_generation(&mut generation)?;
     let epoch = build_current_epoch(
@@ -1378,19 +1395,30 @@ fn record_runtime_failure_at_with_caller(
         },
         &hex(&generation),
     )?;
+    recheck_runtime_failure_publication_boundary(
+        root,
+        &state_directory,
+        &failure_dir,
+        &failure_directory,
+        expected_uid,
+    )?;
     let encoded =
         toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    atomic_write(
-        &epoch_path,
-        encoded.as_bytes(),
-        0o600,
-        Some((expected_uid, expected_uid)),
+    epoch_custody.publish(encoded.as_bytes())?;
+    recheck_runtime_failure_publication_boundary(
+        root,
+        &state_directory,
+        &failure_dir,
+        &failure_directory,
+        expected_uid,
     )?;
-    atomic_write(
-        &latch_path,
-        epoch.generation.as_bytes(),
-        0o600,
-        Some((expected_uid, expected_uid)),
+    latch_custody.publish(epoch.generation.as_bytes())?;
+    recheck_runtime_failure_publication_boundary(
+        root,
+        &state_directory,
+        &failure_dir,
+        &failure_directory,
+        expected_uid,
     )?;
     Ok(RuntimeFailureRecordOutcome::Latched)
 }
@@ -2034,6 +2062,8 @@ struct RuntimeFailureStateDirectory {
     canonical: bool,
     state_dev: u64,
     state_ino: u64,
+    identity_directory_dev: u64,
+    identity_directory_ino: u64,
     identity_dev: u64,
     identity_ino: u64,
 }
@@ -2055,18 +2085,27 @@ fn trusted_state_directory(root: &Path) -> std::io::Result<RuntimeFailureStateDi
     } else {
         return Err(std::io::Error::other("state directory boundary invalid"));
     };
+    crate::secure_file::managed_path_exists(&state_directory)?;
     let metadata = fs::symlink_metadata(&state_directory)?;
+    let identity_directory = state_directory.join("identity");
     let identity_path = state_directory.join("identity/probe-bootstrap.toml");
+    crate::secure_file::managed_path_exists(&identity_directory)?;
+    crate::secure_file::managed_path_exists(&identity_path)?;
+    let identity_directory_metadata = fs::symlink_metadata(&identity_directory)?;
     let identity = fs::symlink_metadata(&identity_path)?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.mode() & 0o7777 != 0o750
+        || !identity_directory_metadata.is_dir()
+        || identity_directory_metadata.file_type().is_symlink()
         || !identity.is_file()
         || identity.file_type().is_symlink()
         || identity.mode() & 0o7777 != 0o600
         || identity.nlink() != 1
         || metadata.uid() != identity.uid()
         || metadata.gid() != identity.gid()
+        || metadata.uid() != identity_directory_metadata.uid()
+        || metadata.gid() != identity_directory_metadata.gid()
         || metadata.nlink() < 2
     {
         return Err(std::io::Error::other("state directory boundary invalid"));
@@ -2090,9 +2129,39 @@ fn trusted_state_directory(root: &Path) -> std::io::Result<RuntimeFailureStateDi
         canonical,
         state_dev: metadata.dev(),
         state_ino: metadata.ino(),
+        identity_directory_dev: identity_directory_metadata.dev(),
+        identity_directory_ino: identity_directory_metadata.ino(),
         identity_dev: identity.dev(),
         identity_ino: identity.ino(),
     })
+}
+
+fn recheck_runtime_failure_publication_boundary(
+    root: &Path,
+    state_directory: &RuntimeFailureStateDirectory,
+    failure_directory: &Path,
+    expected_failure_directory: &fs::Metadata,
+    expected_uid: u32,
+) -> std::io::Result<()> {
+    if trusted_state_directory(root)? != *state_directory {
+        return Err(std::io::Error::other("state directory boundary changed"));
+    }
+    crate::secure_file::managed_path_exists(failure_directory)?;
+    let current = fs::symlink_metadata(failure_directory)?;
+    if !current.is_dir()
+        || current.file_type().is_symlink()
+        || current.uid() != expected_uid
+        || current.gid() != expected_uid
+        || current.mode() & 0o7777 != 0o700
+        || current.nlink() < 2
+        || current.dev() != expected_failure_directory.dev()
+        || current.ino() != expected_failure_directory.ino()
+    {
+        return Err(std::io::Error::other(
+            "runtime failure directory boundary changed",
+        ));
+    }
+    Ok(())
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -2179,6 +2248,57 @@ pub(super) mod tests {
     impl FailureGenerationSource for Generation {
         fn fill_generation(&mut self, bytes: &mut [u8; 32]) -> std::io::Result<()> {
             bytes.fill(self.0);
+            Ok(())
+        }
+    }
+
+    enum CustodySwap {
+        Identity,
+        PrivateState,
+        FailureChild,
+    }
+
+    struct SwapGeneration {
+        root: PathBuf,
+        custody: CustodySwap,
+    }
+
+    impl FailureGenerationSource for SwapGeneration {
+        fn fill_generation(&mut self, bytes: &mut [u8; 32]) -> std::io::Result<()> {
+            bytes.fill(84);
+            let private = rooted(&self.root, CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
+            match self.custody {
+                CustodySwap::Identity => {
+                    let identity = private.join("identity/probe-bootstrap.toml");
+                    let receipt = fs::read(&identity)?;
+                    fs::rename(&identity, self.root.join("replaced-identity"))?;
+                    fs::write(&identity, receipt)?;
+                    fs::set_permissions(identity, fs::Permissions::from_mode(0o600))?;
+                }
+                CustodySwap::PrivateState => {
+                    let replaced = self.root.join("replaced-private-state");
+                    let receipt = fs::read(private.join("identity/probe-bootstrap.toml"))?;
+                    fs::rename(&private, &replaced)?;
+                    fs::create_dir_all(private.join("identity"))?;
+                    fs::set_permissions(&private, fs::Permissions::from_mode(0o750))?;
+                    fs::write(private.join("identity/probe-bootstrap.toml"), receipt)?;
+                    fs::set_permissions(
+                        private.join("identity/probe-bootstrap.toml"),
+                        fs::Permissions::from_mode(0o600),
+                    )?;
+                    fs::create_dir(private.join("runtime-failure"))?;
+                    fs::set_permissions(
+                        private.join("runtime-failure"),
+                        fs::Permissions::from_mode(0o700),
+                    )?;
+                }
+                CustodySwap::FailureChild => {
+                    let child = private.join("runtime-failure");
+                    fs::rename(&child, self.root.join("replaced-runtime-failure"))?;
+                    fs::create_dir(&child)?;
+                    fs::set_permissions(&child, fs::Permissions::from_mode(0o700))?;
+                }
+            }
             Ok(())
         }
     }
@@ -2509,6 +2629,63 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn canonical_custody_rejects_an_intermediate_identity_symlink_before_publication() {
+        let root = canonical_dynamic_user_fixture();
+        let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
+        let outside_identity = root.path().join("outside-identity");
+        let sentinel = root.path().join("outside-sentinel");
+        fs::rename(private.join("identity"), &outside_identity).unwrap();
+        std::os::unix::fs::symlink(&outside_identity, private.join("identity")).unwrap();
+        fs::write(&sentinel, b"unchanged").unwrap();
+
+        assert!(
+            record_runtime_failure_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut FailedRuntime(0),
+                &mut Generation(83),
+            )
+            .is_err()
+        );
+        assert!(
+            !private.join("runtime-failure/epoch.toml").exists()
+                && !private.join("runtime-failure/latch").exists()
+        );
+        assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn canonical_custody_rejects_validation_to_publication_inode_swaps_without_a_pair() {
+        for custody in [
+            CustodySwap::Identity,
+            CustodySwap::PrivateState,
+            CustodySwap::FailureChild,
+        ] {
+            let root = canonical_dynamic_user_fixture();
+            let sentinel = root.path().join("outside-sentinel");
+            fs::write(&sentinel, b"unchanged").unwrap();
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut FailedRuntime(0),
+                    &mut SwapGeneration {
+                        root: root.path().to_owned(),
+                        custody,
+                    },
+                )
+                .is_err()
+            );
+            let failure = rooted(root.path(), "/var/lib/private/enoki-probe/runtime-failure");
+            assert!(
+                !failure.join("epoch.toml").exists() && !failure.join("latch").exists(),
+                "swap must not publish into the replacement child"
+            );
+            assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
+        }
+    }
+
+    #[test]
     fn canonical_custody_rejects_aggregate_unsafe_shapes_without_a_pair() {
         let assert_rejected = |root: &tempfile::TempDir| {
             let sentinel = root.path().join("outside-sentinel");
@@ -2544,6 +2721,18 @@ pub(super) mod tests {
         fs::remove_file(&public).unwrap();
         std::os::unix::fs::symlink("private/other", &public).unwrap();
         assert_rejected(&wrong_target);
+
+        let absolute_target = canonical_dynamic_user_fixture();
+        let public = rooted(absolute_target.path(), STATE_DIRECTORY_PATH);
+        fs::remove_file(&public).unwrap();
+        std::os::unix::fs::symlink("/var/lib/private/enoki-probe", &public).unwrap();
+        assert_rejected(&absolute_target);
+
+        let non_root_link = canonical_dynamic_user_fixture();
+        let public = rooted(non_root_link.path(), STATE_DIRECTORY_PATH);
+        let public = std::ffi::CString::new(public.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::lchown(public.as_ptr(), 1, 1) }, 0);
+        assert_rejected(&non_root_link);
 
         let multi_link = canonical_dynamic_user_fixture();
         fs::hard_link(
