@@ -15,7 +15,7 @@ use enoki_probe_bootstrap::replacement::{
     ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     commit_and_cleanup_replacement,
 };
-use std::{fs, os::unix::fs::MetadataExt, path::Path};
+use std::{fs, io::Write, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
@@ -558,7 +558,17 @@ pub(super) fn remove_lifecycle_companion_activation(
 }
 
 fn lifecycle_cleanup_diagnostic(phase: &str, target: &str, outcome: &str) {
-    eprintln!(
+    write_lifecycle_cleanup_diagnostic(&mut std::io::stderr(), phase, target, outcome);
+}
+
+fn write_lifecycle_cleanup_diagnostic(
+    writer: &mut impl Write,
+    phase: &str,
+    target: &str,
+    outcome: &str,
+) {
+    let _ = writeln!(
+        writer,
         "enoki.lifecycle.diagnostic role=companion phase=cleanup_{phase} target={target} outcome={outcome}"
     );
 }

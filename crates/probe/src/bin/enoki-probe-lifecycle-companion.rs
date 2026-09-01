@@ -248,7 +248,11 @@ fn write_response(response: LifecycleResponse) -> ExitCode {
 }
 
 fn lifecycle_companion_diagnostic(event: &str) {
-    eprintln!("enoki.lifecycle.diagnostic role=companion {event}");
+    write_lifecycle_companion_diagnostic(&mut std::io::stderr(), event);
+}
+
+fn write_lifecycle_companion_diagnostic(writer: &mut impl Write, event: &str) {
+    let _ = writeln!(writer, "enoki.lifecycle.diagnostic role=companion {event}");
 }
 
 fn response_frame_summary(phase: &str, frame: &[u8]) -> String {
@@ -349,6 +353,18 @@ mod tests {
             if self.fail_flush {
                 return Err(std::io::Error::other("ordinary flush failure"));
             }
+            Ok(())
+        }
+    }
+
+    struct FailingDiagnosticWriter;
+
+    impl Write for FailingDiagnosticWriter {
+        fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("diagnostic sink unavailable"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
@@ -503,6 +519,30 @@ mod tests {
             diagnostics.last().map(String::as_str),
             Some("phase=companion_finalization outcome=ok")
         );
+    }
+
+    #[test]
+    fn unavailable_diagnostic_sink_preserves_response_exit_and_finalization() {
+        let response = LifecycleResponse::succeeded();
+        let expected = response.encode();
+        let mut writer = RecordingWriter::default();
+        let mut diagnostic_sink = FailingDiagnosticWriter;
+        let mut finalized = false;
+
+        let exit = write_lifecycle_response_with_diagnostics(
+            response,
+            &mut writer,
+            || {
+                finalized = true;
+                true
+            },
+            |event| write_lifecycle_companion_diagnostic(&mut diagnostic_sink, event),
+        );
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(writer.bytes, expected);
+        assert_eq!(writer.calls, ["write", "flush"]);
+        assert!(finalized);
     }
 
     #[test]

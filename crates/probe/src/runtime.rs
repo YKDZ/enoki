@@ -1104,7 +1104,11 @@ fn request_lifecycle_companion_at(
 }
 
 fn lifecycle_probe_diagnostic(event: &str) {
-    eprintln!("enoki.lifecycle.diagnostic role=probe {event}");
+    write_lifecycle_probe_diagnostic(&mut std::io::stderr(), event);
+}
+
+fn write_lifecycle_probe_diagnostic(writer: &mut impl Write, event: &str) {
+    let _ = writeln!(writer, "enoki.lifecycle.diagnostic role=probe {event}");
 }
 
 fn lifecycle_io_error_summary(error: &std::io::Error) -> String {

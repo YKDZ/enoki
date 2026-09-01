@@ -3695,6 +3695,7 @@ mod tests {
     #[test]
     fn observation_units_keep_callers_roles_and_deadlines_fixed() {
         let probe = service_unit();
+        let lifecycle = lifecycle_companion_unit();
         let runtime_socket = observation_runtime_socket_unit();
         let runtime = observation_runtime_unit();
         let provider_socket = cpu_provider_socket_unit();
@@ -3713,6 +3714,9 @@ mod tests {
         assert!(probe.contains(
             "Wants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket"
         ));
+        assert!(lifecycle.contains("StandardInput=socket\n"));
+        assert!(lifecycle.contains("StandardOutput=socket\n"));
+        assert!(lifecycle.contains("StandardError=journal\n"));
         assert!(runtime_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(runtime.contains("User=enoki-observation-runtime"));
         assert!(runtime.contains("PrivateNetwork=true"));
@@ -3760,6 +3764,7 @@ mod tests {
         assert!(upgrade.contains("IPAddressDeny=any"));
         assert!(upgrade.contains("RuntimeDirectory=enoki-probe"));
         assert!(upgrade.contains("RuntimeDirectoryPreserve=yes"));
+        assert!(upgrade.contains("StandardError=journal\n"));
         assert!(upgrade.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe"));
     }
 
