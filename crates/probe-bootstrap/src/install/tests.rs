@@ -3877,8 +3877,7 @@ mod tests {
             "RefuseManualStart=yes",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
-            "CapabilityBoundingSet=",
-            "AmbientCapabilities=",
+            "AmbientCapabilities=\n",
             "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any",
             "SocketBindDeny=any",
@@ -3891,6 +3890,9 @@ mod tests {
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
+        assert!(recorder.contains("CapabilityBoundingSet=CAP_DAC_READ_SEARCH\n"));
+        assert_eq!(recorder.matches("CapabilityBoundingSet=").count(), 1);
+        assert!(!recorder.contains("CAP_DAC_OVERRIDE"));
         assert!(!recorder.contains("Environment="));
         assert!(!recorder.contains("StandardInput=socket"));
     }

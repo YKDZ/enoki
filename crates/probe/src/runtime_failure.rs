@@ -4,7 +4,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Read,
     os::fd::AsRawFd,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -23,14 +26,17 @@ use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
 const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
 const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
+#[cfg(test)]
 const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const BOOT_ID_PATH: &str = "/run/enoki-probe/runtime-failure-boot-id";
 const HOST_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
-const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
+const STATE_DIRECTORY_PATH: &str = "/var/lib/enoki-probe";
+const CANONICAL_PRIVATE_STATE_DIRECTORY_PATH: &str = "/var/lib/private/enoki-probe";
+const CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET: &[u8] = b"private/enoki-probe";
 const PAIR_LOCK_PATH: &str = "/run/enoki-probe/runtime-failure-pair.lock";
 const LOCAL_RETRY_RECEIPT_PATH: &str =
     "/var/lib/enoki-probe/runtime-failure/local-retry-receipt.json";
@@ -1130,7 +1136,12 @@ fn current_epoch_with_boot_id_source_at_locked(
 ) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
     let (epoch, metadata, epoch_bytes) =
         current_epoch_binding_with_boot_id_source(root, expected_uid, boot_id_source)?;
-    let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)?;
+    let state_directory = trusted_state_directory(root)?;
+    let latch = trusted_file(
+        &state_directory.path.join("runtime-failure/latch"),
+        expected_uid,
+        0o600,
+    )?;
     if latch != epoch.generation.as_bytes() {
         return Err(std::io::Error::other("failure epoch binding invalid"));
     }
@@ -1156,18 +1167,20 @@ fn current_epoch_binding_with_boot_id_source(
     expected_uid: u32,
     boot_id_source: FixedBootIdSource,
 ) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    trusted_state_directory(
-        &rooted(root, "/var/lib/enoki-probe"),
-        &rooted(root, IDENTITY_PATH),
+    let state_directory = trusted_state_directory(root)?;
+    let epoch_bytes = trusted_file(
+        &state_directory.path.join("runtime-failure/epoch.toml"),
+        expected_uid,
+        0o600,
     )?;
-    let epoch_bytes = trusted_file(&rooted(root, EPOCH_PATH), expected_uid, 0o600)?;
     let epoch: RuntimeFailureEpoch = toml::from_str(
         std::str::from_utf8(&epoch_bytes)
             .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
     )
     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
+    let identity =
+        trusted_identity_file(&state_directory.path.join("identity/probe-bootstrap.toml"))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
     let boot_id = trusted_fixed_boot_id(root, expected_uid, boot_id_source)?;
     let metadata: toml::Value = toml::from_str(
@@ -1232,13 +1245,10 @@ fn record_runtime_failure_at_with_caller(
     recorder_pid: u32,
 ) -> std::io::Result<RuntimeFailureRecordOutcome> {
     let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
-    let failure_dir = rooted(root, FAILURE_DIR);
-    let epoch_path = rooted(root, EPOCH_PATH);
-    let latch_path = rooted(root, LATCH_PATH);
-    trusted_state_directory(
-        &rooted(root, "/var/lib/enoki-probe"),
-        &rooted(root, IDENTITY_PATH),
-    )?;
+    let state_directory = trusted_state_directory(root)?;
+    let failure_dir = state_directory.path.join("runtime-failure");
+    let epoch_path = failure_dir.join("epoch.toml");
+    let latch_path = failure_dir.join("latch");
     let creation_reserved = runtime_failure_creation_reserved_at(root, expected_uid)?;
     match (path_present(&epoch_path)?, path_present(&latch_path)?) {
         (true, true) => {
@@ -1348,9 +1358,14 @@ fn record_runtime_failure_at_with_caller(
 
     if path_present(&failure_dir)? {
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
+    } else if state_directory.canonical {
+        return Err(std::io::Error::other("canonical failure child missing"));
     } else {
         ensure_directory(&failure_dir, 0o700, Some((expected_uid, expected_uid)))?;
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
+    }
+    if trusted_state_directory(root)? != state_directory {
+        return Err(std::io::Error::other("state directory boundary changed"));
     }
     let mut generation = [0_u8; 32];
     generations.fill_generation(&mut generation)?;
@@ -1832,7 +1847,9 @@ fn build_current_epoch_with_boot_id_source(
         return Err(std::io::Error::other("Runtime failure is not terminal"));
     }
     let metadata = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
+    let state_directory = trusted_state_directory(root)?;
+    let identity =
+        trusted_identity_file(&state_directory.path.join("identity/probe-bootstrap.toml"))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
     let expected_unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
         .into_iter()
@@ -2011,22 +2028,71 @@ fn trusted_directory(path: &Path, uid: u32, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn trusted_state_directory(path: &Path, identity_path: &Path) -> std::io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    let identity = fs::symlink_metadata(identity_path)?;
+#[derive(Debug, Eq, PartialEq)]
+struct RuntimeFailureStateDirectory {
+    path: PathBuf,
+    canonical: bool,
+    state_dev: u64,
+    state_ino: u64,
+    identity_dev: u64,
+    identity_ino: u64,
+}
+
+fn trusted_state_directory(root: &Path) -> std::io::Result<RuntimeFailureStateDirectory> {
+    let public = rooted(root, STATE_DIRECTORY_PATH);
+    let public_metadata = fs::symlink_metadata(&public)?;
+    let (state_directory, canonical) = if public_metadata.is_dir()
+        && !public_metadata.file_type().is_symlink()
+    {
+        (public.clone(), false)
+    } else if public_metadata.file_type().is_symlink()
+        && public_metadata.uid() == 0
+        && public_metadata.gid() == 0
+        && public_metadata.nlink() == 1
+        && fs::read_link(&public)?.as_os_str().as_bytes() == CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET
+    {
+        (rooted(root, CANONICAL_PRIVATE_STATE_DIRECTORY_PATH), true)
+    } else {
+        return Err(std::io::Error::other("state directory boundary invalid"));
+    };
+    let metadata = fs::symlink_metadata(&state_directory)?;
+    let identity_path = state_directory.join("identity/probe-bootstrap.toml");
+    let identity = fs::symlink_metadata(&identity_path)?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.mode() & 0o7777 != 0o750
         || !identity.is_file()
         || identity.file_type().is_symlink()
         || identity.mode() & 0o7777 != 0o600
+        || identity.nlink() != 1
         || metadata.uid() != identity.uid()
         || metadata.gid() != identity.gid()
         || metadata.nlink() < 2
     {
         return Err(std::io::Error::other("state directory boundary invalid"));
     }
-    Ok(())
+    if public_metadata.file_type().is_symlink() {
+        let current = fs::symlink_metadata(&public)?;
+        if !current.file_type().is_symlink()
+            || current.dev() != public_metadata.dev()
+            || current.ino() != public_metadata.ino()
+            || current.uid() != 0
+            || current.gid() != 0
+            || current.nlink() != 1
+            || fs::read_link(&public)?.as_os_str().as_bytes()
+                != CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET
+        {
+            return Err(std::io::Error::other("state directory boundary changed"));
+        }
+    }
+    Ok(RuntimeFailureStateDirectory {
+        path: state_directory,
+        canonical,
+        state_dev: metadata.dev(),
+        state_ino: metadata.ino(),
+        identity_dev: identity.dev(),
+        identity_ino: identity.ino(),
+    })
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -2320,6 +2386,24 @@ pub(super) mod tests {
         root
     }
 
+    fn canonical_dynamic_user_fixture() -> tempfile::TempDir {
+        let root = fixture();
+        let public = rooted(root.path(), "/var/lib/enoki-probe");
+        let private = rooted(root.path(), "/var/lib/private/enoki-probe");
+        fs::create_dir_all(&private).unwrap();
+        fs::rename(public.join("identity"), private.join("identity")).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::create_dir(private.join("runtime-failure")).unwrap();
+        fs::set_permissions(
+            private.join("runtime-failure"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::remove_dir(&public).unwrap();
+        std::os::unix::fs::symlink("private/enoki-probe", &public).unwrap();
+        root
+    }
+
     fn write_fixture(root: &Path, path: &str, bytes: &[u8], mode: u32) {
         let path = rooted(root, path);
         fs::write(&path, bytes).unwrap();
@@ -2396,6 +2480,105 @@ pub(super) mod tests {
         assert_eq!(outcome, RuntimeFailureRecordOutcome::Ignored);
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
+    }
+
+    #[test]
+    fn canonical_dynamic_user_state_directory_records_the_existing_exact_pair() {
+        let root = canonical_dynamic_user_fixture();
+        let uid = unsafe { libc::geteuid() };
+
+        assert_eq!(
+            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(82))
+                .unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        assert!(
+            rooted(
+                root.path(),
+                "/var/lib/private/enoki-probe/runtime-failure/epoch.toml"
+            )
+            .is_file()
+        );
+        assert!(
+            rooted(
+                root.path(),
+                "/var/lib/private/enoki-probe/runtime-failure/latch"
+            )
+            .is_file()
+        );
+    }
+
+    #[test]
+    fn canonical_custody_rejects_aggregate_unsafe_shapes_without_a_pair() {
+        let assert_rejected = |root: &tempfile::TempDir| {
+            let sentinel = root.path().join("outside-sentinel");
+            fs::write(&sentinel, b"unchanged").unwrap();
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut FailedRuntime(0),
+                    &mut Generation(83),
+                )
+                .is_err()
+            );
+            assert!(
+                !rooted(
+                    root.path(),
+                    "/var/lib/private/enoki-probe/runtime-failure/epoch.toml"
+                )
+                .exists()
+            );
+            assert!(
+                !rooted(
+                    root.path(),
+                    "/var/lib/private/enoki-probe/runtime-failure/latch"
+                )
+                .exists()
+            );
+            assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
+        };
+
+        let wrong_target = canonical_dynamic_user_fixture();
+        let public = rooted(wrong_target.path(), STATE_DIRECTORY_PATH);
+        fs::remove_file(&public).unwrap();
+        std::os::unix::fs::symlink("private/other", &public).unwrap();
+        assert_rejected(&wrong_target);
+
+        let multi_link = canonical_dynamic_user_fixture();
+        fs::hard_link(
+            rooted(multi_link.path(), STATE_DIRECTORY_PATH),
+            multi_link.path().join("var/lib/enoki-probe-link"),
+        )
+        .unwrap();
+        assert_rejected(&multi_link);
+
+        let private_mode = canonical_dynamic_user_fixture();
+        fs::set_permissions(
+            rooted(private_mode.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_rejected(&private_mode);
+
+        let identity_mode = canonical_dynamic_user_fixture();
+        fs::set_permissions(
+            rooted(
+                identity_mode.path(),
+                "/var/lib/private/enoki-probe/identity/probe-bootstrap.toml",
+            ),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert_rejected(&identity_mode);
+
+        let missing_child = canonical_dynamic_user_fixture();
+        fs::remove_dir(rooted(
+            missing_child.path(),
+            "/var/lib/private/enoki-probe/runtime-failure",
+        ))
+        .unwrap();
+        assert_rejected(&missing_child);
     }
 
     #[test]
