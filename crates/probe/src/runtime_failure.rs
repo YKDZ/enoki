@@ -43,6 +43,7 @@ const STATE_DIRECTORY_PATH: &str = "/var/lib/enoki-probe";
 const CANONICAL_PRIVATE_STATE_DIRECTORY_PATH: &str = "/var/lib/private/enoki-probe";
 const CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET: &[u8] = b"private/enoki-probe";
 const PAIR_LOCK_PATH: &str = "/run/enoki-probe/runtime-failure-pair.lock";
+#[cfg(test)]
 const LOCAL_RETRY_RECEIPT_PATH: &str =
     "/var/lib/enoki-probe/runtime-failure/local-retry-receipt.json";
 const UPGRADE_ATTEMPT_PATH: &str = "/var/lib/enoki-probe-bootstrap/probe-upgrade-attempt.toml";
@@ -1449,7 +1450,7 @@ fn record_runtime_failure_at_with_caller(
         return Ok(RuntimeFailureRecordOutcome::Ignored);
     };
 
-    let retry_receipt = rooted(root, LOCAL_RETRY_RECEIPT_PATH);
+    let retry_receipt = runtime_failure_paths(root)?.local_retry_receipt;
     if path_present(&retry_receipt)? {
         let bytes = trusted_file(&retry_receipt, expected_uid, 0o600)?;
         let receipt = parse_local_retry_receipt(&bytes)?;
@@ -3331,6 +3332,27 @@ pub(super) mod tests {
         let mut systemd = RetrySystemd::default();
         retry_runtime_at(root.path(), uid, &mut systemd).unwrap();
         assert_eq!(systemd.0, 1);
+    }
+
+    #[test]
+    fn canonical_retry_invoked_receipt_allows_the_next_failure_generation() {
+        let root = canonical_dynamic_user_fixture();
+        let uid = unsafe { libc::geteuid() };
+        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(50))
+            .unwrap();
+        let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
+        let first_generation = fs::read(private.join("runtime-failure/latch")).unwrap();
+
+        assert!(retry_runtime_at(root.path(), uid, &mut RejectedRepair).is_err());
+        assert_eq!(
+            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(51))
+                .unwrap(),
+            RuntimeFailureRecordOutcome::Latched,
+        );
+        assert_ne!(
+            fs::read(private.join("runtime-failure/latch")).unwrap(),
+            first_generation
+        );
     }
 
     #[test]
