@@ -3877,8 +3877,7 @@ mod tests {
             "RefuseManualStart=yes",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
-            "CapabilityBoundingSet=",
-            "AmbientCapabilities=",
+            "AmbientCapabilities=\n",
             "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any",
             "SocketBindDeny=any",
@@ -3891,6 +3890,9 @@ mod tests {
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
+        assert!(recorder.contains("CapabilityBoundingSet=CAP_DAC_READ_SEARCH\n"));
+        assert_eq!(recorder.matches("CapabilityBoundingSet=").count(), 1);
+        assert!(!recorder.contains("CAP_DAC_OVERRIDE"));
         assert!(!recorder.contains("Environment="));
         assert!(!recorder.contains("StandardInput=socket"));
     }
@@ -4064,6 +4066,31 @@ mod tests {
             assert!(socket.contains("SocketGroup=enoki-observation-ipc"));
             assert!(socket.contains("SocketMode=0660"));
         }
+    }
+
+    #[test]
+    fn lifecycle_companion_owns_only_the_fixed_runtime_repair_drop_in() {
+        let lifecycle = lifecycle_companion_unit();
+        let socket = lifecycle_companion_socket_unit();
+
+        assert!(lifecycle.contains(
+            "RuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\n"
+        ));
+        assert!(lifecycle.contains("ReadOnlyPaths=/run/systemd/system\n"));
+        assert!(lifecycle.contains(
+            "BindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\n"
+        ));
+        assert!(socket.contains(
+            "ExecStopPost=/usr/bin/rm -rf -- /run/systemd/system/enoki-observation-runtime.service.d\n"
+        ));
+        assert!(lifecycle
+            .lines()
+            .filter_map(|line| line.strip_prefix("ReadWritePaths="))
+            .flat_map(str::split_ascii_whitespace)
+            .map(|path| path.strip_prefix('-').unwrap_or(path))
+            .all(|path| {
+                path != "/run/systemd/system" && !path.starts_with("/run/systemd/system/")
+            }));
     }
 
     #[test]
