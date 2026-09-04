@@ -575,6 +575,11 @@ pub fn commit_current_layout_for_test(
     version: &str,
 ) -> Result<(), InstallError> {
     let paths = FixedInstallPaths::under_test_root(root);
+    let _activation_lock = ActivationLock::acquire(
+        &paths.bootstrap_state(),
+        paths.expected_root_uid(),
+        Instant::now() + INSTALL_COMMAND_BUDGET,
+    )?;
     let mut journal = TransactionJournal::begin_with_binding(&paths.bootstrap_state(), None)?;
     journal.commit_layout(&paths, version, false)
 }

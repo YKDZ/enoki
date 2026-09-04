@@ -20,7 +20,7 @@ use enoki_probe_bootstrap::{
 use std::{
     collections::HashMap,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, chown},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -869,6 +869,73 @@ fn schema_five_uninstall_accepts_the_production_current_layout_receipt() {
     );
 
     assert_eq!(response, LifecycleResponse::succeeded());
+}
+
+#[test]
+fn schema_five_uninstall_rejects_noncanonical_production_activation_lock_before_effects() {
+    for corruption in ["mode", "type", "nlink", "owner"] {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut fixture = uninstall_coordinator_fixture(temporary.path());
+        fixture.metadata.schema_version = 5;
+        fixture.metadata.lifecycle_authority_install_key = Some("e".repeat(64));
+        commit_current_layout_for_test(temporary.path(), "1.2.3")
+            .expect("canonical install producer commits current-layout receipt");
+        let activation_lock = fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .expect("bootstrap state")
+            .join("activation.lock");
+        match corruption {
+            "mode" => fs::set_permissions(&activation_lock, fs::Permissions::from_mode(0o4600))
+                .expect("activation lock special mode"),
+            "type" => {
+                fs::remove_file(&activation_lock).expect("remove activation lock file");
+                fs::create_dir(&activation_lock).expect("replace activation lock with directory");
+            }
+            "nlink" => fs::hard_link(
+                &activation_lock,
+                temporary.path().join("activation-lock-alias"),
+            )
+            .expect("hard-link activation lock"),
+            "owner" => {
+                chown(&activation_lock, Some(1), Some(1)).expect("change activation lock owner")
+            }
+            _ => unreachable!(),
+        }
+        let request = LifecycleRequest::local_uninstall(
+            "probe_01",
+            &"b".repeat(64),
+            &"c".repeat(64),
+            "1.2.3",
+        )
+        .expect("bound local uninstall request");
+        let identity = TrustedProbeInstallPreflight {
+            hub_url: "https://hub.example".to_owned(),
+            probe_id: "probe_01".to_owned(),
+        };
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let response = run_uninstall_lifecycle_adapter(
+            &request,
+            &fixture.metadata,
+            &identity,
+            &fixture.metadata_path,
+            &mut transport,
+            &mut systemd,
+        );
+
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid"),
+            "corruption: {corruption}"
+        );
+        assert!(transport.url.is_empty());
+        assert!(transport.status_url.is_empty());
+        assert!(transport.downloads.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
 }
 
 #[test]

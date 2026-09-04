@@ -1043,6 +1043,9 @@ fn validate_owned_bootstrap_state_with_repair(
             Some("current-layout") => {
                 validate_owned_bootstrap_current_layout(&entry.path(), expected_bundle_version)?;
             }
+            Some("activation.lock") => {
+                validate_owned_bootstrap_activation_lock(&entry.path())?;
+            }
             _ => {
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe Bootstrap state contains an unexpected entry",
@@ -1132,6 +1135,22 @@ fn validate_owned_bootstrap_current_layout(
     if fs::read(path).map_err(ProbeUpgraderRunError::Io)? != expected.as_bytes() {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe Bootstrap current layout receipt is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_owned_bootstrap_activation_lock(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap activation lock is not a root-owned regular 0600 file",
         ));
     }
     Ok(())
