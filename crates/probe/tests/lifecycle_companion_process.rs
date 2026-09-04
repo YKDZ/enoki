@@ -1,5 +1,9 @@
 use std::{
     io::Write,
+    os::{
+        fd::AsRawFd,
+        unix::{net::UnixStream, process::CommandExt},
+    },
     process::{Command, Stdio},
 };
 
@@ -102,6 +106,36 @@ fn invalid_marker_precedes_empty_resume() {
         .stderr(Stdio::null())
         .output()
         .expect("启动真实 Companion binary");
+
+    assert_eq!(
+        LifecycleResponse::decode(&output.stdout),
+        Ok(LifecycleResponse::failed("lifecycle.invalid_authority")),
+    );
+}
+
+#[test]
+fn invalid_marker_precedes_socket_peer_input() {
+    let (mut peer, child_socket) = UnixStream::pair().expect("创建真实 Unix socket peer");
+    let socket_fd = child_socket.as_raw_fd();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"));
+    command
+        .env("ENOKI_LIFECYCLE_LEASE_FD", "not-fd9")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(socket_fd, libc::STDIN_FILENO) != libc::STDIN_FILENO {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().expect("启动真实 Companion binary");
+    peer.write_all(b"unread socket request")
+        .expect("写 socket peer");
+    drop(peer);
+    let output = child.wait_with_output().expect("等待 Companion binary");
 
     assert_eq!(
         LifecycleResponse::decode(&output.stdout),
