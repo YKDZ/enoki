@@ -72,10 +72,10 @@ pub fn acquire_probe_repair_authority_once(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = format!(
-                "{origin}/api/probe/operations/{}/repair-authorize",
-                envelope.evidence.failed_operation_id
-            );
+            let url = failed_upgrade_repair_authorization_url(
+                &origin,
+                &envelope.evidence.failed_operation_id,
+            )?;
             (url, None)
         }
         ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
@@ -89,10 +89,8 @@ pub fn acquire_probe_repair_authority_once(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = format!(
-                "{origin}/api/probe/runtime-failures/{}/repair-authorize",
-                envelope.evidence.generation
-            );
+            let url =
+                installed_bundle_repair_authorization_url(&origin, &envelope.evidence.generation)?;
             (url, Some(envelope.evidence))
         }
     };
@@ -1682,6 +1680,30 @@ fn exact_origin(value: &str) -> Option<Url> {
     .then_some(url)
 }
 
+fn failed_upgrade_repair_authorization_url(
+    origin: &Url,
+    operation_id: &str,
+) -> Result<String, AcquisitionFailure> {
+    origin
+        .join(&format!(
+            "api/probe/operations/{operation_id}/repair-authorize"
+        ))
+        .map(Into::into)
+        .map_err(|_| AcquisitionFailure::InvalidOrigin)
+}
+
+fn installed_bundle_repair_authorization_url(
+    origin: &Url,
+    generation: &str,
+) -> Result<String, AcquisitionFailure> {
+    origin
+        .join(&format!(
+            "api/probe/runtime-failures/{generation}/repair-authorize"
+        ))
+        .map(Into::into)
+        .map_err(|_| AcquisitionFailure::InvalidOrigin)
+}
+
 const MAX_METADATA_BYTES: usize = 256 * 1024;
 
 fn fetch_metadata(
@@ -2435,5 +2457,21 @@ mod tests {
         });
 
         assert_eq!(result, Err(AcquisitionFailure::Permanent));
+    }
+
+    #[test]
+    fn repair_authorization_uses_canonical_closed_hub_endpoints() {
+        let origin = exact_origin("https://hub.example").expect("canonical Hub origin");
+
+        assert_eq!(
+            failed_upgrade_repair_authorization_url(&origin, "upgrade-1")
+                .expect("Failed Upgrade Repair endpoint"),
+            "https://hub.example/api/probe/operations/upgrade-1/repair-authorize"
+        );
+        assert_eq!(
+            installed_bundle_repair_authorization_url(&origin, "generation-1")
+                .expect("Installed Bundle Failure Repair endpoint"),
+            "https://hub.example/api/probe/runtime-failures/generation-1/repair-authorize"
+        );
     }
 }
