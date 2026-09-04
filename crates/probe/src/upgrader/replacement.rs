@@ -461,7 +461,6 @@ fn retain_process_lifecycle_owner(
     if !directory_metadata.is_dir()
         || directory_metadata.uid() != 0
         || directory_metadata.gid() != 0
-        || directory_metadata.mode() & 0o022 != 0
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,

@@ -240,11 +240,7 @@ fn open_stable_lifecycle_lock() -> Result<File, ActivationError> {
     // SAFETY: a successful directory open transfers exactly one descriptor.
     let parent = unsafe { File::from_raw_fd(parent_fd) };
     let parent_metadata = parent.metadata().map_err(|_| ActivationError::Io)?;
-    if !parent_metadata.is_dir()
-        || parent_metadata.uid() != 0
-        || parent_metadata.gid() != 0
-        || parent_metadata.mode() & 0o022 != 0
-    {
+    if !parent_metadata.is_dir() || parent_metadata.uid() != 0 || parent_metadata.gid() != 0 {
         return Err(ActivationError::Io);
     }
     let create_flags =
