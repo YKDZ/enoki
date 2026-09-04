@@ -674,12 +674,15 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
         },
     )?;
     remove_probe_bootstrap_roles(plan)?;
-    remove_probe_bootstrap_state(plan)?;
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
-    verify_uninstall_residue_absent(plan, systemd)
+    verify_common_cleanup_residue_absent(plan, systemd)?;
+    verify_uninstall_local_state_absent(plan)?;
+    // The guarded Bootstrap directory is the final local lifecycle effect. Its
+    // successful removal is the exact absence proof for activation authority.
+    remove_probe_bootstrap_state(plan)
 }
 
 fn retire_unbound_installed_bundle_repair_stage_with(
@@ -761,22 +764,6 @@ fn runtime_failure_cleanup_lock(
         )),
         Err(error) => Err(ProbeUpgraderRunError::Io(error)),
     }
-}
-
-pub(super) fn verify_uninstall_residue_absent(
-    plan: &ProbeUninstallCleanupPlan<'_>,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    verify_common_cleanup_residue_absent(plan, systemd)?;
-    verify_uninstall_local_state_absent(plan)?;
-    if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        verify_path_absent(
-            path,
-            "probe_uninstall_bootstrap_state_residue",
-            "verifying Probe Bootstrap state is absent",
-        )?;
-    }
-    Ok(())
 }
 
 pub(super) fn verify_replacement_residue_absent(

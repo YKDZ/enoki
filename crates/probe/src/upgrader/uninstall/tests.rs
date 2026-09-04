@@ -98,7 +98,8 @@ impl ProbeUpgraderValidationTransport for RecordingValidationTransport {
 struct RecordingSystemdRunner {
     calls: Vec<String>,
     failure_step: Option<&'static str>,
-    first_effect_barrier: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    final_verification_barrier: Option<(usize, mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    final_verification_failure_after: Option<usize>,
     loaded_service_residue: bool,
 }
 
@@ -120,10 +121,6 @@ impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
     }
 
     fn stop_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
-        if let Some((entered, release)) = self.first_effect_barrier.take() {
-            entered.send(()).expect("publish first uninstall effect");
-            release.recv().expect("release first uninstall effect");
-        }
         self.calls.push(format!("stop {service_name}"));
         self.fail("stop")
     }
@@ -149,6 +146,27 @@ impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
     }
 
     fn verify_service_absent(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        if service_name == "enoki-probe"
+            && let Some((remaining, _, _)) = self.final_verification_barrier.as_mut()
+        {
+            if *remaining == 0 {
+                let (_, entered, release) = self.final_verification_barrier.take().unwrap();
+                entered.send(()).expect("publish final verification");
+                release.recv().expect("release final verification");
+            } else {
+                *remaining -= 1;
+            }
+        }
+        if service_name == "enoki-probe"
+            && let Some(remaining) = self.final_verification_failure_after.as_mut()
+        {
+            if *remaining == 0 {
+                return Err(ProbeUpgraderRunError::RestartFailure(
+                    "injected final verification failure".to_owned(),
+                ));
+            }
+            *remaining -= 1;
+        }
         self.calls
             .push(format!("verify-service-absent {service_name}"));
         if self.loaded_service_residue {
@@ -761,6 +779,7 @@ fn complete_local_workflow_maps_account_failure_at_the_exact_effect_boundary() {
         &fixture.metadata_path,
         &fixture.identity_path,
         &fixture.companion_path,
+        fixture.metadata.bootstrap_state_dir.as_ref().unwrap(),
     ]
     .into_iter()
     .chain(
@@ -780,7 +799,6 @@ fn complete_local_workflow_maps_account_failure_at_the_exact_effect_boundary() {
     for path in [
         fixture.metadata.bootstrap_acquirer_path.as_ref().unwrap(),
         fixture.metadata.bootstrap_activator_path.as_ref().unwrap(),
-        fixture.metadata.bootstrap_state_dir.as_ref().unwrap(),
         &fixture.metadata.install_path,
         &fixture.metadata.service_unit_path,
     ]
@@ -893,7 +911,7 @@ fn production_uninstall_serializes_planning_and_retires_a_waiting_activation_gen
     let uninstall = thread::spawn(move || {
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner {
-            first_effect_barrier: Some((effect_entered_tx, effect_release_rx)),
+            final_verification_barrier: Some((1, effect_entered_tx, effect_release_rx)),
             ..RecordingSystemdRunner::default()
         };
         let response = coordinate_at(Some(&request), Some(&root), &mut transport, &mut systemd);
@@ -906,7 +924,7 @@ fn production_uninstall_serializes_planning_and_retires_a_waiting_activation_gen
         effect_entered_rx
             .recv_timeout(Duration::from_millis(40))
             .is_err(),
-        "the lifecycle lock precedes every systemd effect"
+        "the lifecycle lock precedes every final verification"
     );
     assert!(finished_rx.try_recv().is_err());
     assert_eq!(
@@ -916,7 +934,7 @@ fn production_uninstall_serializes_planning_and_retires_a_waiting_activation_gen
     drop(held_lock);
     effect_entered_rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("uninstall acquires and re-reads before its first effect");
+        .expect("uninstall reaches its final pre-retirement verification");
 
     let (activation_tx, activation_rx) = mpsc::channel();
     let activation_root = temporary.path().to_path_buf();
@@ -951,6 +969,56 @@ fn production_uninstall_serializes_planning_and_retires_a_waiting_activation_gen
     );
     uninstall.join().unwrap();
     activation.join().unwrap();
+}
+
+#[test]
+fn production_recovery_can_resume_after_the_final_pre_retirement_effect_fails() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    fs::write(
+        &fixture.metadata_path,
+        crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
+    )
+    .expect("schema five install metadata");
+    fs::set_permissions(&fixture.metadata_path, fs::Permissions::from_mode(0o600))
+        .expect("install metadata mode");
+    fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
+        .expect("identity mode");
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
+    let request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        "operation-token",
+        &"b".repeat(64),
+        &"c".repeat(64),
+        "1.2.3",
+    )
+    .expect("bound Hub uninstall request");
+    let mut first_transport = RecordingValidationTransport::default();
+    let mut first_systemd = RecordingSystemdRunner {
+        final_verification_failure_after: Some(1),
+        ..RecordingSystemdRunner::default()
+    };
+
+    let first = coordinate_at(
+        Some(&request),
+        Some(temporary.path()),
+        &mut first_transport,
+        &mut first_systemd,
+    );
+    assert_eq!(first, LifecycleResponse::recovery_pending());
+
+    let mut retry_transport = RecordingValidationTransport::default();
+    let mut retry_systemd = RecordingSystemdRunner::default();
+    let retry = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut retry_transport,
+        &mut retry_systemd,
+    );
+    assert_eq!(retry, LifecycleResponse::succeeded());
+    assert!(retry_transport.url.is_empty());
+    assert!(retry_transport.status_url.is_empty());
 }
 
 #[test]
