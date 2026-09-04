@@ -1,9 +1,15 @@
 use std::{
+    fs::{self, File, OpenOptions},
     io::Write,
     os::{
         fd::AsRawFd,
-        unix::{net::UnixStream, process::CommandExt},
+        unix::{
+            fs::{OpenOptionsExt, PermissionsExt},
+            net::UnixStream,
+            process::CommandExt,
+        },
     },
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -26,6 +32,38 @@ fn replacement_request() -> LifecycleRequest {
         "1.2.3",
     )
     .expect("固定 Replacement request 有效")
+}
+
+struct CreatedStableLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl Drop for CreatedStableLock {
+    fn drop(&mut self) {
+        // 仅移除本测试 create_new 成功的 inode；已有 owner 一律在创建前拒绝。
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn create_test_stable_lock() -> CreatedStableLock {
+    let path = PathBuf::from("/run/lock/enoki-probe-lifecycle.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .expect("已有 stable owner 时测试必须拒绝而非触碰它");
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .expect("固定 stable mode");
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) },
+        0,
+        "测试 parent 必须持有 stable OFD",
+    );
+    CreatedStableLock { _file: file, path }
 }
 
 #[test]
@@ -140,5 +178,55 @@ fn invalid_marker_precedes_socket_peer_input() {
     assert_eq!(
         LifecycleResponse::decode(&output.stdout),
         Ok(LifecycleResponse::failed("lifecycle.invalid_authority")),
+    );
+}
+
+#[test]
+fn valid_adopted_fd9_reaches_the_private_replacement_branch() {
+    assert!(
+        !Path::new("/etc/enoki/probe-install.toml").exists(),
+        "真实 process oracle 拒绝在已安装宿主上运行"
+    );
+    let stable = create_test_stable_lock();
+    let stable_fd = stable._file.as_raw_fd();
+    let request = replacement_request();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"));
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("ENOKI_LIFECYCLE_LEASE_FD", "9")
+        .env_remove("ENOKI_TEST_REPLACEMENT_PRODUCTION_ROOT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if stable_fd == 9 {
+                let flags = libc::fcntl(9, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(9, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup3(stable_fd, 9, 0) != 9 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
+        .spawn()
+        .expect("启动 sealed-child 等价的真实 binary");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(&request.encode().expect("canonical request"))
+        .expect("写入 exact Replacement request");
+    let output = child.wait_with_output().expect("等待 child EOF/exit");
+
+    assert_eq!(
+        LifecycleResponse::decode(&output.stdout),
+        Ok(LifecycleResponse::failed("lifecycle.install_state_invalid")),
+        "fd9 已经通过 source admission；只有 private Replacement coordinator 才会读取缺失安装状态",
     );
 }

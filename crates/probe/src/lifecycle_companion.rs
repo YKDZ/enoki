@@ -151,9 +151,12 @@ fn validate_fdinfo(fd: RawFd) -> Result<(), ()> {
         .lines()
         .filter(|line| line.starts_with("lock:"))
         .filter(|line| {
-            line.contains("FLOCK ADVISORY WRITE")
-                && line.ends_with(" 0 EOF")
-                && line.split_whitespace().any(|word| word.ends_with(&inode))
+            let words = line.split_whitespace().collect::<Vec<_>>();
+            words
+                .windows(3)
+                .any(|window| window == ["FLOCK", "ADVISORY", "WRITE"])
+                && words.ends_with(&["0", "EOF"])
+                && words.iter().any(|word| word.ends_with(&inode))
         })
         .count();
     (valid == 1).then_some(()).ok_or(())

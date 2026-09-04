@@ -753,7 +753,9 @@ fn invoke_replacement_companion(
         .stderr(Stdio::null());
     // 候选角色可能创建子进程；超时清理整个固定进程组并回收主进程。
     let stable_fd = stable.as_raw_fd();
-    if stable_fd == 9 || executable.as_raw_fd() == 9 {
+    if (libc::STDIN_FILENO..=libc::STDERR_FILENO).contains(&stable_fd)
+        || executable.as_raw_fd() == 9
+    {
         return Err(ActivationError::Replacement);
     }
     unsafe {
@@ -761,7 +763,12 @@ fn invoke_replacement_companion(
             if libc::setpgid(0, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            if libc::dup3(stable_fd, 9, 0) != 9 {
+            if stable_fd == 9 {
+                let flags = libc::fcntl(9, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(9, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            } else if libc::dup3(stable_fd, 9, 0) != 9 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
