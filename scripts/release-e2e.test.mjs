@@ -2884,6 +2884,206 @@ printf covered > '${covered}'
     },
   );
 
+  it("resets a quiescent failed Runtime unit before cleanup requires stopped state", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(driver.cleanup("run-runtime-failed-cleanup")).rejects.toThrow(
+      /not executed/,
+    );
+
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-failed-cleanup-"),
+    );
+    try {
+      const fakeSystemctl = path.join(fixture, "systemctl");
+      const resetMarker = path.join(fixture, "reset-marker");
+      const covered = path.join(fixture, "cleanup-covered");
+      await writeFile(
+        fakeSystemctl,
+        `#!/bin/sh
+if [ "$1" = stop ]; then exit 0; fi
+if [ "$1" = reset-failed ]; then
+  [ "$2" = enoki-observation-runtime.service ] || exit 1
+  printf 'reset\\n' > "$ENOKI_RESET_MARKER"
+  exit 0
+fi
+if [ "$1" = show ]; then
+  if [ "$2" = enoki-observation-runtime.service ] && [ ! -f "$ENOKI_RESET_MARKER" ]; then
+    if printf '%s\\n' "$*" | grep -q -- '--property=MainPID'; then
+      printf 'LoadState=loaded\\nActiveState=failed\\nSubState=failed\\nMainPID=0\\nControlPID=0\\nJob=\\n'
+    else
+      printf 'LoadState=loaded\\nActiveState=failed\\nSubState=failed\\n'
+    fi
+  else
+    printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'
+  fi
+  exit 0
+fi
+exit 1
+`,
+        "utf8",
+      );
+      await chmod(fakeSystemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      const quiescenceStart = cleanupCommand.indexOf(
+        "stop_unit enoki-probe.service",
+        helperEnd,
+      );
+      const quiescenceEnd = cleanupCommand.indexOf(
+        '[ ! -e "$restore_tmp" ]',
+        quiescenceStart,
+      );
+      const shell = `set -eu
+unit=enoki-observation-runtime.service
+fail() { printf '%s\\n' "$1" >&2; exit 79; }
+${cleanupCommand.slice(helperStart, helperEnd)}
+${cleanupCommand.slice(quiescenceStart, quiescenceEnd)}
+printf covered > '${covered}'
+`;
+      await expect(
+        execFileAsync("/bin/sh", ["-c", shell], {
+          env: {
+            ...process.env,
+            ENOKI_RESET_MARKER: resetMarker,
+            PATH: `${fixture}:/usr/bin:/bin`,
+          },
+        }),
+      ).resolves.toMatchObject({ stderr: "", stdout: "" });
+      await expect(readFile(resetMarker, "utf8")).resolves.toBe("reset\n");
+      await expect(readFile(covered, "utf8")).resolves.toBe("covered");
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    ["active", "active", "running", "0", "0", "", false, false],
+    ["activating", "activating", "start", "0", "0", "", false, false],
+    ["deactivating", "deactivating", "stop", "0", "0", "", false, false],
+    ["MainPID", "failed", "failed", "19", "0", "", false, false],
+    ["ControlPID", "failed", "failed", "0", "23", "", false, false],
+    ["pending job", "failed", "failed", "0", "0", "42", false, false],
+    ["quiescence query", "failed", "failed", "0", "0", "", true, false],
+    ["reset", "failed", "failed", "0", "0", "", false, true],
+  ])(
+    "fails closed without accepting a %s Runtime cleanup state",
+    async (
+      _caseName,
+      activeState,
+      subState,
+      mainPid,
+      controlPid,
+      job,
+      failQuiescenceQuery,
+      failReset,
+    ) => {
+      let cleanupCommand = null;
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun() {},
+        async execute(command) {
+          cleanupCommand = command;
+          return { code: 79, stderr: "not executed", stdout: "" };
+        },
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+      await expect(
+        driver.cleanup("run-runtime-unsafe-cleanup"),
+      ).rejects.toThrow(/not executed/);
+
+      const fixture = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-runtime-unsafe-cleanup-"),
+      );
+      try {
+        const fakeSystemctl = path.join(fixture, "systemctl");
+        const resetMarker = path.join(fixture, "reset-marker");
+        const covered = path.join(fixture, "cleanup-covered");
+        await writeFile(
+          fakeSystemctl,
+          `#!/bin/sh
+if [ "$1" = stop ]; then exit 0; fi
+if [ "$1" = reset-failed ]; then
+  printf 'attempt\\n' > "$ENOKI_RESET_MARKER"
+  [ "$ENOKI_FAIL_RESET" = yes ] && exit 1
+  exit 0
+fi
+if [ "$1" = show ]; then
+  if [ "$2" = enoki-observation-runtime.service ]; then
+    if printf '%s\\n' "$*" | grep -q -- '--property=MainPID'; then
+      [ "$ENOKI_FAIL_QUIESCENCE_QUERY" = yes ] && exit 1
+      printf 'LoadState=loaded\\nActiveState=%s\\nSubState=%s\\nMainPID=%s\\nControlPID=%s\\nJob=%s\\n' "$ENOKI_ACTIVE_STATE" "$ENOKI_SUB_STATE" "$ENOKI_MAIN_PID" "$ENOKI_CONTROL_PID" "$ENOKI_JOB"
+    else
+      printf 'LoadState=loaded\\nActiveState=%s\\nSubState=%s\\n' "$ENOKI_ACTIVE_STATE" "$ENOKI_SUB_STATE"
+    fi
+  else
+    printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'
+  fi
+  exit 0
+fi
+exit 1
+`,
+          "utf8",
+        );
+        await chmod(fakeSystemctl, 0o755);
+        const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+        const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+        const quiescenceStart = cleanupCommand.indexOf(
+          "stop_unit enoki-probe.service",
+          helperEnd,
+        );
+        const quiescenceEnd = cleanupCommand.indexOf(
+          '[ ! -e "$restore_tmp" ]',
+          quiescenceStart,
+        );
+        const shell = `set -eu
+unit=enoki-observation-runtime.service
+fail() { printf '%s\\n' "$1" >&2; exit 79; }
+${cleanupCommand.slice(helperStart, helperEnd)}
+${cleanupCommand.slice(quiescenceStart, quiescenceEnd)}
+printf covered > '${covered}'
+`;
+        await expect(
+          execFileAsync("/bin/sh", ["-c", shell], {
+            env: {
+              ...process.env,
+              ENOKI_ACTIVE_STATE: activeState,
+              ENOKI_CONTROL_PID: controlPid,
+              ENOKI_FAIL_QUIESCENCE_QUERY: failQuiescenceQuery ? "yes" : "no",
+              ENOKI_FAIL_RESET: failReset ? "yes" : "no",
+              ENOKI_JOB: job,
+              ENOKI_MAIN_PID: mainPid,
+              ENOKI_RESET_MARKER: resetMarker,
+              ENOKI_SUB_STATE: subState,
+              PATH: `${fixture}:/usr/bin:/bin`,
+            },
+          }),
+        ).rejects.toMatchObject({ code: 79 });
+        await expect(readFile(covered, "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        if (failReset) {
+          await expect(readFile(resetMarker, "utf8")).resolves.toBe(
+            "attempt\n",
+          );
+        } else {
+          await expect(readFile(resetMarker, "utf8")).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        }
+      } finally {
+        await rm(fixture, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("refuses an unknown claim member before exhaust can publish backup or touch systemd", async () => {
     const fixture = await createRuntimeFailureCustodyFixture(
       "enoki-runtime-exhaust-unknown-member-",

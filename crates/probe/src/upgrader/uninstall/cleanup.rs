@@ -11,6 +11,10 @@ use crate::upgrader::{
     remove_empty_parent_dir, remove_path_if_exists, replacement::fixed_installed_probe_sha256,
     verify_path_absent,
 };
+use enoki_probe_bootstrap::acquisition::{
+    INSTALLED_BUNDLE_REPAIR_STAGE_ROOT, discard_validated_unadmitted_installed_bundle_repair_stage,
+    validate_unadmitted_installed_bundle_repair_stage,
+};
 use enoki_probe_bootstrap::replacement::{
     ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     commit_and_cleanup_replacement,
@@ -151,6 +155,7 @@ pub(super) struct ProbeUninstallCleanupPlan<'a> {
     pub(super) input: &'a ProbeUninstallerRunInput,
     pub(super) install_metadata: &'a TrustedProbeInstallMetadata,
     pub(super) install_metadata_path: &'a Path,
+    unbound_repair_stage: Option<(Option<String>, u32)>,
 }
 
 /// 在 systemd 或文件系统变更前确定全部本机删除目标。
@@ -160,8 +165,12 @@ pub(super) fn plan_probe_uninstall_cleanup<'a>(
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    validate_owned_bootstrap_assets_for_cleanup(install_metadata)?;
+    let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage()?;
+    validate_owned_bootstrap_assets_for_cleanup_with_repair(
+        install_metadata,
+        plan.unbound_repair_stage.is_some(),
+    )?;
     Ok(plan)
 }
 
@@ -170,8 +179,12 @@ pub(super) fn plan_probe_uninstall_recovery<'a>(
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    validate_owned_bootstrap_assets_for_recovery(install_metadata)?;
+    let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage()?;
+    validate_owned_bootstrap_assets_for_recovery_with_repair(
+        install_metadata,
+        plan.unbound_repair_stage.is_some(),
+    )?;
     Ok(plan)
 }
 
@@ -188,7 +201,10 @@ pub(super) fn plan_committed_replacement_cleanup<'a>(
         validate_owned_bootstrap_role_for_recovery(
             install_metadata.bootstrap_activator_path.as_deref(),
         )?;
-        validate_owned_bootstrap_state(install_metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state(
+            install_metadata.bootstrap_state_dir.as_deref(),
+            install_metadata.bundle_version.as_deref(),
+        )?;
     }
     Ok(plan)
 }
@@ -241,29 +257,85 @@ pub(super) fn plan_probe_uninstall_paths<'a>(
         input,
         install_metadata,
         install_metadata_path,
+        unbound_repair_stage: None,
     })
 }
 
-pub(super) fn validate_owned_bootstrap_assets_for_cleanup(
+fn validate_owned_bootstrap_assets_for_cleanup_with_repair(
     metadata: &TrustedProbeInstallMetadata,
+    has_unbound_repair_stage: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     if matches!(metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role(metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role(metadata.bootstrap_activator_path.as_deref())?;
-        validate_owned_bootstrap_state(metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state_with_repair(
+            metadata.bootstrap_state_dir.as_deref(),
+            metadata.bundle_version.as_deref(),
+            has_unbound_repair_stage,
+        )?;
     }
     Ok(())
 }
 
-pub(super) fn validate_owned_bootstrap_assets_for_recovery(
+fn validate_owned_bootstrap_assets_for_recovery_with_repair(
     metadata: &TrustedProbeInstallMetadata,
+    has_unbound_repair_stage: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     if matches!(metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role_for_recovery(metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role_for_recovery(metadata.bootstrap_activator_path.as_deref())?;
-        validate_owned_bootstrap_state_for_recovery(metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state_for_recovery(
+            metadata.bootstrap_state_dir.as_deref(),
+            metadata.bundle_version.as_deref(),
+            has_unbound_repair_stage,
+        )?;
     }
     Ok(())
+}
+
+/// Planner 只读地区分 fixed child：durable intent 存在时必须先恢复；只有无 intent
+/// 且通过固定 catalog 深验证的 orphan 才进入 executor cleanup plan。
+fn validate_unbound_installed_bundle_repair_stage()
+-> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
+    // State root 不存在即可只读证明 intent 不存在；一旦 state 存在，必须在观察
+    // stage 之前通过现有 recovery loader 加锁并完整验证 intent。
+    let persisted_repair = match fs::symlink_metadata("/var/lib/enoki-probe") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
+        Ok(_) => crate::runtime_failure::resume_installed_bundle_repair()
+            .map(|repair| repair.is_some())
+            .map_err(|_| {
+                ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Installed Bundle Repair intent is invalid",
+                )
+            }),
+    };
+    let stage_present = match fs::symlink_metadata(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
+        Ok(_) => true,
+    };
+    classify_uninstall_repair_stage(stage_present, persisted_repair, || {
+        validate_unadmitted_installed_bundle_repair_stage().map_err(|_| {
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "unbound Installed Bundle Repair stage is not safely discardable",
+            )
+        })
+    })
+}
+
+fn classify_uninstall_repair_stage(
+    stage_present: bool,
+    persisted_repair: Result<bool, ProbeUpgraderRunError>,
+    validate_unbound: impl FnOnce() -> Result<(Option<String>, u32), ProbeUpgraderRunError>,
+) -> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
+    match persisted_repair? {
+        true => Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Installed Bundle Repair recovery must finish before uninstall",
+        )),
+        false if !stage_present => Ok(None),
+        false => validate_unbound().map(Some),
+    }
 }
 
 pub(super) fn prepare_probe_uninstall_cleanup(
@@ -423,7 +495,7 @@ pub(super) fn remove_probe_bootstrap_state(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        remove_owned_bootstrap_state(path)?;
+        remove_owned_bootstrap_state(path, plan.install_metadata.bundle_version.as_deref())?;
     }
     Ok(())
 }
@@ -586,6 +658,21 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
+    retire_unbound_installed_bundle_repair_stage_with(
+        plan.unbound_repair_stage.as_ref(),
+        |entry_name, owner_uid| {
+            discard_validated_unadmitted_installed_bundle_repair_stage(entry_name, owner_uid)
+                .map_err(|_| {
+                    probe_uninstall_cleanup_error(
+                        "probe_uninstall_repair_stage_remove_failed",
+                        "retiring Installed Bundle Repair stage",
+                        ProbeUpgraderRunError::InvalidInstallMetadata(
+                            "Installed Bundle Repair stage changed after planning",
+                        ),
+                    )
+                })
+        },
+    )?;
     remove_probe_bootstrap_roles(plan)?;
     remove_probe_bootstrap_state(plan)?;
     remove_probe_install_identities(plan, systemd)?;
@@ -593,6 +680,15 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
     verify_uninstall_residue_absent(plan, systemd)
+}
+
+fn retire_unbound_installed_bundle_repair_stage_with(
+    stage: Option<&(Option<String>, u32)>,
+    retire: impl FnOnce(Option<&str>, u32) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    stage.map_or(Ok(()), |(entry_name, owner_uid)| {
+        retire(entry_name.as_deref(), *owner_uid)
+    })
 }
 
 #[cfg(test)]
@@ -897,6 +993,15 @@ pub(super) fn validate_owned_bootstrap_role_for_recovery(
 
 pub(super) fn validate_owned_bootstrap_state(
     path: Option<&Path>,
+    expected_bundle_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
+    validate_owned_bootstrap_state_with_repair(path, expected_bundle_version, false)
+}
+
+fn validate_owned_bootstrap_state_with_repair(
+    path: Option<&Path>,
+    expected_bundle_version: Option<&str>,
+    has_unbound_repair_stage: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
         "schema v2 metadata is missing Probe Bootstrap ownership",
@@ -932,6 +1037,12 @@ pub(super) fn validate_owned_bootstrap_state(
                     ));
                 }
             }
+            Some("installed-bundle-repair-stage")
+                if has_unbound_repair_stage
+                    && entry.path() == Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT) => {}
+            Some("current-layout") => {
+                validate_owned_bootstrap_current_layout(&entry.path(), expected_bundle_version)?;
+            }
             _ => {
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe Bootstrap state contains an unexpected entry",
@@ -944,13 +1055,24 @@ pub(super) fn validate_owned_bootstrap_state(
 
 pub(super) fn validate_owned_bootstrap_state_for_recovery(
     path: Option<&Path>,
+    expected_bundle_version: Option<&str>,
+    has_unbound_repair_stage: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     if path.is_some_and(|path| {
         fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     }) {
+        if has_unbound_repair_stage {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Installed Bundle Repair stage parent is absent",
+            ));
+        }
         return Ok(());
     }
-    validate_owned_bootstrap_state(path)
+    validate_owned_bootstrap_state_with_repair(
+        path,
+        expected_bundle_version,
+        has_unbound_repair_stage,
+    )
 }
 
 pub(super) fn validate_owned_bootstrap_directory(
@@ -986,24 +1108,56 @@ pub(super) fn validate_owned_bootstrap_regular(
     }
     Ok(())
 }
-pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+fn validate_owned_bootstrap_current_layout(
+    path: &Path,
+    expected_bundle_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let expected_bundle_version =
+        expected_bundle_version.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap current layout receipt has no bound bundle version",
+        ))?;
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap current layout receipt is not a root-owned regular 0600 file",
+        ));
+    }
+    let expected = format!("schema_version=1\nversion={expected_bundle_version}\n");
+    if fs::read(path).map_err(ProbeUpgraderRunError::Io)? != expected.as_bytes() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap current layout receipt is invalid",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn remove_owned_bootstrap_state(
+    path: &Path,
+    expected_bundle_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
         return Ok(());
     }
-    validate_owned_bootstrap_state(Some(path))?;
+    validate_owned_bootstrap_state(Some(path), expected_bundle_version)?;
     fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata,
+        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
         plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
         remove_lifecycle_companion_binary, remove_uninstall_local_state_with,
-        validate_owned_bootstrap_state,
+        retire_unbound_installed_bundle_repair_stage_with, validate_owned_bootstrap_state,
     };
     use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
     use enoki_probe_bootstrap::replacement::{
@@ -1834,7 +1988,7 @@ mod tests {
         private_directory(&outside);
         symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&symlink_state)),
+            validate_owned_bootstrap_state(Some(&symlink_state), None),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "Probe Bootstrap state is not a root-owned private directory"
             ))
@@ -1849,7 +2003,7 @@ mod tests {
         fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
             .expect("unsafe hardlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&hardlink_state)),
+            validate_owned_bootstrap_state(Some(&hardlink_state), None),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "Probe Bootstrap state contains an unsafe entry"
             ))
@@ -1860,11 +2014,42 @@ mod tests {
         let extra_state = owned_state(extra_temp.path());
         fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&extra_state)),
+            validate_owned_bootstrap_state(Some(&extra_state), None),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "Probe Bootstrap state contains an unexpected entry"
             ))
         ));
         assert!(extra_state.join("unrecognised").exists());
+    }
+
+    #[test]
+    fn final_uninstall_defers_bound_repair_and_retires_only_a_validated_orphan() {
+        assert!(
+            classify_uninstall_repair_stage(false, Ok(true), || {
+                panic!("persisted repair without a stage must still defer uninstall")
+            })
+            .is_err()
+        );
+        assert!(
+            classify_uninstall_repair_stage(true, Ok(true), || {
+                panic!("bound stage must not enter orphan validation")
+            })
+            .is_err()
+        );
+
+        let stage = classify_uninstall_repair_stage(true, Ok(false), || {
+            Ok((Some(".pending-repair-01".to_owned()), 12345))
+        })
+        .expect("validated orphan");
+        let mut retired = None;
+        retire_unbound_installed_bundle_repair_stage_with(stage.as_ref(), |entry, owner_uid| {
+            retired = Some((entry.map(str::to_owned), owner_uid));
+            Ok(())
+        })
+        .expect("retire orphan during execution");
+        assert_eq!(
+            retired,
+            Some((Some(".pending-repair-01".to_owned()), 12345))
+        );
     }
 }

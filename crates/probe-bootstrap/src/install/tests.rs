@@ -3788,6 +3788,20 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_lifecycle_companion_preserves_root_child_credential_handoff() {
+        let lifecycle = lifecycle_companion_unit();
+
+        assert!(lifecycle.contains("Group=root\n"));
+        assert!(!lifecycle.lines().any(|line| line.starts_with("User=")));
+        assert!(lifecycle.contains("NoNewPrivileges=true\n"));
+        assert!(lifecycle.contains("AmbientCapabilities=\n"));
+        assert!(lifecycle.contains("SystemCallFilter=@system-service\n"));
+        assert!(lifecycle.contains(
+            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\n"
+        ));
+    }
+
+    #[test]
     fn signed_execution_roles_render_the_closed_systemd_policy_floor() {
         let role_units = fixed_execution_role_units();
         assert_eq!(

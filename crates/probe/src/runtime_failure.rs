@@ -4231,6 +4231,24 @@ pub(super) mod tests {
             101,
         )
         .unwrap();
+        let mut mismatched_receipt =
+            enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt {
+                operation_id: "another-operation".into(),
+                target_asset_set_digest: authority.target_asset_set_digest.clone(),
+                target_manifest_sha256: authority.manifest_sha256.clone(),
+                target_version: authority.bundle_version.clone(),
+                verified_stage_sha256: "b".repeat(64),
+            };
+        assert_eq!(
+            grant.persist_intent(&mismatched_receipt, 12345),
+            Err(InstalledBundleRepairError::InvalidBoundary)
+        );
+        mismatched_receipt.operation_id = authority.repair_operation_id.clone();
+        mismatched_receipt.target_manifest_sha256 = "c".repeat(64);
+        assert_eq!(
+            grant.persist_intent(&mismatched_receipt, 12345),
+            Err(InstalledBundleRepairError::InvalidBoundary)
+        );
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
@@ -4405,13 +4423,14 @@ pub(super) mod tests {
             target_version: authority.bundle_version.clone(),
             verified_stage_sha256: "b".repeat(64),
         };
+        let invoking_uid = 12345;
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
                 schema_version: 2,
                 state: InstalledBundleRepairProgress::ValidationPending,
                 last_error_code: None,
-                stage_owner_uid: unsafe { libc::geteuid() },
+                stage_owner_uid: invoking_uid,
                 stage_receipt: receipt.clone(),
                 signed_evidence: signed,
                 authority: authority.clone(),
@@ -4428,6 +4447,7 @@ pub(super) mod tests {
             InstalledBundleRepairProgress::ValidationPending
         );
         assert_eq!(resumed.stage_receipt, receipt);
+        assert_eq!(resumed.stage_owner_uid, invoking_uid);
         assert_eq!(resumed.grant.authority(), &authority);
         assert!(rooted(root.path(), LATCH_PATH).exists());
 

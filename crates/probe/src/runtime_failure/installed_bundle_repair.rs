@@ -111,6 +111,13 @@ impl InstalledBundleRepairGrant {
         stage_receipt: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
         stage_owner_uid: u32,
     ) -> Result<(), InstalledBundleRepairError> {
+        if stage_receipt.operation_id != self.authority.repair_operation_id
+            || stage_receipt.target_version != self.authority.bundle_version
+            || stage_receipt.target_manifest_sha256 != self.authority.manifest_sha256
+            || stage_receipt.target_asset_set_digest != self.authority.target_asset_set_digest
+        {
+            return Err(InstalledBundleRepairError::InvalidBoundary);
+        }
         let _lock = acquire_runtime_failure_pair_lock_at(&self.root, self.expected_uid)
             .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
         let (epoch, _, _) = current_epoch_at_locked(&self.root, self.expected_uid)
