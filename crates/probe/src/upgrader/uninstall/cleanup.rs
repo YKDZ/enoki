@@ -679,10 +679,7 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
     verify_common_cleanup_residue_absent(plan, systemd)?;
-    verify_uninstall_local_state_absent(plan)?;
-    // The guarded Bootstrap directory is the final local lifecycle effect. Its
-    // successful removal is the exact absence proof for activation authority.
-    remove_probe_bootstrap_state(plan)
+    verify_uninstall_local_state_absent(plan)
 }
 
 fn retire_unbound_installed_bundle_repair_stage_with(
@@ -701,6 +698,7 @@ fn execute_complete_uninstall_cleanup_oracle(
 ) -> Result<(), ProbeUpgraderRunError> {
     prepare_probe_uninstall_cleanup(plan, systemd)?;
     finalize_recoverable_uninstall_cleanup(plan, systemd)?;
+    remove_probe_bootstrap_state(plan)?;
     remove_lifecycle_companion_binary(plan)?;
     verify_lifecycle_companion_binary_absent(plan)
 }
@@ -1173,8 +1171,9 @@ mod tests {
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
         plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
-        remove_lifecycle_companion_binary, remove_uninstall_local_state_with,
-        retire_unbound_installed_bundle_repair_stage_with, validate_owned_bootstrap_state,
+        remove_lifecycle_companion_binary, remove_probe_bootstrap_state,
+        remove_uninstall_local_state_with, retire_unbound_installed_bundle_repair_stage_with,
+        validate_owned_bootstrap_state,
     };
     use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
     use enoki_probe_bootstrap::replacement::{
@@ -1724,6 +1723,7 @@ mod tests {
             assert!(path.exists(), "{} removed during prepare", path.display());
         }
         finalize_recoverable_uninstall_cleanup(&plan, &mut systemd).expect("recoverable finalize");
+        remove_probe_bootstrap_state(&plan).expect("retire Bootstrap state");
         assert!(companion.exists(), "companion is the final reentry asset");
         remove_lifecycle_companion_binary(&plan).expect("remove companion binary");
         assert!(!companion.exists());

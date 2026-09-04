@@ -31,6 +31,7 @@ pub(super) use cleanup::commit_replacement_and_cleanup_install_with_systemd;
 use cleanup::{
     ProbeUninstallCleanupPlan, finalize_recoverable_uninstall_cleanup,
     plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
+    remove_probe_bootstrap_state,
 };
 #[cfg(test)]
 mod tests;
@@ -433,6 +434,7 @@ impl UninstallMechanics<'_> {
     fn finalize(
         &mut self,
         systemd: &mut impl ProbeUpgraderSystemdRunner,
+        remove_capsule: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
     ) -> Result<(), ProbeUpgraderRunError> {
         let companion_binary = self
             .plan
@@ -444,7 +446,10 @@ impl UninstallMechanics<'_> {
             ))?;
         finalize_recoverable_uninstall_cleanup(&self.plan, systemd)?;
         let _ = companion_binary;
-        commit_lifecycle_capsule_with(&self.capsule_path, remove_path_if_exists)
+        commit_lifecycle_capsule_with(&self.capsule_path, remove_capsule)?;
+        // Capsule retirement is the last recoverable commit. Bootstrap state
+        // then retires the guarded activation generation as the final effect.
+        remove_probe_bootstrap_state(&self.plan)
     }
 }
 
@@ -461,7 +466,9 @@ fn coordinate_hub_uninstall(
     mechanics.verify_hub_authority(operation_id, operation_token, transport)?;
     mechanics.prepare(systemd)?;
     mechanics.report_hub_terminal(operation_id, operation_token, transport)?;
-    if mechanics.acknowledge_terminal().is_err() || mechanics.finalize(systemd).is_err() {
+    if mechanics.acknowledge_terminal().is_err()
+        || mechanics.finalize(systemd, remove_path_if_exists).is_err()
+    {
         return Ok(HubUninstallResult::RecoveryPending);
     }
     Ok(HubUninstallResult::Complete)
@@ -475,7 +482,7 @@ fn coordinate_local_uninstall(
     mechanics.persist_verified()?;
     mechanics.prepare(systemd)?;
     mechanics.acknowledge_terminal()?;
-    mechanics.finalize(systemd)?;
+    mechanics.finalize(systemd, remove_path_if_exists)?;
     Ok(LocalUninstallComplete)
 }
 

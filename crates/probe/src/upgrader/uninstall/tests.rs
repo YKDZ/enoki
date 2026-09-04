@@ -1,10 +1,12 @@
 use super::{
-    CompanionBinaryFacts, PostCommitSelfFinalizeFacts, ResumeDecision, UninstallCapsulePhase,
-    adapt_uninstall_wire_request, commit_lifecycle_capsule_with, coordinate_at,
-    coordinate_lifecycle_companion_recovery_at, lifecycle_response_from_resume_decision,
-    post_commit_self_finalize_policy, read_uninstall_capsule, resume_lifecycle_companion_at,
-    run_uninstall_lifecycle_adapter, uninstall_capsule_path,
+    CompanionBinaryFacts, LocalUninstallIntent, PostCommitSelfFinalizeFacts, ResumeDecision,
+    UninstallCapsulePhase, adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
+    coordinate_at, coordinate_lifecycle_companion_recovery_at,
+    lifecycle_response_from_resume_decision, post_commit_self_finalize_policy,
+    read_uninstall_capsule, resume_lifecycle_companion_at, run_uninstall_lifecycle_adapter,
+    uninstall_capsule_path,
 };
+use crate::upgrader::replacement::ReplacementCoordinatorGuard;
 use crate::{
     probe_auth::ProbeRequestAuth,
     upgrader::{
@@ -1019,6 +1021,79 @@ fn production_recovery_can_resume_after_the_final_pre_retirement_effect_fails() 
     assert_eq!(retry, LifecycleResponse::succeeded());
     assert!(retry_transport.url.is_empty());
     assert!(retry_transport.status_url.is_empty());
+}
+
+#[test]
+fn production_recovery_resumes_when_capsule_retirement_fails_before_lock_retirement() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    fs::write(
+        &fixture.metadata_path,
+        crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
+    )
+    .expect("schema five install metadata");
+    fs::set_permissions(&fixture.metadata_path, fs::Permissions::from_mode(0o600))
+        .expect("install metadata mode");
+    fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
+        .expect("identity mode");
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
+    let activation_lock = fixture
+        .metadata
+        .bootstrap_state_dir
+        .as_ref()
+        .expect("bootstrap state")
+        .join("activation.lock");
+    let request = local_uninstall_request();
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: fixture.identity_path.clone(),
+    };
+    let guard = ReplacementCoordinatorGuard::acquire_existing(Some(temporary.path()))
+        .expect("acquire canonical lifecycle generation");
+    let intent =
+        LocalUninstallIntent::classify(&request, &input, &fixture.metadata, &fixture.metadata_path)
+            .expect("classify local uninstall under the production guard");
+    let mut mechanics = intent.mechanics;
+    let mut systemd = RecordingSystemdRunner::default();
+    mechanics
+        .persist_verified()
+        .expect("persist verified capsule");
+    mechanics.prepare(&mut systemd).expect("prepare uninstall");
+    mechanics
+        .acknowledge_terminal()
+        .expect("acknowledge terminal capsule");
+    let capsule_path = mechanics.capsule_path.clone();
+
+    let interrupted = mechanics.finalize(&mut systemd, |_| {
+        Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+            "injected capsule unlink failure",
+        )))
+    });
+    assert!(interrupted.is_err());
+    assert!(
+        activation_lock.exists(),
+        "capsule failure retains the guarded activation generation"
+    );
+    assert_eq!(
+        read_uninstall_capsule(&capsule_path)
+            .expect("read retained capsule")
+            .expect("capsule remains durable")
+            .phase,
+        UninstallCapsulePhase::TerminalAcknowledged
+    );
+    drop(mechanics);
+    drop(guard);
+
+    let mut recovery_transport = RecordingValidationTransport::default();
+    let mut recovery_systemd = RecordingSystemdRunner::default();
+    let recovered = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut recovery_transport,
+        &mut recovery_systemd,
+    );
+    assert_eq!(recovered, LifecycleResponse::succeeded());
+    assert!(recovery_transport.url.is_empty());
+    assert!(recovery_transport.status_url.is_empty());
 }
 
 #[test]
