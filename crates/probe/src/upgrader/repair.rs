@@ -244,7 +244,7 @@ pub(super) fn acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunE
 enum RepairDependencyFailure {
     Random,
     Clock,
-    Spawn,
+    Spawn(Option<i32>),
     Write,
     Wait,
 }
@@ -320,7 +320,13 @@ impl RepairDependencies for ProductionRepairDependencies {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|_| RepairDependencyFailure::Spawn)?;
+            .map_err(|error| {
+                let failure = RepairDependencyFailure::Spawn(error.raw_os_error());
+                if let Some(diagnostic) = repair_dependency_diagnostic(failure) {
+                    eprintln!("{diagnostic}");
+                }
+                failure
+            })?;
         child
             .stdin
             .take()
@@ -330,11 +336,13 @@ impl RepairDependencies for ProductionRepairDependencies {
         let output = child
             .wait_with_output()
             .map_err(|_| RepairDependencyFailure::Wait)?;
-        Ok(RepairAuthorityOutput {
+        let output = RepairAuthorityOutput {
             code: output.status.code(),
             stdout: output.stdout,
             successful: output.status.success(),
-        })
+        };
+        eprintln!("{}", acquirer_exit_diagnostic(&output));
+        Ok(output)
     }
 }
 
@@ -379,20 +387,92 @@ fn configure_acquirer_privileges(command: &mut Command, uid: u32, gid: u32) {
     unsafe {
         command.pre_exec(move || {
             if libc::setgroups(0, std::ptr::null()) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(pre_exec_failure(
+                    b"enoki.lifecycle.diagnostic role=companion phase=acquirer_pre_exec \
+outcome=error syscall=setgroups errno=",
+                ));
             }
             if libc::setgid(gid) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(pre_exec_failure(
+                    b"enoki.lifecycle.diagnostic role=companion phase=acquirer_pre_exec \
+outcome=error syscall=setgid errno=",
+                ));
             }
             if libc::setuid(uid) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(pre_exec_failure(
+                    b"enoki.lifecycle.diagnostic role=companion phase=acquirer_pre_exec \
+outcome=error syscall=setuid errno=",
+                ));
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(pre_exec_failure(
+                    b"enoki.lifecycle.diagnostic role=companion phase=acquirer_pre_exec \
+outcome=error syscall=prctl_no_new_privs errno=",
+                ));
             }
             Ok(())
         });
     }
+}
+
+fn pre_exec_failure(diagnostic: &[u8]) -> std::io::Error {
+    let error = std::io::Error::last_os_error();
+    let errno = error.raw_os_error().unwrap_or(0).unsigned_abs();
+    let mut digits = [0_u8; 10];
+    let mut start = digits.len();
+    let mut remaining = errno;
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (remaining % 10) as u8;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    let newline = b"\n";
+    let vectors = [
+        libc::iovec {
+            iov_base: diagnostic.as_ptr().cast_mut().cast(),
+            iov_len: diagnostic.len(),
+        },
+        libc::iovec {
+            iov_base: digits[start..].as_ptr().cast_mut().cast(),
+            iov_len: digits.len() - start,
+        },
+        libc::iovec {
+            iov_base: newline.as_ptr().cast_mut().cast(),
+            iov_len: newline.len(),
+        },
+    ];
+    // SAFETY：fork 后只以 async-signal-safe writev 写入固定前缀、原始 errno 数字与换行。
+    unsafe {
+        libc::writev(libc::STDERR_FILENO, vectors.as_ptr(), vectors.len() as i32);
+    }
+    error
+}
+
+fn repair_dependency_diagnostic(failure: RepairDependencyFailure) -> Option<String> {
+    let RepairDependencyFailure::Spawn(Some(errno)) = failure else {
+        return None;
+    };
+    Some(format!(
+        "enoki.lifecycle.diagnostic role=companion phase=acquirer_spawn \
+outcome=error errno={errno}"
+    ))
+}
+
+fn acquirer_exit_diagnostic(output: &RepairAuthorityOutput) -> String {
+    let class = match (output.code, output.successful) {
+        (Some(0), true) => "succeeded",
+        (Some(3), false) => "manual_reinstall_required",
+        (Some(_), false) => "unresolved_failure",
+        (None, false) => "terminated_without_exit_code",
+        _ => "incoherent_status",
+    };
+    format!(
+        "enoki.lifecycle.diagnostic role=companion phase=acquirer_exit \
+outcome=observed class={class}"
+    )
 }
 
 fn contract_failure(code: &'static str) -> ProbeRepairRunError {
@@ -458,7 +538,7 @@ mod tests {
             _invoking_gid: u32,
         ) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
             if let Some(
-                failure @ (RepairDependencyFailure::Spawn
+                failure @ (RepairDependencyFailure::Spawn(_)
                 | RepairDependencyFailure::Write
                 | RepairDependencyFailure::Wait),
             ) = self.failure
@@ -534,7 +614,7 @@ mod tests {
     #[test]
     fn deterministic_dependency_maps_spawn_write_and_wait_failures() {
         for failure in [
-            RepairDependencyFailure::Spawn,
+            RepairDependencyFailure::Spawn(Some(libc::EPERM)),
             RepairDependencyFailure::Write,
             RepairDependencyFailure::Wait,
         ] {
@@ -544,6 +624,48 @@ mod tests {
                 exchange_authority_with(&mut dependencies, b"request", 1000, 1000).unwrap_err();
 
             assert_eq!(error.code(), "probe_repair_authority_acquire_failed");
+        }
+    }
+
+    #[test]
+    fn spawn_dependency_diagnostic_preserves_errno_without_sensitive_payload() {
+        let diagnostic =
+            repair_dependency_diagnostic(RepairDependencyFailure::Spawn(Some(libc::EPERM)));
+
+        assert_eq!(
+            diagnostic.as_deref(),
+            Some(
+                "enoki.lifecycle.diagnostic role=companion phase=acquirer_spawn \
+outcome=error errno=1"
+            )
+        );
+        assert!(!diagnostic.unwrap().contains("request"));
+    }
+
+    #[test]
+    fn acquirer_exit_diagnostic_uses_only_closed_exit_classes() {
+        let cases = [
+            (Some(0), true, "succeeded"),
+            (Some(3), false, "manual_reinstall_required"),
+            (Some(1), false, "unresolved_failure"),
+            (None, false, "terminated_without_exit_code"),
+        ];
+
+        for (code, successful, expected_class) in cases {
+            let diagnostic = acquirer_exit_diagnostic(&RepairAuthorityOutput {
+                code,
+                stdout: b"must-not-appear".to_vec(),
+                successful,
+            });
+
+            assert_eq!(
+                diagnostic,
+                format!(
+                    "enoki.lifecycle.diagnostic role=companion phase=acquirer_exit \
+outcome=observed class={expected_class}"
+                )
+            );
+            assert!(!diagnostic.contains("must-not-appear"));
         }
     }
 
