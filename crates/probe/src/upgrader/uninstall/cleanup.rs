@@ -284,22 +284,11 @@ fn validate_owned_bootstrap_assets_for_recovery_with_repair(
     if matches!(metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role_for_recovery(metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role_for_recovery(metadata.bootstrap_activator_path.as_deref())?;
-        if metadata.bootstrap_state_dir.as_deref().is_some_and(|path| {
-            fs::symlink_metadata(path)
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        }) {
-            if has_unbound_repair_stage {
-                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "Installed Bundle Repair stage parent is absent",
-                ));
-            }
-        } else {
-            validate_owned_bootstrap_state_with_repair(
-                metadata.bootstrap_state_dir.as_deref(),
-                metadata.bundle_version.as_deref(),
-                has_unbound_repair_stage,
-            )?;
-        }
+        validate_owned_bootstrap_state_for_recovery(
+            metadata.bootstrap_state_dir.as_deref(),
+            metadata.bundle_version.as_deref(),
+            has_unbound_repair_stage,
+        )?;
     }
     Ok(())
 }
@@ -1067,13 +1056,23 @@ fn validate_owned_bootstrap_state_with_repair(
 pub(super) fn validate_owned_bootstrap_state_for_recovery(
     path: Option<&Path>,
     expected_bundle_version: Option<&str>,
+    has_unbound_repair_stage: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     if path.is_some_and(|path| {
         fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     }) {
+        if has_unbound_repair_stage {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Installed Bundle Repair stage parent is absent",
+            ));
+        }
         return Ok(());
     }
-    validate_owned_bootstrap_state(path, expected_bundle_version)
+    validate_owned_bootstrap_state_with_repair(
+        path,
+        expected_bundle_version,
+        has_unbound_repair_stage,
+    )
 }
 
 pub(super) fn validate_owned_bootstrap_directory(
