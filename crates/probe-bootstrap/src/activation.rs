@@ -221,10 +221,63 @@ fn reconcile_exact_orphan_companion_at(
     if held.dev() != metadata.dev() || held.ino() != metadata.ino() {
         return Err(ActivationError::Io);
     }
-    fs::remove_file(companion).map_err(|_| ActivationError::Io)?;
-    File::open(companion.parent().ok_or(ActivationError::Io)?)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| ActivationError::Io)
+    let parent_path = companion.parent().ok_or(ActivationError::Io)?;
+    let parent_fd = unsafe {
+        libc::open(
+            std::ffi::CString::new(parent_path.as_os_str().as_encoded_bytes())
+                .map_err(|_| ActivationError::Io)?
+                .as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if parent_fd < 0 {
+        return Err(ActivationError::Io);
+    }
+    let parent = unsafe { File::from_raw_fd(parent_fd) };
+    let name = std::ffi::CString::new(
+        companion
+            .file_name()
+            .ok_or(ActivationError::Io)?
+            .as_encoded_bytes(),
+    )
+    .map_err(|_| ActivationError::Io)?;
+    let mut current: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut current,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+        || current.st_dev != held.dev()
+        || current.st_ino != held.ino()
+        || unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0
+        || parent.sync_all().is_err()
+    {
+        return Err(ActivationError::Io);
+    }
+    let mut absent: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut absent,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } == 0
+        || io::Error::last_os_error().kind() != io::ErrorKind::NotFound
+    {
+        return Err(ActivationError::Io);
+    }
+    for path in forbidden_inventory {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err(ActivationError::Io),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ActivationError::Io),
+        }
+    }
+    Ok(())
 }
 
 fn open_stable_lifecycle_lock() -> Result<File, ActivationError> {
@@ -239,8 +292,7 @@ fn open_stable_lifecycle_lock() -> Result<File, ActivationError> {
     }
     // SAFETY: a successful directory open transfers exactly one descriptor.
     let parent = unsafe { File::from_raw_fd(parent_fd) };
-    let parent_metadata = parent.metadata().map_err(|_| ActivationError::Io)?;
-    if !parent_metadata.is_dir() || parent_metadata.uid() != 0 || parent_metadata.gid() != 0 {
+    if !stable_lock_parent_is_current(&parent)? {
         return Err(ActivationError::Io);
     }
     let create_flags =
@@ -282,10 +334,28 @@ fn open_stable_lifecycle_lock() -> Result<File, ActivationError> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(ActivationError::Io);
     }
-    if !stable_lock_matches_parent_entry(&parent, &file)? {
+    if !stable_lock_parent_is_current(&parent)?
+        || !stable_lock_matches_parent_entry(&parent, &file)?
+    {
         return Err(ActivationError::Io);
     }
     Ok(file)
+}
+
+/// `openat` 固定住目录 fd；每次采用 stable entry 前仍确认绝对 parent
+/// pathname 没有被替换为另一代目录。
+fn stable_lock_parent_is_current(parent: &File) -> Result<bool, ActivationError> {
+    let held = parent.metadata().map_err(|_| ActivationError::Io)?;
+    let current = fs::symlink_metadata("/run/lock").map_err(|_| ActivationError::Io)?;
+    Ok(held.is_dir()
+        && held.uid() == 0
+        && held.gid() == 0
+        && !current.file_type().is_symlink()
+        && current.is_dir()
+        && current.uid() == 0
+        && current.gid() == 0
+        && held.dev() == current.dev()
+        && held.ino() == current.ino())
 }
 
 fn stable_lock_matches_parent_entry(parent: &File, file: &File) -> Result<bool, ActivationError> {
@@ -915,6 +985,12 @@ fn terminate_and_reap(child: &mut std::process::Child) {
 impl Drop for ReceivedRootHandoff {
     fn drop(&mut self) {
         self.enrollment.zeroize();
+        // production handoff 的 lifecycle owner 必须越过 activation return，直到
+        // process 真正 exit 才由 kernel 释放其 legacy/stable OFD。
+        #[cfg(not(test))]
+        if let Some(owner) = self._lifecycle_owner.take() {
+            std::mem::forget(owner);
+        }
     }
 }
 

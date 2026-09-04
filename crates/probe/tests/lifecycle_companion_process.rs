@@ -1,8 +1,9 @@
 use std::{
+    ffi::CString,
     fs::{self, File, OpenOptions},
     io::Write,
     os::{
-        fd::AsRawFd,
+        fd::{AsRawFd, FromRawFd},
         unix::{
             fs::{OpenOptionsExt, PermissionsExt},
             net::UnixStream,
@@ -64,6 +65,22 @@ fn create_test_stable_lock() -> CreatedStableLock {
         "测试 parent 必须持有 stable OFD",
     );
     CreatedStableLock { _file: file, path }
+}
+
+fn sealed_companion_binary() -> File {
+    let name = CString::new("enoki-probe-lifecycle-companion").expect("fixed memfd name");
+    let fd =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    assert!(fd >= 0, "创建 sealed executable memfd");
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let bytes = fs::read(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"))
+        .expect("读取真实 Companion bytes");
+    file.write_all(&bytes).expect("复制真实 Companion bytes");
+    file.sync_all().expect("sync sealed bytes");
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) }, 0);
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_GET_SEALS) }, seals);
+    file
 }
 
 #[test]
@@ -189,8 +206,9 @@ fn valid_adopted_fd9_reaches_the_private_replacement_branch() {
     );
     let stable = create_test_stable_lock();
     let stable_fd = stable._file.as_raw_fd();
+    let sealed = sealed_companion_binary();
     let request = replacement_request();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"));
+    let mut command = Command::new(format!("/proc/self/fd/{}", sealed.as_raw_fd()));
     command
         .env_clear()
         .env("LANG", "C")
@@ -226,7 +244,9 @@ fn valid_adopted_fd9_reaches_the_private_replacement_branch() {
 
     assert_eq!(
         LifecycleResponse::decode(&output.stdout),
-        Ok(LifecycleResponse::failed("lifecycle.install_state_invalid")),
-        "fd9 已经通过 source admission；只有 private Replacement coordinator 才会读取缺失安装状态",
+        Ok(LifecycleResponse::failed(
+            "lifecycle.replacement_commit_failed"
+        )),
+        "fd9 已经通过 source admission；只有 private Replacement coordinator 才会读取缺失 commit custody",
     );
 }

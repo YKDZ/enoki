@@ -52,27 +52,23 @@ static PROCESS_LIFETIME_STABLE: OnceLock<File> = OnceLock::new();
 
 /// Bootstrap parent 保留 legacy + stable owner 时，sealed child 只可带着
 /// 已验证的 fd9 witness 进入本分支；它绝不重取 legacy lock。
-pub(super) fn coordinate(request: &LifecycleRequest) -> LifecycleResponse {
-    coordinate_with_owner(request, true)
+pub(super) fn coordinate(
+    _admission: crate::lifecycle_companion::AdoptedReplacementChild,
+    request: &LifecycleRequest,
+) -> LifecycleResponse {
+    coordinate_with_owner(request)
 }
 
-fn coordinate_with_owner(
-    request: &LifecycleRequest,
-    adopted_parent_owner: bool,
-) -> LifecycleResponse {
+fn coordinate_with_owner(request: &LifecycleRequest) -> LifecycleResponse {
     let production_root = match production_root() {
         Ok(root) => root,
         Err(()) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
     };
-    if !adopted_parent_owner {
-        let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root.as_deref()) else {
-            return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
-        };
-        if let Some(response) =
-            resume_committed_from_exact_request(request, production_root.as_deref())
-        {
-            return response;
-        }
+    // fd9 admission 已使 parent 的 legacy→stable owner 保持到本 child exit；
+    // 在触碰 install metadata 前，先从 commit custody 精确恢复或拒绝。
+    if let Some(response) = resume_committed_from_exact_request(request, production_root.as_deref())
+    {
+        return response;
     }
     let metadata_path =
         production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root.as_deref());
@@ -85,13 +81,33 @@ fn coordinate_with_owner(
             Ok(identity) => identity,
             Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
         };
-    run(
-        request,
-        &metadata,
-        &identity,
-        production_root.as_deref(),
-        adopted_parent_owner,
-    )
+    run(request, &metadata, &identity, production_root.as_deref())
+}
+
+/// 只能由 Companion process admission 构造；字段私有，不能由其他 crate
+/// module 伪造。OFD 本身由 process-lifetime holder 保留至真实 exit。
+pub(crate) struct StandaloneLifecycleOwner {
+    // 保留首次 legacy acquisition，stable OFD 则由 process-lifetime holder
+    // 持有至 exit；下层 coordinator 只借用本 witness，绝不再次 flock。
+    _legacy_acquisition: Option<ReplacementCoordinatorGuard>,
+}
+
+#[cfg(test)]
+impl StandaloneLifecycleOwner {
+    /// 仅供 crate 内直接入口测试：生产 Companion 必须经 process admission
+    /// 取得 owner，测试构造器不会编入生产目标。
+    pub(crate) const fn for_test() -> Self {
+        Self {
+            _legacy_acquisition: None,
+        }
+    }
+}
+
+pub(crate) fn acquire_standalone_lifecycle_owner() -> Result<StandaloneLifecycleOwner, ()> {
+    let guard = ReplacementCoordinatorGuard::acquire(None).map_err(|_| ())?;
+    Ok(StandaloneLifecycleOwner {
+        _legacy_acquisition: Some(guard),
+    })
 }
 
 fn run(
@@ -99,7 +115,6 @@ fn run(
     metadata: &TrustedProbeInstallMetadata,
     identity: &TrustedProbeInstallPreflight,
     production_root: Option<&Path>,
-    adopted_parent_owner: bool,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::ReplacementEnrollment {
         enrollment_token,
@@ -186,7 +201,6 @@ fn run(
         intent,
         registration_binding,
         production_root,
-        adopted_parent_owner,
     )
 }
 
@@ -196,7 +210,6 @@ fn coordinate_inspected_replacement(
     intent: ReplacementIntent,
     registration_binding: enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding,
     production_root: Option<&Path>,
-    adopted_parent_owner: bool,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::ReplacementEnrollment {
         enrollment_token,
@@ -208,13 +221,10 @@ fn coordinate_inspected_replacement(
     else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
-    if !adopted_parent_owner {
-        let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root) else {
-            return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
-        };
-        if let Some(response) = resume_committed_from_exact_request(request, production_root) {
-            return response;
-        }
+    // inspection/Hub 之后再次读取同一 custody：它既覆盖 process admission
+    // 后的已提交恢复，也使检查期间出现的 commit 不能被当作新 migration。
+    if let Some(response) = resume_committed_from_exact_request(request, production_root) {
+        return response;
     }
     let metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
     let current_metadata = match read_trusted_probe_install_metadata(&metadata_path, None) {
@@ -272,6 +282,28 @@ fn coordinate_inspected_replacement(
     })
 }
 
+#[cfg(test)]
+fn coordinate_inspected_replacement_for_test(
+    request: &LifecycleRequest,
+    claimed_authority: &crate::registration::ProbeReplacementAuthorization,
+    intent: ReplacementIntent,
+    registration_binding: enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding,
+    production_root: Option<&Path>,
+) -> LifecycleResponse {
+    // 测试重现 coordinator 与并发 commit 的真实 lock 边界；该入口不会编入
+    // production，production replacement 只能携带 fd9 admission witness。
+    let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root) else {
+        return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
+    };
+    coordinate_inspected_replacement(
+        request,
+        claimed_authority,
+        intent,
+        registration_binding,
+        production_root,
+    )
+}
+
 fn prepare_registration_attempt_then_commit(
     attempt_path: &Path,
     attempt_input: crate::registration::RootReplacementRegistrationAttemptInput,
@@ -321,7 +353,7 @@ fn post_inspection_source_remains_exact(
 /// activation process. The lock is intentionally not authority: a fresh holder
 /// always re-reads every durable fact.
 pub(super) struct ReplacementCoordinatorGuard {
-    _file: File,
+    _file: Option<File>,
 }
 
 impl ReplacementCoordinatorGuard {
@@ -339,6 +371,12 @@ impl ReplacementCoordinatorGuard {
         production_root: Option<&Path>,
         create_if_missing: bool,
     ) -> Result<Self, std::io::Error> {
+        #[cfg(not(test))]
+        if PROCESS_LIFETIME_LEGACY.get().is_some() {
+            // Standalone process 已在 admission 取得 legacy→stable owner；
+            // 下层 uninstall/recovery coordinator 只能借用，不能重取。
+            return Ok(Self { _file: None });
+        }
         let path = production_path(REPLACEMENT_COORDINATOR_LOCK_PATH, production_root);
         let parent = path.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing lock parent")
@@ -413,7 +451,7 @@ impl ReplacementCoordinatorGuard {
                     ));
                 }
                 retain_process_lifecycle_owner(&file, production_root)?;
-                return Ok(Self { _file: file });
+                return Ok(Self { _file: Some(file) });
             }
             if Instant::now() >= deadline {
                 return Err(std::io::Error::new(
@@ -457,11 +495,7 @@ fn retain_process_lifecycle_owner(
     }
     // SAFETY: successful directory open transfers one descriptor.
     let directory = unsafe { File::from_raw_fd(directory_fd) };
-    let directory_metadata = directory.metadata()?;
-    if !directory_metadata.is_dir()
-        || directory_metadata.uid() != 0
-        || directory_metadata.gid() != 0
-    {
+    if !stable_lock_parent_is_current(&directory)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "invalid stable lock parent",
@@ -498,7 +532,9 @@ fn retain_process_lifecycle_owner(
         }
         _ => return Err(std::io::Error::last_os_error()),
     };
-    if !stable_matches_directory_entry(&directory, &stable)? {
+    if !stable_lock_parent_is_current(&directory)?
+        || !stable_matches_directory_entry(&directory, &stable)?
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "invalid stable lifecycle lock",
@@ -507,7 +543,9 @@ fn retain_process_lifecycle_owner(
     if unsafe { libc::flock(stable.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if !stable_matches_directory_entry(&directory, &stable)? {
+    if !stable_lock_parent_is_current(&directory)?
+        || !stable_matches_directory_entry(&directory, &stable)?
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "stable lifecycle lock generation was retired",
@@ -521,6 +559,21 @@ fn retain_process_lifecycle_owner(
         .set(legacy)
         .map_err(|_| std::io::Error::other("legacy owner already set"))?;
     Ok(())
+}
+
+#[cfg(not(test))]
+fn stable_lock_parent_is_current(directory: &File) -> Result<bool, std::io::Error> {
+    let held = directory.metadata()?;
+    let current = fs::symlink_metadata("/run/lock")?;
+    Ok(held.is_dir()
+        && held.uid() == 0
+        && held.gid() == 0
+        && !current.file_type().is_symlink()
+        && current.is_dir()
+        && current.uid() == 0
+        && current.gid() == 0
+        && held.dev() == current.dev()
+        && held.ino() == current.ino())
 }
 
 #[cfg(not(test))]
@@ -1109,13 +1162,12 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            coordinate_inspected_replacement(
+            coordinate_inspected_replacement_for_test(
                 &request,
                 &authority,
                 new_intent,
                 binding,
                 Some(&root),
-                false,
             )
         });
         started_rx.recv().unwrap();
@@ -1316,13 +1368,12 @@ mod tests {
             b"retained old installation metadata"
         );
 
-        let post_inspection = coordinate_inspected_replacement(
+        let post_inspection = coordinate_inspected_replacement_for_test(
             &request,
             &replacement_authority(&committed_intent),
             committed_intent.clone(),
             committed_intent.registration_binding().unwrap(),
             Some(temporary.path()),
-            false,
         );
         assert_eq!(
             post_inspection,

@@ -24,6 +24,7 @@ const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.
 const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/install/tests.rs");
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
+const BOOTSTRAP_ACTIVATION: &str = include_str!("../../probe-bootstrap/src/activation.rs");
 
 use syn::{Attribute, ForeignItem, ImplItem, Item, Visibility};
 
@@ -936,6 +937,40 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
     assert!(
         !dispatch.contains("replacement::coordinate("),
         "Replacement coordinator 只能由已完成 fd9 admission 的 private witness 进入",
+    );
+    assert!(
+        LIFECYCLE_COMPANION_PROCESS.contains("run_adopted_replacement_child(lease, &request)")
+            && UPGRADER.contains("witness: crate::lifecycle_companion::AdoptedReplacementChild")
+            && UPGRADER.contains("replacement::coordinate(witness, request)")
+            && REPLACEMENT_COORDINATOR
+                .contains("_admission: crate::lifecycle_companion::AdoptedReplacementChild"),
+        "所有 production Replacement caller 必须以 private fd9 admission witness 闭合",
+    );
+    assert!(
+        REPLACEMENT_COORDINATOR.contains("fn coordinate_with_owner(request: &LifecycleRequest)")
+            && !REPLACEMENT_COORDINATOR.contains("adopted_parent_owner: bool"),
+        "Replacement coordinator 不得以可伪造 bool 表达 owner authority",
+    );
+    let bootstrap_entry = BOOTSTRAP_ACTIVATION
+        .split("pub fn activate_from_stdin")
+        .nth(1)
+        .expect("Bootstrap stdin production entry");
+    assert!(
+        bootstrap_entry.find("BootstrapLifecycleOwner::acquire()")
+            < bootstrap_entry.find("reconcile_exact_orphan_companion()")
+            && bootstrap_entry.find("reconcile_exact_orphan_companion()")
+                < bootstrap_entry.find("receive_root_handoff_with_policy("),
+        "Bootstrap production entry 必须在 handoff/read/effect 前取得 owner，再执行 R1",
+    );
+    let terminal = LIFECYCLE_COMPANION_PROCESS
+        .split("fn write_terminal_response")
+        .nth(1)
+        .expect("terminal writer");
+    assert!(
+        terminal.find("write_all(prefix)") < terminal.find("finalize_lifecycle_companion_binary()")
+            && terminal.find("finalize_lifecycle_companion_binary()")
+                < terminal.find("write_all(&[last])"),
+        "terminal success 必须 prefix flush→self-unlink→exact final byte",
     );
 
     let interfaces = [

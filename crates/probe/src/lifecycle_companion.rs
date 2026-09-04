@@ -4,7 +4,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::{
-        fd::{FromRawFd, RawFd},
+        fd::{AsRawFd, FromRawFd, RawFd},
         unix::fs::MetadataExt,
     },
     process::ExitCode,
@@ -23,7 +23,8 @@ use crate::upgrader::{
 
 const LEASE_MARKER: &str = "ENOKI_LIFECYCLE_LEASE_FD";
 const LEASE_FD: RawFd = 9;
-const STABLE_LOCK: &str = "/run/lock/enoki-probe-lifecycle.lock";
+const RUN_LOCK_DIRECTORY: &[u8] = b"/run/lock\0";
+const STABLE_LOCK_NAME: &[u8] = b"enoki-probe-lifecycle.lock\0";
 
 /// 唯一 production Companion process interface。
 #[doc(hidden)]
@@ -49,7 +50,7 @@ enum CompanionSource {
     NoInheritedMarker,
     AdoptedReplacementChild(AdoptedReplacementChild),
 }
-struct AdoptedReplacementChild {
+pub(crate) struct AdoptedReplacementChild {
     fd: RawFd,
 }
 
@@ -100,6 +101,9 @@ fn adopt_replacement_child() -> Result<AdoptedReplacementChild, ()> {
     }
     validate_stable_lock(LEASE_FD)?;
     validate_fdinfo(LEASE_FD)?;
+    // fdinfo/OFD relation 验证后、任何 coordinator durable read 前再次闭合
+    // parent pathname 与 fixed entry，拒绝中途替换的 lock generation。
+    validate_stable_lock(LEASE_FD)?;
     if unsafe { libc::fcntl(LEASE_FD, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
         return Err(());
     }
@@ -107,23 +111,51 @@ fn adopt_replacement_child() -> Result<AdoptedReplacementChild, ()> {
 }
 
 fn validate_stable_lock(fd: RawFd) -> Result<(), ()> {
-    let parent = fs::symlink_metadata("/run/lock").map_err(|_| ())?;
-    if !parent.is_dir() || parent.file_type().is_symlink() || parent.uid() != 0 || parent.gid() != 0
+    let parent_fd = unsafe {
+        libc::open(
+            RUN_LOCK_DIRECTORY.as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if parent_fd < 0 {
+        return Err(());
+    }
+    let parent = unsafe { fs::File::from_raw_fd(parent_fd) };
+    let held_parent = parent.metadata().map_err(|_| ())?;
+    let path_parent = fs::symlink_metadata("/run/lock").map_err(|_| ())?;
+    if !held_parent.is_dir()
+        || held_parent.uid() != 0
+        || held_parent.gid() != 0
+        || path_parent.file_type().is_symlink()
+        || held_parent.dev() != path_parent.dev()
+        || held_parent.ino() != path_parent.ino()
     {
         return Err(());
     }
-    let path = fs::symlink_metadata(STABLE_LOCK).map_err(|_| ())?;
     let duplicate = unsafe { libc::dup(fd) };
     if duplicate < 0 {
         return Err(());
     }
     let file = unsafe { fs::File::from_raw_fd(duplicate) };
     let held = file.metadata().map_err(|_| ())?;
-    if !canonical_lock(&path)
+    let mut entry: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            STABLE_LOCK_NAME.as_ptr().cast(),
+            &mut entry,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
         || !canonical_lock(&held)
-        || path.file_type().is_symlink()
-        || path.dev() != held.dev()
-        || path.ino() != held.ino()
+        || entry.st_mode & libc::S_IFMT != libc::S_IFREG
+        || entry.st_uid != 0
+        || entry.st_gid != 0
+        || entry.st_nlink != 1
+        || entry.st_size != 0
+        || entry.st_mode & 0o7777 != 0o600
+        || held.dev() != entry.st_dev
+        || held.ino() != entry.st_ino
     {
         return Err(());
     }
@@ -201,8 +233,16 @@ fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
                 invalid_authority()
             }
             CompanionSource::NoInheritedMarker => {
+                let _owner = match crate::upgrader::acquire_standalone_lifecycle_owner() {
+                    Ok(owner) => owner,
+                    Err(()) => {
+                        return write_response(LifecycleResponse::failed(
+                            "lifecycle.invalid_authority",
+                        ));
+                    }
+                };
                 let mut transport = HttpProbeUpgraderValidationTransport;
-                write_terminal_response(resume_lifecycle_companion(&mut transport))
+                write_terminal_response(resume_lifecycle_companion(&_owner, &mut transport))
             }
         };
     }
@@ -219,7 +259,7 @@ fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
             {
                 return invalid_authority();
             }
-            write_response(run_adopted_replacement_child(&request))
+            write_response(run_adopted_replacement_child(lease, &request))
         }
         CompanionSource::NoInheritedMarker => {
             if request.transition() == LifecycleTransition::ReplacementMigration {
@@ -231,14 +271,22 @@ fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
             if !caller_is_authorized(request.authority(), peer_uid, process_uid) {
                 return invalid_authority();
             }
+            let owner = match crate::upgrader::acquire_standalone_lifecycle_owner() {
+                Ok(owner) => owner,
+                Err(()) => {
+                    return write_response(LifecycleResponse::failed(
+                        "lifecycle.invalid_authority",
+                    ));
+                }
+            };
             if mode == CompanionMode::Upgrade {
                 write_response(run_upgrade_lifecycle_companion_from_peer(
-                    &request, peer_uid,
+                    &owner, &request, peer_uid,
                 ))
             } else {
                 let mut transport = HttpProbeUpgraderValidationTransport;
                 let response =
-                    run_lifecycle_companion_from_peer(&request, &mut transport, peer_uid);
+                    run_lifecycle_companion_from_peer(&owner, &request, &mut transport, peer_uid);
                 if request.transition() == LifecycleTransition::Uninstall {
                     write_terminal_response(response)
                 } else {
@@ -323,15 +371,21 @@ fn write_terminal_response(response: LifecycleResponse) -> ExitCode {
     }
     let frame = response.encode();
     let mut stdout = std::io::stdout();
+    let Some((&last, prefix)) = frame.split_last() else {
+        return ExitCode::from(1);
+    };
     if stdout
-        .write_all(&frame)
+        .write_all(prefix)
         .and_then(|()| stdout.flush())
         .is_err()
     {
         return ExitCode::from(1);
     }
     if crate::upgrader::finalize_lifecycle_companion_binary() {
-        return ExitCode::SUCCESS;
+        return match stdout.write_all(&[last]).and_then(|()| stdout.flush()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
     }
     let _ = stdout.write_all(b"\n").and_then(|()| stdout.flush());
     ExitCode::from(1)

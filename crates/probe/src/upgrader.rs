@@ -1116,6 +1116,7 @@ fn read_probe_repair_identity_with_file_metadata(
 }
 
 pub(crate) fn run_lifecycle_companion_from_peer(
+    _owner: &replacement::StandaloneLifecycleOwner,
     request: &LifecycleRequest,
     transport: &mut impl ProbeUpgraderValidationTransport,
     peer_uid: Option<u32>,
@@ -1126,6 +1127,11 @@ pub(crate) fn run_lifecycle_companion_from_peer(
         peer_uid,
         EffectiveUid::process(),
     )
+}
+
+pub(crate) fn acquire_standalone_lifecycle_owner()
+-> Result<replacement::StandaloneLifecycleOwner, ()> {
+    replacement::acquire_standalone_lifecycle_owner()
 }
 
 #[derive(Clone, Copy)]
@@ -1172,13 +1178,17 @@ fn run_lifecycle_companion_from_peer_with_effective_uid(
 
 /// 仅供已完成 fd9 admission 的 Companion process invocation 使用。source
 /// witness 不可跨此 crate 边界，因而没有第二个外部 Replacement 入口。
-pub(crate) fn run_adopted_replacement_child(request: &LifecycleRequest) -> LifecycleResponse {
-    replacement::coordinate(request)
+pub(crate) fn run_adopted_replacement_child(
+    witness: crate::lifecycle_companion::AdoptedReplacementChild,
+    request: &LifecycleRequest,
+) -> LifecycleResponse {
+    replacement::coordinate(witness, request)
 }
 
 /// 固定 `--upgrade` CLI Adapter 只接受 Compatible Upgrade，并与 socket
 /// companion 入口进入同一个 Probe Bootstrap coordinator。
 pub(crate) fn run_upgrade_lifecycle_companion_from_peer(
+    _owner: &replacement::StandaloneLifecycleOwner,
     request: &LifecycleRequest,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
@@ -1232,14 +1242,12 @@ pub(crate) fn finalize_lifecycle_companion_binary() -> bool {
 /// canonical capsule。capsule 已提交删除时，唯一剩余动作是自删除固定
 /// Companion binary。
 pub(crate) fn resume_lifecycle_companion(
+    _owner: &replacement::StandaloneLifecycleOwner,
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> LifecycleResponse {
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
-    let Ok(_guard) = replacement::ReplacementCoordinatorGuard::acquire_existing(None) else {
-        return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
-    };
     resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Path::new(PRODUCTION_INSTALL_STATE_DIR),
