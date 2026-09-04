@@ -303,21 +303,24 @@ fn validate_owned_bootstrap_assets_for_recovery_with_repair(
 /// 且通过固定 catalog 深验证的 orphan 才进入 executor cleanup plan。
 fn validate_unbound_installed_bundle_repair_stage()
 -> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
+    // State root 不存在即可只读证明 intent 不存在；一旦 state 存在，必须在观察
+    // stage 之前通过现有 recovery loader 加锁并完整验证 intent。
+    let persisted_repair = match fs::symlink_metadata("/var/lib/enoki-probe") {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
+        Ok(_) => crate::runtime_failure::resume_installed_bundle_repair()
+            .map(|repair| repair.is_some())
+            .map_err(|_| {
+                ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Installed Bundle Repair intent is invalid",
+                )
+            }),
+    };
     let stage_present = match fs::symlink_metadata(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
         Ok(_) => true,
     };
-    if !stage_present {
-        return Ok(None);
-    }
-    let persisted_repair = crate::runtime_failure::resume_installed_bundle_repair()
-        .map(|repair| repair.is_some())
-        .map_err(|_| {
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Installed Bundle Repair intent is invalid",
-            )
-        });
     classify_uninstall_repair_stage(stage_present, persisted_repair, || {
         validate_unadmitted_installed_bundle_repair_stage().map_err(|_| {
             ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -332,13 +335,11 @@ fn classify_uninstall_repair_stage(
     persisted_repair: Result<bool, ProbeUpgraderRunError>,
     validate_unbound: impl FnOnce() -> Result<(Option<String>, u32), ProbeUpgraderRunError>,
 ) -> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
-    if !stage_present {
-        return Ok(None);
-    }
     match persisted_repair? {
         true => Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Installed Bundle Repair recovery must finish before uninstall",
         )),
+        false if !stage_present => Ok(None),
         false => validate_unbound().map(Some),
     }
 }
@@ -1970,6 +1971,12 @@ mod tests {
 
     #[test]
     fn final_uninstall_defers_bound_repair_and_retires_only_a_validated_orphan() {
+        assert!(
+            classify_uninstall_repair_stage(false, Ok(true), || {
+                panic!("persisted repair without a stage must still defer uninstall")
+            })
+            .is_err()
+        );
         assert!(
             classify_uninstall_repair_stage(true, Ok(true), || {
                 panic!("bound stage must not enter orphan validation")
