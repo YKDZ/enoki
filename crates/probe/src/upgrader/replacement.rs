@@ -45,7 +45,7 @@ const REPLACEMENT_COORDINATOR_LOCK_BUDGET: Duration = Duration::from_secs(90);
 #[cfg(not(test))]
 static PROCESS_LIFETIME_LEGACY: OnceLock<File> = OnceLock::new();
 #[cfg(not(test))]
-static PROCESS_LIFETIME_STABLE: OnceLock<File> = OnceLock::new();
+static PROCESS_LIFETIME_STABLE: OnceLock<StableLifecycleLock> = OnceLock::new();
 
 /// Bootstrap parent 保留 legacy + stable owner 时，sealed child 只可带着
 /// 已验证的 fd9 witness 进入本分支；它绝不重取 legacy lock。
@@ -87,7 +87,40 @@ pub(crate) struct StandaloneLifecycleOwner {
     // 保留首次 legacy acquisition，stable OFD 则由 process-lifetime holder
     // 持有至 exit；下层 coordinator 只借用本 witness，绝不再次 flock。
     _legacy_acquisition: Option<ReplacementCoordinatorGuard>,
-    _stable: File,
+    stable: StableLifecycleLock,
+}
+
+struct StableLifecycleLock {
+    parent: File,
+    file: File,
+    #[cfg(test)]
+    validate: bool,
+}
+
+impl StableLifecycleLock {
+    fn try_clone(&self) -> Result<Self, std::io::Error> {
+        Ok(Self {
+            parent: self.parent.try_clone()?,
+            file: self.file.try_clone()?,
+            #[cfg(test)]
+            validate: self.validate,
+        })
+    }
+
+    fn validate(&self) -> Result<(), std::io::Error> {
+        #[cfg(test)]
+        if !self.validate {
+            return Ok(());
+        }
+        if !stable_lock_parent_is_current(&self.parent)?
+            || !stable_matches_directory_entry(&self.parent, &self.file)?
+        {
+            return Err(std::io::Error::other(
+                "stable lifecycle lock generation was retired",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -97,8 +130,18 @@ impl StandaloneLifecycleOwner {
     pub(crate) fn for_test() -> Self {
         Self {
             _legacy_acquisition: None,
-            _stable: tempfile::tempfile().expect("test stable owner"),
+            stable: StableLifecycleLock {
+                parent: tempfile::tempfile().expect("test stable parent"),
+                file: tempfile::tempfile().expect("test stable owner"),
+                validate: false,
+            },
         }
+    }
+}
+
+impl StandaloneLifecycleOwner {
+    pub(super) fn validate_stable(&self) -> Result<(), ()> {
+        self.stable.validate().map_err(|_| ())
     }
 }
 
@@ -115,7 +158,7 @@ pub(super) fn acquire_standalone_lifecycle_owner_at(
         match ReplacementCoordinatorGuard::acquire_until(production_root, false, deadline) {
             Ok(guard) => {
                 return Ok(StandaloneLifecycleOwner {
-                    _stable: guard.stable.try_clone().map_err(|_| ())?,
+                    stable: guard.stable.try_clone().map_err(|_| ())?,
                     _legacy_acquisition: Some(guard),
                 });
             }
@@ -123,15 +166,10 @@ pub(super) fn acquire_standalone_lifecycle_owner_at(
                 let stable = acquire_stable_lifecycle_lock(deadline).map_err(|_| ())?;
                 match fs::symlink_metadata(&legacy_path) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        let state = legacy_path.parent().ok_or(())?;
-                        match fs::symlink_metadata(state) {
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                            _ => return Err(()),
-                        }
                         retain_stable_to_process_exit(&stable).map_err(|_| ())?;
                         return Ok(StandaloneLifecycleOwner {
                             _legacy_acquisition: None,
-                            _stable: stable,
+                            stable,
                         });
                     }
                     Ok(_) => drop(stable),
@@ -387,10 +425,14 @@ fn post_inspection_source_remains_exact(
 /// always re-reads every durable fact.
 pub(super) struct ReplacementCoordinatorGuard {
     _file: Option<File>,
-    stable: File,
+    stable: StableLifecycleLock,
 }
 
 impl ReplacementCoordinatorGuard {
+    pub(super) fn validate_stable(&self) -> Result<(), std::io::Error> {
+        self.stable.validate()
+    }
+
     #[cfg(test)]
     pub(super) fn acquire(production_root: Option<&Path>) -> Result<Self, std::io::Error> {
         Self::acquire_with(production_root, true)
@@ -539,7 +581,7 @@ impl Drop for ReplacementCoordinatorGuard {
 fn retain_process_lifecycle_owner(
     legacy: &File,
     deadline: Instant,
-) -> Result<File, std::io::Error> {
+) -> Result<StableLifecycleLock, std::io::Error> {
     #[cfg(test)]
     let _ = legacy;
     #[cfg(not(test))]
@@ -560,7 +602,7 @@ fn retain_process_lifecycle_owner(
     Ok(stable)
 }
 
-fn open_stable_lifecycle_lock(deadline: Instant) -> Result<File, std::io::Error> {
+fn open_stable_lifecycle_lock(deadline: Instant) -> Result<StableLifecycleLock, std::io::Error> {
     let directory_fd = unsafe {
         libc::open(
             RUN_LOCK_DIRECTORY.as_ptr().cast(),
@@ -637,10 +679,15 @@ fn open_stable_lifecycle_lock(deadline: Instant) -> Result<File, std::io::Error>
             "stable lifecycle lock generation was retired",
         ));
     }
-    Ok(stable)
+    Ok(StableLifecycleLock {
+        parent: directory,
+        file: stable,
+        #[cfg(test)]
+        validate: true,
+    })
 }
 
-fn retain_stable_to_process_exit(stable: &File) -> Result<(), std::io::Error> {
+fn retain_stable_to_process_exit(stable: &StableLifecycleLock) -> Result<(), std::io::Error> {
     #[cfg(test)]
     let _ = stable;
     #[cfg(not(test))]
@@ -650,7 +697,7 @@ fn retain_stable_to_process_exit(stable: &File) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn acquire_stable_lifecycle_lock(deadline: Instant) -> Result<File, std::io::Error> {
+fn acquire_stable_lifecycle_lock(deadline: Instant) -> Result<StableLifecycleLock, std::io::Error> {
     open_stable_lifecycle_lock(deadline)
 }
 

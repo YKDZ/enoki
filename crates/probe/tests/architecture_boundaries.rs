@@ -954,7 +954,10 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
     let bootstrap_entry = BOOTSTRAP_ACTIVATION
         .split("fn activate_from_stdin")
         .nth(1)
-        .expect("Bootstrap stdin production entry");
+        .expect("Bootstrap stdin production entry")
+        .split("/// 私有 socket")
+        .next()
+        .expect("Bootstrap stdin production body");
     assert!(
         bootstrap_entry.find("BootstrapLifecycleOwner::acquire()")
             < bootstrap_entry.find("owner.retain_to_process_exit()")
@@ -963,6 +966,16 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
             && bootstrap_entry.find("reconcile_exact_orphan_companion()")
                 < bootstrap_entry.find("receive_root_handoff_with_policy("),
         "Bootstrap production entry 必须在 handoff/read/effect 前取得并保留 owner，再执行 R1",
+    );
+    assert!(
+        bootstrap_entry.find("owner.validate_stable()?")
+            < bootstrap_entry.find("reconcile_exact_orphan_companion()")
+            && bootstrap_entry
+                .rfind("owner.validate_stable()?")
+                .is_some_and(|validation| {
+                    Some(validation) < bootstrap_entry.find("receive_root_handoff_with_policy(")
+                }),
+        "Bootstrap必须在R1与handoff首次durable read前复验同一stable parent/entry generation",
     );
     assert!(
         BOOTSTRAP_ACTIVATION.contains("owner.install_admission(Some(&self._generation_lease))")
@@ -1002,6 +1015,58 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         REPLACEMENT_COORDINATOR.contains("if let Some(stable) = PROCESS_LIFETIME_STABLE.get()")
             && REPLACEMENT_COORDINATOR.contains("stable: stable.try_clone()?"),
         "lower coordinator 必须按 mandatory stable holder 借用 owner，不能按 legacy 是否存在重取",
+    );
+    assert!(
+        UPGRADER.contains("if owner.validate_stable().is_err()")
+            && UNINSTALL.contains("if guard.validate_stable().is_err()")
+            && UNINSTALL.contains("if owner.validate_stable().is_err()")
+            && BOOTSTRAP_ACTIVATION.contains("owner.validate_stable()?;")
+            && BOOTSTRAP_ACTIVATION.contains("parent: self.parent.try_clone()?")
+            && REPLACEMENT_COORDINATOR.contains("parent: self.parent.try_clone()?"),
+        "每个Bootstrap/Standalone flow必须保留stable parent fd并在首次durable read前复验，不得reopen/flock",
+    );
+    let replacement_parent = BOOTSTRAP_ACTIVATION
+        .split("fn activate_fixed_current_probe(")
+        .nth(1)
+        .expect("Replacement parent continuation")
+        .split("fn component(")
+        .next()
+        .expect("Replacement parent continuation body");
+    assert!(
+        replacement_parent.find("owner.validate_stable()?")
+            < replacement_parent.find("prepare_replacement_migration("),
+        "Replacement parent必须在锁后重读commit/custody前复验stable generation",
+    );
+    let bootstrap_retirement = UNINSTALL_CLEANUP
+        .split("fn remove_owned_bootstrap_state(")
+        .nth(1)
+        .expect("Bootstrap state retirement")
+        .split("fn sync_and_verify_bootstrap_state_retired(")
+        .next()
+        .expect("Bootstrap retirement body");
+    let bootstrap_durability = UNINSTALL_CLEANUP
+        .split("fn sync_and_verify_bootstrap_state_retired(")
+        .nth(1)
+        .expect("Bootstrap state durability proof");
+    let capsule_retirement = UNINSTALL
+        .split("fn commit_lifecycle_capsule_with(")
+        .nth(1)
+        .expect("capsule retirement")
+        .split("fn lifecycle_response_from_resume_decision(")
+        .next()
+        .expect("capsule retirement body");
+    assert!(
+        bootstrap_retirement.find("fs::remove_dir(path)")
+            < bootstrap_retirement.rfind("sync_and_verify_bootstrap_state_retired(path)")
+            && bootstrap_durability.find("sync_directory(parent)?")
+                < bootstrap_durability.find("verify_path_absent(")
+            && UNINSTALL
+                .contains("self.finalize_with_durability(systemd, remove_capsule, sync_directory)",)
+            && capsule_retirement.find("remove(capsule_path)?")
+                < capsule_retirement.find("let retirement = sync_parent(parent)")
+            && capsule_retirement.find("let retirement = sync_parent(parent)")
+                < capsule_retirement.find("verify_path_absent("),
+        "state与capsule retirement必须分别unlink→正确parent sync→exact absence proof后才可terminal",
     );
     let terminal = LIFECYCLE_COMPANION_PROCESS
         .split("fn write_terminal_response")

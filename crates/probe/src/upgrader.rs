@@ -1116,11 +1116,14 @@ fn read_probe_repair_identity_with_file_metadata(
 }
 
 pub(crate) fn run_lifecycle_companion_from_peer(
-    _owner: &replacement::StandaloneLifecycleOwner,
+    owner: &replacement::StandaloneLifecycleOwner,
     request: &LifecycleRequest,
     transport: &mut impl ProbeUpgraderValidationTransport,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
+    if owner.validate_stable().is_err() {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    }
     run_lifecycle_companion_from_peer_with_effective_uid(
         request,
         transport,
@@ -1188,10 +1191,13 @@ pub(crate) fn run_adopted_replacement_child(
 /// 固定 `--upgrade` CLI Adapter 只接受 Compatible Upgrade，并与 socket
 /// companion 入口进入同一个 Probe Bootstrap coordinator。
 pub(crate) fn run_upgrade_lifecycle_companion_from_peer(
-    _owner: &replacement::StandaloneLifecycleOwner,
+    owner: &replacement::StandaloneLifecycleOwner,
     request: &LifecycleRequest,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
+    if owner.validate_stable().is_err() {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    }
     run_upgrade_lifecycle_companion_from_peer_with_effective_uid(
         request,
         peer_uid,
@@ -1242,11 +1248,14 @@ pub(crate) fn finalize_lifecycle_companion_binary() -> bool {
 /// canonical capsule。capsule 已提交删除时，唯一剩余动作是自删除固定
 /// Companion binary。
 pub(crate) fn resume_lifecycle_companion(
-    _owner: &replacement::StandaloneLifecycleOwner,
+    owner: &replacement::StandaloneLifecycleOwner,
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> LifecycleResponse {
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    if owner.validate_stable().is_err() {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
     }
     resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),

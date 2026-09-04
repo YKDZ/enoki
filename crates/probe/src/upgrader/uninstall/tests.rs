@@ -354,12 +354,17 @@ fn recovery_metadata(root: &Path) -> TrustedProbeInstallMetadata {
 fn lifecycle_commit_deletes_only_the_capsule_before_process_self_finalization() {
     let capsule = Path::new("/etc/enoki/probe-uninstall.capsule");
     let mut calls = Vec::new();
-    let result = commit_lifecycle_capsule_with(capsule, |path| {
-        calls.push(path.to_path_buf());
-        Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-            "injected ordinary transaction failure",
-        )))
-    });
+    let result = commit_lifecycle_capsule_with(
+        capsule,
+        |path| {
+            calls.push(path.to_path_buf());
+            Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                "injected ordinary transaction failure",
+            )))
+        },
+        |_| Ok(()),
+        || Ok(()),
+    );
     assert!(result.is_err());
     assert_eq!(calls, [capsule]);
 }
@@ -1053,6 +1058,19 @@ fn production_recovery_resumes_when_capsule_retirement_fails_before_lock_retirem
 }
 
 fn prepare_state_absent_terminal_capsule(root: &Path) -> PathBuf {
+    let (capsule_path, interrupted) = finalize_terminal_capsule_with(root, |_| {
+        Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+            "injected capsule unlink failure",
+        )))
+    });
+    assert!(interrupted.is_err());
+    capsule_path
+}
+
+fn finalize_terminal_capsule_with(
+    root: &Path,
+    remove_capsule: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> (PathBuf, Result<(), ProbeUpgraderRunError>) {
     let fixture = uninstall_coordinator_fixture(root);
     fs::write(
         &fixture.metadata_path,
@@ -1085,15 +1103,102 @@ fn prepare_state_absent_terminal_capsule(root: &Path) -> PathBuf {
         .expect("acknowledge terminal capsule");
     let capsule_path = mechanics.capsule_path.clone();
 
-    let interrupted = mechanics.finalize(&mut systemd, |_| {
-        Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-            "injected capsule unlink failure",
-        )))
-    });
-    assert!(interrupted.is_err());
+    let result = mechanics.finalize(&mut systemd, remove_capsule);
     drop(mechanics);
     drop(guard);
-    capsule_path
+    (capsule_path, result)
+}
+
+#[test]
+fn production_recovery_accepts_the_same_operation_before_bootstrap_root_retirement() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let capsule_path = prepare_state_absent_terminal_capsule(temporary.path());
+    let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
+    fs::create_dir(&bootstrap_state).expect("root-removal interruption residue");
+    fs::set_permissions(&bootstrap_state, fs::Permissions::from_mode(0o700))
+        .expect("canonical partial state mode");
+    assert_eq!(
+        read_uninstall_capsule(&capsule_path)
+            .expect("read retained capsule")
+            .expect("exact capsule remains authoritative")
+            .phase,
+        UninstallCapsulePhase::TerminalAcknowledged
+    );
+
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    let response = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+}
+
+#[test]
+fn capsule_parent_sync_failure_stays_nonterminal_and_the_next_recovery_converges() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    fs::write(
+        &fixture.metadata_path,
+        crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
+    )
+    .expect("schema five install metadata");
+    fs::set_permissions(&fixture.metadata_path, fs::Permissions::from_mode(0o600))
+        .expect("install metadata mode");
+    fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
+        .expect("identity mode");
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
+    let request = local_uninstall_request();
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: fixture.identity_path.clone(),
+    };
+    let guard = ReplacementCoordinatorGuard::acquire_existing(Some(temporary.path()))
+        .expect("acquire canonical lifecycle generation");
+    let intent =
+        LocalUninstallIntent::classify(&request, &input, &fixture.metadata, &fixture.metadata_path)
+            .expect("classify local uninstall under the production guard");
+    let mut mechanics = intent.mechanics;
+    let mut systemd = RecordingSystemdRunner::default();
+    mechanics
+        .persist_verified()
+        .expect("persist verified capsule");
+    mechanics.prepare(&mut systemd).expect("prepare uninstall");
+    mechanics
+        .acknowledge_terminal()
+        .expect("acknowledge terminal capsule");
+    let mut sync_calls = 0;
+    let interrupted =
+        mechanics.finalize_with_durability(&mut systemd, remove_path_if_exists, |_| {
+            sync_calls += 1;
+            if sync_calls == 1 {
+                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                    "injected capsule parent sync failure",
+                )))
+            } else {
+                Ok(())
+            }
+        });
+    assert!(interrupted.is_err());
+    assert_eq!(sync_calls, 2, "rollback capsule must also become durable");
+    drop(mechanics);
+    drop(guard);
+
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    let response = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
 }
 
 #[test]

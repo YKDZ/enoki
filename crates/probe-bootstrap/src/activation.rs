@@ -108,13 +108,52 @@ pub fn run_bootstrap_activate_process() -> ExitCode {
 /// descriptor 都只由 kernel 在进程退出时释放，不能由 child 重新取得。
 struct BootstrapLifecycleOwner {
     _legacy: Option<ActivationLock>,
-    stable: File,
+    stable: StableLifecycleLock,
+}
+
+struct StableLifecycleLock {
+    parent: File,
+    file: File,
+    #[cfg(test)]
+    validate: bool,
+}
+
+impl StableLifecycleLock {
+    fn try_clone(&self) -> Result<Self, io::Error> {
+        Ok(Self {
+            parent: self.parent.try_clone()?,
+            file: self.file.try_clone()?,
+            #[cfg(test)]
+            validate: self.validate,
+        })
+    }
+
+    fn validate(&self) -> Result<(), ActivationError> {
+        #[cfg(test)]
+        if !self.validate {
+            return Ok(());
+        }
+        if !stable_lock_parent_is_current(&self.parent)?
+            || !stable_lock_matches_parent_entry(&self.parent, &self.file)?
+        {
+            return Err(ActivationError::Io);
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for StableLifecycleLock {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
 }
 
 #[cfg(not(test))]
 static PROCESS_LIFETIME_BOOTSTRAP_LEGACY: OnceLock<Option<ActivationLock>> = OnceLock::new();
 #[cfg(not(test))]
-static PROCESS_LIFETIME_BOOTSTRAP_STABLE: OnceLock<File> = OnceLock::new();
+static PROCESS_LIFETIME_BOOTSTRAP_STABLE: OnceLock<StableLifecycleLock> = OnceLock::new();
 
 /// 只可由 Bootstrap process owner 的私有字段构造。installer 可消费此类型，
 /// 但无法以任意 File、Option 或 flag 伪造它。
@@ -184,6 +223,10 @@ impl BootstrapLifecycleOwner {
                 generation,
             },
         }
+    }
+
+    fn validate_stable(&self) -> Result<(), ActivationError> {
+        self.stable.validate()
     }
 
     #[cfg(not(test))]
@@ -413,7 +456,7 @@ fn reconcile_exact_orphan_companion_at(
     Ok(())
 }
 
-fn open_stable_lifecycle_lock(deadline: Instant) -> Result<File, ActivationError> {
+fn open_stable_lifecycle_lock(deadline: Instant) -> Result<StableLifecycleLock, ActivationError> {
     let parent_fd = unsafe {
         libc::open(
             RUN_LOCK_DIRECTORY.as_ptr().cast(),
@@ -478,7 +521,12 @@ fn open_stable_lifecycle_lock(deadline: Instant) -> Result<File, ActivationError
     {
         return Err(ActivationError::Io);
     }
-    Ok(file)
+    Ok(StableLifecycleLock {
+        parent,
+        file,
+        #[cfg(test)]
+        validate: true,
+    })
 }
 
 /// `openat` 固定住目录 fd；每次采用 stable entry 前仍确认绝对 parent
@@ -607,12 +655,13 @@ impl ReceivedRootHandoff {
             .as_mut()
             .ok_or(ActivationError::Verification)?;
         let owner = self._lifecycle_owner.as_ref().ok_or(ActivationError::Io)?;
+        owner.validate_stable()?;
         let stable = owner.stable.try_clone().map_err(|_| ActivationError::Io)?;
         let mut replacement_activation = prepare_replacement_migration(
             &self.enrollment,
             &self.bundle,
             &mut self.lifecycle_companion,
-            &stable,
+            &stable.file,
         )?;
         if let ReplacementActivation::CompletePredecessor(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
@@ -642,7 +691,7 @@ impl ReceivedRootHandoff {
                 &self.enrollment,
                 &self.bundle,
                 &mut self.lifecycle_companion,
-                &stable,
+                &stable.file,
             )?;
         }
         if let ReplacementActivation::Complete(commit) = &replacement_activation {
@@ -1163,7 +1212,9 @@ fn activate_from_stdin(input: &mut impl Read) -> Result<ReceivedRootHandoff, Act
     }
     let owner = BootstrapLifecycleOwner::acquire()?;
     owner.retain_to_process_exit()?;
+    owner.validate_stable()?;
     reconcile_exact_orphan_companion()?;
+    owner.validate_stable()?;
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(ActivationError::BuildTrustUnavailable)?;
     receive_root_handoff_with_policy(
@@ -1193,7 +1244,9 @@ fn activate_from_socket(
     }
     let owner = BootstrapLifecycleOwner::acquire()?;
     owner.retain_to_process_exit()?;
+    owner.validate_stable()?;
     reconcile_exact_orphan_companion()?;
+    owner.validate_stable()?;
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(ActivationError::BuildTrustUnavailable)?;
     let policy = VerificationPolicy {
@@ -1571,6 +1624,14 @@ mod tests {
         Some(TestStableLock { file, path })
     }
 
+    fn test_stable_owner() -> StableLifecycleLock {
+        StableLifecycleLock {
+            parent: tempfile::tempfile().unwrap(),
+            file: tempfile::tempfile().unwrap(),
+            validate: false,
+        }
+    }
+
     #[test]
     fn bootstrap_stable_owner_wait_is_bounded() {
         let Some(stable) = hold_test_stable_lock() else {
@@ -1594,7 +1655,7 @@ mod tests {
         .unwrap();
         let owner = BootstrapLifecycleOwner {
             _legacy: Some(legacy),
-            stable: tempfile::tempfile().unwrap(),
+            stable: test_stable_owner(),
         };
 
         owner
@@ -1616,7 +1677,7 @@ mod tests {
         .expect("真实 handoff 已创建并持有 generation state");
         received._lifecycle_owner = Some(BootstrapLifecycleOwner {
             _legacy: None,
-            stable: tempfile::tempfile().unwrap(),
+            stable: test_stable_owner(),
         });
         received
             ._lifecycle_owner

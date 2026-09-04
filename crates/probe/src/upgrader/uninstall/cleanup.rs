@@ -9,7 +9,7 @@ use crate::upgrader::{
     observation_services, preflight_rooted_path, read_trusted_probe_install_metadata_read_only,
     read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
     remove_empty_parent_dir, remove_path_if_exists, replacement::fixed_installed_probe_sha256,
-    verify_path_absent,
+    sync_directory, verify_path_absent,
 };
 use enoki_probe_bootstrap::acquisition::{
     INSTALLED_BUNDLE_REPAIR_STAGE_ROOT, discard_validated_unadmitted_installed_bundle_repair_stage,
@@ -1146,7 +1146,7 @@ pub(super) fn remove_owned_bootstrap_state(
     expected_bundle_version: Option<&str>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
-        return Ok(());
+        return sync_and_verify_bootstrap_state_retired(path);
     }
     validate_owned_bootstrap_state(Some(path), expected_bundle_version)?;
     let activation_lock = path.join("activation.lock");
@@ -1160,7 +1160,22 @@ pub(super) fn remove_owned_bootstrap_state(
         }
     }
     remove_path_if_exists(&activation_lock)?;
-    fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)
+    fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)?;
+    sync_and_verify_bootstrap_state_retired(path)
+}
+
+fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let parent = path
+        .parent()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap state has no parent",
+        ))?;
+    sync_directory(parent)?;
+    verify_path_absent(
+        path,
+        "probe_uninstall_bootstrap_state_residue",
+        "verifying retired Probe Bootstrap state",
+    )
 }
 
 #[cfg(test)]
