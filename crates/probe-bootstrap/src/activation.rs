@@ -661,7 +661,7 @@ impl ReceivedRootHandoff {
             &self.enrollment,
             &self.bundle,
             &mut self.lifecycle_companion,
-            &stable.file,
+            &stable,
         )?;
         if let ReplacementActivation::CompletePredecessor(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
@@ -691,7 +691,7 @@ impl ReceivedRootHandoff {
                 &self.enrollment,
                 &self.bundle,
                 &mut self.lifecycle_companion,
-                &stable.file,
+                &stable,
             )?;
         }
         if let ReplacementActivation::Complete(commit) = &replacement_activation {
@@ -784,7 +784,7 @@ fn prepare_replacement_migration(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     companion: &mut File,
-    stable: &File,
+    stable: &StableLifecycleLock,
 ) -> Result<ReplacementActivation, ActivationError> {
     let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
         .try_exists()
@@ -802,7 +802,14 @@ fn prepare_replacement_migration(
             )
             .map_err(ActivationError::Install)
         },
-        |request| invoke_replacement_companion(request, companion, bundle, stable),
+        |request| {
+            invoke_replacement_companion(request, companion, bundle, &stable.file)?;
+            // child 只有在 canonical response frame、EOF 与成功退出全部成立后
+            // 才会返回；parent 必须在采用 child 产生的 commit/custody 前复验
+            // 同一 held stable generation。
+            stable.validate()?;
+            Ok(())
+        },
     )
 }
 

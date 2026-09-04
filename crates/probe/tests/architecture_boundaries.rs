@@ -1026,16 +1026,18 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         "每个Bootstrap/Standalone flow必须保留stable parent fd并在首次durable read前复验，不得reopen/flock",
     );
     let replacement_parent = BOOTSTRAP_ACTIVATION
-        .split("fn activate_fixed_current_probe(")
+        .split("fn prepare_replacement_migration(")
         .nth(1)
         .expect("Replacement parent continuation")
-        .split("fn component(")
+        .split("enum ReplacementActivation")
         .next()
         .expect("Replacement parent continuation body");
     assert!(
-        replacement_parent.find("owner.validate_stable()?")
-            < replacement_parent.find("prepare_replacement_migration("),
-        "Replacement parent必须在锁后重读commit/custody前复验stable generation",
+        replacement_parent.contains("stable: &StableLifecycleLock")
+            && replacement_parent.find("invoke_replacement_companion(")
+                < replacement_parent.rfind("stable.validate()?;")
+            && replacement_parent.rfind("stable.validate()?;") < replacement_parent.rfind("Ok(())"),
+        "Replacement child返回canonical frame/EOF/success后，parent必须在重读commit/custody前复验同一stable generation",
     );
     let bootstrap_retirement = UNINSTALL_CLEANUP
         .split("fn remove_owned_bootstrap_state(")
