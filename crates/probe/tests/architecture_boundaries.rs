@@ -9,6 +9,7 @@ const DISK_HEALTH_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-disk-health-resource-provider.rs");
 const LIFECYCLE_COMPANION_BINARY: &str =
     include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
+const LIFECYCLE_COMPANION_PROCESS: &str = include_str!("../src/lifecycle_companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
 const REPAIR_COORDINATOR: &str = include_str!("../src/upgrader/repair.rs");
@@ -711,8 +712,9 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         );
     }
 
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("LifecycleRequest::decode"));
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_lifecycle_companion"));
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_lifecycle_companion_process"));
+    assert!(LIFECYCLE_COMPANION_PROCESS.contains("LifecycleRequest::decode"));
+    assert!(LIFECYCLE_COMPANION_PROCESS.contains("run_lifecycle_companion_from_peer"));
     for forbidden in [
         "Command::new",
         "internal-upgrader",
@@ -721,7 +723,7 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         "std::env::var",
     ] {
         assert!(
-            !LIFECYCLE_COMPANION_BINARY.contains(forbidden),
+            !LIFECYCLE_COMPANION_PROCESS.contains(forbidden),
             "Lifecycle Companion 入口不得接受或启动通用执行责任：{forbidden}",
         );
     }
@@ -755,15 +757,19 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
 
 #[test]
 fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechanics() {
-    let recorder_branch = LIFECYCLE_COMPANION_BINARY
-        .find("mode == CompanionMode::RecordRuntimeFailure")
+    let source_admission = LIFECYCLE_COMPANION_PROCESS
+        .find("let source = match inherited_source()")
+        .expect("Companion 必须先完成 inherited source admission");
+    let recorder_branch = LIFECYCLE_COMPANION_PROCESS
+        .find("crate::runtime_failure::record_runtime_failure()")
         .expect("Companion 必须含固定 Runtime failure recorder 分支");
-    let stdin_decode = LIFECYCLE_COMPANION_BINARY
+    let stdin_decode = LIFECYCLE_COMPANION_PROCESS
         .find("read_to_end(&mut bytes)")
         .expect("通用 Companion 仍读取有界 LifecycleRequest");
-    let http_transport = LIFECYCLE_COMPANION_BINARY
+    let http_transport = LIFECYCLE_COMPANION_PROCESS
         .find("let mut transport = HttpProbeUpgraderValidationTransport")
         .expect("通用 Companion 仍有既有 Hub transport");
+    assert!(source_admission < recorder_branch);
     assert!(recorder_branch < stdin_decode);
     assert!(recorder_branch < http_transport);
     let recorder = include_str!("../src/runtime_failure.rs");

@@ -18,12 +18,12 @@ const LAYOUT_NAME: &str = "current-layout";
 const STAGING_NAME: &str = "activation-stage";
 pub(super) const OWNERSHIP_MARKER: &str = ".enoki-bootstrap-transaction";
 
-pub(super) struct ActivationLock {
+pub(crate) struct ActivationLock {
     file: File,
 }
 
 impl ActivationLock {
-    pub fn acquire(
+    pub(crate) fn acquire(
         state: &Path,
         expected_uid: u32,
         deadline: Instant,

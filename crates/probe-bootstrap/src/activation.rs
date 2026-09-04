@@ -7,6 +7,7 @@ use crate::{
         CommittedReplacementLocalCustody, FixedInstallPaths, InstallError, SystemAccounts,
         SystemSystemd, VerifiedCompleteFreshComponents,
         activate_complete_replacement_current_probe_with_registration, coordinate_fresh_install,
+        transaction::ActivationLock,
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
     replacement::{
@@ -21,11 +22,14 @@ use crate::{
 use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
-    fs::File,
+    fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::fd::{AsRawFd, FromRawFd, RawFd},
     os::unix::process::CommandExt,
-    process::{Command, Stdio},
+    os::{
+        fd::{AsRawFd, FromRawFd, RawFd},
+        unix::fs::{MetadataExt, OpenOptionsExt},
+    },
+    process::{Command, ExitCode, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -36,6 +40,10 @@ const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
 const REPLACEMENT_COMMIT: &str = "/var/lib/enoki-probe-bootstrap/replacement-migration.json";
 const REPLACEMENT_COMPANION_BUDGET: Duration = Duration::from_secs(90);
 const REPLACEMENT_COMPANION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const STABLE_LIFECYCLE_LOCK_NAME: &[u8] = b"enoki-probe-lifecycle.lock\0";
+const RUN_LOCK_DIRECTORY: &[u8] = b"/run/lock\0";
+const ACTIVATION_LOCK_BUDGET: Duration = Duration::from_secs(90);
+const ORPHAN_COMPANION: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 static COMPONENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Eq, PartialEq)]
@@ -48,6 +56,274 @@ pub enum ActivationError {
     Io,
     Install(InstallError),
     Replacement,
+}
+
+/// 唯一 production Bootstrap activation process interface。binary 不保留
+/// handoff、generation 或安装 transaction 的第二入口。
+#[doc(hidden)]
+pub fn run_bootstrap_activate_process() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--render-observation-integration-v1") {
+        return match std::io::stdout()
+            .lock()
+            .write_all(&crate::install::render_observation_integration_v1())
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    }
+    let result = if std::env::args().nth(1).as_deref() == Some("--fd-handoff") {
+        // SAFETY: acquisition 只跨 exec 转交固定 receipt/socket descriptors。
+        let mut receipt = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
+        let mut input = unsafe { std::os::unix::net::UnixStream::from_raw_fd(libc::STDOUT_FILENO) };
+        activate_from_socket(&mut input, &mut receipt)
+    } else {
+        activate_from_stdin(&mut std::io::stdin().lock())
+    };
+    match result {
+        Ok(verified) => match verified.activate_fixed_current_probe() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(ActivationError::Install(error)) => {
+                eprintln!("Probe Bootstrap activation failed ({})", error.diagnostic());
+                ExitCode::from(error.exit_code())
+            }
+            Err(_) => {
+                eprintln!("Probe Bootstrap activation failed");
+                ExitCode::from(1)
+            }
+        },
+        Err(ActivationError::NotRoot) => {
+            eprintln!("Probe Bootstrap activation must run as root");
+            ExitCode::from(2)
+        }
+        Err(_) => {
+            eprintln!("Probe Bootstrap activation failed");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Bootstrap 进程唯一的 lifecycle owner。legacy 在 stable 之前取得，两个
+/// descriptor 都只由 kernel 在进程退出时释放，不能由 child 重新取得。
+struct BootstrapLifecycleOwner {
+    _legacy: Option<ActivationLock>,
+    stable: File,
+}
+
+impl BootstrapLifecycleOwner {
+    fn acquire() -> Result<Self, ActivationError> {
+        let state = std::path::Path::new("/var/lib/enoki-probe-bootstrap");
+        loop {
+            match fs::symlink_metadata(state) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    let legacy =
+                        ActivationLock::acquire(state, 0, Instant::now() + ACTIVATION_LOCK_BUDGET)
+                            .map_err(ActivationError::Install)?;
+                    let stable = open_stable_lifecycle_lock()?;
+                    return Ok(Self {
+                        _legacy: Some(legacy),
+                        stable,
+                    });
+                }
+                Ok(_) => return Err(ActivationError::Io),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let stable = open_stable_lifecycle_lock()?;
+                    // 没有 legacy 时只可在 stable 内复验 absence。并发创建则
+                    // 释放 stable，从唯一的 legacy -> stable 顺序重新开始。
+                    match fs::symlink_metadata(state) {
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            return Ok(Self {
+                                _legacy: None,
+                                stable,
+                            });
+                        }
+                        Ok(_) => drop(stable),
+                        Err(_) => return Err(ActivationError::Io),
+                    }
+                }
+                Err(_) => return Err(ActivationError::Io),
+            }
+        }
+    }
+}
+
+/// R1 只收敛前一次 terminal self-unlink 失败留下的 exact Companion。它在
+/// source/state/handoff 读取前运行；任何额外 inventory 都拒绝，绝不读取 B。
+fn reconcile_exact_orphan_companion() -> Result<(), ActivationError> {
+    reconcile_exact_orphan_companion_at(
+        std::path::Path::new(INSTALL_METADATA),
+        std::path::Path::new(ORPHAN_COMPANION),
+        &[
+            "/var/lib/enoki-probe-bootstrap",
+            "/var/lib/enoki-probe",
+            "/etc/enoki",
+            "/usr/local/bin/enoki-probe",
+            "/usr/local/bin/enoki-observation-runtime",
+            "/usr/local/bin/enoki-cpu-resource-provider",
+            "/usr/local/bin/enoki-disk-health-resource-provider",
+            "/usr/local/bin/enoki-probe-bootstrap-acquire",
+            "/usr/local/bin/enoki-probe-bootstrap-activate",
+            "/etc/systemd/system/enoki-probe.service",
+            "/etc/systemd/system/enoki-observation-runtime.service",
+            "/etc/systemd/system/enoki-observation-runtime.socket",
+            "/etc/systemd/system/enoki-observation-runtime-failure.service",
+            "/etc/systemd/system/enoki-cpu-resource-provider@.service",
+            "/etc/systemd/system/enoki-cpu-resource-provider.socket",
+            "/etc/systemd/system/enoki-disk-health-resource-provider@.service",
+            "/etc/systemd/system/enoki-disk-health-resource-provider.socket",
+            "/etc/systemd/system/enoki-probe-lifecycle-companion@.service",
+            "/etc/systemd/system/enoki-probe-lifecycle-companion.socket",
+            "/etc/systemd/system/enoki-probe-lifecycle-upgrade@.service",
+            "/etc/systemd/system/enoki-probe-lifecycle-upgrade.socket",
+            "/etc/sudoers.d/enoki-probe-operations",
+            "/etc/sudoers.d/enoki-probe-collector-helpers",
+            "/etc/sudoers.d/enoki-probe-upgrader",
+        ],
+    )
+}
+
+fn reconcile_exact_orphan_companion_at(
+    install_metadata: &std::path::Path,
+    companion: &std::path::Path,
+    forbidden_inventory: &[&str],
+) -> Result<(), ActivationError> {
+    match fs::symlink_metadata(install_metadata) {
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err(ActivationError::Io),
+    }
+    let metadata = match fs::symlink_metadata(companion) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(ActivationError::Io),
+    };
+    for path in forbidden_inventory {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Err(ActivationError::Io),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ActivationError::Io),
+        }
+    }
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o755
+    {
+        return Err(ActivationError::Io);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(companion)
+        .map_err(|_| ActivationError::Io)?;
+    let held = file.metadata().map_err(|_| ActivationError::Io)?;
+    if held.dev() != metadata.dev() || held.ino() != metadata.ino() {
+        return Err(ActivationError::Io);
+    }
+    fs::remove_file(companion).map_err(|_| ActivationError::Io)?;
+    File::open(companion.parent().ok_or(ActivationError::Io)?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| ActivationError::Io)
+}
+
+fn open_stable_lifecycle_lock() -> Result<File, ActivationError> {
+    let parent_fd = unsafe {
+        libc::open(
+            RUN_LOCK_DIRECTORY.as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if parent_fd < 0 {
+        return Err(ActivationError::Io);
+    }
+    // SAFETY: a successful directory open transfers exactly one descriptor.
+    let parent = unsafe { File::from_raw_fd(parent_fd) };
+    let parent_metadata = parent.metadata().map_err(|_| ActivationError::Io)?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.uid() != 0
+        || parent_metadata.gid() != 0
+        || parent_metadata.mode() & 0o022 != 0
+    {
+        return Err(ActivationError::Io);
+    }
+    let create_flags =
+        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let file = match unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            STABLE_LIFECYCLE_LOCK_NAME.as_ptr().cast(),
+            create_flags,
+            0o600,
+        )
+    } {
+        descriptor if descriptor >= 0 => {
+            // SAFETY: a successful openat transfers exactly one descriptor.
+            let file = unsafe { File::from_raw_fd(descriptor) };
+            file.sync_all().map_err(|_| ActivationError::Io)?;
+            parent.sync_all().map_err(|_| ActivationError::Io)?;
+            file
+        }
+        _ if io::Error::last_os_error().kind() == io::ErrorKind::AlreadyExists => {
+            let descriptor = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    STABLE_LIFECYCLE_LOCK_NAME.as_ptr().cast(),
+                    libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(ActivationError::Io);
+            }
+            // SAFETY: a successful openat transfers exactly one descriptor.
+            unsafe { File::from_raw_fd(descriptor) }
+        }
+        _ => return Err(ActivationError::Io),
+    };
+    if !stable_lock_matches_parent_entry(&parent, &file)? {
+        return Err(ActivationError::Io);
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(ActivationError::Io);
+    }
+    if !stable_lock_matches_parent_entry(&parent, &file)? {
+        return Err(ActivationError::Io);
+    }
+    Ok(file)
+}
+
+fn stable_lock_matches_parent_entry(parent: &File, file: &File) -> Result<bool, ActivationError> {
+    let metadata = file.metadata().map_err(|_| ActivationError::Io)?;
+    let mut entry: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            STABLE_LIFECYCLE_LOCK_NAME.as_ptr().cast(),
+            &mut entry,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(ActivationError::Io);
+    }
+    Ok(canonical_stable_lock(&metadata)
+        && entry.st_mode & libc::S_IFMT == libc::S_IFREG
+        && entry.st_uid == 0
+        && entry.st_gid == 0
+        && entry.st_nlink == 1
+        && entry.st_size == 0
+        && entry.st_mode & 0o7777 == 0o600
+        && metadata.dev() == entry.st_dev
+        && metadata.ino() == entry.st_ino)
+}
+
+fn canonical_stable_lock(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.uid() == 0
+        && metadata.gid() == 0
+        && metadata.nlink() == 1
+        && metadata.len() == 0
+        && metadata.mode() & 0o7777 == 0o600
 }
 
 impl From<HandoffError> for ActivationError {
@@ -77,6 +353,7 @@ pub struct ReceivedRootHandoff {
     activator: Option<File>,
     enrollment: Enrollment,
     _generation_lease: DelegationGenerationLease,
+    _lifecycle_owner: Option<BootstrapLifecycleOwner>,
 }
 
 impl ReceivedRootHandoff {
@@ -124,10 +401,18 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
+        let stable = self
+            ._lifecycle_owner
+            .as_ref()
+            .ok_or(ActivationError::Io)?
+            .stable
+            .try_clone()
+            .map_err(|_| ActivationError::Io)?;
         let mut replacement_activation = prepare_replacement_migration(
             &self.enrollment,
             &self.bundle,
             &mut self.lifecycle_companion,
+            &stable,
         )?;
         if let ReplacementActivation::CompletePredecessor(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
@@ -157,6 +442,7 @@ impl ReceivedRootHandoff {
                 &self.enrollment,
                 &self.bundle,
                 &mut self.lifecycle_companion,
+                &stable,
             )?;
         }
         if let ReplacementActivation::Complete(commit) = &replacement_activation {
@@ -242,6 +528,7 @@ fn prepare_replacement_migration(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     companion: &mut File,
+    stable: &File,
 ) -> Result<ReplacementActivation, ActivationError> {
     let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
         .try_exists()
@@ -259,7 +546,7 @@ fn prepare_replacement_migration(
             )
             .map_err(ActivationError::Install)
         },
-        |request| invoke_replacement_companion(request, companion, bundle),
+        |request| invoke_replacement_companion(request, companion, bundle, stable),
     )
 }
 
@@ -453,6 +740,7 @@ fn invoke_replacement_companion(
     request: &LifecycleRequest,
     source: &mut File,
     bundle: &VerifiedBundle,
+    stable: &File,
 ) -> Result<(), ActivationError> {
     let _standard_descriptors = reserve_closed_standard_descriptors()?;
     let executable = sealed_lifecycle_companion(source, bundle)?;
@@ -462,18 +750,25 @@ fn invoke_replacement_companion(
         .env_clear()
         .env("LANG", "C")
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("ENOKI_LIFECYCLE_LEASE_FD", "9")
         .current_dir("/")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // 候选角色可能创建子进程；超时清理整个固定进程组并回收主进程。
+    let stable_fd = stable.as_raw_fd();
+    if stable_fd == 9 || executable.as_raw_fd() == 9 {
+        return Err(ActivationError::Replacement);
+    }
     unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
+        command.pre_exec(move || {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(io::Error::last_os_error());
             }
+            if libc::dup3(stable_fd, 9, 0) != 9 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         });
     }
     let mut child = command.spawn().map_err(|_| ActivationError::Replacement)?;
@@ -651,6 +946,8 @@ pub fn activate_from_stdin(input: &mut impl Read) -> Result<ReceivedRootHandoff,
     if unsafe { libc::geteuid() } != 0 {
         return Err(ActivationError::NotRoot);
     }
+    let owner = BootstrapLifecycleOwner::acquire()?;
+    reconcile_exact_orphan_companion()?;
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(ActivationError::BuildTrustUnavailable)?;
     receive_root_handoff_with_policy(
@@ -663,6 +960,10 @@ pub fn activate_from_stdin(input: &mut impl Read) -> Result<ReceivedRootHandoff,
             external_root_pem: Some(trust.root_pem.as_bytes()),
         },
     )
+    .map(|mut handoff| {
+        handoff._lifecycle_owner = Some(owner);
+        handoff
+    })
 }
 
 /// 私有 socket 只承载 metadata/component handoff；fd 0 保留为 sudo 实际
@@ -674,6 +975,8 @@ pub fn activate_from_socket(
     if unsafe { libc::geteuid() } != 0 {
         return Err(ActivationError::NotRoot);
     }
+    let owner = BootstrapLifecycleOwner::acquire()?;
+    reconcile_exact_orphan_companion()?;
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(ActivationError::BuildTrustUnavailable)?;
     let policy = VerificationPolicy {
@@ -683,7 +986,10 @@ pub fn activate_from_socket(
         external_root_fingerprint: trust.root_fingerprint.to_owned(),
         external_root_pem: Some(trust.root_pem.as_bytes()),
     };
-    receive_root_handoff_with_receipt(input, &policy, activator_receipt)
+    receive_root_handoff_with_receipt(input, &policy, activator_receipt).map(|mut handoff| {
+        handoff._lifecycle_owner = Some(owner);
+        handoff
+    })
 }
 
 fn receive_root_handoff_with_receipt(
@@ -865,6 +1171,7 @@ fn receive_root_handoff(
             activator: has_bootstrap_receipts.then_some(activator),
             enrollment,
             _generation_lease: generation_lease,
+            _lifecycle_owner: None,
         })
     })();
     if result.is_err() {
@@ -1012,6 +1319,46 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{fs, io::Cursor, os::unix::fs::PermissionsExt, sync::mpsc, thread, time::Duration};
     use tempfile::tempdir;
+
+    #[test]
+    fn r1_removes_only_the_exact_orphan_companion() {
+        let temporary = tempdir().unwrap();
+        let bin = temporary.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let companion = bin.join("enoki-probe-lifecycle-companion");
+        fs::write(&companion, b"sealed orphan").unwrap();
+        fs::set_permissions(&companion, fs::Permissions::from_mode(0o755)).unwrap();
+
+        reconcile_exact_orphan_companion_at(
+            &temporary.path().join("probe-install.toml"),
+            &companion,
+            &[],
+        )
+        .expect("exact B-only residue 可收敛");
+        assert!(!companion.exists());
+    }
+
+    #[test]
+    fn r1_rejects_extra_inventory_without_touching_the_orphan() {
+        let temporary = tempdir().unwrap();
+        let bin = temporary.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let companion = bin.join("enoki-probe-lifecycle-companion");
+        fs::write(&companion, b"sealed orphan").unwrap();
+        fs::set_permissions(&companion, fs::Permissions::from_mode(0o755)).unwrap();
+        let residue = temporary.path().join("extra");
+        fs::write(&residue, b"not B-only").unwrap();
+
+        assert!(
+            reconcile_exact_orphan_companion_at(
+                &temporary.path().join("probe-install.toml"),
+                &companion,
+                &[residue.to_str().unwrap()],
+            )
+            .is_err()
+        );
+        assert!(companion.exists());
+    }
 
     #[test]
     fn rejects_invalid_metadata_before_creating_a_root_component() {

@@ -19,6 +19,10 @@ use enoki_probe_bootstrap::{
     },
 };
 use sha2::{Digest, Sha256};
+#[cfg(not(test))]
+use std::os::fd::FromRawFd;
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::{
     fs::{self, File, OpenOptions},
     io::Read,
@@ -32,14 +36,39 @@ use std::{
 };
 
 const REPLACEMENT_COORDINATOR_LOCK_PATH: &str = "/var/lib/enoki-probe-bootstrap/activation.lock";
+#[cfg(not(test))]
+const STABLE_LIFECYCLE_LOCK_NAME: &[u8] = b"enoki-probe-lifecycle.lock\0";
+#[cfg(not(test))]
+const RUN_LOCK_DIRECTORY: &[u8] = b"/run/lock\0";
 const REPLACEMENT_COORDINATOR_LOCK_BUDGET: Duration = Duration::from_secs(90);
 
+/// 一个 Companion process 只执行一个 lifecycle invocation。首次取得的
+/// legacy/stable OFD 故意留到 process exit，不能在 coordinator return 与
+/// terminal response/self-unlink 之间释放。
+#[cfg(not(test))]
+static PROCESS_LIFETIME_LEGACY: OnceLock<File> = OnceLock::new();
+#[cfg(not(test))]
+static PROCESS_LIFETIME_STABLE: OnceLock<File> = OnceLock::new();
+
 pub(super) fn coordinate(request: &LifecycleRequest) -> LifecycleResponse {
+    coordinate_with_owner(request, false)
+}
+
+/// Bootstrap parent 保留 legacy + stable owner 时，sealed child 只可带着
+/// 已验证的 fd9 witness 进入本分支；它绝不重取 legacy lock。
+pub(super) fn coordinate_adopted_child(request: &LifecycleRequest) -> LifecycleResponse {
+    coordinate_with_owner(request, true)
+}
+
+fn coordinate_with_owner(
+    request: &LifecycleRequest,
+    adopted_parent_owner: bool,
+) -> LifecycleResponse {
     let production_root = match production_root() {
         Ok(root) => root,
         Err(()) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
     };
-    {
+    if !adopted_parent_owner {
         let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root.as_deref()) else {
             return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
         };
@@ -60,7 +89,13 @@ pub(super) fn coordinate(request: &LifecycleRequest) -> LifecycleResponse {
             Ok(identity) => identity,
             Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
         };
-    run(request, &metadata, &identity, production_root.as_deref())
+    run(
+        request,
+        &metadata,
+        &identity,
+        production_root.as_deref(),
+        adopted_parent_owner,
+    )
 }
 
 fn run(
@@ -68,6 +103,7 @@ fn run(
     metadata: &TrustedProbeInstallMetadata,
     identity: &TrustedProbeInstallPreflight,
     production_root: Option<&Path>,
+    adopted_parent_owner: bool,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::ReplacementEnrollment {
         enrollment_token,
@@ -154,6 +190,7 @@ fn run(
         intent,
         registration_binding,
         production_root,
+        adopted_parent_owner,
     )
 }
 
@@ -163,6 +200,7 @@ fn coordinate_inspected_replacement(
     intent: ReplacementIntent,
     registration_binding: enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding,
     production_root: Option<&Path>,
+    adopted_parent_owner: bool,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::ReplacementEnrollment {
         enrollment_token,
@@ -174,11 +212,13 @@ fn coordinate_inspected_replacement(
     else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
-    let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root) else {
-        return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
-    };
-    if let Some(response) = resume_committed_from_exact_request(request, production_root) {
-        return response;
+    if !adopted_parent_owner {
+        let Ok(_guard) = ReplacementCoordinatorGuard::acquire(production_root) else {
+            return LifecycleResponse::failed("lifecycle.replacement_commit_failed");
+        };
+        if let Some(response) = resume_committed_from_exact_request(request, production_root) {
+            return response;
+        }
     }
     let metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
     let current_metadata = match read_trusted_probe_install_metadata(&metadata_path, None) {
@@ -285,7 +325,7 @@ fn post_inspection_source_remains_exact(
 /// activation process. The lock is intentionally not authority: a fresh holder
 /// always re-reads every durable fact.
 pub(super) struct ReplacementCoordinatorGuard {
-    file: File,
+    _file: File,
 }
 
 impl ReplacementCoordinatorGuard {
@@ -376,7 +416,8 @@ impl ReplacementCoordinatorGuard {
                         "replacement coordinator lock generation was retired",
                     ));
                 }
-                return Ok(Self { file });
+                retain_process_lifecycle_owner(&file, production_root)?;
+                return Ok(Self { _file: file });
             }
             if Instant::now() >= deadline {
                 return Err(std::io::Error::new(
@@ -398,9 +439,127 @@ fn canonical_lifecycle_lock_metadata(metadata: &fs::Metadata) -> bool {
 }
 
 impl Drop for ReplacementCoordinatorGuard {
-    fn drop(&mut self) {
-        let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    fn drop(&mut self) {}
+}
+
+#[cfg(not(test))]
+fn retain_process_lifecycle_owner(
+    legacy: &File,
+    _production_root: Option<&Path>,
+) -> Result<(), std::io::Error> {
+    if PROCESS_LIFETIME_LEGACY.get().is_some() {
+        return Ok(());
     }
+    let directory_fd = unsafe {
+        libc::open(
+            RUN_LOCK_DIRECTORY.as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if directory_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful directory open transfers one descriptor.
+    let directory = unsafe { File::from_raw_fd(directory_fd) };
+    let directory_metadata = directory.metadata()?;
+    if !directory_metadata.is_dir()
+        || directory_metadata.uid() != 0
+        || directory_metadata.gid() != 0
+        || directory_metadata.mode() & 0o022 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "invalid stable lock parent",
+        ));
+    }
+    let stable = match unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            STABLE_LIFECYCLE_LOCK_NAME.as_ptr().cast(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    } {
+        descriptor if descriptor >= 0 => {
+            // SAFETY: successful openat transfers one descriptor.
+            let file = unsafe { File::from_raw_fd(descriptor) };
+            file.sync_all()?;
+            directory.sync_all()?;
+            file
+        }
+        _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists => {
+            let descriptor = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    STABLE_LIFECYCLE_LOCK_NAME.as_ptr().cast(),
+                    libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: successful openat transfers one descriptor.
+            unsafe { File::from_raw_fd(descriptor) }
+        }
+        _ => return Err(std::io::Error::last_os_error()),
+    };
+    if !stable_matches_directory_entry(&directory, &stable)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "invalid stable lifecycle lock",
+        ));
+    }
+    if unsafe { libc::flock(stable.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if !stable_matches_directory_entry(&directory, &stable)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "stable lifecycle lock generation was retired",
+        ));
+    }
+    let legacy = legacy.try_clone()?;
+    PROCESS_LIFETIME_STABLE
+        .set(stable)
+        .map_err(|_| std::io::Error::other("stable owner already set"))?;
+    PROCESS_LIFETIME_LEGACY
+        .set(legacy)
+        .map_err(|_| std::io::Error::other("legacy owner already set"))?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn stable_matches_directory_entry(directory: &File, stable: &File) -> Result<bool, std::io::Error> {
+    let metadata = stable.metadata()?;
+    let mut entry: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            STABLE_LIFECYCLE_LOCK_NAME.as_ptr().cast(),
+            &mut entry,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(canonical_lifecycle_lock_metadata(&metadata)
+        && entry.st_mode & libc::S_IFMT == libc::S_IFREG
+        && entry.st_uid == 0
+        && entry.st_gid == 0
+        && entry.st_nlink == 1
+        && entry.st_size == 0
+        && entry.st_mode & 0o7777 == 0o600
+        && metadata.dev() == entry.st_dev
+        && metadata.ino() == entry.st_ino)
+}
+
+#[cfg(test)]
+fn retain_process_lifecycle_owner(
+    _legacy: &File,
+    _production_root: Option<&Path>,
+) -> Result<(), std::io::Error> {
+    Ok(())
 }
 
 pub(super) fn resume_committed_from_exact_request(
@@ -955,7 +1114,14 @@ mod tests {
         let (started_tx, started_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            coordinate_inspected_replacement(&request, &authority, new_intent, binding, Some(&root))
+            coordinate_inspected_replacement(
+                &request,
+                &authority,
+                new_intent,
+                binding,
+                Some(&root),
+                false,
+            )
         });
         started_rx.recv().unwrap();
         std::thread::sleep(Duration::from_millis(30));
@@ -1161,6 +1327,7 @@ mod tests {
             committed_intent.clone(),
             committed_intent.registration_binding().unwrap(),
             Some(temporary.path()),
+            false,
         );
         assert_eq!(
             post_inspection,

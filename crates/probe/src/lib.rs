@@ -2,6 +2,7 @@ pub mod cli;
 pub mod collectors;
 pub mod disk_health_resource_sandbox;
 pub mod host_profile;
+mod lifecycle_companion;
 pub mod metrics;
 pub mod observation_runtime;
 pub mod probe_auth;
@@ -15,6 +16,9 @@ pub mod system_state_resource_sandbox;
 pub mod transport;
 pub mod upgrader;
 pub mod version;
+
+#[doc(hidden)]
+pub use lifecycle_companion::run_lifecycle_companion_process;
 
 pub(crate) mod hub_url {
     use url::Url;

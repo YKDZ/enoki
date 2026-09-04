@@ -14,7 +14,7 @@ mod installed_layout;
 mod replacement_finalize;
 mod replacement_registration;
 mod systemd;
-mod transaction;
+pub(crate) mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
 mod upgrade;
 
@@ -1951,6 +1951,10 @@ fn lifecycle_companion_unit() -> String {
     format!(
         "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nStandardError=journal\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\nRuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nReadOnlyPaths=/run/systemd/system\nBindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\nBindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe\n"
     )
+    .replace(
+        " /run/enoki-probe\n",
+        " /run/enoki-probe /run/lock\n",
+    )
 }
 
 fn lifecycle_upgrade_socket_unit() -> &'static str {
@@ -1960,6 +1964,10 @@ fn lifecycle_upgrade_socket_unit() -> &'static str {
 fn lifecycle_upgrade_unit() -> String {
     format!(
         "[Unit]\nDescription=Enoki Probe Upgrade Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nStandardError=journal\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade\nTimeoutStartSec=90s\nRuntimeDirectory=enoki-probe\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nBindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe\n"
+    )
+    .replace(
+        " /run/enoki-probe\n",
+        " /run/enoki-probe /run/lock\n",
     )
 }
 
