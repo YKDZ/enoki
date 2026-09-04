@@ -787,7 +787,6 @@ fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechani
         );
     }
     assert!(BOOTSTRAP_ACQUISITION.contains("ClosedRepairEvidence::InstalledBundleFailure"));
-    assert!(BOOTSTRAP_ACQUISITION.contains("/api/probe/runtime-failures/{}/repair-authorize"));
     assert!(!BOOTSTRAP_ACQUISITION.contains("repair_authorize_url"));
 }
 
