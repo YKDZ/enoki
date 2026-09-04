@@ -13,7 +13,10 @@ use crate::{
         TrustedProbeInstallPreflight,
     },
 };
-use enoki_probe_bootstrap::lifecycle::{LifecycleRequest, LifecycleResponse};
+use enoki_probe_bootstrap::{
+    install::commit_current_layout_for_test,
+    lifecycle::{LifecycleRequest, LifecycleResponse},
+};
 use std::{
     collections::HashMap,
     fs,
@@ -844,16 +847,8 @@ fn schema_five_uninstall_accepts_the_production_current_layout_receipt() {
     let mut fixture = uninstall_coordinator_fixture(temporary.path());
     fixture.metadata.schema_version = 5;
     fixture.metadata.lifecycle_authority_install_key = Some("e".repeat(64));
-    let current_layout = fixture
-        .metadata
-        .bootstrap_state_dir
-        .as_ref()
-        .expect("bootstrap state")
-        .join("current-layout");
-    fs::write(&current_layout, "schema_version=1\nversion=1.2.3\n")
-        .expect("production current-layout receipt");
-    fs::set_permissions(&current_layout, fs::Permissions::from_mode(0o600))
-        .expect("current-layout mode");
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
     let request =
         LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
             .expect("bound local uninstall request");
@@ -917,8 +912,53 @@ fn schema_five_uninstall_rejects_mismatched_current_layout_receipt_before_effect
     );
     assert!(transport.url.is_empty());
     assert!(transport.status_url.is_empty());
+    assert!(transport.downloads.is_empty());
     assert!(systemd.calls.is_empty());
-    assert!(current_layout.exists());
+}
+
+#[test]
+fn schema_five_uninstall_rejects_special_mode_current_layout_receipt_before_effects() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let mut fixture = uninstall_coordinator_fixture(temporary.path());
+    fixture.metadata.schema_version = 5;
+    fixture.metadata.lifecycle_authority_install_key = Some("e".repeat(64));
+    let current_layout = fixture
+        .metadata
+        .bootstrap_state_dir
+        .as_ref()
+        .expect("bootstrap state")
+        .join("current-layout");
+    fs::write(&current_layout, "schema_version=1\nversion=1.2.3\n")
+        .expect("production current-layout receipt");
+    fs::set_permissions(&current_layout, fs::Permissions::from_mode(0o4600))
+        .expect("current-layout special mode");
+    let request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+
+    let response = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+    assert!(transport.downloads.is_empty());
+    assert!(systemd.calls.is_empty());
 }
 
 #[test]

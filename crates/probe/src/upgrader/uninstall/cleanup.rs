@@ -1123,7 +1123,7 @@ fn validate_owned_bootstrap_current_layout(
         || metadata.uid() != 0
         || metadata.gid() != 0
         || metadata.nlink() != 1
-        || metadata.mode() & 0o777 != 0o600
+        || metadata.mode() & 0o7777 != 0o600
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe Bootstrap current layout receipt is not a root-owned regular 0600 file",

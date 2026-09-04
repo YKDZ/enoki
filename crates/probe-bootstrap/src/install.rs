@@ -570,6 +570,17 @@ impl FixedInstallPaths {
 
 #[cfg(feature = "deterministic-test-seams")]
 #[doc(hidden)]
+pub fn commit_current_layout_for_test(
+    root: impl Into<PathBuf>,
+    version: &str,
+) -> Result<(), InstallError> {
+    let paths = FixedInstallPaths::under_test_root(root);
+    let mut journal = TransactionJournal::begin_with_binding(&paths.bootstrap_state(), None)?;
+    journal.commit_layout(&paths, version, false)
+}
+
+#[cfg(feature = "deterministic-test-seams")]
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstalledBundleRepairCrashPoint {
     JournalPublish,
