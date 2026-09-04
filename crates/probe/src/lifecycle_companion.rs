@@ -79,10 +79,12 @@ fn inherited_source() -> Result<CompanionSource, ()> {
 fn marker_value() -> Result<Option<String>, ()> {
     let bytes = fs::read("/proc/self/environ").map_err(|_| ())?;
     let prefix = format!("{LEASE_MARKER}=").into_bytes();
-    let mut values = bytes
-        .split(|byte| *byte == 0)
-        .filter_map(|entry| entry.strip_prefix(prefix.as_slice()));
-    let first = values.next();
+    let mut values = bytes.split(|byte| *byte == 0).filter_map(|entry| {
+        (entry == LEASE_MARKER.as_bytes())
+            .then_some(Err(()))
+            .or_else(|| entry.strip_prefix(prefix.as_slice()).map(Ok))
+    });
+    let first = values.next().transpose()?;
     if values.next().is_some() {
         return Err(());
     }
@@ -177,21 +179,37 @@ fn validate_fdinfo(fd: RawFd) -> Result<(), ()> {
         return Err(());
     }
     let file = unsafe { fs::File::from_raw_fd(duplicate) };
-    let inode = file.metadata().map_err(|_| ())?.ino().to_string();
+    let metadata = file.metadata().map_err(|_| ())?;
     let fdinfo = fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).map_err(|_| ())?;
-    let valid = fdinfo
+    let records = fdinfo
         .lines()
         .filter(|line| line.starts_with("lock:"))
-        .filter(|line| {
-            let words = line.split_whitespace().collect::<Vec<_>>();
-            words
-                .windows(3)
-                .any(|window| window == ["FLOCK", "ADVISORY", "WRITE"])
-                && words.ends_with(&["0", "EOF"])
-                && words.iter().any(|word| word.ends_with(&inode))
-        })
-        .count();
-    (valid == 1).then_some(()).ok_or(())
+        .collect::<Vec<_>>();
+    if records.len() != 1 {
+        return Err(());
+    }
+    let fields = records[0]
+        .strip_prefix("lock:")
+        .ok_or(())?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if fields.len() != 8
+        || !fields[0]
+            .strip_suffix(':')
+            .is_some_and(|value| value.parse::<u64>().is_ok())
+        || fields[1..4] != ["FLOCK", "ADVISORY", "WRITE"]
+        || fields[4].parse::<u32>().is_err()
+        || fields[6..] != ["0", "EOF"]
+    {
+        return Err(());
+    }
+    let expected = format!(
+        "{:02x}:{:02x}:{}",
+        libc::major(metadata.dev()),
+        libc::minor(metadata.dev()),
+        metadata.ino()
+    );
+    (fields[5] == expected).then_some(()).ok_or(())
 }
 
 fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
@@ -220,7 +238,12 @@ fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
         .is_err()
         || bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES
     {
-        return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
+        return match source {
+            CompanionSource::AdoptedReplacementChild(_) => invalid_authority(),
+            CompanionSource::NoInheritedMarker => {
+                write_response(LifecycleResponse::failed("lifecycle.invalid_request"))
+            }
+        };
     }
     let peer_uid = stdin_peer_uid();
     let process_uid = unsafe { libc::getuid() };
@@ -248,7 +271,14 @@ fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
     }
     let request = match LifecycleRequest::decode(&bytes) {
         Ok(request) => request,
-        Err(_) => return write_response(LifecycleResponse::failed("lifecycle.invalid_request")),
+        Err(_) => {
+            return match source {
+                CompanionSource::AdoptedReplacementChild(_) => invalid_authority(),
+                CompanionSource::NoInheritedMarker => {
+                    write_response(LifecycleResponse::failed("lifecycle.invalid_request"))
+                }
+            };
+        }
     };
     match source {
         CompanionSource::AdoptedReplacementChild(lease) => {
@@ -262,11 +292,11 @@ fn run(source: CompanionSource, mode: CompanionMode) -> ExitCode {
             write_response(run_adopted_replacement_child(lease, &request))
         }
         CompanionSource::NoInheritedMarker => {
-            if request.transition() == LifecycleTransition::ReplacementMigration {
-                return invalid_authority();
-            }
             if !mode_accepts(mode, request.transition()) {
                 return write_response(LifecycleResponse::not_enabled());
+            }
+            if request.transition() == LifecycleTransition::ReplacementMigration {
+                return invalid_authority();
             }
             if !caller_is_authorized(request.authority(), peer_uid, process_uid) {
                 return invalid_authority();

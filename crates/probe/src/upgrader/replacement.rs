@@ -19,7 +19,6 @@ use enoki_probe_bootstrap::{
     },
 };
 use sha2::{Digest, Sha256};
-#[cfg(not(test))]
 use std::os::fd::FromRawFd;
 #[cfg(not(test))]
 use std::sync::OnceLock;
@@ -36,9 +35,7 @@ use std::{
 };
 
 const REPLACEMENT_COORDINATOR_LOCK_PATH: &str = "/var/lib/enoki-probe-bootstrap/activation.lock";
-#[cfg(not(test))]
 const STABLE_LIFECYCLE_LOCK_NAME: &[u8] = b"enoki-probe-lifecycle.lock\0";
-#[cfg(not(test))]
 const RUN_LOCK_DIRECTORY: &[u8] = b"/run/lock\0";
 const REPLACEMENT_COORDINATOR_LOCK_BUDGET: Duration = Duration::from_secs(90);
 
@@ -90,24 +87,60 @@ pub(crate) struct StandaloneLifecycleOwner {
     // 保留首次 legacy acquisition，stable OFD 则由 process-lifetime holder
     // 持有至 exit；下层 coordinator 只借用本 witness，绝不再次 flock。
     _legacy_acquisition: Option<ReplacementCoordinatorGuard>,
+    _stable: File,
 }
 
 #[cfg(test)]
 impl StandaloneLifecycleOwner {
     /// 仅供 crate 内直接入口测试：生产 Companion 必须经 process admission
     /// 取得 owner，测试构造器不会编入生产目标。
-    pub(crate) const fn for_test() -> Self {
+    pub(crate) fn for_test() -> Self {
         Self {
             _legacy_acquisition: None,
+            _stable: tempfile::tempfile().expect("test stable owner"),
         }
     }
 }
 
 pub(crate) fn acquire_standalone_lifecycle_owner() -> Result<StandaloneLifecycleOwner, ()> {
-    let guard = ReplacementCoordinatorGuard::acquire(None).map_err(|_| ())?;
-    Ok(StandaloneLifecycleOwner {
-        _legacy_acquisition: Some(guard),
-    })
+    acquire_standalone_lifecycle_owner_at(None)
+}
+
+pub(super) fn acquire_standalone_lifecycle_owner_at(
+    production_root: Option<&Path>,
+) -> Result<StandaloneLifecycleOwner, ()> {
+    let deadline = Instant::now() + REPLACEMENT_COORDINATOR_LOCK_BUDGET;
+    let legacy_path = production_path(REPLACEMENT_COORDINATOR_LOCK_PATH, production_root);
+    loop {
+        match ReplacementCoordinatorGuard::acquire_until(production_root, false, deadline) {
+            Ok(guard) => {
+                return Ok(StandaloneLifecycleOwner {
+                    _stable: guard.stable.try_clone().map_err(|_| ())?,
+                    _legacy_acquisition: Some(guard),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let stable = acquire_stable_lifecycle_lock(deadline).map_err(|_| ())?;
+                match fs::symlink_metadata(&legacy_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let state = legacy_path.parent().ok_or(())?;
+                        match fs::symlink_metadata(state) {
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            _ => return Err(()),
+                        }
+                        retain_stable_to_process_exit(&stable).map_err(|_| ())?;
+                        return Ok(StandaloneLifecycleOwner {
+                            _legacy_acquisition: None,
+                            _stable: stable,
+                        });
+                    }
+                    Ok(_) => drop(stable),
+                    Err(_) => return Err(()),
+                }
+            }
+            Err(_) => return Err(()),
+        }
+    }
 }
 
 fn run(
@@ -354,9 +387,11 @@ fn post_inspection_source_remains_exact(
 /// always re-reads every durable fact.
 pub(super) struct ReplacementCoordinatorGuard {
     _file: Option<File>,
+    stable: File,
 }
 
 impl ReplacementCoordinatorGuard {
+    #[cfg(test)]
     pub(super) fn acquire(production_root: Option<&Path>) -> Result<Self, std::io::Error> {
         Self::acquire_with(production_root, true)
     }
@@ -371,11 +406,34 @@ impl ReplacementCoordinatorGuard {
         production_root: Option<&Path>,
         create_if_missing: bool,
     ) -> Result<Self, std::io::Error> {
+        Self::acquire_until(
+            production_root,
+            create_if_missing,
+            Instant::now() + REPLACEMENT_COORDINATOR_LOCK_BUDGET,
+        )
+    }
+
+    #[cfg(test)]
+    fn acquire_until_for_test(
+        production_root: Option<&Path>,
+        deadline: Instant,
+    ) -> Result<Self, std::io::Error> {
+        Self::acquire_until(production_root, true, deadline)
+    }
+
+    fn acquire_until(
+        production_root: Option<&Path>,
+        create_if_missing: bool,
+        deadline: Instant,
+    ) -> Result<Self, std::io::Error> {
         #[cfg(not(test))]
-        if PROCESS_LIFETIME_LEGACY.get().is_some() {
-            // Standalone process 已在 admission 取得 legacy→stable owner；
-            // 下层 uninstall/recovery coordinator 只能借用，不能重取。
-            return Ok(Self { _file: None });
+        if let Some(stable) = PROCESS_LIFETIME_STABLE.get() {
+            // Standalone process 已在 admission 取得 optional legacy + mandatory
+            // stable owner；下层 coordinator只借用 stable，不按legacy存在性重取。
+            return Ok(Self {
+                _file: None,
+                stable: stable.try_clone()?,
+            });
         }
         let path = production_path(REPLACEMENT_COORDINATOR_LOCK_PATH, production_root);
         let parent = path.parent().ok_or_else(|| {
@@ -434,7 +492,6 @@ impl ReplacementCoordinatorGuard {
                 "replacement coordinator lock is not root-private",
             ));
         }
-        let deadline = Instant::now() + REPLACEMENT_COORDINATOR_LOCK_BUDGET;
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 let path_metadata = fs::symlink_metadata(&path)?;
@@ -450,8 +507,11 @@ impl ReplacementCoordinatorGuard {
                         "replacement coordinator lock generation was retired",
                     ));
                 }
-                retain_process_lifecycle_owner(&file, production_root)?;
-                return Ok(Self { _file: Some(file) });
+                let stable = retain_process_lifecycle_owner(&file, deadline)?;
+                return Ok(Self {
+                    _file: Some(file),
+                    stable,
+                });
             }
             if Instant::now() >= deadline {
                 return Err(std::io::Error::new(
@@ -476,14 +536,31 @@ impl Drop for ReplacementCoordinatorGuard {
     fn drop(&mut self) {}
 }
 
-#[cfg(not(test))]
 fn retain_process_lifecycle_owner(
     legacy: &File,
-    _production_root: Option<&Path>,
-) -> Result<(), std::io::Error> {
+    deadline: Instant,
+) -> Result<File, std::io::Error> {
+    #[cfg(test)]
+    let _ = legacy;
+    #[cfg(not(test))]
     if PROCESS_LIFETIME_LEGACY.get().is_some() {
-        return Ok(());
+        return PROCESS_LIFETIME_STABLE.get().unwrap().try_clone();
     }
+    let stable = open_stable_lifecycle_lock(deadline)?;
+    #[cfg(not(test))]
+    {
+        let legacy = legacy.try_clone()?;
+        PROCESS_LIFETIME_STABLE
+            .set(stable.try_clone()?)
+            .map_err(|_| std::io::Error::other("stable owner already set"))?;
+        PROCESS_LIFETIME_LEGACY
+            .set(legacy)
+            .map_err(|_| std::io::Error::other("legacy owner already set"))?;
+    }
+    Ok(stable)
+}
+
+fn open_stable_lifecycle_lock(deadline: Instant) -> Result<File, std::io::Error> {
     let directory_fd = unsafe {
         libc::open(
             RUN_LOCK_DIRECTORY.as_ptr().cast(),
@@ -540,8 +617,17 @@ fn retain_process_lifecycle_owner(
             "invalid stable lifecycle lock",
         ));
     }
-    if unsafe { libc::flock(stable.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error());
+    loop {
+        if unsafe { libc::flock(stable.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "stable lifecycle lock timed out",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
     if !stable_lock_parent_is_current(&directory)?
         || !stable_matches_directory_entry(&directory, &stable)?
@@ -551,17 +637,23 @@ fn retain_process_lifecycle_owner(
             "stable lifecycle lock generation was retired",
         ));
     }
-    let legacy = legacy.try_clone()?;
+    Ok(stable)
+}
+
+fn retain_stable_to_process_exit(stable: &File) -> Result<(), std::io::Error> {
+    #[cfg(test)]
+    let _ = stable;
+    #[cfg(not(test))]
     PROCESS_LIFETIME_STABLE
-        .set(stable)
+        .set(stable.try_clone()?)
         .map_err(|_| std::io::Error::other("stable owner already set"))?;
-    PROCESS_LIFETIME_LEGACY
-        .set(legacy)
-        .map_err(|_| std::io::Error::other("legacy owner already set"))?;
     Ok(())
 }
 
-#[cfg(not(test))]
+fn acquire_stable_lifecycle_lock(deadline: Instant) -> Result<File, std::io::Error> {
+    open_stable_lifecycle_lock(deadline)
+}
+
 fn stable_lock_parent_is_current(directory: &File) -> Result<bool, std::io::Error> {
     let held = directory.metadata()?;
     let current = fs::symlink_metadata("/run/lock")?;
@@ -576,7 +668,6 @@ fn stable_lock_parent_is_current(directory: &File) -> Result<bool, std::io::Erro
         && held.ino() == current.ino())
 }
 
-#[cfg(not(test))]
 fn stable_matches_directory_entry(directory: &File, stable: &File) -> Result<bool, std::io::Error> {
     let metadata = stable.metadata()?;
     let mut entry: libc::stat = unsafe { std::mem::zeroed() };
@@ -600,14 +691,6 @@ fn stable_matches_directory_entry(directory: &File, stable: &File) -> Result<boo
         && entry.st_mode & 0o7777 == 0o600
         && metadata.dev() == entry.st_dev
         && metadata.ino() == entry.st_ino)
-}
-
-#[cfg(test)]
-fn retain_process_lifecycle_owner(
-    _legacy: &File,
-    _production_root: Option<&Path>,
-) -> Result<(), std::io::Error> {
-    Ok(())
 }
 
 pub(super) fn resume_committed_from_exact_request(
@@ -927,7 +1010,72 @@ fn authority_matches(
 mod tests {
     use super::*;
     use enoki_probe_bootstrap::handoff::Enrollment;
-    use std::{cell::Cell, sync::mpsc, time::Duration};
+    use std::{cell::Cell, os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
+
+    struct TestStableLock {
+        file: File,
+        path: PathBuf,
+    }
+
+    impl Drop for TestStableLock {
+        fn drop(&mut self) {
+            let held = self.file.metadata().ok();
+            let current = fs::symlink_metadata(&self.path).ok();
+            if held.is_some_and(|held| {
+                current.is_some_and(|current| {
+                    held.dev() == current.dev() && held.ino() == current.ino()
+                })
+            }) {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+
+    fn hold_test_stable_lock() -> Option<TestStableLock> {
+        let path = PathBuf::from("/run/lock/enoki-probe-lifecycle.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .ok()?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .expect("canonical stable mode");
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0);
+        Some(TestStableLock { file, path })
+    }
+
+    #[test]
+    fn standalone_legacy_owner_times_out_while_stable_is_held() {
+        let Some(stable) = hold_test_stable_lock() else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("var/lib/enoki-probe-bootstrap");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let result = ReplacementCoordinatorGuard::acquire_until_for_test(
+            Some(root.path()),
+            Instant::now() + Duration::from_millis(30),
+        );
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut
+        ));
+        let legacy = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state.join("activation.lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(legacy.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "stable deadline 后此前 legacy owner 已释放",
+        );
+        drop(stable);
+    }
 
     fn replacement_intent(enrollment_id: &str, token: &str) -> ReplacementIntent {
         ReplacementIntent {

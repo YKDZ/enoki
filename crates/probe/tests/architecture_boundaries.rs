@@ -952,7 +952,7 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         "Replacement coordinator 不得以可伪造 bool 表达 owner authority",
     );
     let bootstrap_entry = BOOTSTRAP_ACTIVATION
-        .split("pub fn activate_from_stdin")
+        .split("fn activate_from_stdin")
         .nth(1)
         .expect("Bootstrap stdin production entry");
     assert!(
@@ -965,7 +965,7 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         "Bootstrap production entry 必须在 handoff/read/effect 前取得并保留 owner，再执行 R1",
     );
     assert!(
-        BOOTSTRAP_ACTIVATION.contains("owner.install_admission()")
+        BOOTSTRAP_ACTIVATION.contains("owner.install_admission(Some(&self._generation_lease))")
             && BOOTSTRAP_ACTIVATION.contains(
                 "activate_complete_replacement_current_probe_with_registration_and_admission("
             )
@@ -983,6 +983,25 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         admitted_install.contains("admission.enter(")
             && !admitted_install.contains("ActivationLock::acquire("),
         "process admission 的安装 transaction 只能 borrow/stable-absent，不得重取 legacy",
+    );
+    let standalone_owner = REPLACEMENT_COORDINATOR
+        .split("fn acquire_standalone_lifecycle_owner_at(")
+        .nth(1)
+        .expect("Standalone owner admission")
+        .split("fn run(")
+        .next()
+        .expect("Standalone owner body");
+    assert!(
+        standalone_owner.contains(
+            "ReplacementCoordinatorGuard::acquire_until(production_root, false, deadline)",
+        ) && standalone_owner.contains("_legacy_acquisition: None")
+            && !standalone_owner.contains("ReplacementCoordinatorGuard::acquire(production_root)"),
+        "Standalone owner 必须使用 optional legacy + mandatory stable，legacy absent 时不得创建 legacy/state",
+    );
+    assert!(
+        REPLACEMENT_COORDINATOR.contains("if let Some(stable) = PROCESS_LIFETIME_STABLE.get()")
+            && REPLACEMENT_COORDINATOR.contains("stable: stable.try_clone()?"),
+        "lower coordinator 必须按 mandatory stable holder 借用 owner，不能按 legacy 是否存在重取",
     );
     let terminal = LIFECYCLE_COMPANION_PROCESS
         .split("fn write_terminal_response")

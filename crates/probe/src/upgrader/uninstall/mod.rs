@@ -65,6 +65,7 @@ struct CompanionBinaryFacts {
 struct PostCommitSelfFinalizeFacts {
     install_metadata_absent: bool,
     install_state_absent: bool,
+    bootstrap_state_absent: bool,
     companion_binary: CompanionBinaryFacts,
 }
 
@@ -446,10 +447,10 @@ impl UninstallMechanics<'_> {
             ))?;
         finalize_recoverable_uninstall_cleanup(&self.plan, systemd)?;
         let _ = companion_binary;
-        commit_lifecycle_capsule_with(&self.capsule_path, remove_capsule)?;
-        // Capsule retirement is the last recoverable commit. Bootstrap state
-        // then retires the guarded activation generation as the final effect.
-        remove_probe_bootstrap_state(&self.plan)
+        // 在 Bootstrap state 的每个可失败删除点前保留 capsule；只有 state
+        // 已完全退休后，才提交删除唯一 recovery capsule。
+        remove_probe_bootstrap_state(&self.plan)?;
+        commit_lifecycle_capsule_with(&self.capsule_path, remove_capsule)
     }
 }
 
@@ -545,6 +546,7 @@ fn lifecycle_response_from_resume_decision(
 fn resume_lifecycle_companion_decision_at(
     install_metadata_path: &Path,
     install_state_dir: &Path,
+    bootstrap_state_dir: &Path,
     companion_binary_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -554,6 +556,7 @@ fn resume_lifecycle_companion_decision_at(
         let facts = read_post_commit_self_finalize_facts(
             install_metadata_path,
             install_state_dir,
+            bootstrap_state_dir,
             companion_binary_path,
         )?;
         return post_commit_self_finalize_policy(facts).map_err(|()| {
@@ -581,6 +584,7 @@ fn resume_lifecycle_companion_decision_at(
 pub(super) fn resume_lifecycle_companion_at(
     install_metadata_path: &Path,
     install_state_dir: &Path,
+    bootstrap_state_dir: &Path,
     companion_binary_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -588,6 +592,7 @@ pub(super) fn resume_lifecycle_companion_at(
     lifecycle_response_from_resume_decision(resume_lifecycle_companion_decision_at(
         install_metadata_path,
         install_state_dir,
+        bootstrap_state_dir,
         companion_binary_path,
         transport,
         systemd,
@@ -600,12 +605,14 @@ fn coordinate_lifecycle_companion_recovery_at(
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> LifecycleResponse {
-    let Ok(_guard) = ReplacementCoordinatorGuard::acquire_existing(production_root) else {
+    let Ok(_owner) = super::replacement::acquire_standalone_lifecycle_owner_at(production_root)
+    else {
         return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
     };
     resume_lifecycle_companion_at(
         &production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root),
         &production_path(super::PRODUCTION_INSTALL_STATE_DIR, production_root),
+        &production_path(super::PRODUCTION_BOOTSTRAP_STATE_DIR, production_root),
         &production_path(super::LIFECYCLE_COMPANION_BINARY_PATH, production_root),
         transport,
         systemd,
@@ -615,14 +622,17 @@ fn coordinate_lifecycle_companion_recovery_at(
 fn read_post_commit_self_finalize_facts(
     install_metadata_path: &Path,
     install_state_dir: &Path,
+    bootstrap_state_dir: &Path,
     companion_binary_path: &Path,
 ) -> Result<PostCommitSelfFinalizeFacts, ProbeUpgraderRunError> {
     let install_metadata_absent = path_absence_fact(install_metadata_path)?;
     let install_state_absent = path_absence_fact(install_state_dir)?;
+    let bootstrap_state_absent = path_absence_fact(bootstrap_state_dir)?;
     let binary = fs::symlink_metadata(companion_binary_path).map_err(ProbeUpgraderRunError::Io)?;
     Ok(PostCommitSelfFinalizeFacts {
         install_metadata_absent,
         install_state_absent,
+        bootstrap_state_absent,
         companion_binary: CompanionBinaryFacts {
             regular_file: binary.file_type().is_file(),
             link_count: binary.nlink(),
@@ -645,6 +655,7 @@ fn post_commit_self_finalize_policy(
 ) -> Result<ResumeDecision, ()> {
     (facts.install_metadata_absent
         && facts.install_state_absent
+        && facts.bootstrap_state_absent
         && facts.companion_binary.regular_file
         && facts.companion_binary.link_count == 1
         && facts.companion_binary.owner_uid == 0

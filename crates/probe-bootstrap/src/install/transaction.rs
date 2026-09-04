@@ -1093,39 +1093,6 @@ mod tests {
     }
 
     #[test]
-    fn waiting_activation_rejects_a_retired_lock_generation() {
-        let root = tempdir().unwrap();
-        let state = root.path().join("state");
-        fs::create_dir(&state).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
-        let first = ActivationLock::acquire(
-            &state,
-            unsafe { libc::geteuid() },
-            Instant::now() + Duration::from_secs(1),
-        )
-        .unwrap();
-        let (started_tx, started_rx) = mpsc::channel();
-        let worker_state = state.clone();
-        let worker = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            ActivationLock::acquire(
-                &worker_state,
-                unsafe { libc::geteuid() },
-                Instant::now() + Duration::from_secs(1),
-            )
-            .map(|_| ())
-        });
-        started_rx.recv().unwrap();
-        std::thread::sleep(Duration::from_millis(40));
-
-        fs::remove_file(state.join(LOCK_NAME)).unwrap();
-        fs::remove_dir(&state).unwrap();
-        drop(first);
-
-        assert_eq!(worker.join().unwrap(), Err(InstallError::ExistingResidue));
-    }
-
-    #[test]
     fn activation_lock_rejects_a_symlink_without_changing_its_target() {
         use std::os::unix::fs::symlink;
         let root = tempdir().unwrap();

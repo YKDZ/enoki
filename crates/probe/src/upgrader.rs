@@ -1251,6 +1251,7 @@ pub(crate) fn resume_lifecycle_companion(
     resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Path::new(PRODUCTION_INSTALL_STATE_DIR),
+        Path::new(PRODUCTION_BOOTSTRAP_STATE_DIR),
         Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
         transport,
         &mut SystemProbeUpgraderSystemdRunner,

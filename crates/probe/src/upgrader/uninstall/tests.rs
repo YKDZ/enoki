@@ -369,6 +369,7 @@ fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
     let trusted = PostCommitSelfFinalizeFacts {
         install_metadata_absent: true,
         install_state_absent: true,
+        bootstrap_state_absent: true,
         companion_binary: CompanionBinaryFacts {
             regular_file: true,
             link_count: 1,
@@ -388,6 +389,10 @@ fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
         },
         PostCommitSelfFinalizeFacts {
             install_state_absent: false,
+            ..trusted
+        },
+        PostCommitSelfFinalizeFacts {
+            bootstrap_state_absent: false,
             ..trusted
         },
         PostCommitSelfFinalizeFacts {
@@ -1026,7 +1031,29 @@ fn production_recovery_can_resume_after_the_final_pre_retirement_effect_fails() 
 #[test]
 fn production_recovery_resumes_when_capsule_retirement_fails_before_lock_retirement() {
     let temporary = tempfile::tempdir().expect("temporary directory");
-    let fixture = uninstall_coordinator_fixture(temporary.path());
+    let capsule_path = prepare_state_absent_terminal_capsule(temporary.path());
+    assert_eq!(
+        read_uninstall_capsule(&capsule_path)
+            .expect("read retained capsule")
+            .expect("capsule remains durable")
+            .phase,
+        UninstallCapsulePhase::TerminalAcknowledged
+    );
+
+    let mut recovery_transport = RecordingValidationTransport::default();
+    let mut recovery_systemd = RecordingSystemdRunner::default();
+    let recovered = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut recovery_transport,
+        &mut recovery_systemd,
+    );
+    assert_eq!(recovered, LifecycleResponse::succeeded());
+    assert!(recovery_transport.url.is_empty());
+    assert!(recovery_transport.status_url.is_empty());
+}
+
+fn prepare_state_absent_terminal_capsule(root: &Path) -> PathBuf {
+    let fixture = uninstall_coordinator_fixture(root);
     fs::write(
         &fixture.metadata_path,
         crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
@@ -1036,19 +1063,13 @@ fn production_recovery_resumes_when_capsule_retirement_fails_before_lock_retirem
         .expect("install metadata mode");
     fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
         .expect("identity mode");
-    commit_current_layout_for_test(temporary.path(), "1.2.3")
+    commit_current_layout_for_test(root, "1.2.3")
         .expect("canonical install producer commits current-layout receipt");
-    let activation_lock = fixture
-        .metadata
-        .bootstrap_state_dir
-        .as_ref()
-        .expect("bootstrap state")
-        .join("activation.lock");
     let request = local_uninstall_request();
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: fixture.identity_path.clone(),
     };
-    let guard = ReplacementCoordinatorGuard::acquire_existing(Some(temporary.path()))
+    let guard = ReplacementCoordinatorGuard::acquire_existing(Some(root))
         .expect("acquire canonical lifecycle generation");
     let intent =
         LocalUninstallIntent::classify(&request, &input, &fixture.metadata, &fixture.metadata_path)
@@ -1070,85 +1091,103 @@ fn production_recovery_resumes_when_capsule_retirement_fails_before_lock_retirem
         )))
     });
     assert!(interrupted.is_err());
-    assert!(
-        activation_lock.exists(),
-        "capsule failure retains the guarded activation generation"
-    );
-    assert_eq!(
-        read_uninstall_capsule(&capsule_path)
-            .expect("read retained capsule")
-            .expect("capsule remains durable")
-            .phase,
-        UninstallCapsulePhase::TerminalAcknowledged
-    );
     drop(mechanics);
     drop(guard);
-
-    let mut recovery_transport = RecordingValidationTransport::default();
-    let mut recovery_systemd = RecordingSystemdRunner::default();
-    let recovered = coordinate_lifecycle_companion_recovery_at(
-        Some(temporary.path()),
-        &mut recovery_transport,
-        &mut recovery_systemd,
-    );
-    assert_eq!(recovered, LifecycleResponse::succeeded());
-    assert!(recovery_transport.url.is_empty());
-    assert!(recovery_transport.status_url.is_empty());
+    capsule_path
 }
 
 #[test]
 fn production_recovery_serializes_its_first_fact_read_and_then_converges() {
     let temporary = tempfile::tempdir().expect("temporary directory");
-    let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
-    fs::create_dir_all(&bootstrap_state).expect("bootstrap state");
-    fs::set_permissions(&bootstrap_state, fs::Permissions::from_mode(0o700))
-        .expect("bootstrap state mode");
-    let activation_lock = bootstrap_state.join("activation.lock");
-    fs::write(&activation_lock, []).expect("activation lock");
-    fs::set_permissions(&activation_lock, fs::Permissions::from_mode(0o600))
-        .expect("activation lock mode");
-    let companion = temporary
-        .path()
-        .join("usr/local/bin/enoki-probe-lifecycle-companion");
-    fs::create_dir_all(companion.parent().unwrap()).expect("companion parent");
-    fs::write(&companion, "companion").expect("companion binary");
-    fs::set_permissions(&companion, fs::Permissions::from_mode(0o755)).expect("companion mode");
-    let held_lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&activation_lock)
-        .expect("open activation lock");
-    assert_eq!(
-        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_EX) },
-        0
-    );
+    prepare_state_absent_terminal_capsule(temporary.path());
+    let (owner_acquired_tx, owner_acquired_rx) = mpsc::channel();
+    let (owner_release_tx, owner_release_rx) = mpsc::channel();
+    let owner_root = temporary.path().to_path_buf();
+    let holder = thread::spawn(move || {
+        let owner =
+            crate::upgrader::replacement::acquire_standalone_lifecycle_owner_at(Some(&owner_root))
+                .expect("stable-only process owner");
+        owner_acquired_tx.send(()).expect("publish stable owner");
+        owner_release_rx.recv().expect("release stable owner");
+        drop(owner);
+    });
+    owner_acquired_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("stable-only process owner acquired before recovery");
 
     let (finished_tx, finished_rx) = mpsc::channel();
-    let root = temporary.path().to_path_buf();
+    let recovery_root = temporary.path().to_path_buf();
     let recovery = thread::spawn(move || {
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
-        let response =
-            coordinate_lifecycle_companion_recovery_at(Some(&root), &mut transport, &mut systemd);
+        let response = coordinate_lifecycle_companion_recovery_at(
+            Some(&recovery_root),
+            &mut transport,
+            &mut systemd,
+        );
         finished_tx
             .send((response, transport, systemd.calls))
             .expect("publish recovery result");
     });
-    assert!(finished_rx.recv_timeout(Duration::from_millis(40)).is_err());
-
-    assert_eq!(
-        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_UN) },
-        0
+    assert!(
+        finished_rx.recv_timeout(Duration::from_millis(40)).is_err(),
+        "recovery cannot read the retained capsule before stable admission"
     );
-    drop(held_lock);
+    owner_release_tx
+        .send(())
+        .expect("release process stable owner");
+    holder.join().expect("stable holder exits");
     let (response, transport, transcript) = finished_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("recovery re-reads and converges after release");
+        .recv_timeout(Duration::from_secs(2))
+        .expect("recovery re-reads the exact retained capsule and converges");
     assert_eq!(response, LifecycleResponse::succeeded());
     assert!(transport.url.is_empty());
     assert!(transport.status_url.is_empty());
-    assert!(transcript.is_empty());
-    recovery.join().unwrap();
+    assert!(!transcript.is_empty());
+    recovery.join().expect("recovery exits");
+}
+
+#[test]
+fn stable_only_recovery_rejects_an_invalid_capsule_before_external_effects() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let metadata = temporary.path().join("etc/enoki/probe-install.toml");
+    fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("metadata parent");
+    fs::write(
+        uninstall_capsule_path(&metadata).expect("fixed capsule path"),
+        "not a canonical uninstall capsule\n",
+    )
+    .expect("invalid capsule input");
+    let companion = temporary
+        .path()
+        .join("usr/local/bin/enoki-probe-lifecycle-companion");
+    fs::create_dir_all(companion.parent().expect("companion parent")).expect("companion parent");
+    fs::write(&companion, "companion").expect("companion binary");
+    fs::set_permissions(&companion, fs::Permissions::from_mode(0o755)).expect("companion mode");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+
+    let response = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+    assert!(systemd.calls.is_empty());
+    assert_eq!(
+        fs::read(&companion).expect("unchanged companion"),
+        b"companion"
+    );
+    assert_eq!(
+        fs::read(uninstall_capsule_path(&metadata).expect("fixed capsule path"))
+            .expect("unchanged invalid capsule"),
+        b"not a canonical uninstall capsule\n"
+    );
 }
 
 #[test]
@@ -1770,11 +1809,16 @@ fn lifecycle_resume_child_process() {
     let binary_path =
         std::env::var("ENOKI_TEST_RESUME_BINARY").expect("fixed test recovery binary");
     let state_path = std::env::var("ENOKI_TEST_RESUME_STATE").expect("fixed test install state");
+    let bootstrap_state = Path::new(&state_path)
+        .parent()
+        .expect("install state parent")
+        .join("enoki-probe-bootstrap");
     let mut transport = RecordingValidationTransport::default();
     let mut systemd = RecordingSystemdRunner::default();
     let completed = resume_lifecycle_companion_at(
         Path::new(&metadata_path),
         Path::new(&state_path),
+        &bootstrap_state,
         Path::new(&binary_path),
         &mut transport,
         &mut systemd,
@@ -1805,9 +1849,16 @@ fn empty_resume_rejects_a_healthy_install_without_self_finalizing() {
     fs::write(&binary, "companion").expect("companion binary");
     let mut transport = RecordingValidationTransport::default();
     let mut systemd = RecordingSystemdRunner::default();
+    let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
 
-    let response =
-        resume_lifecycle_companion_at(&metadata, &state, &binary, &mut transport, &mut systemd);
+    let response = resume_lifecycle_companion_at(
+        &metadata,
+        &state,
+        &bootstrap_state,
+        &binary,
+        &mut transport,
+        &mut systemd,
+    );
     assert_eq!(
         response,
         LifecycleResponse::failed("probe_uninstall_metadata_invalid")

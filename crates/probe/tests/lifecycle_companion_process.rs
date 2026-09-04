@@ -1,11 +1,11 @@
 use std::{
     ffi::CString,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
-            fs::{OpenOptionsExt, PermissionsExt},
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixStream,
             process::CommandExt,
         },
@@ -42,12 +42,19 @@ struct CreatedStableLock {
 
 impl Drop for CreatedStableLock {
     fn drop(&mut self) {
-        // 仅移除本测试 create_new 成功的 inode；已有 owner 一律在创建前拒绝。
-        let _ = fs::remove_file(&self.path);
+        // 仅移除本测试 create_new 成功且仍由 pathname 指向的 exact inode。
+        let held = self._file.metadata().ok();
+        let current = fs::symlink_metadata(&self.path).ok();
+        if held.is_some_and(|held| {
+            current
+                .is_some_and(|current| held.dev() == current.dev() && held.ino() == current.ino())
+        }) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
-fn create_test_stable_lock() -> CreatedStableLock {
+fn create_test_stable_lock() -> Option<CreatedStableLock> {
     let path = PathBuf::from("/run/lock/enoki-probe-lifecycle.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -56,7 +63,7 @@ fn create_test_stable_lock() -> CreatedStableLock {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&path)
-        .expect("已有 stable owner 时测试必须拒绝而非触碰它");
+        .ok()?;
     file.set_permissions(fs::Permissions::from_mode(0o600))
         .expect("固定 stable mode");
     assert_eq!(
@@ -64,7 +71,22 @@ fn create_test_stable_lock() -> CreatedStableLock {
         0,
         "测试 parent 必须持有 stable OFD",
     );
-    CreatedStableLock { _file: file, path }
+    Some(CreatedStableLock { _file: file, path })
+}
+
+fn add_inherited_ofd_range_lock(stable: &CreatedStableLock) {
+    let range = libc::flock {
+        l_type: libc::F_WRLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0,
+        l_len: 1,
+        l_pid: 0,
+    };
+    assert_eq!(
+        unsafe { libc::fcntl(stable._file.as_raw_fd(), libc::F_OFD_SETLK, &range) },
+        0,
+        "测试在同一 inherited OFD 上添加额外内核 lock record",
+    );
 }
 
 fn sealed_companion_binary() -> File {
@@ -81,6 +103,52 @@ fn sealed_companion_binary() -> File {
     assert_eq!(unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, seals) }, 0);
     assert_eq!(unsafe { libc::fcntl(fd, libc::F_GET_SEALS) }, seals);
     file
+}
+
+fn malformed_marker_runtime_output() -> Vec<u8> {
+    let executable = CString::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"))
+        .expect("Companion executable path has no NUL");
+    let argument = CString::new("record-runtime-failure").expect("fixed argv has no NUL");
+    let malformed_marker =
+        CString::new("ENOKI_LIFECYCLE_LEASE_FD").expect("fixed malformed env entry has no NUL");
+    let mut pipe = [0; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork real Companion process");
+    if child == 0 {
+        unsafe {
+            libc::close(pipe[0]);
+            if libc::dup2(pipe[1], libc::STDOUT_FILENO) != libc::STDOUT_FILENO {
+                libc::_exit(127);
+            }
+            libc::close(pipe[1]);
+            let null = CString::new("/dev/null").expect("fixed null path");
+            let stdin = libc::open(null.as_ptr(), libc::O_RDONLY);
+            if stdin < 0 || libc::dup2(stdin, libc::STDIN_FILENO) != libc::STDIN_FILENO {
+                libc::_exit(127);
+            }
+            let mut argv = [executable.as_ptr(), argument.as_ptr(), std::ptr::null()];
+            let mut environment = [malformed_marker.as_ptr(), std::ptr::null()];
+            libc::execve(
+                executable.as_ptr(),
+                argv.as_mut_ptr(),
+                environment.as_mut_ptr(),
+            );
+            libc::_exit(127);
+        }
+    }
+    unsafe { libc::close(pipe[1]) };
+    let mut output = Vec::new();
+    unsafe { File::from_raw_fd(pipe[0]) }
+        .read_to_end(&mut output)
+        .expect("read real Companion stdout");
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(child, &mut status, 0) }, child);
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) != 0);
+    output
 }
 
 #[test]
@@ -153,6 +221,14 @@ fn invalid_marker_precedes_runtime_mode_without_running_the_runtime_action() {
 }
 
 #[test]
+fn malformed_present_marker_precedes_runtime_mode() {
+    assert_eq!(
+        LifecycleResponse::decode(&malformed_marker_runtime_output()),
+        Ok(LifecycleResponse::failed("lifecycle.invalid_authority")),
+    );
+}
+
+#[test]
 fn invalid_marker_precedes_empty_resume() {
     let output = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"))
         .env("ENOKI_LIFECYCLE_LEASE_FD", "not-fd9")
@@ -204,7 +280,9 @@ fn valid_adopted_fd9_reaches_the_private_replacement_branch() {
         !Path::new("/etc/enoki/probe-install.toml").exists(),
         "真实 process oracle 拒绝在已安装宿主上运行"
     );
-    let stable = create_test_stable_lock();
+    let Some(stable) = create_test_stable_lock() else {
+        return;
+    };
     let stable_fd = stable._file.as_raw_fd();
     let sealed = sealed_companion_binary();
     let request = replacement_request();
@@ -248,5 +326,113 @@ fn valid_adopted_fd9_reaches_the_private_replacement_branch() {
             "lifecycle.replacement_commit_failed"
         )),
         "fd9 已经通过 source admission；只有 private Replacement coordinator 才会读取缺失 commit custody",
+    );
+}
+
+#[test]
+fn adopted_fd9_with_malformed_request_is_invalid_authority() {
+    let Some(stable) = create_test_stable_lock() else {
+        return;
+    };
+    let stable_fd = stable._file.as_raw_fd();
+    let sealed = sealed_companion_binary();
+    let mut command = Command::new(format!("/proc/self/fd/{}", sealed.as_raw_fd()));
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("ENOKI_LIFECYCLE_LEASE_FD", "9")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup3(stable_fd, 9, 0) != 9 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("启动 sealed Companion binary");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(b"not a lifecycle request")
+        .expect("写入 malformed request");
+    let output = child.wait_with_output().expect("等待 child EOF/exit");
+
+    assert!(!output.status.success());
+    assert_eq!(
+        LifecycleResponse::decode(&output.stdout),
+        Ok(LifecycleResponse::failed("lifecycle.invalid_authority")),
+    );
+}
+
+#[test]
+fn adopted_fd9_with_an_extra_kernel_lock_record_is_invalid_authority() {
+    let Some(stable) = create_test_stable_lock() else {
+        return;
+    };
+    add_inherited_ofd_range_lock(&stable);
+    let stable_fd = stable._file.as_raw_fd();
+    let sealed = sealed_companion_binary();
+    let request = replacement_request();
+    let mut command = Command::new(format!("/proc/self/fd/{}", sealed.as_raw_fd()));
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .env("ENOKI_LIFECYCLE_LEASE_FD", "9")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup3(stable_fd, 9, 0) != 9 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("启动 sealed Companion binary");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(&request.encode().expect("canonical request"))
+        .expect("写入 exact Replacement request");
+    let output = child.wait_with_output().expect("等待 child EOF/exit");
+
+    assert!(!output.status.success());
+    assert_eq!(
+        LifecycleResponse::decode(&output.stdout),
+        Ok(LifecycleResponse::failed("lifecycle.invalid_authority")),
+    );
+}
+
+#[test]
+fn markerless_upgrade_replacement_is_not_enabled() {
+    let request = replacement_request();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"))
+        .arg("--upgrade")
+        .env_remove("ENOKI_LIFECYCLE_LEASE_FD")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("启动真实 Companion binary");
+    child
+        .stdin
+        .take()
+        .expect("child stdin")
+        .write_all(&request.encode().expect("canonical request"))
+        .expect("写入 request");
+    let output = child.wait_with_output().expect("等待 Companion binary");
+
+    assert!(!output.status.success());
+    assert_eq!(
+        LifecycleResponse::decode(&output.stdout),
+        Ok(LifecycleResponse::not_enabled()),
     );
 }
