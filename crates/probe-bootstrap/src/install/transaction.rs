@@ -95,6 +95,46 @@ impl ActivationLock {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+
+    pub(crate) fn matches_canonical_state(
+        &self,
+        state: &Path,
+        expected_uid: u32,
+    ) -> Result<(), InstallError> {
+        let path = state.join(LOCK_NAME);
+        let path_metadata =
+            fs::symlink_metadata(&path).map_err(|_| InstallError::ExistingResidue)?;
+        let held_metadata = self.file.metadata().map_err(|_| InstallError::Io)?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.is_file()
+            || path_metadata.uid() != expected_uid
+            || path_metadata.gid() != expected_uid
+            || path_metadata.mode() & 0o7777 != 0o600
+            || path_metadata.nlink() != 1
+            || path_metadata.dev() != held_metadata.dev()
+            || path_metadata.ino() != held_metadata.ino()
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        Ok(())
+    }
+
+    /// 只供已持有 stable lifecycle owner 的 legacy-absent admission 使用。
+    /// 它建立/复验 private state，但绝不打开或 flock 新 legacy OFD。
+    pub(crate) fn establish_state_without_legacy_lock(
+        state: &Path,
+        expected_uid: u32,
+    ) -> Result<(), InstallError> {
+        ensure_private_state(state, expected_uid)
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn try_clone(&self) -> Result<Self, InstallError> {
+        self.file
+            .try_clone()
+            .map(|file| Self { file })
+            .map_err(|_| InstallError::Io)
+    }
 }
 
 impl Drop for ActivationLock {

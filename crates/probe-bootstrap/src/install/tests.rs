@@ -57,6 +57,7 @@ mod tests {
         )
     }
 
+
     struct LayoutBootstrapComponentsForTest<'a> {
         probe: &'a mut File,
         bootstrap_acquirer: &'a mut File,

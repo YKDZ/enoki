@@ -6,8 +6,8 @@ use crate::{
     install::{
         CommittedReplacementLocalCustody, FixedInstallPaths, InstallError, SystemAccounts,
         SystemSystemd, VerifiedCompleteFreshComponents,
-        activate_complete_replacement_current_probe_with_registration, coordinate_fresh_install,
-        transaction::ActivationLock,
+        activate_complete_replacement_current_probe_with_registration_and_admission,
+        coordinate_fresh_install_with_admission, transaction::ActivationLock,
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
     replacement::{
@@ -20,6 +20,8 @@ use crate::{
     },
 };
 use sha2::{Digest, Sha256};
+#[cfg(not(test))]
+use std::sync::OnceLock;
 use std::{
     ffi::CString,
     fs::{self, File, OpenOptions},
@@ -109,6 +111,29 @@ struct BootstrapLifecycleOwner {
     stable: File,
 }
 
+#[cfg(not(test))]
+static PROCESS_LIFETIME_BOOTSTRAP_LEGACY: OnceLock<Option<ActivationLock>> = OnceLock::new();
+#[cfg(not(test))]
+static PROCESS_LIFETIME_BOOTSTRAP_STABLE: OnceLock<File> = OnceLock::new();
+
+/// 只可由 Bootstrap process owner 的私有字段构造。installer 可消费此类型，
+/// 但无法以任意 File、Option 或 flag 伪造它。
+pub(crate) struct BootstrapInstallAdmission<'a> {
+    source: BootstrapInstallAdmissionSource<'a>,
+}
+
+enum BootstrapInstallAdmissionSource<'a> {
+    Owner(&'a BootstrapLifecycleOwner),
+    #[cfg(test)]
+    Independent,
+}
+
+#[allow(dead_code)]
+pub(crate) struct BootstrapInstallLease<'a> {
+    _owner: Option<&'a BootstrapLifecycleOwner>,
+    _independent: Option<ActivationLock>,
+}
+
 impl BootstrapLifecycleOwner {
     fn acquire() -> Result<Self, ActivationError> {
         let state = std::path::Path::new("/var/lib/enoki-probe-bootstrap");
@@ -143,6 +168,79 @@ impl BootstrapLifecycleOwner {
                 Err(_) => return Err(ActivationError::Io),
             }
         }
+    }
+
+    fn install_admission(&self) -> BootstrapInstallAdmission<'_> {
+        BootstrapInstallAdmission {
+            source: BootstrapInstallAdmissionSource::Owner(self),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn retain_to_process_exit(&self) -> Result<(), ActivationError> {
+        if PROCESS_LIFETIME_BOOTSTRAP_STABLE.get().is_some() {
+            return Ok(());
+        }
+        let legacy = self
+            ._legacy
+            .as_ref()
+            .map(ActivationLock::try_clone)
+            .transpose()
+            .map_err(ActivationError::Install)?;
+        let stable = self.stable.try_clone().map_err(|_| ActivationError::Io)?;
+        PROCESS_LIFETIME_BOOTSTRAP_LEGACY
+            .set(legacy)
+            .map_err(|_| ActivationError::Io)?;
+        PROCESS_LIFETIME_BOOTSTRAP_STABLE
+            .set(stable)
+            .map_err(|_| ActivationError::Io)
+    }
+
+    #[cfg(test)]
+    fn retain_to_process_exit(&self) -> Result<(), ActivationError> {
+        Ok(())
+    }
+}
+
+impl<'a> BootstrapInstallAdmission<'a> {
+    #[cfg(test)]
+    pub(crate) fn independent_for_test() -> Self {
+        Self {
+            source: BootstrapInstallAdmissionSource::Independent,
+        }
+    }
+
+    #[allow(irrefutable_let_patterns)]
+    pub(crate) fn enter(
+        self,
+        state: &std::path::Path,
+        expected_uid: u32,
+    ) -> Result<BootstrapInstallLease<'a>, InstallError> {
+        let BootstrapInstallAdmissionSource::Owner(owner) = self.source else {
+            return ActivationLock::acquire(
+                state,
+                expected_uid,
+                Instant::now() + ACTIVATION_LOCK_BUDGET,
+            )
+            .map(|lock| BootstrapInstallLease {
+                _owner: None,
+                _independent: Some(lock),
+            });
+        };
+        if let Some(legacy) = owner._legacy.as_ref() {
+            legacy.matches_canonical_state(state, expected_uid)?;
+        } else {
+            if state.try_exists().map_err(|_| InstallError::Io)?
+                || owner.stable.metadata().map_err(|_| InstallError::Io)?.len() != 0
+            {
+                return Err(InstallError::ExistingResidue);
+            }
+            ActivationLock::establish_state_without_legacy_lock(state, expected_uid)?;
+        }
+        Ok(BootstrapInstallLease {
+            _owner: Some(owner),
+            _independent: None,
+        })
     }
 }
 
@@ -467,13 +565,8 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
-        let stable = self
-            ._lifecycle_owner
-            .as_ref()
-            .ok_or(ActivationError::Io)?
-            .stable
-            .try_clone()
-            .map_err(|_| ActivationError::Io)?;
+        let owner = self._lifecycle_owner.as_ref().ok_or(ActivationError::Io)?;
+        let stable = owner.stable.try_clone().map_err(|_| ActivationError::Io)?;
         let mut replacement_activation = prepare_replacement_migration(
             &self.enrollment,
             &self.bundle,
@@ -541,7 +634,7 @@ impl ReceivedRootHandoff {
             let registration_binding = commit
                 .registration_binding()
                 .ok_or(ActivationError::Replacement)?;
-            activate_complete_replacement_current_probe_with_registration(
+            activate_complete_replacement_current_probe_with_registration_and_admission(
                 components,
                 &self.enrollment,
                 &self.bundle,
@@ -551,9 +644,16 @@ impl ReceivedRootHandoff {
                 &mut systemd,
                 &resume_binding,
                 &registration_binding,
+                owner.install_admission(),
             )
         } else {
-            coordinate_fresh_install(components, &self.enrollment, &self.bundle, &trust)
+            coordinate_fresh_install_with_admission(
+                components,
+                &self.enrollment,
+                &self.bundle,
+                &trust,
+                owner.install_admission(),
+            )
         };
         result.map_err(ActivationError::Install)?;
         if let ReplacementActivation::Resume(commit) = replacement_activation {
@@ -985,12 +1085,6 @@ fn terminate_and_reap(child: &mut std::process::Child) {
 impl Drop for ReceivedRootHandoff {
     fn drop(&mut self) {
         self.enrollment.zeroize();
-        // production handoff 的 lifecycle owner 必须越过 activation return，直到
-        // process 真正 exit 才由 kernel 释放其 legacy/stable OFD。
-        #[cfg(not(test))]
-        if let Some(owner) = self._lifecycle_owner.take() {
-            std::mem::forget(owner);
-        }
     }
 }
 
@@ -1026,6 +1120,7 @@ pub fn activate_from_stdin(input: &mut impl Read) -> Result<ReceivedRootHandoff,
         return Err(ActivationError::NotRoot);
     }
     let owner = BootstrapLifecycleOwner::acquire()?;
+    owner.retain_to_process_exit()?;
     reconcile_exact_orphan_companion()?;
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(ActivationError::BuildTrustUnavailable)?;
@@ -1055,6 +1150,7 @@ pub fn activate_from_socket(
         return Err(ActivationError::NotRoot);
     }
     let owner = BootstrapLifecycleOwner::acquire()?;
+    owner.retain_to_process_exit()?;
     reconcile_exact_orphan_companion()?;
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(ActivationError::BuildTrustUnavailable)?;
@@ -1398,6 +1494,47 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::{fs, io::Cursor, os::unix::fs::PermissionsExt, sync::mpsc, thread, time::Duration};
     use tempfile::tempdir;
+
+    #[test]
+    fn process_owner_admission_borrows_legacy_for_the_actual_install_transaction_gate() {
+        let root = tempdir().unwrap();
+        let state = root.path().join("bootstrap-state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let legacy = ActivationLock::acquire(
+            &state,
+            unsafe { libc::geteuid() },
+            Instant::now() + ACTIVATION_LOCK_BUDGET,
+        )
+        .unwrap();
+        let owner = BootstrapLifecycleOwner {
+            _legacy: Some(legacy),
+            stable: tempfile::tempfile().unwrap(),
+        };
+
+        owner
+            .install_admission()
+            .enter(&state, unsafe { libc::geteuid() })
+            .expect("actual install transaction gate borrows held legacy instead of re-flocking");
+    }
+
+    #[test]
+    fn process_owner_stable_absent_admission_establishes_state_for_fresh_transaction_gate() {
+        let root = tempdir().unwrap();
+        let state = root.path().join("bootstrap-state");
+        let owner = BootstrapLifecycleOwner {
+            _legacy: None,
+            stable: tempfile::tempfile().unwrap(),
+        };
+        let _lease = owner
+            .install_admission()
+            .enter(&state, unsafe { libc::geteuid() })
+            .expect("stable-owned absent admission");
+        assert!(
+            state.is_dir(),
+            "fresh transaction gate 获得已验证 private state"
+        );
+    }
 
     #[test]
     fn r1_removes_only_the_exact_orphan_companion() {

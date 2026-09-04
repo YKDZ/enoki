@@ -957,10 +957,32 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         .expect("Bootstrap stdin production entry");
     assert!(
         bootstrap_entry.find("BootstrapLifecycleOwner::acquire()")
-            < bootstrap_entry.find("reconcile_exact_orphan_companion()")
+            < bootstrap_entry.find("owner.retain_to_process_exit()")
+            && bootstrap_entry.find("owner.retain_to_process_exit()")
+                < bootstrap_entry.find("reconcile_exact_orphan_companion()")
             && bootstrap_entry.find("reconcile_exact_orphan_companion()")
                 < bootstrap_entry.find("receive_root_handoff_with_policy("),
-        "Bootstrap production entry 必须在 handoff/read/effect 前取得 owner，再执行 R1",
+        "Bootstrap production entry 必须在 handoff/read/effect 前取得并保留 owner，再执行 R1",
+    );
+    assert!(
+        BOOTSTRAP_ACTIVATION.contains("owner.install_admission()")
+            && BOOTSTRAP_ACTIVATION.contains(
+                "activate_complete_replacement_current_probe_with_registration_and_admission("
+            )
+            && BOOTSTRAP_ACTIVATION.contains("coordinate_fresh_install_with_admission("),
+        "Bootstrap fresh 与 Replacement continuation 必须把 process owner witness 交给安装 transaction",
+    );
+    let admitted_install = BOOTSTRAP_INSTALL
+        .split("fn activate_verified_fresh_install_with_admission(")
+        .nth(1)
+        .expect("admitted install transaction")
+        .split("fn recover_interrupted_install(")
+        .next()
+        .expect("admitted install body");
+    assert!(
+        admitted_install.contains("admission.enter(")
+            && !admitted_install.contains("ActivationLock::acquire("),
+        "process admission 的安装 transaction 只能 borrow/stable-absent，不得重取 legacy",
     );
     let terminal = LIFECYCLE_COMPANION_PROCESS
         .split("fn write_terminal_response")

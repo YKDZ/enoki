@@ -43,6 +43,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[allow(unused_imports)]
 use transaction::{ActivationLock, OwnedPath, TransactionJournal};
 
 pub(crate) use replacement_registration::retire_attempt_source as retire_replacement_registration_attempt_source;
@@ -50,6 +51,8 @@ pub(crate) use replacement_registration::retire_attempt_source as retire_replace
 const INSTALL_COMMAND_BUDGET: Duration = Duration::from_secs(90);
 const ROLLBACK_COMMAND_BUDGET: Duration = Duration::from_secs(30);
 const COMMAND_STEP_BUDGET: Duration = Duration::from_secs(15);
+
+use crate::activation::BootstrapInstallAdmission;
 
 const SERVICE_NAME: &str = "enoki-probe";
 const SERVICE_USER: &str = "enoki-probe";
@@ -730,18 +733,36 @@ pub(crate) fn classify_committed_replacement_local_custody(
 
 /// Fresh 专属 coordinator：只接受普通新 Host Enrollment 与完整已验证角色集合。
 /// Replacement authority 在构造任何 account/filesystem/systemd effect 前关闭。
+#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn coordinate_fresh_install(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
 ) -> Result<(), InstallError> {
+    coordinate_fresh_install_with_admission(
+        components,
+        enrollment,
+        bundle,
+        trust,
+        BootstrapInstallAdmission::independent_for_test(),
+    )
+}
+
+pub(crate) fn coordinate_fresh_install_with_admission(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    admission: BootstrapInstallAdmission<'_>,
+) -> Result<(), InstallError> {
     let verified = verify_fresh_install(components, enrollment, bundle, trust)?;
     let paths = FixedInstallPaths::production();
     let mut accounts = SystemAccounts::default();
     let mut systemd = SystemSystemd::default();
     let mut files = SystemInstallFiles;
-    activate_verified_fresh_install(
+    activate_verified_fresh_install_with_admission(
         verified.components.probe,
         Some((
             verified.components.observation_runtime,
@@ -763,6 +784,7 @@ pub(crate) fn coordinate_fresh_install(
             files: &mut files,
         },
         InstallFailureSemantics::FreshRollback,
+        admission,
     )
 }
 
@@ -796,6 +818,7 @@ fn verify_fresh_install<'a>(
 /// 因此候选激活失败时保留 durable journal，绝不调用普通 fresh-install rollback。
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn activate_complete_replacement_current_probe(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -815,10 +838,13 @@ pub(crate) fn activate_complete_replacement_current_probe(
         accounts,
         systemd,
         InstallFailureSemantics::CommittedReplacement(resume_binding),
+        BootstrapInstallAdmission::independent_for_test(),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn activate_complete_replacement_current_probe_with_registration(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -829,6 +855,33 @@ pub(crate) fn activate_complete_replacement_current_probe_with_registration(
     systemd: &mut impl SystemdPort,
     resume_binding: &ReplacementResumeBinding,
     registration_binding: &ReplacementRegistrationBinding,
+) -> Result<(), InstallError> {
+    activate_complete_replacement_current_probe_with_registration_and_admission(
+        components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        accounts,
+        systemd,
+        resume_binding,
+        registration_binding,
+        BootstrapInstallAdmission::independent_for_test(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn activate_complete_replacement_current_probe_with_registration_and_admission(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+    resume_binding: &ReplacementResumeBinding,
+    registration_binding: &ReplacementRegistrationBinding,
+    admission: BootstrapInstallAdmission<'_>,
 ) -> Result<(), InstallError> {
     activate_complete_replacement_current_probe_with_semantics(
         components,
@@ -842,6 +895,7 @@ pub(crate) fn activate_complete_replacement_current_probe_with_registration(
             registration: registration_binding,
             resume: resume_binding,
         },
+        admission,
     )
 }
 
@@ -855,9 +909,10 @@ fn activate_complete_replacement_current_probe_with_semantics<'a>(
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
     semantics: InstallFailureSemantics<'a>,
+    admission: BootstrapInstallAdmission<'_>,
 ) -> Result<(), InstallError> {
     let mut files = SystemInstallFiles;
-    activate_verified_install_layout(
+    activate_verified_install_layout_with_admission(
         components.probe,
         Some((
             components.observation_runtime,
@@ -879,6 +934,7 @@ fn activate_complete_replacement_current_probe_with_semantics<'a>(
             files: &mut files,
         },
         semantics,
+        admission,
     )
 }
 
@@ -1031,6 +1087,8 @@ fn validate_bootstrap_roles(paths: &FixedInstallPaths) -> Result<(), InstallErro
 // The closed activation boundary makes every authority-bearing dependency
 // explicit; none of these values are caller-selected role collections.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn activate_verified_install_layout(
     component: &mut File,
     observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
@@ -1042,9 +1100,7 @@ fn activate_verified_install_layout(
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
     failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
-    let mut observation_components = observation_components;
-    verify_fresh_install_inputs(component, observation_components.as_mut(), bundle, trust)?;
-    activate_verified_fresh_install(
+    activate_verified_install_layout_with_admission(
         component,
         observation_components,
         bootstrap_components,
@@ -1054,6 +1110,36 @@ fn activate_verified_install_layout(
         paths,
         ports,
         failure_semantics,
+        BootstrapInstallAdmission::independent_for_test(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_verified_install_layout_with_admission(
+    component: &mut File,
+    observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
+    bootstrap_components: Option<(&mut File, &mut File)>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+    failure_semantics: InstallFailureSemantics<'_>,
+    admission: BootstrapInstallAdmission<'_>,
+) -> Result<(), InstallError> {
+    let mut observation_components = observation_components;
+    verify_fresh_install_inputs(component, observation_components.as_mut(), bundle, trust)?;
+    activate_verified_fresh_install_with_admission(
+        component,
+        observation_components,
+        bootstrap_components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        ports,
+        failure_semantics,
+        admission,
     )
 }
 
@@ -1099,6 +1185,8 @@ fn verify_fresh_install_inputs(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn activate_verified_fresh_install(
     component: &mut File,
     observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
@@ -1110,12 +1198,35 @@ fn activate_verified_fresh_install(
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
     failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
+    activate_verified_fresh_install_with_admission(
+        component,
+        observation_components,
+        bootstrap_components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        ports,
+        failure_semantics,
+        BootstrapInstallAdmission::independent_for_test(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_verified_fresh_install_with_admission(
+    component: &mut File,
+    observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
+    bootstrap_components: Option<(&mut File, &mut File)>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+    failure_semantics: InstallFailureSemantics<'_>,
+    admission: BootstrapInstallAdmission<'_>,
+) -> Result<(), InstallError> {
     let install_observation = observation_components.is_some();
-    let _activation_lock = ActivationLock::acquire(
-        &paths.bootstrap_state(),
-        paths.expected_root_uid(),
-        Instant::now() + INSTALL_COMMAND_BUDGET,
-    )?;
+    let _activation_lease = admission.enter(&paths.bootstrap_state(), paths.expected_root_uid())?;
     let resumed_journal = match recover_interrupted_install(paths, ports, failure_semantics)? {
         InterruptedInstall::Fresh => None,
         InterruptedInstall::ResumeCommitted(journal) => Some(*journal),
