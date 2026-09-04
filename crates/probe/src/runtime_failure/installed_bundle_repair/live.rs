@@ -7,8 +7,8 @@ use std::{
 
 use enoki_probe_bootstrap::{
     acquisition::{
-        VerifiedProbeUpgradeStage, VerifiedUpgradeStageReceipt, open_verified_probe_upgrade_stage,
-        remove_verified_probe_upgrade_stage,
+        VerifiedProbeUpgradeStage, VerifiedUpgradeStageReceipt,
+        open_verified_installed_bundle_repair_stage, remove_verified_installed_bundle_repair_stage,
     },
     install::{
         FixedInstallPaths, InstalledBundleRepairBinding, InstalledUpgradeBinding, SystemSystemd,
@@ -348,7 +348,7 @@ impl RepairStageOpener for ProductionStageOpener {
         receipt: &VerifiedUpgradeStageReceipt,
         owner_uid: u32,
     ) -> Result<RepairStage, LiveInstalledBundleRepairError> {
-        open_verified_probe_upgrade_stage(receipt, owner_uid)
+        open_verified_installed_bundle_repair_stage(receipt, owner_uid)
             .map(RepairStage::from)
             .map_err(|_| LiveInstalledBundleRepairError::ManualReinstallRequired)
     }
@@ -358,7 +358,7 @@ impl RepairStageOpener for ProductionStageOpener {
         operation_id: &str,
         owner_uid: u32,
     ) -> Result<(), LiveInstalledBundleRepairError> {
-        remove_verified_probe_upgrade_stage(operation_id, owner_uid)
+        remove_verified_installed_bundle_repair_stage(operation_id, owner_uid)
             .map_err(|_| contract_failure("probe_repair_stage_cleanup_failed"))
     }
 }

@@ -799,7 +799,7 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
         );
     }
     for required in [
-        "open_verified_probe_upgrade_stage",
+        "open_verified_installed_bundle_repair_stage",
         "restore_installed_bundle_for_repair",
         "stage.bundle.manifest_sha256 != authority.manifest_sha256",
         "mask\", \"--runtime\", \"enoki-observation-runtime.socket",

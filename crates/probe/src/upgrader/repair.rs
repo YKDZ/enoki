@@ -9,7 +9,10 @@ use super::{
     read_trusted_probe_install_preflight,
 };
 use enoki_probe_bootstrap::{
-    acquisition::remove_verified_probe_upgrade_stage,
+    acquisition::{
+        INSTALLED_BUNDLE_REPAIR_STAGE_ROOT, discard_unadmitted_installed_bundle_repair_stage,
+        prepare_installed_bundle_repair_stage, remove_verified_probe_upgrade_stage,
+    },
     install::{
         FixedInstallPaths, RepairIntentState, SystemSystemd, complete_authorized_probe_repair,
         consume_probe_repair_authority, execute_authorized_probe_repair,
@@ -25,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::{fs::MetadataExt, process::CommandExt},
+    os::unix::process::CommandExt,
     path::Path,
     process::{Command, Stdio},
 };
@@ -192,27 +195,64 @@ fn run_installed_bundle_repair(
         evidence_signature: &signed.signature,
     })
     .map_err(|_| contract_failure("probe_repair_request_invalid"))?;
-    let output = exchange_authority_with(dependencies, &request, invoking_uid, invoking_gid)?;
-    let response: InstalledBundleRepairAuthorizationResponse = decode_authority_response(&output)?;
-    let grant = crate::runtime_failure::validate_installed_bundle_repair_authority(
+    prepare_installed_bundle_repair_stage(invoking_uid, invoking_gid)
+        .map_err(|_| contract_failure("probe_repair_stage_prepare_failed"))?;
+    let output = match exchange_installed_bundle_authority_with(
+        dependencies,
+        &request,
+        invoking_uid,
+        invoking_gid,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            cleanup_unadmitted_installed_bundle_stage(invoking_uid)?;
+            return Err(error);
+        }
+    };
+    let response: InstalledBundleRepairAuthorizationResponse =
+        match decode_authority_response(&output) {
+            Ok(response) => response,
+            Err(error) => {
+                cleanup_unadmitted_installed_bundle_stage(invoking_uid)?;
+                return Err(error);
+            }
+        };
+    let grant = match crate::runtime_failure::validate_installed_bundle_repair_authority(
         &signed,
         &response.authority,
         &response.signature,
         now_ms,
-    )
-    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
-    let identity_metadata =
-        fs::symlink_metadata("/var/lib/enoki-probe/identity/probe-bootstrap.toml")
-            .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
-    let session = crate::runtime_failure::begin_installed_bundle_repair(
+    ) {
+        Ok(grant) => grant,
+        Err(_) => {
+            cleanup_unadmitted_installed_bundle_stage(invoking_uid)?;
+            return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+        }
+    };
+    let session = match crate::runtime_failure::begin_installed_bundle_repair(
         grant,
-        response.stage_receipt,
-        identity_metadata.uid(),
-    )
-    .map_err(|_| contract_failure("probe_repair_intent_persist_failed"))?;
+        response.stage_receipt.clone(),
+        invoking_uid,
+    ) {
+        Ok(session) => session,
+        Err(_) => {
+            if matches!(
+                crate::runtime_failure::resume_installed_bundle_repair(),
+                Ok(None)
+            ) {
+                cleanup_unadmitted_installed_bundle_stage(invoking_uid)?;
+            }
+            return Err(contract_failure("probe_repair_intent_persist_failed"));
+        }
+    };
     adapt_installed_bundle_result(crate::runtime_failure::drive_live_installed_bundle_repair(
         session,
     ))
+}
+
+fn cleanup_unadmitted_installed_bundle_stage(invoking_uid: u32) -> Result<(), ProbeRepairRunError> {
+    discard_unadmitted_installed_bundle_repair_stage(invoking_uid)
+        .map_err(|_| contract_failure("probe_repair_stage_cleanup_failed"))
 }
 
 fn adapt_installed_bundle_result(
@@ -286,6 +326,12 @@ trait RepairDependencies {
         invoking_uid: u32,
         invoking_gid: u32,
     ) -> Result<RepairAuthorityOutput, RepairDependencyFailure>;
+    fn exchange_installed_bundle_authority(
+        &mut self,
+        request: &[u8],
+        invoking_uid: u32,
+        invoking_gid: u32,
+    ) -> Result<RepairAuthorityOutput, RepairDependencyFailure>;
 }
 
 struct ProductionRepairDependencies;
@@ -314,36 +360,60 @@ impl RepairDependencies for ProductionRepairDependencies {
     ) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
         let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
         acquirer.arg("--repair-authorize");
-        configure_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
-        let mut child = acquirer
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|error| {
-                let failure = RepairDependencyFailure::Spawn(error.raw_os_error());
-                if let Some(diagnostic) = repair_dependency_diagnostic(failure) {
-                    eprintln!("{diagnostic}");
-                }
-                failure
-            })?;
-        child
-            .stdin
-            .take()
-            .ok_or(RepairDependencyFailure::Write)?
-            .write_all(request)
-            .map_err(|_| RepairDependencyFailure::Write)?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| RepairDependencyFailure::Wait)?;
-        let output = RepairAuthorityOutput {
-            code: output.status.code(),
-            stdout: output.stdout,
-            successful: output.status.success(),
-        };
-        eprintln!("{}", acquirer_exit_diagnostic(&output));
-        Ok(output)
+        run_acquirer(acquirer, request, invoking_uid, invoking_gid)
     }
+
+    fn exchange_installed_bundle_authority(
+        &mut self,
+        request: &[u8],
+        invoking_uid: u32,
+        invoking_gid: u32,
+    ) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
+        let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
+        // 该专用语义入口在 root child 降权前固定 cwd；调用方既不能选择 path/FD，
+        // 降权后的 acquirer 也无需 traverse root-private Bootstrap parent。
+        acquirer
+            .arg("--repair-authorize")
+            .current_dir(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT);
+        run_acquirer(acquirer, request, invoking_uid, invoking_gid)
+    }
+}
+
+fn run_acquirer(
+    mut acquirer: Command,
+    request: &[u8],
+    invoking_uid: u32,
+    invoking_gid: u32,
+) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
+    configure_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
+    let mut child = acquirer
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| {
+            let failure = RepairDependencyFailure::Spawn(error.raw_os_error());
+            if let Some(diagnostic) = repair_dependency_diagnostic(failure) {
+                eprintln!("{diagnostic}");
+            }
+            failure
+        })?;
+    child
+        .stdin
+        .take()
+        .ok_or(RepairDependencyFailure::Write)?
+        .write_all(request)
+        .map_err(|_| RepairDependencyFailure::Write)?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| RepairDependencyFailure::Wait)?;
+    let output = RepairAuthorityOutput {
+        code: output.status.code(),
+        stdout: output.stdout,
+        successful: output.status.success(),
+    };
+    eprintln!("{}", acquirer_exit_diagnostic(&output));
+    Ok(output)
 }
 
 fn fresh_exchange_facts_with(
@@ -371,6 +441,22 @@ fn exchange_authority_with(
     let output = dependencies
         .exchange_authority(request, invoking_uid, invoking_gid)
         .map_err(|_| contract_failure("probe_repair_authority_acquire_failed"))?;
+    validate_acquirer_output(output)
+}
+
+fn exchange_installed_bundle_authority_with(
+    dependencies: &mut impl RepairDependencies,
+    request: &[u8],
+    invoking_uid: u32,
+    invoking_gid: u32,
+) -> Result<Vec<u8>, ProbeRepairRunError> {
+    let output = dependencies
+        .exchange_installed_bundle_authority(request, invoking_uid, invoking_gid)
+        .map_err(|_| contract_failure("probe_repair_authority_acquire_failed"))?;
+    validate_acquirer_output(output)
+}
+
+fn validate_acquirer_output(output: RepairAuthorityOutput) -> Result<Vec<u8>, ProbeRepairRunError> {
     if let Some(error) = acquirer_exit_failure(output.code) {
         return Err(error);
     }
@@ -550,6 +636,15 @@ mod tests {
                 stdout: self.output.stdout.clone(),
                 successful: self.output.successful,
             })
+        }
+
+        fn exchange_installed_bundle_authority(
+            &mut self,
+            request: &[u8],
+            invoking_uid: u32,
+            invoking_gid: u32,
+        ) -> Result<RepairAuthorityOutput, RepairDependencyFailure> {
+            self.exchange_authority(request, invoking_uid, invoking_gid)
         }
     }
 
