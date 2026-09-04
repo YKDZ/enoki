@@ -1,9 +1,9 @@
 use super::{
     CompanionBinaryFacts, PostCommitSelfFinalizeFacts, ResumeDecision, UninstallCapsulePhase,
-    adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
-    lifecycle_response_from_resume_decision, post_commit_self_finalize_policy,
-    read_uninstall_capsule, resume_lifecycle_companion_at, run_uninstall_lifecycle_adapter,
-    uninstall_capsule_path,
+    adapt_uninstall_wire_request, commit_lifecycle_capsule_with, coordinate_at,
+    coordinate_lifecycle_companion_recovery_at, lifecycle_response_from_resume_decision,
+    post_commit_self_finalize_policy, read_uninstall_capsule, resume_lifecycle_companion_at,
+    run_uninstall_lifecycle_adapter, uninstall_capsule_path,
 };
 use crate::{
     probe_auth::ProbeRequestAuth,
@@ -19,10 +19,16 @@ use enoki_probe_bootstrap::{
 };
 use std::{
     collections::HashMap,
-    fs,
-    os::unix::fs::{PermissionsExt, chown},
+    fs::{self, OpenOptions},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{PermissionsExt, chown},
+    },
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 #[derive(Default)]
@@ -92,6 +98,7 @@ impl ProbeUpgraderValidationTransport for RecordingValidationTransport {
 struct RecordingSystemdRunner {
     calls: Vec<String>,
     failure_step: Option<&'static str>,
+    first_effect_barrier: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     loaded_service_residue: bool,
 }
 
@@ -113,6 +120,10 @@ impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
     }
 
     fn stop_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        if let Some((entered, release)) = self.first_effect_barrier.take() {
+            entered.send(()).expect("publish first uninstall effect");
+            release.recv().expect("release first uninstall effect");
+        }
         self.calls.push(format!("stop {service_name}"));
         self.fail("stop")
     }
@@ -839,6 +850,162 @@ fn production_uninstall_adapter_fails_closed_for_schema_two_and_three_without_ef
         assert!(fixture.identity_path.exists());
         assert!(fixture.companion_path.exists());
     }
+}
+
+#[test]
+fn production_uninstall_serializes_planning_and_retires_a_waiting_activation_generation() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    fs::write(
+        &fixture.metadata_path,
+        crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
+    )
+    .expect("schema five install metadata");
+    fs::set_permissions(&fixture.metadata_path, fs::Permissions::from_mode(0o600))
+        .expect("install metadata mode");
+    fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
+        .expect("identity mode");
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
+    let activation_lock = fixture
+        .metadata
+        .bootstrap_state_dir
+        .as_ref()
+        .expect("bootstrap state")
+        .join("activation.lock");
+    let held_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&activation_lock)
+        .expect("open canonical activation lock");
+    assert_eq!(
+        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+
+    let request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+    let (effect_entered_tx, effect_entered_rx) = mpsc::channel();
+    let (effect_release_tx, effect_release_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let root = temporary.path().to_path_buf();
+    let uninstall = thread::spawn(move || {
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner {
+            first_effect_barrier: Some((effect_entered_tx, effect_release_rx)),
+            ..RecordingSystemdRunner::default()
+        };
+        let response = coordinate_at(Some(&request), Some(&root), &mut transport, &mut systemd);
+        finished_tx
+            .send((response, transport, systemd.calls))
+            .expect("publish uninstall result");
+    });
+
+    assert!(
+        effect_entered_rx
+            .recv_timeout(Duration::from_millis(40))
+            .is_err(),
+        "the lifecycle lock precedes every systemd effect"
+    );
+    assert!(finished_rx.try_recv().is_err());
+    assert_eq!(
+        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_UN) },
+        0
+    );
+    drop(held_lock);
+    effect_entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("uninstall acquires and re-reads before its first effect");
+
+    let (activation_tx, activation_rx) = mpsc::channel();
+    let activation_root = temporary.path().to_path_buf();
+    let activation = thread::spawn(move || {
+        activation_tx
+            .send(commit_current_layout_for_test(&activation_root, "1.2.3"))
+            .expect("publish activation result");
+    });
+    assert!(
+        activation_rx
+            .recv_timeout(Duration::from_millis(40))
+            .is_err(),
+        "activation cannot enter while uninstall owns the lifecycle"
+    );
+    effect_release_tx
+        .send(())
+        .expect("release uninstall effect");
+
+    let (response, transport, transcript) = finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("uninstall converges after the prior holder releases");
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+    assert!(transcript.contains(&"stop enoki-probe".to_owned()));
+    assert!(transcript.contains(&"disable enoki-probe".to_owned()));
+    assert!(
+        activation_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err()
+    );
+    uninstall.join().unwrap();
+    activation.join().unwrap();
+}
+
+#[test]
+fn production_recovery_serializes_its_first_fact_read_and_then_converges() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
+    fs::create_dir_all(&bootstrap_state).expect("bootstrap state");
+    fs::set_permissions(&bootstrap_state, fs::Permissions::from_mode(0o700))
+        .expect("bootstrap state mode");
+    let activation_lock = bootstrap_state.join("activation.lock");
+    fs::write(&activation_lock, []).expect("activation lock");
+    fs::set_permissions(&activation_lock, fs::Permissions::from_mode(0o600))
+        .expect("activation lock mode");
+    let companion = temporary
+        .path()
+        .join("usr/local/bin/enoki-probe-lifecycle-companion");
+    fs::create_dir_all(companion.parent().unwrap()).expect("companion parent");
+    fs::write(&companion, "companion").expect("companion binary");
+    fs::set_permissions(&companion, fs::Permissions::from_mode(0o755)).expect("companion mode");
+    let held_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&activation_lock)
+        .expect("open activation lock");
+    assert_eq!(
+        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let root = temporary.path().to_path_buf();
+    let recovery = thread::spawn(move || {
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+        let response =
+            coordinate_lifecycle_companion_recovery_at(Some(&root), &mut transport, &mut systemd);
+        finished_tx
+            .send((response, transport, systemd.calls))
+            .expect("publish recovery result");
+    });
+    assert!(finished_rx.recv_timeout(Duration::from_millis(40)).is_err());
+
+    assert_eq!(
+        unsafe { libc::flock(held_lock.as_raw_fd(), libc::LOCK_UN) },
+        0
+    );
+    drop(held_lock);
+    let (response, transport, transcript) = finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("recovery re-reads and converges after release");
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+    assert!(transcript.is_empty());
+    recovery.join().unwrap();
 }
 
 #[test]

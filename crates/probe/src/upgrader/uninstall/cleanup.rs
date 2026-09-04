@@ -1164,7 +1164,18 @@ pub(super) fn remove_owned_bootstrap_state(
         return Ok(());
     }
     validate_owned_bootstrap_state(Some(path), expected_bundle_version)?;
-    fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
+    let activation_lock = path.join("activation.lock");
+    // Keep the canonical generation linked until every other owned entry has
+    // retired. Waiters therefore open this inode and fail its post-flock
+    // pathname identity check after the directory is removed.
+    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
+        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
+        if entry.file_name() != "activation.lock" {
+            remove_path_if_exists(&entry.path())?;
+        }
+    }
+    remove_path_if_exists(&activation_lock)?;
+    fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)
 }
 
 #[cfg(test)]

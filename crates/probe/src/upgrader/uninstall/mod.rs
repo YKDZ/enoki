@@ -9,10 +9,10 @@ use super::{
     SystemProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, TrustedProbeInstallPreflight,
     hex_sha256, json_string_fragment, operation_status_url, operation_token_validation_url,
     probe_request_auth_from_bootstrap_config, read_trusted_probe_install_metadata,
-    read_trusted_probe_install_preflight, read_upgrader_bootstrap_config, remove_path_if_exists,
-    render_operation_status_body, sync_directory,
-    validate_bootstrap_config_matches_trusted_install_metadata, validate_identity_path,
-    write_new_synced_file,
+    read_trusted_probe_install_preflight, read_upgrader_bootstrap_config,
+    rebase_trusted_install_metadata_paths, remove_path_if_exists, render_operation_status_body,
+    sync_directory, validate_bootstrap_config_matches_trusted_install_metadata,
+    validate_identity_path, write_new_synced_file,
 };
 use crate::probe_auth::ProbeRequestAuth;
 use enoki_probe_bootstrap::lifecycle::{
@@ -26,6 +26,7 @@ use std::{
 };
 
 mod cleanup;
+use super::replacement::{ReplacementCoordinatorGuard, production_path};
 pub(super) use cleanup::commit_replacement_and_cleanup_install_with_systemd;
 use cleanup::{
     ProbeUninstallCleanupPlan, finalize_recoverable_uninstall_cleanup,
@@ -77,26 +78,64 @@ struct UninstallRecoveryCapsule {
 }
 
 pub(super) fn coordinate(
-    request: &LifecycleRequest,
+    request: Option<&LifecycleRequest>,
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> LifecycleResponse {
-    let install_metadata_path = Path::new(PRODUCTION_INSTALL_METADATA_PATH);
-    let metadata = match read_trusted_probe_install_metadata(install_metadata_path, None) {
+    let mut systemd = SystemProbeUpgraderSystemdRunner;
+    coordinate_at(request, None, transport, &mut systemd)
+}
+
+fn coordinate_at(
+    request: Option<&LifecycleRequest>,
+    production_root: Option<&Path>,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> LifecycleResponse {
+    let Ok(_guard) = ReplacementCoordinatorGuard::acquire_existing(production_root) else {
+        return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
+    };
+    let install_metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
+    let mut metadata = match read_trusted_probe_install_metadata(&install_metadata_path, None) {
         Ok(metadata) => metadata,
         Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
     };
-    let identity = match read_trusted_probe_install_preflight(install_metadata_path, None) {
-        Ok(identity) => identity,
-        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+    let identity =
+        match read_trusted_probe_install_preflight(&install_metadata_path, production_root) {
+            Ok(identity) => identity,
+            Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+        };
+    rebase_trusted_install_metadata_paths(&mut metadata, production_root);
+    let local_request;
+    let request = if let Some(request) = request {
+        request
+    } else {
+        let Some((install_state, manifest, version)) = metadata
+            .install_state_sha256
+            .as_deref()
+            .zip(metadata.target_manifest_sha256.as_deref())
+            .zip(metadata.bundle_version.as_deref())
+            .map(|((install_state, manifest), version)| (install_state, manifest, version))
+        else {
+            return LifecycleResponse::failed("lifecycle.install_state_invalid");
+        };
+        local_request = match LifecycleRequest::local_uninstall(
+            &identity.probe_id,
+            install_state,
+            manifest,
+            version,
+        ) {
+            Ok(request) => request,
+            Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
+        };
+        &local_request
     };
-    let mut systemd = SystemProbeUpgraderSystemdRunner;
     run_uninstall_lifecycle_adapter(
         request,
         &metadata,
         &identity,
-        install_metadata_path,
+        &install_metadata_path,
         transport,
-        &mut systemd,
+        systemd,
     )
 }
 
@@ -546,6 +585,24 @@ pub(super) fn resume_lifecycle_companion_at(
         transport,
         systemd,
     ))
+}
+
+#[cfg(test)]
+fn coordinate_lifecycle_companion_recovery_at(
+    production_root: Option<&Path>,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> LifecycleResponse {
+    let Ok(_guard) = ReplacementCoordinatorGuard::acquire_existing(production_root) else {
+        return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
+    };
+    resume_lifecycle_companion_at(
+        &production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root),
+        &production_path(super::PRODUCTION_INSTALL_STATE_DIR, production_root),
+        &production_path(super::LIFECYCLE_COMPANION_BINARY_PATH, production_root),
+        transport,
+        systemd,
+    )
 }
 
 fn read_post_commit_self_finalize_facts(

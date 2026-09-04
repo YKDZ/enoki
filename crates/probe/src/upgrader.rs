@@ -1170,7 +1170,7 @@ fn run_lifecycle_companion_from_peer_with_effective_uid(
         }
         LifecycleTransition::Repair => repair::coordinate(request, peer_uid),
         LifecycleTransition::ReplacementMigration => replacement::coordinate(request),
-        LifecycleTransition::Uninstall => uninstall::coordinate(request, transport),
+        LifecycleTransition::Uninstall => uninstall::coordinate(Some(request), transport),
         LifecycleTransition::FreshInstall => LifecycleResponse::not_enabled(),
     }
 }
@@ -1236,6 +1236,9 @@ pub fn resume_lifecycle_companion(
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
+    let Ok(_guard) = replacement::ReplacementCoordinatorGuard::acquire_existing(None) else {
+        return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
+    };
     resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Path::new(PRODUCTION_INSTALL_STATE_DIR),
@@ -1251,36 +1254,7 @@ pub fn run_local_lifecycle_companion(
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
-    let metadata = match read_trusted_probe_install_metadata(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
-        Ok(metadata) if matches!(metadata.schema_version, 4 | 5) => metadata,
-        Ok(_) => return LifecycleResponse::failed("lifecycle.replacement_required"),
-        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
-    };
-    let identity = match read_trusted_probe_install_preflight(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
-        Ok(identity) => identity,
-        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
-    };
-    let Some((install_state, manifest, version)) = metadata
-        .install_state_sha256
-        .as_deref()
-        .zip(metadata.target_manifest_sha256.as_deref())
-        .zip(metadata.bundle_version.as_deref())
-        .map(|((install_state, manifest), version)| (install_state, manifest, version))
-    else {
-        return LifecycleResponse::failed("lifecycle.install_state_invalid");
-    };
-    let Ok(request) =
-        LifecycleRequest::local_uninstall(&identity.probe_id, install_state, manifest, version)
-    else {
-        return LifecycleResponse::failed("lifecycle.install_state_invalid");
-    };
-    run_lifecycle_companion(&request, transport)
+    uninstall::coordinate(None, transport)
 }
 
 fn rebase_trusted_install_metadata_paths(

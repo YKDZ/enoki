@@ -57,13 +57,36 @@ impl ActivationLock {
             sync_parent(&path)?;
         }
         let metadata = file.metadata().map_err(|_| InstallError::Io)?;
-        if !metadata.is_file() || metadata.uid() != expected_uid || metadata.mode() & 0o777 != 0o600
+        if !metadata.is_file()
+            || metadata.uid() != expected_uid
+            || metadata.gid() != expected_uid
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o7777 != 0o600
         {
             return Err(InstallError::ExistingResidue);
         }
         loop {
             let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if result == 0 {
+                let path_metadata =
+                    fs::symlink_metadata(&path).map_err(|_| InstallError::ExistingResidue)?;
+                let locked_metadata = file.metadata().map_err(|_| InstallError::Io)?;
+                if path_metadata.file_type().is_symlink()
+                    || !path_metadata.is_file()
+                    || path_metadata.uid() != expected_uid
+                    || path_metadata.gid() != expected_uid
+                    || path_metadata.mode() & 0o7777 != 0o600
+                    || path_metadata.dev() != locked_metadata.dev()
+                    || path_metadata.ino() != locked_metadata.ino()
+                    || path_metadata.nlink() != 1
+                    || !locked_metadata.is_file()
+                    || locked_metadata.uid() != expected_uid
+                    || locked_metadata.gid() != expected_uid
+                    || locked_metadata.mode() & 0o7777 != 0o600
+                    || locked_metadata.nlink() != 1
+                {
+                    return Err(InstallError::ExistingResidue);
+                }
                 return Ok(Self { file });
             }
             if Instant::now() >= deadline {
@@ -1027,6 +1050,39 @@ mod tests {
         drop(first);
         received.recv_timeout(Duration::from_secs(1)).unwrap();
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn waiting_activation_rejects_a_retired_lock_generation() {
+        let root = tempdir().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let first = ActivationLock::acquire(
+            &state,
+            unsafe { libc::geteuid() },
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            ActivationLock::acquire(
+                &worker_state,
+                unsafe { libc::geteuid() },
+                Instant::now() + Duration::from_secs(1),
+            )
+            .map(|_| ())
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(40));
+
+        fs::remove_file(state.join(LOCK_NAME)).unwrap();
+        fs::remove_dir(&state).unwrap();
+        drop(first);
+
+        assert_eq!(worker.join().unwrap(), Err(InstallError::ExistingResidue));
     }
 
     #[test]

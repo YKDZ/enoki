@@ -159,7 +159,7 @@ fn schema_four_metadata_contents() -> String {
     .join("\n")
 }
 
-fn schema_five_metadata_contents() -> String {
+pub(super) fn schema_five_metadata_contents() -> String {
     [
         schema_four_metadata_contents().replacen("schema_version = 4", "schema_version = 5", 1),
         format!("lifecycle_upgrade_service_unit_path = \"{LIFECYCLE_UPGRADE_SERVICE_UNIT_PATH}\""),

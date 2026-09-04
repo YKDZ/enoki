@@ -281,15 +281,28 @@ fn post_inspection_source_remains_exact(
         ) == AuthorityMatch::Matches
 }
 
-/// Serializes the post-inspection proof, capsule publication, and Replacement
-/// commit with every production activation process. The lock is intentionally
-/// not authority: a fresh holder always re-reads every durable fact.
-struct ReplacementCoordinatorGuard {
+/// Serializes Replacement and uninstall lifecycle effects with every production
+/// activation process. The lock is intentionally not authority: a fresh holder
+/// always re-reads every durable fact.
+pub(super) struct ReplacementCoordinatorGuard {
     file: File,
 }
 
 impl ReplacementCoordinatorGuard {
-    fn acquire(production_root: Option<&Path>) -> Result<Self, std::io::Error> {
+    pub(super) fn acquire(production_root: Option<&Path>) -> Result<Self, std::io::Error> {
+        Self::acquire_with(production_root, true)
+    }
+
+    pub(super) fn acquire_existing(production_root: Option<&Path>) -> Result<Self, std::io::Error> {
+        // Uninstall consumes an installed receipt. A missing lock is invalid
+        // inventory, not permission to manufacture new lifecycle authority.
+        Self::acquire_with(production_root, false)
+    }
+
+    fn acquire_with(
+        production_root: Option<&Path>,
+        create_if_missing: bool,
+    ) -> Result<Self, std::io::Error> {
         let path = production_path(REPLACEMENT_COORDINATOR_LOCK_PATH, production_root);
         let parent = path.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing lock parent")
@@ -305,24 +318,35 @@ impl ReplacementCoordinatorGuard {
                 "replacement coordinator lock parent is not root-private",
             ));
         }
-        let (file, created) = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-        {
-            Ok(file) => (file, true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+        let (file, created) = if create_if_missing {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)
+            {
+                Ok(file) => (file, true),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                        .open(&path)?,
+                    false,
+                ),
+                Err(error) => return Err(error),
+            }
+        } else {
+            (
                 OpenOptions::new()
                     .read(true)
                     .write(true)
                     .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
                     .open(&path)?,
                 false,
-            ),
-            Err(error) => return Err(error),
+            )
         };
         if created {
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
@@ -330,11 +354,7 @@ impl ReplacementCoordinatorGuard {
             File::open(parent)?.sync_all()?;
         }
         let metadata = file.metadata()?;
-        if !metadata.is_file()
-            || metadata.uid() != 0
-            || metadata.mode() & 0o777 != 0o600
-            || metadata.nlink() != 1
-        {
+        if !canonical_lifecycle_lock_metadata(&metadata) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "replacement coordinator lock is not root-private",
@@ -343,6 +363,19 @@ impl ReplacementCoordinatorGuard {
         let deadline = Instant::now() + REPLACEMENT_COORDINATOR_LOCK_BUDGET;
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                let path_metadata = fs::symlink_metadata(&path)?;
+                let locked_metadata = file.metadata()?;
+                if !canonical_lifecycle_lock_metadata(&path_metadata)
+                    || !canonical_lifecycle_lock_metadata(&locked_metadata)
+                    || path_metadata.file_type().is_symlink()
+                    || path_metadata.dev() != locked_metadata.dev()
+                    || path_metadata.ino() != locked_metadata.ino()
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "replacement coordinator lock generation was retired",
+                    ));
+                }
                 return Ok(Self { file });
             }
             if Instant::now() >= deadline {
@@ -354,6 +387,14 @@ impl ReplacementCoordinatorGuard {
             thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+fn canonical_lifecycle_lock_metadata(metadata: &fs::Metadata) -> bool {
+    metadata.is_file()
+        && metadata.uid() == 0
+        && metadata.gid() == 0
+        && metadata.nlink() == 1
+        && metadata.mode() & 0o7777 == 0o600
 }
 
 impl Drop for ReplacementCoordinatorGuard {
