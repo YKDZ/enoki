@@ -905,7 +905,7 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         .split("fn run_lifecycle_companion_from_peer_with_effective_uid(")
         .nth(1)
         .expect("Lifecycle Companion 必须保留内部 effective UID seam")
-        .split("/// 固定 `--upgrade`")
+        .split("/// 仅供已完成 fd9 admission")
         .next()
         .expect("Lifecycle Companion internal dispatch body");
     for leaked_knowledge in [
@@ -927,16 +927,16 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
             "顶层 dispatch 不得读取或拼装转换专属语义：{leaked_knowledge}",
         );
     }
-    for typed_delegate in [
-        "repair::coordinate(",
-        "replacement::coordinate(",
-        "uninstall::coordinate(",
-    ] {
+    for typed_delegate in ["repair::coordinate(", "uninstall::coordinate("] {
         assert!(
             dispatch.contains(typed_delegate),
             "顶层 dispatch 必须只通过小 Interface 委派：{typed_delegate}",
         );
     }
+    assert!(
+        !dispatch.contains("replacement::coordinate("),
+        "Replacement coordinator 只能由已完成 fd9 admission 的 private witness 进入",
+    );
 
     let interfaces = [
         (REPAIR_COORDINATOR, "Repair"),

@@ -1160,7 +1160,11 @@ fn run_lifecycle_companion_from_peer_with_effective_uid(
             enoki_probe_bootstrap::install::run_compatible_upgrade(request, peer_uid)
         }
         LifecycleTransition::Repair => repair::coordinate(request, peer_uid),
-        LifecycleTransition::ReplacementMigration => replacement::coordinate(request),
+        // Replacement 有且只有 fd9 admission 构造的 adopted witness 入口；
+        // 一般 lifecycle dispatch 绝不代为取得或伪造它。
+        LifecycleTransition::ReplacementMigration => {
+            LifecycleResponse::failed("lifecycle.invalid_authority")
+        }
         LifecycleTransition::Uninstall => uninstall::coordinate(Some(request), transport),
         LifecycleTransition::FreshInstall => LifecycleResponse::not_enabled(),
     }
@@ -1169,7 +1173,7 @@ fn run_lifecycle_companion_from_peer_with_effective_uid(
 /// 仅供已完成 fd9 admission 的 Companion process invocation 使用。source
 /// witness 不可跨此 crate 边界，因而没有第二个外部 Replacement 入口。
 pub(crate) fn run_adopted_replacement_child(request: &LifecycleRequest) -> LifecycleResponse {
-    replacement::coordinate_adopted_child(request)
+    replacement::coordinate(request)
 }
 
 /// 固定 `--upgrade` CLI Adapter 只接受 Compatible Upgrade，并与 socket

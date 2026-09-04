@@ -50,13 +50,9 @@ static PROCESS_LIFETIME_LEGACY: OnceLock<File> = OnceLock::new();
 #[cfg(not(test))]
 static PROCESS_LIFETIME_STABLE: OnceLock<File> = OnceLock::new();
 
-pub(super) fn coordinate(request: &LifecycleRequest) -> LifecycleResponse {
-    coordinate_with_owner(request, false)
-}
-
 /// Bootstrap parent 保留 legacy + stable owner 时，sealed child 只可带着
 /// 已验证的 fd9 witness 进入本分支；它绝不重取 legacy lock。
-pub(super) fn coordinate_adopted_child(request: &LifecycleRequest) -> LifecycleResponse {
+pub(super) fn coordinate(request: &LifecycleRequest) -> LifecycleResponse {
     coordinate_with_owner(request, true)
 }
 
