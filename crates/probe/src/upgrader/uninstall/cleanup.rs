@@ -9,7 +9,7 @@ use crate::upgrader::{
     observation_services, preflight_rooted_path, read_trusted_probe_install_metadata_read_only,
     read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
     remove_empty_parent_dir, remove_path_if_exists, replacement::fixed_installed_probe_sha256,
-    verify_path_absent,
+    sync_directory, verify_path_absent,
 };
 use enoki_probe_bootstrap::acquisition::{
     INSTALLED_BUNDLE_REPAIR_STAGE_ROOT, discard_validated_unadmitted_installed_bundle_repair_stage,
@@ -674,12 +674,12 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
         },
     )?;
     remove_probe_bootstrap_roles(plan)?;
-    remove_probe_bootstrap_state(plan)?;
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
-    verify_uninstall_residue_absent(plan, systemd)
+    verify_common_cleanup_residue_absent(plan, systemd)?;
+    verify_uninstall_local_state_absent(plan)
 }
 
 fn retire_unbound_installed_bundle_repair_stage_with(
@@ -698,6 +698,7 @@ fn execute_complete_uninstall_cleanup_oracle(
 ) -> Result<(), ProbeUpgraderRunError> {
     prepare_probe_uninstall_cleanup(plan, systemd)?;
     finalize_recoverable_uninstall_cleanup(plan, systemd)?;
+    remove_probe_bootstrap_state(plan)?;
     remove_lifecycle_companion_binary(plan)?;
     verify_lifecycle_companion_binary_absent(plan)
 }
@@ -761,22 +762,6 @@ fn runtime_failure_cleanup_lock(
         )),
         Err(error) => Err(ProbeUpgraderRunError::Io(error)),
     }
-}
-
-pub(super) fn verify_uninstall_residue_absent(
-    plan: &ProbeUninstallCleanupPlan<'_>,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    verify_common_cleanup_residue_absent(plan, systemd)?;
-    verify_uninstall_local_state_absent(plan)?;
-    if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        verify_path_absent(
-            path,
-            "probe_uninstall_bootstrap_state_residue",
-            "verifying Probe Bootstrap state is absent",
-        )?;
-    }
-    Ok(())
 }
 
 pub(super) fn verify_replacement_residue_absent(
@@ -1043,6 +1028,9 @@ fn validate_owned_bootstrap_state_with_repair(
             Some("current-layout") => {
                 validate_owned_bootstrap_current_layout(&entry.path(), expected_bundle_version)?;
             }
+            Some("activation.lock") => {
+                validate_owned_bootstrap_activation_lock(&entry.path())?;
+            }
             _ => {
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe Bootstrap state contains an unexpected entry",
@@ -1137,15 +1125,57 @@ fn validate_owned_bootstrap_current_layout(
     Ok(())
 }
 
+fn validate_owned_bootstrap_activation_lock(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap activation lock is not a root-owned regular 0600 file",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn remove_owned_bootstrap_state(
     path: &Path,
     expected_bundle_version: Option<&str>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
-        return Ok(());
+        return sync_and_verify_bootstrap_state_retired(path);
     }
     validate_owned_bootstrap_state(Some(path), expected_bundle_version)?;
-    fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
+    let activation_lock = path.join("activation.lock");
+    // Keep the canonical generation linked until every other owned entry has
+    // retired. Waiters therefore open this inode and fail its post-flock
+    // pathname identity check after the directory is removed.
+    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
+        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
+        if entry.file_name() != "activation.lock" {
+            remove_path_if_exists(&entry.path())?;
+        }
+    }
+    remove_path_if_exists(&activation_lock)?;
+    fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)?;
+    sync_and_verify_bootstrap_state_retired(path)
+}
+
+fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let parent = path
+        .parent()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap state has no parent",
+        ))?;
+    sync_directory(parent)?;
+    verify_path_absent(
+        path,
+        "probe_uninstall_bootstrap_state_residue",
+        "verifying retired Probe Bootstrap state",
+    )
 }
 
 #[cfg(test)]
@@ -1156,8 +1186,9 @@ mod tests {
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
         plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
-        remove_lifecycle_companion_binary, remove_uninstall_local_state_with,
-        retire_unbound_installed_bundle_repair_stage_with, validate_owned_bootstrap_state,
+        remove_lifecycle_companion_binary, remove_probe_bootstrap_state,
+        remove_uninstall_local_state_with, retire_unbound_installed_bundle_repair_stage_with,
+        validate_owned_bootstrap_state,
     };
     use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
     use enoki_probe_bootstrap::replacement::{
@@ -1707,6 +1738,7 @@ mod tests {
             assert!(path.exists(), "{} removed during prepare", path.display());
         }
         finalize_recoverable_uninstall_cleanup(&plan, &mut systemd).expect("recoverable finalize");
+        remove_probe_bootstrap_state(&plan).expect("retire Bootstrap state");
         assert!(companion.exists(), "companion is the final reentry asset");
         remove_lifecycle_companion_binary(&plan).expect("remove companion binary");
         assert!(!companion.exists());

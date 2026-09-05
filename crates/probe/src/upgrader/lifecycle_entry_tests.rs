@@ -147,6 +147,7 @@ fn effective_uid_gate_precedes_both_upgrade_entries() {
 #[test]
 fn public_entries_use_the_process_effective_uid() {
     let request = expired_upgrade_request();
+    let owner = replacement::StandaloneLifecycleOwner::for_test();
     let expected = if unsafe { libc::geteuid() } == 0 {
         LifecycleResponse::failed("lifecycle.invalid_authority")
     } else {
@@ -155,11 +156,11 @@ fn public_entries_use_the_process_effective_uid() {
     let mut transport = UnusedTransport;
 
     assert_eq!(
-        run_lifecycle_companion_from_peer(&request, &mut transport, Some(1000)),
+        run_lifecycle_companion_from_peer(&owner, &request, &mut transport, Some(1000)),
         expected,
     );
     assert_eq!(
-        run_upgrade_lifecycle_companion_from_peer(&request, Some(1000)),
+        run_upgrade_lifecycle_companion_from_peer(&owner, &request, Some(1000)),
         expected,
     );
 }

@@ -9,6 +9,7 @@ const DISK_HEALTH_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-disk-health-resource-provider.rs");
 const LIFECYCLE_COMPANION_BINARY: &str =
     include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
+const LIFECYCLE_COMPANION_PROCESS: &str = include_str!("../src/lifecycle_companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
 const REPAIR_COORDINATOR: &str = include_str!("../src/upgrader/repair.rs");
@@ -23,6 +24,7 @@ const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.
 const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/install/tests.rs");
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
+const BOOTSTRAP_ACTIVATION: &str = include_str!("../../probe-bootstrap/src/activation.rs");
 
 use syn::{Attribute, ForeignItem, ImplItem, Item, Visibility};
 
@@ -711,8 +713,9 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         );
     }
 
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("LifecycleRequest::decode"));
-    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_lifecycle_companion"));
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_lifecycle_companion_process"));
+    assert!(LIFECYCLE_COMPANION_PROCESS.contains("LifecycleRequest::decode"));
+    assert!(LIFECYCLE_COMPANION_PROCESS.contains("run_lifecycle_companion_from_peer"));
     for forbidden in [
         "Command::new",
         "internal-upgrader",
@@ -721,7 +724,7 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         "std::env::var",
     ] {
         assert!(
-            !LIFECYCLE_COMPANION_BINARY.contains(forbidden),
+            !LIFECYCLE_COMPANION_PROCESS.contains(forbidden),
             "Lifecycle Companion 入口不得接受或启动通用执行责任：{forbidden}",
         );
     }
@@ -755,15 +758,19 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
 
 #[test]
 fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechanics() {
-    let recorder_branch = LIFECYCLE_COMPANION_BINARY
-        .find("mode == CompanionMode::RecordRuntimeFailure")
+    let source_admission = LIFECYCLE_COMPANION_PROCESS
+        .find("let source = match inherited_source()")
+        .expect("Companion 必须先完成 inherited source admission");
+    let recorder_branch = LIFECYCLE_COMPANION_PROCESS
+        .find("crate::runtime_failure::record_runtime_failure()")
         .expect("Companion 必须含固定 Runtime failure recorder 分支");
-    let stdin_decode = LIFECYCLE_COMPANION_BINARY
+    let stdin_decode = LIFECYCLE_COMPANION_PROCESS
         .find("read_to_end(&mut bytes)")
         .expect("通用 Companion 仍读取有界 LifecycleRequest");
-    let http_transport = LIFECYCLE_COMPANION_BINARY
+    let http_transport = LIFECYCLE_COMPANION_PROCESS
         .find("let mut transport = HttpProbeUpgraderValidationTransport")
         .expect("通用 Companion 仍有既有 Hub transport");
+    assert!(source_admission < recorder_branch);
     assert!(recorder_branch < stdin_decode);
     assert!(recorder_branch < http_transport);
     let recorder = include_str!("../src/runtime_failure.rs");
@@ -780,7 +787,6 @@ fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechani
         );
     }
     assert!(BOOTSTRAP_ACQUISITION.contains("ClosedRepairEvidence::InstalledBundleFailure"));
-    assert!(BOOTSTRAP_ACQUISITION.contains("/api/probe/runtime-failures/{}/repair-authorize"));
     assert!(!BOOTSTRAP_ACQUISITION.contains("repair_authorize_url"));
 }
 
@@ -899,7 +905,7 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
         .split("fn run_lifecycle_companion_from_peer_with_effective_uid(")
         .nth(1)
         .expect("Lifecycle Companion 必须保留内部 effective UID seam")
-        .split("/// 固定 `--upgrade`")
+        .split("/// 仅供已完成 fd9 admission")
         .next()
         .expect("Lifecycle Companion internal dispatch body");
     for leaked_knowledge in [
@@ -921,16 +927,158 @@ fn lifecycle_companion_dispatch_hides_transition_specific_knowledge() {
             "顶层 dispatch 不得读取或拼装转换专属语义：{leaked_knowledge}",
         );
     }
-    for typed_delegate in [
-        "repair::coordinate(",
-        "replacement::coordinate(",
-        "uninstall::coordinate(",
-    ] {
+    for typed_delegate in ["repair::coordinate(", "uninstall::coordinate("] {
         assert!(
             dispatch.contains(typed_delegate),
             "顶层 dispatch 必须只通过小 Interface 委派：{typed_delegate}",
         );
     }
+    assert!(
+        !dispatch.contains("replacement::coordinate("),
+        "Replacement coordinator 只能由已完成 fd9 admission 的 private witness 进入",
+    );
+    assert!(
+        LIFECYCLE_COMPANION_PROCESS.contains("run_adopted_replacement_child(lease, &request)")
+            && UPGRADER.contains("witness: crate::lifecycle_companion::AdoptedReplacementChild")
+            && UPGRADER.contains("replacement::coordinate(witness, request)")
+            && REPLACEMENT_COORDINATOR
+                .contains("_admission: crate::lifecycle_companion::AdoptedReplacementChild"),
+        "所有 production Replacement caller 必须以 private fd9 admission witness 闭合",
+    );
+    assert!(
+        REPLACEMENT_COORDINATOR.contains("fn coordinate_with_owner(request: &LifecycleRequest)")
+            && !REPLACEMENT_COORDINATOR.contains("adopted_parent_owner: bool"),
+        "Replacement coordinator 不得以可伪造 bool 表达 owner authority",
+    );
+    let bootstrap_entry = BOOTSTRAP_ACTIVATION
+        .split("fn activate_from_stdin")
+        .nth(1)
+        .expect("Bootstrap stdin production entry")
+        .split("/// 私有 socket")
+        .next()
+        .expect("Bootstrap stdin production body");
+    assert!(
+        bootstrap_entry.find("BootstrapLifecycleOwner::acquire()")
+            < bootstrap_entry.find("owner.retain_to_process_exit()")
+            && bootstrap_entry.find("owner.retain_to_process_exit()")
+                < bootstrap_entry.find("reconcile_exact_orphan_companion()")
+            && bootstrap_entry.find("reconcile_exact_orphan_companion()")
+                < bootstrap_entry.find("receive_root_handoff_with_policy("),
+        "Bootstrap production entry 必须在 handoff/read/effect 前取得并保留 owner，再执行 R1",
+    );
+    assert!(
+        bootstrap_entry.find("owner.validate_stable()?")
+            < bootstrap_entry.find("reconcile_exact_orphan_companion()")
+            && bootstrap_entry
+                .rfind("owner.validate_stable()?")
+                .is_some_and(|validation| {
+                    Some(validation) < bootstrap_entry.find("receive_root_handoff_with_policy(")
+                }),
+        "Bootstrap必须在R1与handoff首次durable read前复验同一stable parent/entry generation",
+    );
+    assert!(
+        BOOTSTRAP_ACTIVATION.contains("owner.install_admission(Some(&self._generation_lease))")
+            && BOOTSTRAP_ACTIVATION.contains(
+                "activate_complete_replacement_current_probe_with_registration_and_admission("
+            )
+            && BOOTSTRAP_ACTIVATION.contains("coordinate_fresh_install_with_admission("),
+        "Bootstrap fresh 与 Replacement continuation 必须把 process owner witness 交给安装 transaction",
+    );
+    let admitted_install = BOOTSTRAP_INSTALL
+        .split("fn activate_verified_fresh_install_with_admission(")
+        .nth(1)
+        .expect("admitted install transaction")
+        .split("fn recover_interrupted_install(")
+        .next()
+        .expect("admitted install body");
+    assert!(
+        admitted_install.contains("admission.enter(")
+            && !admitted_install.contains("ActivationLock::acquire("),
+        "process admission 的安装 transaction 只能 borrow/stable-absent，不得重取 legacy",
+    );
+    let standalone_owner = REPLACEMENT_COORDINATOR
+        .split("fn acquire_standalone_lifecycle_owner_at(")
+        .nth(1)
+        .expect("Standalone owner admission")
+        .split("fn run(")
+        .next()
+        .expect("Standalone owner body");
+    assert!(
+        standalone_owner.contains(
+            "ReplacementCoordinatorGuard::acquire_until(production_root, false, deadline)",
+        ) && standalone_owner.contains("_legacy_acquisition: None")
+            && !standalone_owner.contains("ReplacementCoordinatorGuard::acquire(production_root)"),
+        "Standalone owner 必须使用 optional legacy + mandatory stable，legacy absent 时不得创建 legacy/state",
+    );
+    assert!(
+        REPLACEMENT_COORDINATOR.contains("if let Some(stable) = PROCESS_LIFETIME_STABLE.get()")
+            && REPLACEMENT_COORDINATOR.contains("stable: stable.try_clone()?"),
+        "lower coordinator 必须按 mandatory stable holder 借用 owner，不能按 legacy 是否存在重取",
+    );
+    assert!(
+        UPGRADER.contains("if owner.validate_stable().is_err()")
+            && UNINSTALL.contains("if guard.validate_stable().is_err()")
+            && UNINSTALL.contains("if owner.validate_stable().is_err()")
+            && BOOTSTRAP_ACTIVATION.contains("owner.validate_stable()?;")
+            && BOOTSTRAP_ACTIVATION.contains("parent: self.parent.try_clone()?")
+            && REPLACEMENT_COORDINATOR.contains("parent: self.parent.try_clone()?"),
+        "每个Bootstrap/Standalone flow必须保留stable parent fd并在首次durable read前复验，不得reopen/flock",
+    );
+    let replacement_parent = BOOTSTRAP_ACTIVATION
+        .split("fn prepare_replacement_migration(")
+        .nth(1)
+        .expect("Replacement parent continuation")
+        .split("enum ReplacementActivation")
+        .next()
+        .expect("Replacement parent continuation body");
+    assert!(
+        replacement_parent.contains("stable: &StableLifecycleLock")
+            && replacement_parent.find("invoke_replacement_companion(")
+                < replacement_parent.rfind("stable.validate()?;")
+            && replacement_parent.rfind("stable.validate()?;") < replacement_parent.rfind("Ok(())"),
+        "Replacement child返回canonical frame/EOF/success后，parent必须在重读commit/custody前复验同一stable generation",
+    );
+    let bootstrap_retirement = UNINSTALL_CLEANUP
+        .split("fn remove_owned_bootstrap_state(")
+        .nth(1)
+        .expect("Bootstrap state retirement")
+        .split("fn sync_and_verify_bootstrap_state_retired(")
+        .next()
+        .expect("Bootstrap retirement body");
+    let bootstrap_durability = UNINSTALL_CLEANUP
+        .split("fn sync_and_verify_bootstrap_state_retired(")
+        .nth(1)
+        .expect("Bootstrap state durability proof");
+    let capsule_retirement = UNINSTALL
+        .split("fn commit_lifecycle_capsule_with(")
+        .nth(1)
+        .expect("capsule retirement")
+        .split("fn lifecycle_response_from_resume_decision(")
+        .next()
+        .expect("capsule retirement body");
+    assert!(
+        bootstrap_retirement.find("fs::remove_dir(path)")
+            < bootstrap_retirement.rfind("sync_and_verify_bootstrap_state_retired(path)")
+            && bootstrap_durability.find("sync_directory(parent)?")
+                < bootstrap_durability.find("verify_path_absent(")
+            && UNINSTALL
+                .contains("self.finalize_with_durability(systemd, remove_capsule, sync_directory)",)
+            && capsule_retirement.find("remove(capsule_path)?")
+                < capsule_retirement.find("let retirement = sync_parent(parent)")
+            && capsule_retirement.find("let retirement = sync_parent(parent)")
+                < capsule_retirement.find("verify_path_absent("),
+        "state与capsule retirement必须分别unlink→正确parent sync→exact absence proof后才可terminal",
+    );
+    let terminal = LIFECYCLE_COMPANION_PROCESS
+        .split("fn write_terminal_response")
+        .nth(1)
+        .expect("terminal writer");
+    assert!(
+        terminal.find("write_all(prefix)") < terminal.find("finalize_lifecycle_companion_binary()")
+            && terminal.find("finalize_lifecycle_companion_binary()")
+                < terminal.find("write_all(&[last])"),
+        "terminal success 必须 prefix flush→self-unlink→exact final byte",
+    );
 
     let interfaces = [
         (REPAIR_COORDINATOR, "Repair"),

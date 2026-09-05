@@ -57,6 +57,7 @@ mod tests {
         )
     }
 
+
     struct LayoutBootstrapComponentsForTest<'a> {
         probe: &'a mut File,
         bootstrap_acquirer: &'a mut File,
@@ -3785,6 +3786,7 @@ mod tests {
         assert!(upgrade.contains("RuntimeDirectoryPreserve=yes"));
         assert!(upgrade.contains("StandardError=journal\n"));
         assert!(upgrade.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe"));
+        assert!(upgrade.contains("/run/lock\n"));
     }
 
     #[test]
@@ -4066,6 +4068,7 @@ mod tests {
             "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
         ));
         assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
+        assert!(lifecycle.contains("/run/lock\n"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
         let lifecycle_socket = lifecycle_companion_socket_unit();

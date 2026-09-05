@@ -18,12 +18,12 @@ const LAYOUT_NAME: &str = "current-layout";
 const STAGING_NAME: &str = "activation-stage";
 pub(super) const OWNERSHIP_MARKER: &str = ".enoki-bootstrap-transaction";
 
-pub(super) struct ActivationLock {
+pub(crate) struct ActivationLock {
     file: File,
 }
 
 impl ActivationLock {
-    pub fn acquire(
+    pub(crate) fn acquire(
         state: &Path,
         expected_uid: u32,
         deadline: Instant,
@@ -57,13 +57,36 @@ impl ActivationLock {
             sync_parent(&path)?;
         }
         let metadata = file.metadata().map_err(|_| InstallError::Io)?;
-        if !metadata.is_file() || metadata.uid() != expected_uid || metadata.mode() & 0o777 != 0o600
+        if !metadata.is_file()
+            || metadata.uid() != expected_uid
+            || metadata.gid() != expected_uid
+            || metadata.nlink() != 1
+            || metadata.mode() & 0o7777 != 0o600
         {
             return Err(InstallError::ExistingResidue);
         }
         loop {
             let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if result == 0 {
+                let path_metadata =
+                    fs::symlink_metadata(&path).map_err(|_| InstallError::ExistingResidue)?;
+                let locked_metadata = file.metadata().map_err(|_| InstallError::Io)?;
+                if path_metadata.file_type().is_symlink()
+                    || !path_metadata.is_file()
+                    || path_metadata.uid() != expected_uid
+                    || path_metadata.gid() != expected_uid
+                    || path_metadata.mode() & 0o7777 != 0o600
+                    || path_metadata.dev() != locked_metadata.dev()
+                    || path_metadata.ino() != locked_metadata.ino()
+                    || path_metadata.nlink() != 1
+                    || !locked_metadata.is_file()
+                    || locked_metadata.uid() != expected_uid
+                    || locked_metadata.gid() != expected_uid
+                    || locked_metadata.mode() & 0o7777 != 0o600
+                    || locked_metadata.nlink() != 1
+                {
+                    return Err(InstallError::ExistingResidue);
+                }
                 return Ok(Self { file });
             }
             if Instant::now() >= deadline {
@@ -71,6 +94,46 @@ impl ActivationLock {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    pub(crate) fn matches_canonical_state(
+        &self,
+        state: &Path,
+        expected_uid: u32,
+    ) -> Result<(), InstallError> {
+        let path = state.join(LOCK_NAME);
+        let path_metadata =
+            fs::symlink_metadata(&path).map_err(|_| InstallError::ExistingResidue)?;
+        let held_metadata = self.file.metadata().map_err(|_| InstallError::Io)?;
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.is_file()
+            || path_metadata.uid() != expected_uid
+            || path_metadata.gid() != expected_uid
+            || path_metadata.mode() & 0o7777 != 0o600
+            || path_metadata.nlink() != 1
+            || path_metadata.dev() != held_metadata.dev()
+            || path_metadata.ino() != held_metadata.ino()
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        Ok(())
+    }
+
+    /// 只供已持有 stable lifecycle owner 的 legacy-absent admission 使用。
+    /// 它建立/复验 private state，但绝不打开或 flock 新 legacy OFD。
+    pub(crate) fn establish_state_without_legacy_lock(
+        state: &Path,
+        expected_uid: u32,
+    ) -> Result<(), InstallError> {
+        ensure_private_state(state, expected_uid)
+    }
+
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn try_clone(&self) -> Result<Self, InstallError> {
+        self.file
+            .try_clone()
+            .map(|file| Self { file })
+            .map_err(|_| InstallError::Io)
     }
 }
 

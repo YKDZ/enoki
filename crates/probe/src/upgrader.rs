@@ -1115,26 +1115,26 @@ fn read_probe_repair_identity_with_file_metadata(
     Ok(identity)
 }
 
-/// Lifecycle Companion 的唯一生产入口。授权事实在任何系统变更前与
-/// root-owned 安装状态和当前 Probe Identity 精确比对。
-pub fn run_lifecycle_companion(
-    request: &LifecycleRequest,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-) -> LifecycleResponse {
-    run_lifecycle_companion_from_peer(request, transport, None)
-}
-
-pub fn run_lifecycle_companion_from_peer(
+pub(crate) fn run_lifecycle_companion_from_peer(
+    owner: &replacement::StandaloneLifecycleOwner,
     request: &LifecycleRequest,
     transport: &mut impl ProbeUpgraderValidationTransport,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
+    if owner.validate_stable().is_err() {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    }
     run_lifecycle_companion_from_peer_with_effective_uid(
         request,
         transport,
         peer_uid,
         EffectiveUid::process(),
     )
+}
+
+pub(crate) fn acquire_standalone_lifecycle_owner()
+-> Result<replacement::StandaloneLifecycleOwner, ()> {
+    replacement::acquire_standalone_lifecycle_owner()
 }
 
 #[derive(Clone, Copy)]
@@ -1169,18 +1169,35 @@ fn run_lifecycle_companion_from_peer_with_effective_uid(
             enoki_probe_bootstrap::install::run_compatible_upgrade(request, peer_uid)
         }
         LifecycleTransition::Repair => repair::coordinate(request, peer_uid),
-        LifecycleTransition::ReplacementMigration => replacement::coordinate(request),
-        LifecycleTransition::Uninstall => uninstall::coordinate(request, transport),
+        // Replacement 有且只有 fd9 admission 构造的 adopted witness 入口；
+        // 一般 lifecycle dispatch 绝不代为取得或伪造它。
+        LifecycleTransition::ReplacementMigration => {
+            LifecycleResponse::failed("lifecycle.invalid_authority")
+        }
+        LifecycleTransition::Uninstall => uninstall::coordinate(Some(request), transport),
         LifecycleTransition::FreshInstall => LifecycleResponse::not_enabled(),
     }
 }
 
+/// 仅供已完成 fd9 admission 的 Companion process invocation 使用。source
+/// witness 不可跨此 crate 边界，因而没有第二个外部 Replacement 入口。
+pub(crate) fn run_adopted_replacement_child(
+    witness: crate::lifecycle_companion::AdoptedReplacementChild,
+    request: &LifecycleRequest,
+) -> LifecycleResponse {
+    replacement::coordinate(witness, request)
+}
+
 /// 固定 `--upgrade` CLI Adapter 只接受 Compatible Upgrade，并与 socket
 /// companion 入口进入同一个 Probe Bootstrap coordinator。
-pub fn run_upgrade_lifecycle_companion_from_peer(
+pub(crate) fn run_upgrade_lifecycle_companion_from_peer(
+    owner: &replacement::StandaloneLifecycleOwner,
     request: &LifecycleRequest,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
+    if owner.validate_stable().is_err() {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    }
     run_upgrade_lifecycle_companion_from_peer_with_effective_uid(
         request,
         peer_uid,
@@ -1223,64 +1240,31 @@ fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
 }
 
 /// 响应已经完整写出后，Companion binary unlink 是进程最后一个可失败动作。
-pub fn finalize_lifecycle_companion_binary() -> bool {
+pub(crate) fn finalize_lifecycle_companion_binary() -> bool {
     remove_path_if_exists(Path::new(LIFECYCLE_COMPANION_BINARY_PATH)).is_ok()
 }
 
 /// 固定恢复入口不接受运行时参数；它只消费安装目录中的 root-owned
 /// canonical capsule。capsule 已提交删除时，唯一剩余动作是自删除固定
 /// Companion binary。
-pub fn resume_lifecycle_companion(
+pub(crate) fn resume_lifecycle_companion(
+    owner: &replacement::StandaloneLifecycleOwner,
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> LifecycleResponse {
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    if owner.validate_stable().is_err() {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
     }
     resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Path::new(PRODUCTION_INSTALL_STATE_DIR),
+        Path::new(PRODUCTION_BOOTSTRAP_STATE_DIR),
         Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
         transport,
         &mut SystemProbeUpgraderSystemdRunner,
     )
-}
-
-pub fn run_local_lifecycle_companion(
-    transport: &mut impl ProbeUpgraderValidationTransport,
-) -> LifecycleResponse {
-    if unsafe { libc::geteuid() } != 0 {
-        return LifecycleResponse::failed("lifecycle.root_required");
-    }
-    let metadata = match read_trusted_probe_install_metadata(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
-        Ok(metadata) if matches!(metadata.schema_version, 4 | 5) => metadata,
-        Ok(_) => return LifecycleResponse::failed("lifecycle.replacement_required"),
-        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
-    };
-    let identity = match read_trusted_probe_install_preflight(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
-        Ok(identity) => identity,
-        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
-    };
-    let Some((install_state, manifest, version)) = metadata
-        .install_state_sha256
-        .as_deref()
-        .zip(metadata.target_manifest_sha256.as_deref())
-        .zip(metadata.bundle_version.as_deref())
-        .map(|((install_state, manifest), version)| (install_state, manifest, version))
-    else {
-        return LifecycleResponse::failed("lifecycle.install_state_invalid");
-    };
-    let Ok(request) =
-        LifecycleRequest::local_uninstall(&identity.probe_id, install_state, manifest, version)
-    else {
-        return LifecycleResponse::failed("lifecycle.install_state_invalid");
-    };
-    run_lifecycle_companion(&request, transport)
 }
 
 fn rebase_trusted_install_metadata_paths(
