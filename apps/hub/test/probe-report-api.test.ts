@@ -99,6 +99,7 @@ async function createEnrollmentToken(
 async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
+  probeVersion = "0.1.0",
 ) {
   const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
@@ -118,7 +119,7 @@ async function registerProbe(
               kernel: "6.8.0",
               memoryTotalBytes: 2_147_483_648,
               os: "linux",
-              probeVersion: "0.1.0",
+              probeVersion,
             },
           },
         ],
@@ -4007,119 +4008,161 @@ describe("Probe report API", () => {
     database.close();
   });
 
-  it("persists an Installed Bundle Failure Repair without synthesizing a failed Upgrade", async () => {
-    const database = await createTemporaryDatabase();
-    const nowMs = 1_725_000_010_000;
-    const assetDir = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-installed-repair-assets-"),
-    );
-    tempRoots.push(assetDir);
-    const release = await writeSignedProbeAssetSet(assetDir, {
-      sourceVersion: "0.0.9",
-      targetVersion: "0.1.0",
-      transition: "compatible",
-    });
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => nowMs,
-      probeApiOrigin: "https://hub.example",
-      probeAssets: {
-        assetDir,
-        trustedRootPublicKeyPem: release.rootPublicKeyPem,
-      },
-    });
-    const ownerSession = await loginOwner(app);
-    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
-    const host = database.sqlite
-      .prepare("select id from managed_hosts where probe_id = ?")
-      .get(registration.probeId) as { id: number };
-    const evidence = {
-      kind: "installed_bundle_failure" as const,
-      schemaVersion: 1 as const,
-      hubOrigin: "https://hub.example",
-      hostId: String(host.id),
-      probeId: registration.probeId,
-      generation: "a".repeat(64),
-      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
-      unit: "enoki-observation-runtime.service" as const,
-      unitSha256: "b".repeat(64),
-      identityReceiptSha256: "c".repeat(64),
-      installStateSha256: "d".repeat(64),
-      manifestSha256: release.targetBundles[0]!.bundleManifestSha256,
-      bundleVersion: "0.1.0",
-      issuedAtMs: nowMs,
-      expiresAtMs: nowMs + 60_000,
-      requestNonce: "request_nonce_01",
-    };
-    const installKey = deriveLifecycleAuthorityKey(
-      createHash("sha256").update(enrollmentToken).digest(),
-      "https://hub.example",
-    );
-    const repairPath = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
-    const wrongHostEvidence = { ...evidence, hostId: String(host.id + 1) };
-    const wrongHost = await app.request(repairPath, {
-      body: JSON.stringify({
-        evidence: wrongHostEvidence,
-        evidenceSignature: signInstalledBundleFailureEvidence(
-          canonicalInstalledBundleFailureEvidence(wrongHostEvidence),
-          installKey,
+  it.each([
+    {
+      expectedStatus: 200,
+      hostProbeVersion: "v0.1.75",
+      name: "a v-prefixed Host observation",
+    },
+    {
+      expectedStatus: 200,
+      hostProbeVersion: "0.1.75",
+      name: "a canonical Host observation",
+    },
+    {
+      expectedStatus: 409,
+      hostProbeVersion: "0.1.74",
+      name: "a different Host observation",
+    },
+    {
+      expectedStatus: 409,
+      hostProbeVersion: "not-semver",
+      name: "an invalid Host observation",
+    },
+  ] as const)(
+    "persists an Installed Bundle Failure Repair without synthesizing a failed Upgrade for $name",
+    async ({ expectedStatus, hostProbeVersion }) => {
+      const database = await createTemporaryDatabase();
+      const nowMs = 1_725_000_010_000;
+      const assetDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-installed-repair-assets-"),
+      );
+      tempRoots.push(assetDir);
+      const release = await writeSignedProbeAssetSet(assetDir, {
+        sourceVersion: "0.0.9",
+        targetVersion: "0.1.75",
+        transition: "compatible",
+      });
+      const app = createHubApp({
+        auth: {
+          failureDelayMs: 0,
+          ownerPassword: "correct horse battery staple",
+          sessionCookieName: "enoki_owner_session",
+        },
+        database,
+        now: () => nowMs,
+        probeApiOrigin: "https://hub.example",
+        probeAssets: {
+          assetDir,
+          trustedRootPublicKeyPem: release.rootPublicKeyPem,
+        },
+      });
+      const ownerSession = await loginOwner(app);
+      const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+      const registration = await registerProbe(
+        app,
+        enrollmentToken,
+        hostProbeVersion,
+      );
+      const host = database.sqlite
+        .prepare("select id from managed_hosts where probe_id = ?")
+        .get(registration.probeId) as { id: number };
+      const evidence = {
+        kind: "installed_bundle_failure" as const,
+        schemaVersion: 1 as const,
+        hubOrigin: "https://hub.example",
+        hostId: String(host.id),
+        probeId: registration.probeId,
+        generation: "a".repeat(64),
+        bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+        unit: "enoki-observation-runtime.service" as const,
+        unitSha256: "b".repeat(64),
+        identityReceiptSha256: "c".repeat(64),
+        installStateSha256: "d".repeat(64),
+        manifestSha256: release.targetBundles[0]!.bundleManifestSha256,
+        bundleVersion: "0.1.75",
+        issuedAtMs: nowMs,
+        expiresAtMs: nowMs + 60_000,
+        requestNonce: "request_nonce_01",
+      };
+      const installKey = deriveLifecycleAuthorityKey(
+        createHash("sha256").update(enrollmentToken).digest(),
+        "https://hub.example",
+      );
+      const repairPath = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
+      const wrongHostEvidence = { ...evidence, hostId: String(host.id + 1) };
+      const wrongHost = await app.request(repairPath, {
+        body: JSON.stringify({
+          evidence: wrongHostEvidence,
+          evidenceSignature: signInstalledBundleFailureEvidence(
+            canonicalInstalledBundleFailureEvidence(wrongHostEvidence),
+            installKey,
+          ),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      expect(wrongHost.status).toBe(409);
+      const missingHost = await app.request(repairPath, {
+        body: JSON.stringify({
+          evidence: Object.fromEntries(
+            Object.entries(evidence).filter(([key]) => key !== "hostId"),
+          ),
+          evidenceSignature: "a".repeat(64),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      expect(missingHost.status).toBe(409);
+      const response = await app.request(repairPath, {
+        body: JSON.stringify({
+          evidence,
+          evidenceSignature: signInstalledBundleFailureEvidence(
+            canonicalInstalledBundleFailureEvidence(evidence),
+            installKey,
+          ),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      expect(response.status).toBe(expectedStatus);
+      if (expectedStatus !== 200) {
+        await expect(response.json()).resolves.toEqual({
+          disposition: "manual_reinstall_required",
+        });
+        expect(
+          database.sqlite
+            .prepare(
+              "select count(*) as count from probe_operations where kind = 'probe_repair'",
+            )
+            .get(),
+        ).toEqual({ count: 0 });
+        database.close();
+        return;
+      }
+      const body = (await response.json()) as {
+        authority: { repairOperationId: string; probeId: string };
+        targetAssetSetDigest: string;
+      };
+      expect(body.authority).not.toHaveProperty("failedOperationId");
+      expect(body.authority.probeId).toBe(registration.probeId);
+      expect(body.targetAssetSetDigest).toBe(release.targetAssetSetDigest);
+      expect(
+        database.probeOperations.findById(
+          Number(body.authority.repairOperationId),
         ),
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    expect(wrongHost.status).toBe(409);
-    const missingHost = await app.request(repairPath, {
-      body: JSON.stringify({
-        evidence: Object.fromEntries(
-          Object.entries(evidence).filter(([key]) => key !== "hostId"),
-        ),
-        evidenceSignature: "a".repeat(64),
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    expect(missingHost.status).toBe(409);
-    const response = await app.request(repairPath, {
-      body: JSON.stringify({
-        evidence,
-        evidenceSignature: signInstalledBundleFailureEvidence(
-          canonicalInstalledBundleFailureEvidence(evidence),
-          installKey,
-        ),
-      }),
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      authority: { repairOperationId: string; probeId: string };
-      targetAssetSetDigest: string;
-    };
-    expect(body.authority).not.toHaveProperty("failedOperationId");
-    expect(body.authority.probeId).toBe(registration.probeId);
-    expect(body.targetAssetSetDigest).toBe(release.targetAssetSetDigest);
-    expect(
-      database.probeOperations.findById(
-        Number(body.authority.repairOperationId),
-      ),
-    ).toEqual(
-      expect.objectContaining({
-        hostId: host.id,
-        repairEligibilityKind: "installed_bundle_failure",
-        repairFailedOperationId: null,
-        repairFailureGeneration: evidence.generation,
-        state: "accepted",
-      }),
-    );
-    database.close();
-  });
+      ).toEqual(
+        expect.objectContaining({
+          hostId: host.id,
+          repairEligibilityKind: "installed_bundle_failure",
+          repairFailedOperationId: null,
+          repairFailureGeneration: evidence.generation,
+          state: "accepted",
+        }),
+      );
+      database.close();
+    },
+  );
 
   it("creates one typed Repair operation only from signed postactivation evidence for the exact failed Upgrade", async () => {
     const database = await createTemporaryDatabase();
