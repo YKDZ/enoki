@@ -1,7 +1,7 @@
 use std::{
     ffi::CString,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
@@ -179,21 +179,20 @@ fn general_replacement_without_an_inherited_marker_is_rejected_before_coordinato
 #[test]
 fn upgrade_mode_with_an_invalid_inherited_marker_rejects_before_mode_rejection() {
     let request = replacement_request();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"))
+    let mut stdin = tempfile::tempfile().expect("创建 preloaded stdin");
+    stdin
+        .write_all(&request.encode().expect("canonical request"))
+        .expect("预载 request");
+    stdin.rewind().expect("rewind preloaded stdin");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"))
         .arg("--upgrade")
         .env("ENOKI_LIFECYCLE_LEASE_FD", "9")
-        .stdin(Stdio::piped())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .expect("启动真实 Companion binary");
-    child
-        .stdin
-        .take()
-        .expect("child stdin")
-        .write_all(&request.encode().expect("canonical request"))
-        .expect("写入 request");
-    let output = child.wait_with_output().expect("等待 Companion binary");
+        .output()
+        .expect("启动并等待真实 Companion binary");
 
     assert!(!output.status.success(), "无效来源必须以失败退出");
     assert_eq!(
