@@ -850,7 +850,10 @@ fn verify_systemd_service_absent_with(
             error.to_string(),
         )
     })?;
-    if output.successful && output.stdout.trim() == "not-found" {
+    if output.successful
+        && (output.stdout.trim() == "not-found"
+            || (is_instance_service_glob(service_name) && output.stdout.trim().is_empty()))
+    {
         return Ok(());
     }
     if output.successful {
@@ -865,6 +868,15 @@ fn verify_systemd_service_absent_with(
         action,
         cleanup_command_failure_message(&output, "systemctl"),
     ))
+}
+
+fn is_instance_service_glob(service_name: &str) -> bool {
+    matches!(
+        service_name,
+        "enoki-cpu-resource-provider@*.service"
+            | "enoki-disk-health-resource-provider@*.service"
+            | "enoki-probe-lifecycle-upgrade@*.service"
+    )
 }
 
 fn remove_service_identity_with(
@@ -2370,3 +2382,5 @@ fn toml_string(value: &str) -> String {
 mod install_metadata_tests;
 #[cfg(test)]
 mod lifecycle_entry_tests;
+#[cfg(test)]
+mod systemd_cleanup_tests;
