@@ -454,28 +454,30 @@ mod tests {
     #[test]
     fn fixed_ipc_transaction_cleanup_uses_the_system_accounts_compensation_branch() {
         let marker = "tx-1";
-        let record = "enoki-probe-ipc:!enoki-bootstrap-tx-1::\n";
-        for (lookup, current, harmless, delete, expected) in [
-            (None, false, true, Ok(()), Ok(())),
-            (Some(record), true, true, Err(InstallError::Account), Ok(())),
-            (
-                Some(record),
-                true,
-                false,
-                Err(InstallError::Account),
-                Err(InstallError::Account),
-            ),
-        ] {
-            let result = remove_fixed_ipc_group_transaction_with(
-                PROBE_IPC_GROUP,
-                marker,
-                None,
-                &mut || Ok(lookup.map(str::to_owned)),
-                &mut || Ok(current),
-                &mut || Ok(harmless),
-                &mut || delete.clone(),
-            );
-            assert_eq!(result, expected);
+        for group_name in [PROBE_IPC_GROUP, OBSERVATION_IPC_GROUP] {
+            let record = format!("{group_name}:!enoki-bootstrap-{marker}::\n");
+            for (lookup, current, harmless, delete, expected) in [
+                (false, false, true, Ok(()), Ok(())),
+                (true, true, true, Err(InstallError::Account), Ok(())),
+                (
+                    true,
+                    true,
+                    false,
+                    Err(InstallError::Account),
+                    Err(InstallError::Account),
+                ),
+            ] {
+                let result = remove_fixed_ipc_group_transaction_with(
+                    group_name,
+                    marker,
+                    None,
+                    &mut || Ok(lookup.then(|| record.clone())),
+                    &mut || Ok(current),
+                    &mut || Ok(harmless),
+                    &mut || delete.clone(),
+                );
+                assert_eq!(result, expected);
+            }
         }
     }
 

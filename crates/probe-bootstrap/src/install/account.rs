@@ -338,45 +338,12 @@ impl AccountPort for SystemAccounts {
         fixed_ipc_group_is_absent_or_harmless(group_name, deadline)
     }
     fn remove_observation_ipc_group(&mut self, transaction_id: &str) -> Result<(), InstallError> {
-        let deadline = self
-            .command_deadline
-            .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-        let output = run_bounded(
-            "/usr/bin/getent",
-            &["gshadow", OBSERVATION_IPC_GROUP],
-            InstallError::Account,
-            deadline,
-            COMMAND_STEP_BUDGET,
-        )?;
-        let Some(record) = classify_gshadow_lookup(output.status.code(), output.stdout)? else {
-            return fixed_ipc_group_is_absent_or_harmless(OBSERVATION_IPC_GROUP, deadline)?
-                .then_some(())
-                .ok_or(InstallError::ExistingResidue);
-        };
-        let fields = record.trim_end().split(':').collect::<Vec<_>>();
-        if fields.len() != 4
-            || fields[0] != OBSERVATION_IPC_GROUP
-            || fields[1] != group_account_marker(transaction_id)
-        {
-            if fixed_ipc_group_is_harmless(OBSERVATION_IPC_GROUP, deadline)? {
-                return Ok(());
-            }
-            return Err(InstallError::ExistingResidue);
-        }
-        if !fixed_ipc_group_is_current_transaction(OBSERVATION_IPC_GROUP, transaction_id, deadline)?
-        {
-            return Err(InstallError::ExistingResidue);
-        }
-        match require_success(
-            "/usr/sbin/groupdel",
-            &[OBSERVATION_IPC_GROUP],
-            InstallError::Account,
-            deadline,
-        ) {
-            Ok(()) => Ok(()),
-            Err(_) if fixed_ipc_group_is_harmless(OBSERVATION_IPC_GROUP, deadline)? => Ok(()),
-            Err(error) => Err(error),
-        }
+        remove_owned_ipc_group(
+            OBSERVATION_IPC_GROUP,
+            transaction_id,
+            None,
+            self.command_deadline,
+        )
     }
 }
 
