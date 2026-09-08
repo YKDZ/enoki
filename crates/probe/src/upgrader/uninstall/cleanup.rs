@@ -218,7 +218,7 @@ pub(super) fn plan_committed_replacement_cleanup<'a>(
     // The executor deliberately repeats it while holding the pair lock.
     trusted_state_root_layout(
         &install_metadata.state_dir,
-        StateRootOwner::BoundService {
+        StateRootOwner::BoundServiceOrEmptyShell {
             user: &install_metadata.service_user,
             group: &install_metadata.service_group,
         },
@@ -788,7 +788,7 @@ pub(super) fn execute_committed_replacement_cleanup(
     // userdel its numeric UID/GID is not an NSS fact a retry may guess.
     let state_cleanup = prepare_trusted_state_root_cleanup(
         &plan.install_metadata.state_dir,
-        StateRootOwner::BoundService {
+        StateRootOwner::BoundServiceOrEmptyShell {
             user: &plan.install_metadata.service_user,
             group: &plan.install_metadata.service_group,
         },
@@ -991,7 +991,7 @@ enum TrustedStateRoot {
 #[derive(Clone, Copy)]
 enum StateRootOwner<'a> {
     Root,
-    BoundService { user: &'a str, group: &'a str },
+    BoundServiceOrEmptyShell { user: &'a str, group: &'a str },
     EqualUidGid,
 }
 
@@ -1025,7 +1025,11 @@ fn trusted_state_root_layout(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
                 Ok(metadata) => {
-                    validate_state_root_directory(&metadata, StateRootOwner::EqualUidGid)?;
+                    validate_state_root_directory(
+                        &private,
+                        &metadata,
+                        StateRootOwner::EqualUidGid,
+                    )?;
                     Ok(Some(TrustedStateRoot::Canonical {
                         public: public_state_dir.to_owned(),
                         private,
@@ -1037,7 +1041,7 @@ fn trusted_state_root_layout(
         Ok(metadata) => metadata,
     };
     if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
-        validate_state_root_directory(&public_metadata, ordinary_owner)?;
+        validate_state_root_directory(public_state_dir, &public_metadata, ordinary_owner)?;
         match fs::symlink_metadata(&private) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) => {
@@ -1063,7 +1067,9 @@ fn trusted_state_root_layout(
     match fs::symlink_metadata(&private) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
-        Ok(metadata) => validate_state_root_directory(&metadata, StateRootOwner::EqualUidGid)?,
+        Ok(metadata) => {
+            validate_state_root_directory(&private, &metadata, StateRootOwner::EqualUidGid)?
+        }
     }
     Ok(Some(TrustedStateRoot::Canonical {
         public: public_state_dir.to_owned(),
@@ -1072,13 +1078,14 @@ fn trusted_state_root_layout(
 }
 
 fn validate_state_root_directory(
+    path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.mode() & 0o7777 != 0o750
-        || !state_root_owner_matches(metadata, owner)
+        || !state_root_owner_matches(path, metadata, owner)?
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
@@ -1087,19 +1094,35 @@ fn validate_state_root_directory(
     Ok(())
 }
 
-fn state_root_owner_matches(metadata: &fs::Metadata, owner: StateRootOwner<'_>) -> bool {
+fn state_root_owner_matches(
+    path: &Path,
+    metadata: &fs::Metadata,
+    owner: StateRootOwner<'_>,
+) -> Result<bool, ProbeUpgraderRunError> {
     let actual = (metadata.uid(), metadata.gid());
     let root = expected_root_owner();
     match owner {
-        StateRootOwner::Root => state_root_owner_tuple_matches(actual, root, None),
-        StateRootOwner::BoundService { user, group } => {
-            if actual == root {
-                return true;
+        StateRootOwner::Root => Ok(state_root_owner_tuple_matches(actual, root, None)),
+        StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
+            if state_root_owner_tuple_matches(
+                actual,
+                root,
+                service_identity_owner(user, group).ok(),
+            ) {
+                return Ok(true);
             }
-            state_root_owner_tuple_matches(actual, root, service_identity_owner(user, group).ok())
+            if metadata.uid() != metadata.gid() {
+                return Ok(false);
+            }
+            state_root_is_empty(path)
         }
-        StateRootOwner::EqualUidGid => metadata.uid() == metadata.gid(),
+        StateRootOwner::EqualUidGid => Ok(metadata.uid() == metadata.gid()),
     }
+}
+
+fn state_root_is_empty(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
+    let mut entries = fs::read_dir(path)?;
+    Ok(entries.next().transpose()?.is_none())
 }
 
 fn state_root_owner_tuple_matches(
@@ -1648,6 +1671,7 @@ mod tests {
     #[derive(Default)]
     struct TestSystemd {
         calls: Vec<String>,
+        fail_fixed_ipc_verification: bool,
     }
 
     impl ProbeUpgraderSystemdRunner for TestSystemd {
@@ -1701,6 +1725,17 @@ mod tests {
         ) -> Result<(), ProbeUpgraderRunError> {
             self.calls
                 .push(format!("remove-ipc-group {group}:{ownership_marker}"));
+            Ok(())
+        }
+
+        fn verify_fixed_ipc_groups_absent_or_harmless(
+            &mut self,
+        ) -> Result<(), ProbeUpgraderRunError> {
+            if self.fail_fixed_ipc_verification {
+                return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                    "injected fixed IPC verification failure",
+                )));
+            }
             Ok(())
         }
     }
@@ -2438,6 +2473,71 @@ mod tests {
             install_metadata_path.exists(),
             "commit custody retires metadata afterwards"
         );
+    }
+
+    #[test]
+    fn committed_replacement_retries_an_empty_service_shell_after_identity_retirement() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = metadata(temporary.path(), 1);
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ] {
+            create_file(path, 0o600);
+        }
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("initial committed Replacement plan");
+        let mut failing_systemd = TestSystemd {
+            fail_fixed_ipc_verification: true,
+            ..TestSystemd::default()
+        };
+
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(true));
+        let error = execute_committed_replacement_cleanup(&plan, &mut failing_systemd)
+            .expect_err("post-identity verification failure retains cleanup");
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
+        assert!(matches!(error, ProbeUpgraderRunError::Io(_)));
+        assert!(
+            failing_systemd
+                .calls
+                .iter()
+                .any(|call| call.starts_with("remove-identity")),
+            "identity retirement happened before the later failure"
+        );
+        assert!(
+            fs::read_dir(&metadata.state_dir)
+                .expect("retained state shell")
+                .next()
+                .is_none(),
+            "only an empty shell is retained"
+        );
+
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(Some((u32::MAX, u32::MAX))));
+        let retry = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("retained empty shell re-enters cleanup");
+        let appeared = metadata.state_dir.join("appeared-after-planning");
+        create_file(&appeared, 0o600);
+        let error = execute_committed_replacement_cleanup(&retry, &mut TestSystemd::default())
+            .expect_err("held-lock reread rejects a changed empty shell");
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata(_)
+        ));
+        assert!(appeared.exists(), "changed state was not deleted");
+        fs::remove_file(&appeared).expect("restore empty shell");
+
+        let retry = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("restored empty shell re-enters cleanup");
+        execute_committed_replacement_cleanup(&retry, &mut TestSystemd::default())
+            .expect("empty shell retry completes");
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(None));
     }
 
     #[test]
