@@ -3142,6 +3142,15 @@ export function createProbeHostHarness({
       { root: true },
     );
     if (recorded.code !== 0) {
+      if (result.code !== 0) {
+        const error = new Error(
+          `Probe installation failed (${result.code}); redacted installer evidence was retained`,
+        );
+        error.code = "probe_installation_failed";
+        error.installerEvidence = commandEvidence(result);
+        error.resourceRecordingEvidence = commandEvidence(recorded);
+        throw error;
+      }
       const error = new Error(
         `Could not record run-owned Probe resources: ${recorded.stderr}`,
       );

@@ -5239,7 +5239,8 @@ exit 0
     ]);
   });
 
-  it("retains successful installer evidence when run-resource recording fails", async () => {
+  it("fails successful manual reinstall when run-resource renewal fails", async () => {
+    let installations = 0;
     const harness = createProbeHostHarness({
       execute: async (command) => {
         if (command.includes("# enoki-release-e2e:inventory")) {
@@ -5256,20 +5257,85 @@ exit 0
           return successfulCommandText("owned\n");
         }
         if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:renew-resources")) {
           return { code: 1, stderr: "resource recording failed", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+          installations += 1;
+          return successfulCommandText(productInstallerOutput());
         }
         return successfulCommandText(productInstallerOutput());
       },
     });
 
     await harness.assertDisposable("run-recording-failure");
+    await harness.install(officialEnrollment(), "run-recording-failure");
     await expect(
-      harness.install(officialEnrollment(), "run-recording-failure"),
+      harness.manualReinstall(officialEnrollment(), "run-recording-failure"),
     ).rejects.toMatchObject({
       code: "probe_resource_recording_failed",
       installerEvidence: {
         code: 0,
         stdout: expect.stringContaining("ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE"),
+      },
+    });
+    expect(installations).toBe(2);
+  });
+
+  it("keeps an installer failure primary when manual reinstall renewal also fails", async () => {
+    let installations = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:renew-resources")) {
+          return { code: 1, stderr: "renewal owner is absent", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+          installations += 1;
+          return installations === 1
+            ? successfulCommandText(productInstallerOutput())
+            : { code: 23, stderr: "bootstrap activation failed", stdout: "" };
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-installer-and-renewal-failure");
+    await harness.install(
+      officialEnrollment(),
+      "run-installer-and-renewal-failure",
+    );
+    await expect(
+      harness.manualReinstall(
+        officialEnrollment(),
+        "run-installer-and-renewal-failure",
+      ),
+    ).rejects.toMatchObject({
+      code: "probe_installation_failed",
+      installerEvidence: {
+        code: 23,
+        stderr: "bootstrap activation failed",
+      },
+      resourceRecordingEvidence: {
+        code: 1,
+        stderr: "renewal owner is absent",
       },
     });
   });
