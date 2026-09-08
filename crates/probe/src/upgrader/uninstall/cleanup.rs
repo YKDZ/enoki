@@ -20,6 +20,7 @@ use enoki_probe_bootstrap::replacement::{
     commit_and_cleanup_replacement,
 };
 use std::{
+    ffi::CString,
     fs,
     io::Write,
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -767,26 +768,37 @@ pub(super) fn execute_committed_replacement_cleanup(
 ) -> Result<(), ProbeUpgraderRunError> {
     prepare_probe_uninstall_cleanup(plan, systemd)?;
     remove_probe_bootstrap_roles(plan)?;
-    remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_lifecycle_companion_binary(plan)?;
-    systemd.verify_fixed_ipc_groups_absent_or_harmless()?;
     // 手动重装必须让可信 metadata 活过全部可失败清理与核验。cleanup_complete
     // 持久化后，metadata 由 exact commit custody 作为独立、幂等的退休动作处理。
-    let state_cleanup = prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir)?;
+    // v0.1.74 produced this exact ordinary root as the service account. Keep
+    // that account until the fixed, metadata-bound root is cleared: after
+    // userdel its numeric UID/GID is not an NSS fact a retry may guess.
+    let state_cleanup = prepare_trusted_state_root_cleanup(
+        &plan.install_metadata.state_dir,
+        StateRootOwner::BoundService {
+            user: &plan.install_metadata.service_user,
+            group: &plan.install_metadata.service_group,
+        },
+    )?;
     remove_path_if_exists(&plan.input.bootstrap_config_path)?;
-    clear_prepared_state_root_contents_with(state_cleanup, &mut remove_path_if_exists)?;
-    verify_replacement_residue_absent(plan, systemd)
+    let cleared_state_shell =
+        clear_prepared_state_root_contents_with(state_cleanup, &mut remove_path_if_exists)?;
+    remove_probe_install_identities(plan, systemd)?;
+    systemd.verify_fixed_ipc_groups_absent_or_harmless()?;
+    verify_replacement_residue_absent(plan, systemd, &cleared_state_shell)
 }
 
 pub(super) fn remove_uninstall_local_state_with(
     plan: &ProbeUninstallCleanupPlan<'_>,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
-    let state_cleanup = prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir)?;
+    let state_cleanup =
+        prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir, StateRootOwner::Root)?;
     remove(plan.install_metadata_path)?;
     remove(&plan.input.bootstrap_config_path)?;
-    clear_prepared_state_root_contents_with(state_cleanup, &mut remove)
+    clear_prepared_state_root_contents_with(state_cleanup, &mut remove).map(|_| ())
 }
 
 #[cfg(test)]
@@ -831,7 +843,7 @@ fn runtime_failure_cleanup_lock(
 fn clear_prepared_state_root_contents_with(
     cleanup: TrustedStateCleanup,
     remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
-) -> Result<(), ProbeUpgraderRunError> {
+) -> Result<ClearedStateShell, ProbeUpgraderRunError> {
     clear_prepared_state_root_contents_with_shell(cleanup, remove, retire_state_shell)
 }
 
@@ -839,9 +851,9 @@ fn clear_prepared_state_root_contents_with_shell(
     cleanup: TrustedStateCleanup,
     remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
     mut retire_shell: impl FnMut(&TrustedStateRoot) -> std::io::Result<()>,
-) -> Result<(), ProbeUpgraderRunError> {
+) -> Result<ClearedStateShell, ProbeUpgraderRunError> {
     let Some(layout) = cleanup.layout else {
-        return Ok(());
+        return Ok(ClearedStateShell(None));
     };
 
     match fs::read_dir(layout.contents()) {
@@ -862,7 +874,21 @@ fn clear_prepared_state_root_contents_with_shell(
     // A shell is not data.  Its removal is deliberately best effort, but a
     // failed rmdir may only be ignored after a fresh empty proof.
     let _ = retire_shell(&layout);
-    verify_state_root_empty_or_absent(&layout)
+    verify_state_root_empty_or_absent(&layout)?;
+    Ok(ClearedStateShell(Some(layout)))
+}
+
+/// An in-process proof produced only after the held pair lock has cleared and
+/// synced the admitted state root. It carries no persistent ownership fact;
+/// later Replacement cleanup may only re-check that this shell remains empty.
+struct ClearedStateShell(Option<TrustedStateRoot>);
+
+impl ClearedStateShell {
+    fn verify_empty_or_absent(&self) -> Result<(), ProbeUpgraderRunError> {
+        self.0
+            .as_ref()
+            .map_or(Ok(()), verify_state_root_empty_or_absent)
+    }
 }
 
 struct TrustedStateCleanup {
@@ -874,11 +900,12 @@ struct TrustedStateCleanup {
 
 fn prepare_trusted_state_root_cleanup(
     public_state_dir: &Path,
+    ordinary_owner: StateRootOwner<'_>,
 ) -> Result<TrustedStateCleanup, ProbeUpgraderRunError> {
     // Admission is read-only and is backed by the caller's existing
     // metadata/capsule authority.  It intentionally has no cleanup effect:
     // the held-lock reread below is the only layout used for removal.
-    let _admitted_layout = trusted_state_root_layout(public_state_dir)?;
+    let _admitted_layout = trusted_state_root_layout(public_state_dir, ordinary_owner)?;
     let lock = crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
         public_state_dir,
         unsafe { libc::geteuid() },
@@ -886,7 +913,7 @@ fn prepare_trusted_state_root_cleanup(
     .map_err(ProbeUpgraderRunError::Io)?;
     // The lock serializes writers, not root authority.  Re-read the exact
     // fixed projection while held before retiring any binding material.
-    let layout = trusted_state_root_layout(public_state_dir)?;
+    let layout = trusted_state_root_layout(public_state_dir, ordinary_owner)?;
     if let Some(root) = layout.as_ref() {
         require_repair_intent_absent(root)?;
         crate::runtime_failure::cleanup_runtime_failure_pair_at_concrete_state(
@@ -950,6 +977,13 @@ enum TrustedStateRoot {
     Canonical { public: PathBuf, private: PathBuf },
 }
 
+#[derive(Clone, Copy)]
+enum StateRootOwner<'a> {
+    Root,
+    BoundService { user: &'a str, group: &'a str },
+    EqualUidGid,
+}
+
 impl TrustedStateRoot {
     fn contents(&self) -> &Path {
         match self {
@@ -961,6 +995,7 @@ impl TrustedStateRoot {
 
 fn trusted_state_root_layout(
     public_state_dir: &Path,
+    ordinary_owner: StateRootOwner<'_>,
 ) -> Result<Option<TrustedStateRoot>, ProbeUpgraderRunError> {
     if !public_state_dir.ends_with("var/lib/enoki-probe") {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -979,7 +1014,7 @@ fn trusted_state_root_layout(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
                 Ok(metadata) => {
-                    validate_state_root_directory(&metadata, false)?;
+                    validate_state_root_directory(&metadata, StateRootOwner::EqualUidGid)?;
                     Ok(Some(TrustedStateRoot::Canonical {
                         public: public_state_dir.to_owned(),
                         private,
@@ -991,7 +1026,7 @@ fn trusted_state_root_layout(
         Ok(metadata) => metadata,
     };
     if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
-        validate_state_root_directory(&public_metadata, true)?;
+        validate_state_root_directory(&public_metadata, ordinary_owner)?;
         match fs::symlink_metadata(&private) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) => {
@@ -1017,7 +1052,7 @@ fn trusted_state_root_layout(
     match fs::symlink_metadata(&private) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
-        Ok(metadata) => validate_state_root_directory(&metadata, false)?,
+        Ok(metadata) => validate_state_root_directory(&metadata, StateRootOwner::EqualUidGid)?,
     }
     Ok(Some(TrustedStateRoot::Canonical {
         public: public_state_dir.to_owned(),
@@ -1027,19 +1062,58 @@ fn trusted_state_root_layout(
 
 fn validate_state_root_directory(
     metadata: &fs::Metadata,
-    require_root_owner: bool,
+    owner: StateRootOwner<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.mode() & 0o7777 != 0o750
-        || (require_root_owner && (metadata.uid(), metadata.gid()) != expected_root_owner())
-        || (!require_root_owner && metadata.uid() != metadata.gid())
+        || !state_root_owner_matches(metadata, owner)
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
     }
     Ok(())
+}
+
+fn state_root_owner_matches(metadata: &fs::Metadata, owner: StateRootOwner<'_>) -> bool {
+    match owner {
+        StateRootOwner::Root => (metadata.uid(), metadata.gid()) == expected_root_owner(),
+        StateRootOwner::BoundService { user, group } => {
+            (metadata.uid(), metadata.gid()) == expected_root_owner()
+                || service_identity_owner(user, group)
+                    .is_ok_and(|owner| (metadata.uid(), metadata.gid()) == owner)
+        }
+        StateRootOwner::EqualUidGid => metadata.uid() == metadata.gid(),
+    }
+}
+
+fn service_identity_owner(
+    service_user: &str,
+    service_group: &str,
+) -> Result<(u32, u32), ProbeUpgraderRunError> {
+    let service_user = CString::new(service_user).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("service account name is unsafe")
+    })?;
+    let service_group = CString::new(service_group).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("service group name is unsafe")
+    })?;
+    // SAFETY: this copies the numeric fields while the NUL-terminated name
+    // and the libc passwd result remain valid.
+    let account = unsafe { libc::getpwnam(service_user.as_ptr()) };
+    if account.is_null() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "service account owner is unavailable",
+        ));
+    }
+    let (uid, account_gid) = unsafe { ((*account).pw_uid, (*account).pw_gid) };
+    let group = unsafe { libc::getgrnam(service_group.as_ptr()) };
+    if group.is_null() || account_gid != unsafe { (*group).gr_gid } {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "service account and group ownership is unavailable",
+        ));
+    }
+    Ok((uid, unsafe { (*group).gr_gid }))
 }
 
 fn expected_root_owner() -> (u32, u32) {
@@ -1077,9 +1151,10 @@ fn verify_state_root_empty_or_absent(root: &TrustedStateRoot) -> Result<(), Prob
     }
 }
 
-pub(super) fn verify_replacement_residue_absent(
+fn verify_replacement_residue_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
+    cleared_state_shell: &ClearedStateShell,
 ) -> Result<(), ProbeUpgraderRunError> {
     verify_common_cleanup_residue_absent(plan, systemd)?;
     for (path, code, action) in [
@@ -1096,7 +1171,7 @@ pub(super) fn verify_replacement_residue_absent(
     ] {
         verify_path_absent(path, code, action)?;
     }
-    verify_uninstall_state_shell_harmless(&plan.install_metadata.state_dir)?;
+    cleared_state_shell.verify_empty_or_absent()?;
     verify_lifecycle_companion_binary_absent(plan)
 }
 
@@ -1129,7 +1204,7 @@ pub(super) fn verify_uninstall_local_state_absent(
 pub(super) fn verify_uninstall_state_shell_harmless(
     public_state_dir: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
-    match trusted_state_root_layout(public_state_dir)? {
+    match trusted_state_root_layout(public_state_dir, StateRootOwner::Root)? {
         None => Ok(()),
         Some(root) => verify_state_root_empty(&root),
     }
@@ -1146,7 +1221,7 @@ fn trusted_state_root_is_empty_or_absent_under_pair_lock(
         unsafe { libc::geteuid() },
     )
     .map_err(ProbeUpgraderRunError::Io)?;
-    let layout = trusted_state_root_layout(public_state_dir)?;
+    let layout = trusted_state_root_layout(public_state_dir, StateRootOwner::Root)?;
     match layout {
         None => Ok(true),
         Some(root) => {
@@ -1537,8 +1612,9 @@ mod tests {
         ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     };
     use std::{
+        ffi::CString,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink},
         path::{Path, PathBuf},
         sync::mpsc::{self, RecvTimeoutError},
         thread,
@@ -1654,6 +1730,13 @@ mod tests {
         }
         fs::write(path, b"fixture").expect("write fixture");
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("fixture mode");
+    }
+
+    fn account_identity(name: &str) -> (u32, u32) {
+        let name = CString::new(name).expect("account name");
+        let account = unsafe { libc::getpwnam(name.as_ptr()) };
+        assert!(!account.is_null(), "account is available");
+        unsafe { ((*account).pw_uid, (*account).pw_gid) }
     }
 
     #[test]
@@ -2280,6 +2363,95 @@ mod tests {
         assert!(
             install_metadata_path.exists(),
             "commit custody retires metadata afterwards"
+        );
+    }
+
+    #[test]
+    fn committed_replacement_clears_a_bound_legacy_service_owned_state_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 1);
+        metadata.service_user = "nobody".to_owned();
+        metadata.service_group = "nogroup".to_owned();
+        let (uid, gid) = account_identity("nobody");
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ] {
+            create_file(path, 0o600);
+        }
+        chown(&metadata.state_dir, Some(uid), Some(gid)).expect("legacy service-owned state root");
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("committed Replacement plan");
+        let mut systemd = TestSystemd::default();
+
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(true));
+        execute_committed_replacement_cleanup(&plan, &mut systemd)
+            .expect("Replacement clears the producer-bound legacy service state root");
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
+
+        assert!(
+            metadata.state_dir.exists(),
+            "empty shell may remain harmless"
+        );
+        assert!(
+            fs::read_dir(&metadata.state_dir)
+                .expect("state shell remains readable")
+                .next()
+                .is_none(),
+            "the service-owned shell is empty before identity retirement"
+        );
+        assert!(
+            install_metadata_path.exists(),
+            "commit custody retires metadata afterwards"
+        );
+    }
+
+    #[test]
+    fn committed_replacement_rejects_a_mismatched_ordinary_state_owner_before_retiring_identity() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 1);
+        metadata.service_user = "nobody".to_owned();
+        metadata.service_group = "nogroup".to_owned();
+        let (uid, gid) = account_identity("daemon");
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ] {
+            create_file(path, 0o600);
+        }
+        chown(&metadata.state_dir, Some(uid), Some(gid)).expect("mismatched state root");
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("committed Replacement plan");
+        let mut systemd = TestSystemd::default();
+
+        let error = execute_committed_replacement_cleanup(&plan, &mut systemd)
+            .expect_err("unknown service owner must fail closed");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata(_)
+        ));
+        assert!(metadata.state_dir.exists(), "state was not cleared");
+        assert!(
+            !systemd
+                .calls
+                .iter()
+                .any(|call| call.starts_with("remove-identity")),
+            "identity retirement follows state cleanup"
         );
     }
 
