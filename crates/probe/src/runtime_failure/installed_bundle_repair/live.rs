@@ -92,7 +92,7 @@ impl
         Self {
             root: PathBuf::from("/"),
             paths: FixedInstallPaths::production(),
-            systemd: SystemSystemd::for_live_upgrade(),
+            systemd: SystemSystemd::for_live_general_companion(),
             runner: ProcessRepairSystemdRunner,
             runtime: UnixRuntimeValidator,
             stages: ProductionStageOpener,
