@@ -4,6 +4,7 @@ mod tests {
         account_records_match_transaction, classify_gshadow_lookup,
         create_probe_ipc_group_with_commands, create_transaction_identity_with_commands,
         fixed_ipc_group_is_harmless_records, owned_ipc_group_record_matches,
+        nss_gshadow_matches_local, remove_fixed_ipc_group_transaction_with,
         remove_owned_ipc_group_with_commands,
     };
     use super::upgrade::{upgrade_destinations, write_operation_status};
@@ -77,6 +78,36 @@ mod tests {
             "enoki-probe-ipc:x:4242:outsider",
             nss,
         ));
+    }
+
+    #[test]
+    fn retired_fixed_ipc_group_rejects_nss_password_or_authorization_disagreement() {
+        let group = "enoki-probe-ipc:x:4242:";
+        let shadow = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::";
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n";
+        let nss = "enoki-probe-ipc:x:4242:";
+
+        for inconsistent_nss in [
+            "enoki-probe-ipc:independent-password:4242:",
+            "enoki-probe-ipc:!:4242:",
+        ] {
+            assert!(!fixed_ipc_group_is_harmless_records(
+                "enoki-probe-ipc",
+                group,
+                shadow,
+                passwd,
+                inconsistent_nss,
+                nss,
+            ));
+            assert!(!fixed_ipc_group_is_harmless_records(
+                "enoki-probe-ipc",
+                group,
+                shadow,
+                passwd,
+                nss,
+                inconsistent_nss,
+            ));
+        }
     }
 
     fn coordinate_fresh_install_for_test(
@@ -420,6 +451,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fixed_ipc_transaction_cleanup_uses_the_system_accounts_compensation_branch() {
+        let marker = "tx-1";
+        let record = "enoki-probe-ipc:!enoki-bootstrap-tx-1::\n";
+        for (lookup, current, harmless, delete, expected) in [
+            (None, false, true, Ok(()), Ok(())),
+            (Some(record), true, true, Err(InstallError::Account), Ok(())),
+            (
+                Some(record),
+                true,
+                false,
+                Err(InstallError::Account),
+                Err(InstallError::Account),
+            ),
+        ] {
+            let result = remove_fixed_ipc_group_transaction_with(
+                PROBE_IPC_GROUP,
+                marker,
+                None,
+                &mut || Ok(lookup.map(str::to_owned)),
+                &mut || Ok(current),
+                &mut || Ok(harmless),
+                &mut || delete.clone(),
+            );
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn fixed_ipc_cleanup_requires_keyed_gshadow_to_match_the_unique_local_record() {
+        let local = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::\n";
+        assert!(nss_gshadow_matches_local(local, local, PROBE_IPC_GROUP));
+        for keyed in [
+            "enoki-probe-ipc:!enoki-bootstrap-ffffffffffffffffffffffffffffffff::\n",
+            "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef:admin:\n",
+            "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::\nextra",
+        ] {
+            assert!(!nss_gshadow_matches_local(keyed, local, PROBE_IPC_GROUP));
+        }
+    }
+
     #[derive(Default)]
     struct Accounts {
         calls: Vec<&'static str>,
@@ -430,6 +502,7 @@ mod tests {
         crash_after: Option<&'static str>,
         fail_identity: bool,
         fail_ipc: bool,
+        fixed_ipc_absent_or_harmless: Option<bool>,
         poison_staging: Option<PathBuf>,
         break_state_on_identity: Option<(PathBuf, PathBuf)>,
     }
@@ -511,6 +584,15 @@ mod tests {
         ) -> Result<bool, InstallError> {
             self.ipc_calls.push("owns");
             Ok(self.ipc_present)
+        }
+        fn fixed_ipc_group_is_absent_or_harmless(
+            &mut self,
+            group_name: &str,
+        ) -> Result<bool, InstallError> {
+            assert_eq!(group_name, PROBE_IPC_GROUP);
+            Ok(self
+                .fixed_ipc_absent_or_harmless
+                .unwrap_or(!self.identity_present))
         }
         fn remove_observation_ipc_group(
             &mut self,
@@ -7106,6 +7188,49 @@ mod tests {
                 .join("activation-journal.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn no_receipt_recovery_retires_only_an_absent_or_harmless_fixed_ipc_group() {
+        for (absent_or_harmless, expected_success) in [(true, true), (false, false)] {
+            let temporary = tempdir().unwrap();
+            for parent in [
+                "usr/local/bin",
+                "var/lib/enoki-probe-bootstrap",
+                "etc/systemd/system",
+                "etc/sudoers.d",
+            ] {
+                fs::create_dir_all(temporary.path().join(parent)).unwrap();
+            }
+            fs::set_permissions(
+                temporary.path().join("var/lib/enoki-probe-bootstrap"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            write_bootstrap_roles(temporary.path());
+            let paths = FixedInstallPaths::under(temporary.path());
+            drop(TransactionJournal::begin(&paths.bootstrap_state()).unwrap());
+            let mut accounts = Accounts {
+                fixed_ipc_absent_or_harmless: Some(absent_or_harmless),
+                ..Accounts::default()
+            };
+
+            let result = activate_layout_without_roles_for_test(
+                &mut component(),
+                &Enrollment::new("https://hub.example", "enk_enroll_restart").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut Systemd::default(),
+            );
+
+            assert_eq!(result.is_ok(), expected_success);
+            assert_eq!(
+                paths.bootstrap_state().join("activation-journal.json").exists(),
+                !expected_success,
+            );
+        }
     }
 
     #[test]

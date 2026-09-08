@@ -1,6 +1,6 @@
 use super::{
     CleanupCommandOutput, ProbeUpgraderRunError, remove_fixed_ipc_group_with_accounts,
-    verify_systemd_service_absent_with, verify_systemd_service_stopped_with,
+    run_cleanup_command, verify_systemd_service_absent_with, verify_systemd_service_stopped_with,
 };
 
 fn successful_output(stdout: &str) -> CleanupCommandOutput {
@@ -166,6 +166,27 @@ fn stopped_service_verification_accepts_not_found_reentry_and_checks_every_insta
     )
     .expect_err("each instance needs a complete stopped-state fact set");
     assert_eq!(error.code(), "probe_uninstall_service_residue");
+}
+
+#[test]
+fn stopped_instance_verification_keeps_empty_jobs_from_the_production_command_conversion() {
+    let mut run = |_: &str, args: &[&str]| {
+        let text = match args[2] {
+            "LoadState" => "loaded\nloaded\n",
+            "ActiveState" => "inactive\ninactive\n",
+            "SubState" => "dead\ndead\n",
+            "Job" => "\n\n",
+            "MainPID" | "ControlPID" => "0\n0\n",
+            "KillMode" => "control-group\ncontrol-group\n",
+            property => panic!("unexpected systemd property {property}"),
+        };
+        run_cleanup_command("printf", &[text])
+    };
+
+    assert!(
+        verify_systemd_service_stopped_with("enoki-cpu-resource-provider@*.service", &mut run,)
+            .is_ok()
+    );
 }
 
 #[test]

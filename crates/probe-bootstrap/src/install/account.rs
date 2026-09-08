@@ -40,6 +40,7 @@ fn nss_group_matches(record: &str, group_name: &str, gid: u32) -> bool {
         && fields.is_some_and(|fields| {
             fields.len() == 4
                 && fields[0] == group_name
+                && fields[1] == "x"
                 && fields[2].parse::<u32>() == Ok(gid)
                 && fields[3].is_empty()
         })
@@ -126,6 +127,33 @@ fn nss_group_lookup(key: &str, deadline: Instant) -> Result<Option<String>, Inst
     }
 }
 
+fn nss_gshadow_lookup(group_name: &str, deadline: Instant) -> Result<Option<String>, InstallError> {
+    let output = run_bounded(
+        "/usr/bin/getent",
+        &["gshadow", group_name],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    match output.status.code() {
+        Some(0) => String::from_utf8(output.stdout)
+            .map(Some)
+            .map_err(|_| InstallError::Account),
+        Some(2) => Ok(None),
+        _ => Err(InstallError::Account),
+    }
+}
+
+pub(super) fn nss_gshadow_matches_local(
+    record: &str,
+    local_gshadow: &str,
+    group_name: &str,
+) -> bool {
+    exact_record(local_gshadow, group_name).is_some_and(|local| {
+        record.lines().count() == 1 && record.trim_end().split(':').collect::<Vec<_>>() == local
+    })
+}
+
 fn fixed_ipc_group_is_harmless(group_name: &str, deadline: Instant) -> Result<bool, InstallError> {
     let local_group = read_local_account_file("/etc/group")?;
     let local_gshadow = read_local_account_file("/etc/gshadow")?;
@@ -145,6 +173,12 @@ fn fixed_ipc_group_is_harmless(group_name: &str, deadline: Instant) -> Result<bo
     let Some(nss_by_gid) = nss_group_lookup(&gid.to_string(), deadline)? else {
         return Ok(false);
     };
+    let Some(nss_gshadow) = nss_gshadow_lookup(group_name, deadline)? else {
+        return Ok(false);
+    };
+    if !nss_gshadow_matches_local(&nss_gshadow, &local_gshadow, group_name) {
+        return Ok(false);
+    }
     Ok(fixed_ipc_group_is_harmless_records(
         group_name,
         &local_group,
@@ -161,7 +195,8 @@ fn fixed_ipc_group_is_absent(group_name: &str, deadline: Instant) -> Result<bool
     if has_record(&local_group, group_name) || has_record(&local_gshadow, group_name) {
         return Ok(false);
     }
-    Ok(nss_group_lookup(group_name, deadline)?.is_none())
+    Ok(nss_group_lookup(group_name, deadline)?.is_none()
+        && nss_gshadow_lookup(group_name, deadline)?.is_none())
 }
 
 fn fixed_ipc_group_is_absent_or_harmless(
@@ -328,6 +363,10 @@ impl AccountPort for SystemAccounts {
             }
             return Err(InstallError::ExistingResidue);
         }
+        if !fixed_ipc_group_is_current_transaction(OBSERVATION_IPC_GROUP, transaction_id, deadline)?
+        {
+            return Err(InstallError::ExistingResidue);
+        }
         match require_success(
             "/usr/sbin/groupdel",
             &[OBSERVATION_IPC_GROUP],
@@ -378,44 +417,61 @@ fn remove_owned_ipc_group(
     deadline: Option<Instant>,
 ) -> Result<(), InstallError> {
     let deadline = deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-    let output = run_bounded(
-        "/usr/bin/getent",
-        &["gshadow", group_name],
-        InstallError::Account,
-        deadline,
-        COMMAND_STEP_BUDGET,
-    )?;
-    let Some(record) = classify_gshadow_lookup(output.status.code(), output.stdout)? else {
-        return if is_fixed_ipc_group(group_name)
-            && fixed_ipc_group_is_absent_or_harmless(group_name, deadline)?
-        {
-            Ok(())
-        } else {
-            Err(InstallError::ExistingResidue)
-        };
+    remove_fixed_ipc_group_transaction_with(
+        group_name,
+        transaction_id,
+        identity,
+        &mut || {
+            let output = run_bounded(
+                "/usr/bin/getent",
+                &["gshadow", group_name],
+                InstallError::Account,
+                deadline,
+                COMMAND_STEP_BUDGET,
+            )?;
+            classify_gshadow_lookup(output.status.code(), output.stdout)
+        },
+        &mut || fixed_ipc_group_is_current_transaction(group_name, transaction_id, deadline),
+        &mut || fixed_ipc_group_is_absent_or_harmless(group_name, deadline),
+        &mut || {
+            require_success(
+                "/usr/sbin/groupdel",
+                &[group_name],
+                InstallError::Account,
+                deadline,
+            )
+        },
+    )
+}
+
+pub(super) fn remove_fixed_ipc_group_transaction_with(
+    group_name: &str,
+    transaction_id: &str,
+    identity: Option<ServiceIdentity>,
+    lookup_gshadow: &mut impl FnMut() -> Result<Option<String>, InstallError>,
+    is_current_transaction: &mut impl FnMut() -> Result<bool, InstallError>,
+    is_absent_or_harmless: &mut impl FnMut() -> Result<bool, InstallError>,
+    groupdel: &mut impl FnMut() -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    if !is_fixed_ipc_group(group_name) {
+        return Err(InstallError::ExistingResidue);
+    }
+    let Some(record) = lookup_gshadow()? else {
+        return is_absent_or_harmless()?
+            .then_some(())
+            .ok_or(InstallError::ExistingResidue);
     };
     if !owned_ipc_group_record_matches(group_name, transaction_id, identity, &record) {
-        return if is_fixed_ipc_group(group_name)
-            && fixed_ipc_group_is_harmless(group_name, deadline)?
-        {
-            Ok(())
-        } else {
-            Err(InstallError::ExistingResidue)
-        };
+        return is_absent_or_harmless()?
+            .then_some(())
+            .ok_or(InstallError::ExistingResidue);
     }
-    match require_success(
-        "/usr/sbin/groupdel",
-        &[group_name],
-        InstallError::Account,
-        deadline,
-    ) {
+    if !is_current_transaction()? {
+        return Err(InstallError::ExistingResidue);
+    }
+    match groupdel() {
         Ok(()) => Ok(()),
-        Err(_error)
-            if is_fixed_ipc_group(group_name)
-                && fixed_ipc_group_is_harmless(group_name, deadline)? =>
-        {
-            Ok(())
-        }
+        Err(_) if is_absent_or_harmless()? => Ok(()),
         Err(error) => Err(error),
     }
 }

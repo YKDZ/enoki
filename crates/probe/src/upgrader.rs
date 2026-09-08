@@ -103,6 +103,7 @@ fn observation_stop_services(schema_version: u32) -> &'static [&'static str] {
             "enoki-disk-health-resource-provider@*.service",
             "enoki-observation-runtime.service",
             "enoki-observation-runtime-failure.service",
+            "enoki-probe-lifecycle-upgrade.socket",
             "enoki-probe-lifecycle-upgrade@*.service",
         ],
         4 => &[
@@ -1458,7 +1459,7 @@ fn run_cleanup_command(
     Ok(CleanupCommandOutput {
         code: output.status.code(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         successful: output.status.success(),
     })
 }

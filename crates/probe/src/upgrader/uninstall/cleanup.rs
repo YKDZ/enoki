@@ -347,7 +347,7 @@ pub(super) fn prepare_probe_uninstall_cleanup(
         for service in observation_stop_services(install_metadata.schema_version)
             .iter()
             .copied()
-            .filter(|service| !is_lifecycle_companion_service(service))
+            .filter(|service| *service != "enoki-probe-lifecycle-companion.socket")
         {
             systemd.stop_service(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
@@ -2131,6 +2131,10 @@ mod tests {
         assert!(
             position("enoki-observation-runtime.service")
                 < position("enoki-observation-runtime-failure.service")
+        );
+        assert!(
+            position("enoki-probe-lifecycle-upgrade.socket")
+                < position("enoki-probe-lifecycle-upgrade@*.service")
         );
     }
 }

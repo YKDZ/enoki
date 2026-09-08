@@ -1856,7 +1856,7 @@ fn recover_interrupted_install(
                     .accounts
                     .remove_transaction_identity(journal.transaction_id(), identity),
             ),
-            Ok(false) if identity.is_some() => {
+            Ok(false) => {
                 match ports
                     .accounts
                     .fixed_ipc_group_is_absent_or_harmless(PROBE_IPC_GROUP)
@@ -1873,7 +1873,6 @@ fn recover_interrupted_install(
                     ),
                 }
             }
-            Ok(false) => {}
             Err(error) => record_rollback(
                 &mut failures,
                 RollbackStep::RemoveServiceIdentity,
