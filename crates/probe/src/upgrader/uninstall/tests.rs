@@ -1,3 +1,4 @@
+use super::cleanup::set_strict_repair_loader_failure;
 use super::{
     CompanionBinaryFacts, LocalUninstallIntent, PostCommitSelfFinalizeFacts, ResumeDecision,
     UninstallCapsulePhase, adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
@@ -1085,6 +1086,45 @@ fn production_recovery_resumes_a_retained_capsule_from_an_empty_state_shell() {
     assert_eq!(response, LifecycleResponse::succeeded());
     assert!(transport.url.is_empty());
     assert!(transport.status_url.is_empty());
+}
+
+#[test]
+fn production_recovery_resumes_a_retained_capsule_after_partial_state_cleanup() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let capsule_path = prepare_state_absent_terminal_capsule(temporary.path());
+    let state = temporary.path().join("var/lib/enoki-probe");
+    fs::create_dir(&state).expect("interrupted state shell");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o750))
+        .expect("trusted state shell mode");
+    fs::write(state.join("partial-state"), b"interrupted cleanup")
+        .expect("ordinary interrupted state");
+    assert!(
+        read_uninstall_capsule(&capsule_path)
+            .expect("read retained capsule")
+            .is_some()
+    );
+
+    set_strict_repair_loader_failure(true);
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    let response = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut transport,
+        &mut systemd,
+    );
+    set_strict_repair_loader_failure(false);
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+    assert!(
+        !state.exists()
+            || fs::read_dir(&state)
+                .expect("retained state shell remains readable")
+                .next()
+                .is_none(),
+        "authorized recovery clears the complete trusted state root"
+    );
 }
 
 fn prepare_state_absent_terminal_capsule(root: &Path) -> PathBuf {

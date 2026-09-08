@@ -171,7 +171,8 @@ pub(super) fn plan_probe_uninstall_cleanup<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage()?;
+    plan.unbound_repair_stage =
+        validate_unbound_installed_bundle_repair_stage(Path::new("/var/lib/enoki-probe"), false)?;
     validate_owned_bootstrap_assets_for_cleanup_with_repair(
         install_metadata,
         plan.unbound_repair_stage.is_some(),
@@ -185,7 +186,8 @@ pub(super) fn plan_probe_uninstall_recovery<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage()?;
+    plan.unbound_repair_stage =
+        validate_unbound_installed_bundle_repair_stage(&install_metadata.state_dir, true)?;
     validate_owned_bootstrap_assets_for_recovery_with_repair(
         install_metadata,
         plan.unbound_repair_stage.is_some(),
@@ -300,22 +302,31 @@ fn validate_owned_bootstrap_assets_for_recovery_with_repair(
 
 /// Planner 只读地区分 fixed child：durable intent 存在时必须先恢复；只有无 intent
 /// 且通过固定 catalog 深验证的 orphan 才进入 executor cleanup plan。
-fn validate_unbound_installed_bundle_repair_stage()
--> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
-    // State root 不存在即可只读证明 intent 不存在；一旦 state 存在，必须在观察
-    // stage 之前通过现有 recovery loader 加锁并完整验证 intent。
-    let persisted_repair = if trusted_state_root_is_empty_or_absent_under_pair_lock(Path::new(
-        "/var/lib/enoki-probe",
-    ))? {
+fn validate_unbound_installed_bundle_repair_stage(
+    public_state_dir: &Path,
+    retained_uninstall_capsule: bool,
+) -> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
+    // State root 不存在即可只读证明 intent 不存在。保留的 Uninstall capsule
+    // 已授权本次 cleanup；它在同一无删除 effect pair lock 下证明 intent 缺席后，
+    // 可以继续收敛残余 root，而不能要求已退休的 identity 重走 Repair loader。
+    // 没有 capsule 的首次 Uninstall 对任何非空 root 仍走原严格 loader。
+    let empty_or_absent = trusted_state_root_is_empty_or_absent_under_pair_lock(public_state_dir)?;
+    let persisted_repair = if empty_or_absent || retained_uninstall_capsule {
         Ok(false)
     } else {
-        crate::runtime_failure::resume_installed_bundle_repair()
-            .map(|repair| repair.is_some())
-            .map_err(|_| {
-                ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "Installed Bundle Repair intent is invalid",
-                )
-            })
+        #[cfg(test)]
+        let repair = if STRICT_REPAIR_LOADER_FAILURE.with(std::cell::Cell::get) {
+            Err(crate::runtime_failure::InstalledBundleRepairError::RecoveryPending)
+        } else {
+            crate::runtime_failure::resume_installed_bundle_repair()
+        };
+        #[cfg(not(test))]
+        let repair = crate::runtime_failure::resume_installed_bundle_repair();
+        repair.map(|repair| repair.is_some()).map_err(|_| {
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Installed Bundle Repair intent is invalid",
+            )
+        })
     };
     let stage_present = match fs::symlink_metadata(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -329,6 +340,16 @@ fn validate_unbound_installed_bundle_repair_stage()
             )
         })
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    static STRICT_REPAIR_LOADER_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn set_strict_repair_loader_failure(failure: bool) {
+    STRICT_REPAIR_LOADER_FAILURE.with(|value| value.set(failure));
 }
 
 fn classify_uninstall_repair_stage(
