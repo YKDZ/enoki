@@ -668,7 +668,11 @@ fn read_post_commit_self_finalize_facts(
     companion_binary_path: &Path,
 ) -> Result<PostCommitSelfFinalizeFacts, ProbeUpgraderRunError> {
     let install_metadata_absent = path_absence_fact(install_metadata_path)?;
-    let install_state_absent = path_absence_fact(install_state_dir)?;
+    // No-capsule Resume has no deletion authority.  It may only accept the
+    // fixed state projection after independently proving that it is already
+    // absent or empty; a non-empty or unsafe root stays fail-closed.
+    cleanup::verify_uninstall_state_shell_harmless(install_state_dir)?;
+    let install_state_absent = true;
     let bootstrap_state_absent = path_absence_fact(bootstrap_state_dir)?;
     let binary = fs::symlink_metadata(companion_binary_path).map_err(ProbeUpgraderRunError::Io)?;
     Ok(PostCommitSelfFinalizeFacts {

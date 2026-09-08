@@ -19,7 +19,12 @@ use enoki_probe_bootstrap::replacement::{
     ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     commit_and_cleanup_replacement,
 };
-use std::{fs, io::Write, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    fs,
+    io::Write,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::{Path, PathBuf},
+};
 
 #[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
@@ -751,10 +756,10 @@ pub(super) fn remove_uninstall_local_state_with(
     plan: &ProbeUninstallCleanupPlan<'_>,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let state_cleanup = prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir)?;
     remove(plan.install_metadata_path)?;
     remove(&plan.input.bootstrap_config_path)?;
-    let _runtime_failure_lock = runtime_failure_cleanup_lock(&plan.install_metadata.state_dir)?;
-    remove(&plan.install_metadata.state_dir)
+    clear_prepared_state_root_contents_with(state_cleanup, &mut remove)
 }
 
 pub(super) fn finalize_replacement_local_state_with(
@@ -786,6 +791,220 @@ fn runtime_failure_cleanup_lock(
             "Probe state directory is unsafe",
         )),
         Err(error) => Err(ProbeUpgraderRunError::Io(error)),
+    }
+}
+
+/// State is one installation-owned root, not an inventory of independently
+/// retired children.  The caller has already established the metadata or
+/// retained-capsule binding; this function only accepts the two fixed state
+/// projections and keeps the existing pair lock across clear, sync and the
+/// best-effort shell retirement.
+fn clear_prepared_state_root_contents_with(
+    cleanup: TrustedStateCleanup,
+    remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    clear_prepared_state_root_contents_with_shell(cleanup, remove, retire_state_shell)
+}
+
+fn clear_prepared_state_root_contents_with_shell(
+    cleanup: TrustedStateCleanup,
+    remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+    mut retire_shell: impl FnMut(&TrustedStateRoot) -> std::io::Result<()>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let Some(layout) = cleanup.layout else {
+        return Ok(());
+    };
+
+    for entry in fs::read_dir(layout.contents())? {
+        let entry = entry?;
+        // remove_path_if_exists uses lstat: an entry symlink is unlinked and
+        // never traversed, while directories are recursively retired.
+        remove(&entry.path())?;
+    }
+    sync_directory(layout.contents())?;
+    verify_state_root_empty(&layout)?;
+
+    // A shell is not data.  Its removal is deliberately best effort, but a
+    // failed rmdir may only be ignored after a fresh empty proof.
+    let _ = retire_shell(&layout);
+    verify_state_root_empty_or_absent(&layout)
+}
+
+struct TrustedStateCleanup {
+    layout: Option<TrustedStateRoot>,
+    // Held from the root proof through metadata/config retirement and content
+    // cleanup; this is intentionally not a durable fact and is never unlinked.
+    _runtime_failure_lock: Option<crate::runtime_failure::RuntimeFailurePairLock>,
+}
+
+fn prepare_trusted_state_root_cleanup(
+    public_state_dir: &Path,
+) -> Result<TrustedStateCleanup, ProbeUpgraderRunError> {
+    let layout = trusted_state_root_layout(public_state_dir)?;
+    let lock = layout
+        .as_ref()
+        .map(|_| {
+            crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
+                public_state_dir,
+                unsafe { libc::geteuid() },
+            )
+            .map_err(ProbeUpgraderRunError::Io)
+        })
+        .transpose()?;
+    Ok(TrustedStateCleanup {
+        layout,
+        _runtime_failure_lock: lock,
+    })
+}
+
+fn retire_state_shell(layout: &TrustedStateRoot) -> std::io::Result<()> {
+    #[cfg(test)]
+    if STATE_SHELL_RETIRE_FAILURE.with(std::cell::Cell::get) {
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    }
+    match layout {
+        TrustedStateRoot::Ordinary(path) => fs::remove_dir(path),
+        TrustedStateRoot::Canonical { public, private } => {
+            if let Err(error) = fs::remove_dir(private)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+            fs::remove_file(public)
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static STATE_SHELL_RETIRE_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[derive(Debug)]
+enum TrustedStateRoot {
+    Ordinary(PathBuf),
+    Canonical { public: PathBuf, private: PathBuf },
+}
+
+impl TrustedStateRoot {
+    fn contents(&self) -> &Path {
+        match self {
+            Self::Ordinary(path) => path,
+            Self::Canonical { private, .. } => private,
+        }
+    }
+}
+
+fn trusted_state_root_layout(
+    public_state_dir: &Path,
+) -> Result<Option<TrustedStateRoot>, ProbeUpgraderRunError> {
+    if !cfg!(test) && !public_state_dir.ends_with("var/lib/enoki-probe") {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is not the fixed state root",
+        ));
+    }
+    let private = public_state_dir
+        .parent()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ))?
+        .join("private/enoki-probe");
+    let public_metadata = match fs::symlink_metadata(public_state_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return match fs::symlink_metadata(&private) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+                Ok(metadata) => {
+                    validate_state_root_directory(&metadata, false)?;
+                    Ok(Some(TrustedStateRoot::Canonical {
+                        public: public_state_dir.to_owned(),
+                        private,
+                    }))
+                }
+            };
+        }
+        Err(error) => return Err(error.into()),
+        Ok(metadata) => metadata,
+    };
+    if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
+        validate_state_root_directory(&public_metadata, true)?;
+        match fs::symlink_metadata(&private) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe state directory has conflicting canonical residue",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(Some(TrustedStateRoot::Ordinary(
+            public_state_dir.to_owned(),
+        )));
+    }
+    if !public_metadata.file_type().is_symlink()
+        || public_metadata.uid() != 0
+        || public_metadata.gid() != 0
+        || public_metadata.nlink() != 1
+        || fs::read_link(public_state_dir)?.as_os_str().as_bytes() != b"private/enoki-probe"
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    match fs::symlink_metadata(&private) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(metadata) => validate_state_root_directory(&metadata, false)?,
+    }
+    Ok(Some(TrustedStateRoot::Canonical {
+        public: public_state_dir.to_owned(),
+        private,
+    }))
+}
+
+fn validate_state_root_directory(
+    metadata: &fs::Metadata,
+    require_root_owner: bool,
+) -> Result<(), ProbeUpgraderRunError> {
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || (!cfg!(test) && metadata.mode() & 0o7777 != 0o750)
+        || (require_root_owner && (metadata.uid(), metadata.gid()) != expected_root_owner())
+        || (!require_root_owner && metadata.uid() != metadata.gid())
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    Ok(())
+}
+
+fn expected_root_owner() -> (u32, u32) {
+    #[cfg(test)]
+    {
+        // The filesystem adapter maps production root ownership to the test
+        // process identity, so these fixtures remain meaningful in a
+        // non-root CI worker without weakening the production predicate.
+        (unsafe { libc::geteuid() }, unsafe { libc::getegid() })
+    }
+    #[cfg(not(test))]
+    (0, 0)
+}
+
+fn verify_state_root_empty(root: &TrustedStateRoot) -> Result<(), ProbeUpgraderRunError> {
+    if fs::read_dir(root.contents())?.next().is_some() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory was not cleared",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_state_root_empty_or_absent(root: &TrustedStateRoot) -> Result<(), ProbeUpgraderRunError> {
+    match fs::symlink_metadata(root.contents()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => verify_state_root_empty(root),
     }
 }
 
@@ -835,15 +1054,20 @@ pub(super) fn verify_uninstall_local_state_absent(
             "probe_uninstall_metadata_residue",
             "verifying install metadata is absent",
         ),
-        (
-            plan.install_metadata.state_dir.as_path(),
-            "probe_uninstall_state_residue",
-            "verifying Probe state is absent",
-        ),
     ] {
         verify_path_absent(path, code, action)?;
     }
+    verify_uninstall_state_shell_harmless(&plan.install_metadata.state_dir)?;
     Ok(())
+}
+
+pub(super) fn verify_uninstall_state_shell_harmless(
+    public_state_dir: &Path,
+) -> Result<(), ProbeUpgraderRunError> {
+    match trusted_state_root_layout(public_state_dir)? {
+        None => Ok(()),
+        Some(root) => verify_state_root_empty(&root),
+    }
 }
 
 pub(super) fn verify_lifecycle_companion_binary_absent(
@@ -1206,8 +1430,8 @@ fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgra
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
-        commit_replacement_cleanup_with_metadata_retirement,
+        ProbeUpgraderSystemdRunner, STATE_SHELL_RETIRE_FAILURE, TrustedProbeInstallMetadata,
+        classify_uninstall_repair_stage, commit_replacement_cleanup_with_metadata_retirement,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
         plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
@@ -1294,9 +1518,9 @@ mod tests {
         TrustedProbeInstallMetadata {
             schema_version,
             hub_url: "https://hub.example".to_owned(),
-            identity_path: root.join("state/identity.toml"),
+            identity_path: root.join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
             install_path: root.join("bin/enoki-probe"),
-            operation_status_path: root.join("state/status.toml"),
+            operation_status_path: root.join("var/lib/enoki-probe/probe-operation-status.toml"),
             probe_asset_public_key_sha256: "a".repeat(64),
             probe_distribution_root_sha256: None,
             bootstrap_acquirer_path: None,
@@ -1306,7 +1530,7 @@ mod tests {
             service_group: "enoki-probe".to_owned(),
             service_unit_path: root.join("systemd/enoki-probe.service"),
             service_user: "enoki-probe".to_owned(),
-            state_dir: root.join("state"),
+            state_dir: root.join("var/lib/enoki-probe"),
             operation_sudoers_path: None,
             collector_helper_sudoers_path: None,
             old_sudoers_paths: Vec::new(),
@@ -1740,6 +1964,8 @@ mod tests {
         for path in &observation_units {
             create_file(path, 0o600);
         }
+        fs::set_permissions(&metadata.state_dir, fs::Permissions::from_mode(0o750))
+            .expect("trusted state root mode");
         create_file(&acquirer, 0o755);
         create_file(&activator, 0o755);
         fs::create_dir(&bootstrap_state).expect("bootstrap state");
@@ -1764,14 +1990,26 @@ mod tests {
         ] {
             assert!(path.exists(), "{} removed during prepare", path.display());
         }
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(true));
         finalize_recoverable_uninstall_cleanup(&plan, &mut systemd).expect("recoverable finalize");
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
         remove_probe_bootstrap_state(&plan).expect("retire Bootstrap state");
         assert!(companion.exists(), "companion is the final reentry asset");
         remove_lifecycle_companion_binary(&plan).expect("remove companion binary");
         assert!(!companion.exists());
         assert!(!install_metadata_path.exists());
         assert!(!metadata.identity_path.exists());
-        assert!(!metadata.state_dir.exists());
+        assert!(
+            metadata.state_dir.exists(),
+            "empty state shell is harmless residue"
+        );
+        assert!(
+            fs::read_dir(&metadata.state_dir)
+                .expect("state shell remains readable")
+                .next()
+                .is_none(),
+            "the coordinator clears the complete trusted state root before retaining its shell"
+        );
         for path in [
             &metadata.install_path,
             &metadata.service_unit_path,
@@ -1839,6 +2077,9 @@ mod tests {
     fn local_state_failure_preserves_the_exact_cleanup_transcript() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let metadata = metadata(temporary.path(), 1);
+        fs::create_dir_all(&metadata.state_dir).expect("state root");
+        let remaining_state = metadata.state_dir.join("actual-state");
+        create_file(&remaining_state, 0o600);
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
         };
@@ -1849,7 +2090,7 @@ mod tests {
 
         let error = remove_uninstall_local_state_with(&plan, |path| {
             calls.push(path.to_path_buf());
-            (path != metadata.state_dir)
+            (path != remaining_state)
                 .then_some(())
                 .ok_or_else(|| ProbeUpgraderRunError::Io(std::io::Error::other("injected")))
         })
@@ -1861,7 +2102,7 @@ mod tests {
             [
                 install_metadata_path,
                 metadata.identity_path,
-                metadata.state_dir,
+                remaining_state,
             ]
         );
     }

@@ -1326,6 +1326,50 @@ fn schema_five_uninstall_accepts_the_production_current_layout_receipt() {
 }
 
 #[test]
+fn schema_five_uninstall_clears_the_exact_canonical_root_without_following_nested_links() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let mut fixture = uninstall_coordinator_fixture(temporary.path());
+    fixture.metadata.schema_version = 5;
+    fixture.metadata.lifecycle_authority_install_key = Some("e".repeat(64));
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
+    let public = fixture.metadata.state_dir.clone();
+    let private = temporary.path().join("var/lib/private/enoki-probe");
+    fs::create_dir_all(private.parent().expect("private parent")).expect("private parent");
+    fs::rename(&public, &private).expect("move trusted state to canonical private root");
+    symlink("private/enoki-probe", &public).expect("exact canonical public link");
+    let outside = temporary.path().join("outside-state");
+    fs::write(&outside, "must remain outside the trusted root").expect("outside state");
+    symlink(&outside, private.join("nested-link")).expect("nested state link");
+    let request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+
+    let response = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert_eq!(
+        fs::read(&outside).expect("nested target survives"),
+        b"must remain outside the trusted root"
+    );
+}
+
+#[test]
 fn schema_five_uninstall_rejects_noncanonical_production_activation_lock_before_effects() {
     for corruption in ["mode", "type", "nlink", "owner"] {
         let temporary = tempfile::tempdir().expect("temporary directory");
@@ -1969,6 +2013,40 @@ fn empty_resume_rejects_a_healthy_install_without_self_finalizing() {
         LifecycleResponse::failed("probe_uninstall_metadata_invalid")
     );
     assert!(binary.exists());
+    assert!(transport.url.is_empty());
+    assert!(systemd.calls.is_empty());
+}
+
+#[test]
+fn empty_resume_accepts_an_empty_state_shell_after_capsule_retirement() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let metadata = temporary.path().join("etc/enoki/probe-install.toml");
+    let state = temporary.path().join("var/lib/enoki-probe");
+    let binary = temporary
+        .path()
+        .join("usr/local/bin/enoki-probe-lifecycle-companion");
+    fs::create_dir_all(state.parent().expect("state parent")).expect("state parent");
+    fs::create_dir(&state).expect("empty trusted state shell");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).expect("state shell mode");
+    fs::create_dir_all(binary.parent().expect("companion parent")).expect("companion parent");
+    fs::write(&binary, "companion").expect("companion binary");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("companion mode");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
+
+    let response = resume_lifecycle_companion_at(
+        &metadata,
+        &state,
+        &bootstrap_state,
+        &binary,
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(state.exists(), "no-capsule proof is read-only");
+    assert!(fs::read_dir(&state).unwrap().next().is_none());
     assert!(transport.url.is_empty());
     assert!(systemd.calls.is_empty());
 }

@@ -65,6 +65,7 @@ const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const LIFECYCLE_COMPANION_BINARY: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 const STATE: &str = "/var/lib/enoki-probe";
+const PRIVATE_STATE: &str = "/var/lib/private/enoki-probe";
 const RUNTIME_FAILURE_EPOCH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const RUNTIME_FAILURE_LATCH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
 const RUNTIME_FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
@@ -1258,6 +1259,11 @@ fn activate_verified_fresh_install_with_admission(
     if !is_committed_resume {
         ports.accounts.require_absent()?;
         ports.systemd.require_absent()?;
+        retire_empty_state_shell_for_fresh(paths)?;
+        if fs::symlink_metadata(paths.state()).is_ok() {
+            return Err(InstallError::ExistingResidue);
+        }
+        preflight_files(paths)?;
     }
 
     let mut journal = match resumed_journal {

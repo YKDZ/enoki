@@ -1575,6 +1575,81 @@ mod tests {
     }
 
     #[test]
+    fn fresh_coordinator_retires_an_empty_ordinary_state_shell_before_its_new_journal() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let shell = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir(&shell).unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o750)).unwrap();
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        activate_layout_without_roles_for_test(
+            &mut component,
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .expect("fresh coordinator removes only the verified empty shell before journaling");
+
+        assert!(temporary
+            .path()
+            .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
+            .exists());
+    }
+
+    #[test]
+    fn fresh_coordinator_retires_an_empty_canonical_state_shell_before_its_new_journal() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib/private",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let private = temporary.path().join("var/lib/private/enoki-probe");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).unwrap();
+        symlink("private/enoki-probe", temporary.path().join("var/lib/enoki-probe")).unwrap();
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        activate_layout_without_roles_for_test(
+            &mut component,
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .expect("fresh coordinator retires the exact empty canonical shell");
+
+        assert!(temporary
+            .path()
+            .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
+            .exists());
+    }
+
+    #[test]
     fn fresh_machine_installs_bundled_bootstrap_receipts_before_probe_activation() {
         let temporary = tempdir().unwrap();
         for parent in [
