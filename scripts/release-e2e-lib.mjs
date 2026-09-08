@@ -7857,6 +7857,9 @@ function serializedError(error) {
   if (error?.installerEvidence) {
     serialized.installerEvidence = error.installerEvidence;
   }
+  if (error?.resourceRecordingEvidence) {
+    serialized.resourceRecordingEvidence = error.resourceRecordingEvidence;
+  }
   if (error instanceof AggregateError) {
     serialized.errors = error.errors.map((nested) => serializedError(nested));
   }
