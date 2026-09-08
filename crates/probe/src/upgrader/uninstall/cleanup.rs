@@ -852,20 +852,23 @@ fn runtime_failure_cleanup_lock(
 /// retained-capsule binding; this function only accepts the two fixed state
 /// projections and keeps the existing pair lock across clear, sync and the
 /// best-effort shell retirement.
-fn clear_prepared_state_root_contents_with(
-    cleanup: TrustedStateCleanup,
+fn clear_prepared_state_root_contents_with<'a>(
+    cleanup: TrustedStateCleanup<'a>,
     remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
-) -> Result<ClearedStateShell, ProbeUpgraderRunError> {
+) -> Result<ClearedStateShell<'a>, ProbeUpgraderRunError> {
     clear_prepared_state_root_contents_with_shell(cleanup, remove, retire_state_shell)
 }
 
-fn clear_prepared_state_root_contents_with_shell(
-    cleanup: TrustedStateCleanup,
+fn clear_prepared_state_root_contents_with_shell<'a>(
+    cleanup: TrustedStateCleanup<'a>,
     remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
     mut retire_shell: impl FnMut(&TrustedStateRoot) -> std::io::Result<()>,
-) -> Result<ClearedStateShell, ProbeUpgraderRunError> {
+) -> Result<ClearedStateShell<'a>, ProbeUpgraderRunError> {
     let Some(admission) = cleanup.admission else {
-        return Ok(ClearedStateShell(None));
+        return Ok(ClearedStateShell {
+            layout: None,
+            owner: cleanup.owner,
+        });
     };
     let layout = admission.layout;
 
@@ -905,20 +908,26 @@ fn clear_prepared_state_root_contents_with_shell(
     // A shell is not data.  Its removal is deliberately best effort, but a
     // failed rmdir may only be ignored after a fresh empty proof.
     let _ = retire_shell(&layout);
-    verify_state_root_empty_or_absent(&layout)?;
-    Ok(ClearedStateShell(Some(layout)))
+    verify_trusted_state_root_empty_or_absent(layout.public(), cleanup.owner)?;
+    Ok(ClearedStateShell {
+        layout: Some(layout),
+        owner: cleanup.owner,
+    })
 }
 
 /// An in-process proof produced only after the held pair lock has cleared and
 /// synced the admitted state root. It carries no persistent ownership fact;
 /// later Replacement cleanup may only re-check that this shell remains empty.
-struct ClearedStateShell(Option<TrustedStateRoot>);
+struct ClearedStateShell<'a> {
+    layout: Option<TrustedStateRoot>,
+    owner: StateRootOwner<'a>,
+}
 
-impl ClearedStateShell {
+impl ClearedStateShell<'_> {
     fn verify_empty_or_absent(&self) -> Result<(), ProbeUpgraderRunError> {
-        self.0
-            .as_ref()
-            .map_or(Ok(()), verify_state_root_empty_or_absent)
+        self.layout.as_ref().map_or(Ok(()), |layout| {
+            verify_trusted_state_root_empty_or_absent(layout.public(), self.owner)
+        })
     }
 }
 
@@ -933,17 +942,18 @@ struct TrustedStateRootAdmission {
     authority: StateRootCleanupAuthority,
 }
 
-struct TrustedStateCleanup {
+struct TrustedStateCleanup<'a> {
     admission: Option<TrustedStateRootAdmission>,
+    owner: StateRootOwner<'a>,
     // Held from the root proof through metadata/config retirement and content
     // cleanup; this is intentionally not a durable fact and is never unlinked.
     _runtime_failure_lock: Option<crate::runtime_failure::RuntimeFailurePairLock>,
 }
 
-fn prepare_trusted_state_root_cleanup(
+fn prepare_trusted_state_root_cleanup<'a>(
     public_state_dir: &Path,
-    ordinary_owner: StateRootOwner<'_>,
-) -> Result<TrustedStateCleanup, ProbeUpgraderRunError> {
+    ordinary_owner: StateRootOwner<'a>,
+) -> Result<TrustedStateCleanup<'a>, ProbeUpgraderRunError> {
     // Admission is read-only and is backed by the caller's existing
     // metadata/capsule authority.  It intentionally has no cleanup effect:
     // the held-lock reread below is the only layout used for removal.
@@ -968,6 +978,7 @@ fn prepare_trusted_state_root_cleanup(
     }
     Ok(TrustedStateCleanup {
         admission,
+        owner: ordinary_owner,
         _runtime_failure_lock: Some(lock),
     })
 }
@@ -1025,7 +1036,6 @@ enum TrustedStateRoot {
 enum StateRootOwner<'a> {
     Root,
     BoundServiceOrEmptyShell { user: &'a str, group: &'a str },
-    EqualUidGid,
 }
 
 impl TrustedStateRoot {
@@ -1033,6 +1043,13 @@ impl TrustedStateRoot {
         match self {
             Self::Ordinary(path) => path,
             Self::Canonical { private, .. } => private,
+        }
+    }
+
+    fn public(&self) -> &Path {
+        match self {
+            Self::Ordinary(path) => path,
+            Self::Canonical { public, .. } => public,
         }
     }
 }
@@ -1058,11 +1075,8 @@ fn trusted_state_root_layout(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
                 Ok(metadata) => {
-                    let authority = validate_state_root_directory(
-                        &private,
-                        &metadata,
-                        StateRootOwner::EqualUidGid,
-                    )?;
+                    let authority =
+                        validate_state_root_directory(&private, &metadata, ordinary_owner)?;
                     Ok(Some(TrustedStateRootAdmission {
                         layout: TrustedStateRoot::Canonical {
                             public: public_state_dir.to_owned(),
@@ -1107,9 +1121,7 @@ fn trusted_state_root_layout(
             StateRootCleanupAuthority::ContentAuthorized
         }
         Err(error) => return Err(error.into()),
-        Ok(metadata) => {
-            validate_state_root_directory(&private, &metadata, StateRootOwner::EqualUidGid)?
-        }
+        Ok(metadata) => validate_state_root_directory(&private, &metadata, ordinary_owner)?,
     };
     Ok(Some(TrustedStateRootAdmission {
         layout: TrustedStateRoot::Canonical {
@@ -1159,8 +1171,6 @@ fn state_root_authority(
             }
             Ok(state_root_is_empty(path)?.then_some(StateRootCleanupAuthority::EmptyShellOnly))
         }
-        StateRootOwner::EqualUidGid => Ok((metadata.uid() == metadata.gid())
-            .then_some(StateRootCleanupAuthority::ContentAuthorized)),
     }
 }
 
@@ -1239,6 +1249,16 @@ fn verify_state_root_empty_or_absent(root: &TrustedStateRoot) -> Result<(), Prob
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
         Ok(_) => verify_state_root_empty(root),
+    }
+}
+
+fn verify_trusted_state_root_empty_or_absent(
+    public_state_dir: &Path,
+    owner: StateRootOwner<'_>,
+) -> Result<(), ProbeUpgraderRunError> {
+    match trusted_state_root_layout(public_state_dir, owner)? {
+        None => Ok(()),
+        Some(admission) => verify_state_root_empty_or_absent(&admission.layout),
     }
 }
 
@@ -2461,6 +2481,39 @@ mod tests {
         assert!(
             install_metadata_path.exists(),
             "commit custody retires metadata afterwards"
+        );
+    }
+
+    #[test]
+    fn committed_replacement_planner_rejects_noncurrent_canonical_contents_before_effects() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 1);
+        metadata.service_user = "daemon".to_owned();
+        metadata.service_group = "daemon".to_owned();
+        let private = temporary.path().join("var/lib/private/enoki-probe");
+        fs::create_dir_all(private.parent().expect("private parent")).expect("private parent");
+        fs::create_dir(&private).expect("private state root");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750))
+            .expect("private state root mode");
+        symlink("private/enoki-probe", &metadata.state_dir).expect("canonical root");
+        create_file(&metadata.identity_path, 0o600);
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(Some((u32::MAX, u32::MAX))));
+        let result = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path);
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(None));
+
+        assert!(matches!(
+            result,
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert!(
+            metadata.identity_path.exists(),
+            "canonical contents were not touched"
         );
     }
 
