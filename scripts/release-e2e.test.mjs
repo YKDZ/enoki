@@ -160,6 +160,12 @@ async function createLegacyReleaseRecordingFixture(prefix) {
   };
 
   await mkdir(fakeBin, { recursive: true });
+  await mkdir(path.join(root, "etc"), { recursive: true });
+  await Promise.all(
+    ["group", "gshadow", "passwd"].map((name) =>
+      writeFile(path.join(root, "etc", name), "", "utf8"),
+    ),
+  );
   await writeFile(
     path.join(fakeBin, "getent"),
     `#!/bin/sh
@@ -184,7 +190,17 @@ esac
 `,
     "utf8",
   );
-  await writeFile(path.join(fakeBin, "systemctl"), "#!/bin/sh\nexit 0\n");
+  await writeFile(
+    path.join(fakeBin, "systemctl"),
+    `#!/bin/sh
+case "$1" in
+  show) printf 'not-found\\n' ;;
+  list-units) : ;;
+esac
+exit 0
+`,
+    "utf8",
+  );
   for (const command of ["getent", "id", "systemctl"]) {
     await chmod(path.join(fakeBin, command), 0o755);
   }
@@ -4173,6 +4189,9 @@ exit 1
     const inspect = async ({
       canonical = false,
       canonicalPrivateAbsent = false,
+      fixedIpcGroupMember = false,
+      fixedIpcGroupsHarmless = false,
+      fixedRolePresent = false,
       member = null,
       publicAbsent = false,
       publicMode = 0o750,
@@ -4184,6 +4203,7 @@ exit 1
       const privateParent = path.join(publicParent, "private");
       const publicState = path.join(publicParent, "enoki-probe");
       const privateState = path.join(privateParent, "enoki-probe");
+      const etc = path.join(root, "etc");
       const mapHostPaths = (command) =>
         command
           .replaceAll("/var/lib/", `${root}/var/lib/`)
@@ -4192,14 +4212,65 @@ exit 1
           .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`);
       try {
         await mkdir(fakeBin, { recursive: true });
+        await mkdir(etc, { recursive: true });
+        await writeFile(path.join(etc, "group"), "", "utf8");
+        await writeFile(path.join(etc, "gshadow"), "", "utf8");
+        await writeFile(path.join(etc, "passwd"), "", "utf8");
+        if (fixedIpcGroupMember) {
+          await writeFile(
+            path.join(etc, "group"),
+            "enoki-probe-ipc:x:4242:outsider\n",
+            "utf8",
+          );
+          await writeFile(
+            path.join(etc, "gshadow"),
+            "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::\n",
+            "utf8",
+          );
+        }
+        if (fixedIpcGroupsHarmless) {
+          await writeFile(
+            path.join(etc, "group"),
+            [
+              "enoki-probe-ipc:x:4242:",
+              "enoki-observation-ipc:x:4243:",
+              "",
+            ].join("\n"),
+            "utf8",
+          );
+          await writeFile(
+            path.join(etc, "gshadow"),
+            [
+              "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::",
+              "enoki-observation-ipc:!enoki-bootstrap-fedcba9876543210fedcba9876543210::",
+              "",
+            ].join("\n"),
+            "utf8",
+          );
+        }
         await writeFile(
           path.join(fakeBin, "getent"),
-          "#!/bin/sh\nexit 2\n",
+          `#!/bin/sh
+if [ "$1" = group ]; then
+  awk -F: -v key="$2" '$1 == key || $3 == key { print; found = 1 } END { exit !found }' "$ENOKI_FIXTURE_ETC/group" && exit 0
+  exit 2
+fi
+exit 2
+`,
           "utf8",
         );
         await writeFile(
           path.join(fakeBin, "systemctl"),
-          "#!/bin/sh\nexit 0\n",
+          `#!/bin/sh
+if [ "$1" = show ]; then
+  if [ "$2" = enoki-observation-runtime.service ] && [ "$ENOKI_FIXED_ROLE_PRESENT" = yes ]; then
+    printf 'loaded\\n'
+  else
+    printf 'not-found\\n'
+  fi
+fi
+exit 0
+`,
           "utf8",
         );
         await chmod(path.join(fakeBin, "getent"), 0o755);
@@ -4234,6 +4305,8 @@ exit 1
                   {
                     env: {
                       ...process.env,
+                      ENOKI_FIXED_ROLE_PRESENT: fixedRolePresent ? "yes" : "no",
+                      ENOKI_FIXTURE_ETC: etc,
                       PATH: `${fakeBin}:${process.env.PATH}`,
                     },
                   },
@@ -4291,6 +4364,14 @@ exit 1
       harmlessResidue: ["/var/lib/private/enoki-probe"],
       units: [],
     });
+    await expect(
+      inspect({ fixedIpcGroupsHarmless: true }),
+    ).resolves.toMatchObject({
+      fixedIpcGroups: {
+        "enoki-observation-ipc": "harmless",
+        "enoki-probe-ipc": "harmless",
+      },
+    });
     await expect(inspect({ canonical: false, member: "data" })).rejects.toThrow(
       "/var/lib/enoki-probe",
     );
@@ -4306,6 +4387,12 @@ exit 1
     await expect(
       inspect({ canonical: true, publicTarget: "private/not-enoki-probe" }),
     ).rejects.toThrow("/var/lib/enoki-probe");
+    await expect(inspect({ fixedIpcGroupMember: true })).rejects.toThrow(
+      /enoki-probe-ipc/,
+    );
+    await expect(inspect({ fixedRolePresent: true })).rejects.toThrow(
+      /enoki-observation-runtime.service/,
+    );
   });
 
   it("uses the public Local Probe Uninstall command and proves its shared cleanup boundary", async () => {
@@ -4948,6 +5035,12 @@ exit 1
 
       try {
         await mkdir(fakeBin, { recursive: true });
+        await mkdir(path.join(root, "etc"), { recursive: true });
+        await Promise.all(
+          ["group", "gshadow", "passwd"].map((name) =>
+            writeFile(path.join(root, "etc", name), "", "utf8"),
+          ),
+        );
         for (const command of ["groupdel", "userdel"]) {
           const executable = path.join(fakeBin, command);
           await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
@@ -4959,8 +5052,12 @@ exit 1
           `#!/bin/sh
 case "$1" in
   show)
-    [ "$ENOKI_SERVICE_SCENARIO" != query-failure ] || exit 1
-    printf 'LoadState=loaded\\nActiveState=%s\\n' "$(cat "$ENOKI_SERVICE_STATE")"
+    if [ "$5" = --value ]; then
+      printf 'not-found\\n'
+    else
+      [ "$ENOKI_SERVICE_SCENARIO" != query-failure ] || exit 1
+      printf 'LoadState=loaded\\nActiveState=%s\\n' "$(cat "$ENOKI_SERVICE_STATE")"
+    fi
     ;;
   disable)
     [ "$ENOKI_SERVICE_SCENARIO" != stop-failure ] || exit 1
@@ -4974,7 +5071,13 @@ exit 0
 `,
           "utf8",
         );
+        await writeFile(
+          path.join(fakeBin, "getent"),
+          "#!/bin/sh\nexit 2\n",
+          "utf8",
+        );
         await chmod(systemctl, 0o755);
+        await chmod(path.join(fakeBin, "getent"), 0o755);
         await writeFile(serviceState, "active", "utf8");
         const harness = createProbeHostHarness({
           execute: async (command) => {
@@ -5221,12 +5324,19 @@ exit 0
       command.includes("# enoki-release-e2e:remove-claim"),
     );
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-claim-retire-"));
+    const fakeBin = path.join(root, "fake-bin");
     const claimRoot = path.join(root, "var", "lib", "enoki-release-e2e");
     const activeClaim = path.join(claimRoot, "claim");
     const retiringClaim = path.join(claimRoot, "claim-retiring");
     const mapped = retireClaim
       .replaceAll("/var/lib/", `${root}/var/lib/`)
+      .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`)
+      .replaceAll("/etc/", `${root}/etc/`)
       .replaceAll("/run/", `${root}/run/`);
+    const runMapped = () =>
+      execFileAsync("sh", ["-c", mapped], {
+        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+      });
     const token = retireClaim.match(/\$\(cat "\$1\/token"\)" = '([^']+)'/)?.[1];
     expect(token).toMatch(/^[0-9a-f-]{36}$/);
     const writeClaim = async (directory, { unknown = false } = {}) => {
@@ -5247,18 +5357,47 @@ exit 0
       }
     };
     try {
+      await mkdir(fakeBin, { recursive: true });
+      await mkdir(path.join(root, "etc"), { recursive: true });
+      await Promise.all(
+        ["group", "gshadow", "passwd"].map((name) =>
+          writeFile(path.join(root, "etc", name), "", "utf8"),
+        ),
+      );
+      await writeFile(
+        path.join(fakeBin, "getent"),
+        "#!/bin/sh\nexit 2\n",
+        "utf8",
+      );
+      await writeFile(
+        path.join(fakeBin, "systemctl"),
+        "#!/bin/sh\n[ \"$1\" != show ] || printf 'not-found\\n'\nexit 0\n",
+        "utf8",
+      );
+      await chmod(path.join(fakeBin, "getent"), 0o755);
+      await chmod(path.join(fakeBin, "systemctl"), 0o755);
       await writeClaim(activeClaim);
       const mappedProduct = path.join(root, "var", "lib", "enoki-probe");
+      const mappedRuntime = path.join(
+        root,
+        "usr",
+        "local",
+        "bin",
+        "enoki-observation-runtime",
+      );
       await mkdir(mappedProduct, { recursive: true, mode: 0o750 });
       await writeFile(path.join(mappedProduct, "residue"), "data", "utf8");
-      await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
+      await mkdir(path.dirname(mappedRuntime), { recursive: true });
+      await writeFile(mappedRuntime, "residue", "utf8");
+      await expect(runMapped()).rejects.toMatchObject({
         code: 79,
       });
       await expect(
         readFile(path.join(activeClaim, "resources"), "utf8"),
       ).resolves.toBe("exact-resource-evidence\n");
       await rm(path.join(mappedProduct, "residue"), { force: true });
-      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+      await rm(mappedRuntime, { force: true });
+      await expect(runMapped()).resolves.toMatchObject({
         stdout: "released\n",
       });
       await expect(lstat(activeClaim)).rejects.toMatchObject({
@@ -5269,7 +5408,7 @@ exit 0
       });
 
       await writeClaim(retiringClaim);
-      await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
+      await expect(runMapped()).resolves.toMatchObject({
         stdout: "released\n",
       });
       await expect(lstat(retiringClaim)).rejects.toMatchObject({

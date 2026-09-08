@@ -82,6 +82,48 @@ const releaseE2EGroups = Object.freeze(
     .map((resource) => resource.name),
 );
 
+// schema-v5 的固定产品边界来自 Bootstrap rollback verification 与 Probe
+// uninstall 的 observation/companion 合同。它不是可扩展的资源登记表：Harness
+// 只观察这里列出的当前角色、激活源和二个 IPC group。
+const fixedIpcGroupNames = Object.freeze([
+  "enoki-probe-ipc",
+  "enoki-observation-ipc",
+]);
+const fixedNecessaryUnitNames = Object.freeze([
+  "enoki-observation-runtime-failure.service",
+  "enoki-probe.service",
+  "enoki-observation-runtime.service",
+  "enoki-observation-runtime.socket",
+  "enoki-cpu-resource-provider.socket",
+  "enoki-disk-health-resource-provider.socket",
+  "enoki-probe-lifecycle-companion.socket",
+  "enoki-probe-lifecycle-upgrade.socket",
+]);
+const fixedNecessaryUnitGlobs = Object.freeze([
+  "enoki-cpu-resource-provider@*.service",
+  "enoki-disk-health-resource-provider@*.service",
+  "enoki-probe-lifecycle-companion@*.service",
+  "enoki-probe-lifecycle-upgrade@*.service",
+  "enoki-probe*.service",
+]);
+const fixedNecessaryProductPaths = Object.freeze([
+  "/usr/local/bin/enoki-observation-runtime",
+  "/usr/local/bin/enoki-cpu-resource-provider",
+  "/usr/local/bin/enoki-disk-health-resource-provider",
+  "/usr/local/bin/enoki-probe-lifecycle-companion",
+  "/etc/systemd/system/enoki-observation-runtime-failure.service",
+  "/etc/systemd/system/enoki-observation-runtime.service",
+  "/etc/systemd/system/enoki-observation-runtime.socket",
+  "/etc/systemd/system/enoki-cpu-resource-provider@.service",
+  "/etc/systemd/system/enoki-cpu-resource-provider.socket",
+  "/etc/systemd/system/enoki-disk-health-resource-provider@.service",
+  "/etc/systemd/system/enoki-disk-health-resource-provider.socket",
+  "/etc/systemd/system/enoki-probe-lifecycle-companion@.service",
+  "/etc/systemd/system/enoki-probe-lifecycle-companion.socket",
+  "/etc/systemd/system/enoki-probe-lifecycle-upgrade@.service",
+  "/etc/systemd/system/enoki-probe-lifecycle-upgrade.socket",
+]);
+
 const terminalProbeOperationStates = new Set([
   "succeeded",
   "failed",
@@ -1386,6 +1428,9 @@ function assertSuccessfulCommandEvidence(value, label) {
 }
 
 function assertHostInventoryEvidence(inventory) {
+  const inventoryKeys = Object.keys(inventory ?? {})
+    .sort()
+    .join(",");
   if (
     !inventory ||
     inventory.error ||
@@ -1395,12 +1440,30 @@ function assertHostInventoryEvidence(inventory) {
     inventory.files.some((entry) => typeof entry !== "string" || !entry) ||
     !Array.isArray(inventory.units) ||
     inventory.units.some((entry) => typeof entry !== "string" || !entry) ||
-    !["accounts,files,units", "accounts,files,harmlessResidue,units"].includes(
-      Object.keys(inventory).sort().join(","),
-    ) ||
+    ![
+      "accounts,files,units",
+      "accounts,files,harmlessResidue,units",
+      "accounts,files,fixedIpcGroups,units",
+      "accounts,files,fixedIpcGroups,harmlessResidue,units",
+    ].includes(inventoryKeys) ||
     Object.keys(inventory.accounts).sort().join(",") !== "group,user"
   ) {
     throw new Error("filesystem inventory collection is invalid");
+  }
+  if (inventory.fixedIpcGroups !== undefined) {
+    if (
+      !inventory.fixedIpcGroups ||
+      Object.keys(inventory.fixedIpcGroups).sort().join(",") !==
+        [...fixedIpcGroupNames].sort().join(",") ||
+      fixedIpcGroupNames.some(
+        (group) =>
+          !["absent", "harmless", "residue"].includes(
+            inventory.fixedIpcGroups[group],
+          ),
+      )
+    ) {
+      throw new Error("fixed IPC group inventory is invalid");
+    }
   }
   if (inventory.harmlessResidue !== undefined) {
     const harmlessResidue = inventory.harmlessResidue;
@@ -4317,6 +4380,112 @@ is_harmless_state_path() {
 }`;
 }
 
+function fixedProductRetirementPrelude() {
+  const groups = fixedIpcGroupNames.join(" ");
+  const units = fixedNecessaryUnitNames.join(" ");
+  const unitGlobs = fixedNecessaryUnitGlobs.join(" ");
+  const paths = fixedNecessaryProductPaths.join(" ");
+  return String.raw`fixed_ipc_groups="${groups}"
+fixed_necessary_units="${units}"
+fixed_necessary_unit_globs="${unitGlobs}"
+fixed_necessary_paths="${paths}"
+local_record_count() {
+  file=$1
+  name=$2
+  awk -F: -v name="$name" '$1 == name { count += 1 } END { print count + 0 }' "$file" 2>/dev/null
+}
+local_record() {
+  file=$1
+  name=$2
+  awk -F: -v name="$name" '$1 == name { print; exit }' "$file" 2>/dev/null
+}
+nss_group() {
+  key=$1
+  if output=$(getent group "$key" 2>/dev/null); then
+    [ "$(printf '%s\n' "$output" | awk 'NF { count += 1 } END { print count + 0 }')" = 1 ] || return 2
+    printf '%s\n' "$output"
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" = 2 ] && return 1
+  return 2
+}
+fixed_ipc_group_state() {
+  group=$1
+  case "$group" in enoki-probe-ipc|enoki-observation-ipc) ;; *) return 2 ;; esac
+  [ -r /etc/group ] && [ -r /etc/gshadow ] && [ -r /etc/passwd ] || return 2
+  group_count=$(local_record_count /etc/group "$group") || return 2
+  shadow_count=$(local_record_count /etc/gshadow "$group") || return 2
+  nss_name=
+  if nss_name=$(nss_group "$group"); then
+    nss_present=true
+  else
+    status=$?
+    [ "$status" = 1 ] || return 2
+    nss_present=false
+  fi
+  if [ "$group_count" = 0 ] && [ "$shadow_count" = 0 ] && [ "$nss_present" = false ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  [ "$group_count" = 1 ] && [ "$shadow_count" = 1 ] && [ "$nss_present" = true ] || { printf 'residue\n'; return 0; }
+  group_record=$(local_record /etc/group "$group") || return 2
+  shadow_record=$(local_record /etc/gshadow "$group") || return 2
+  gid=$(printf '%s\n' "$group_record" | awk -F: -v name="$group" '$1 == name && NF == 4 && $2 == "x" && $3 ~ /^[0-9]+$/ && $3 != "0" && $4 == "" { print $3 }')
+  marker=$(printf '%s\n' "$shadow_record" | awk -F: -v name="$group" '$1 == name && NF == 4 && $3 == "" && $4 == "" { print $2 }')
+  marker_ok=false
+  case "$marker" in
+    !enoki-bootstrap-*)
+      transaction=${"${"}marker#!enoki-bootstrap-}
+      [ "${"${"}#transaction}" = 32 ] && case "$transaction" in *[!0-9a-f]*) ;; *) marker_ok=yes ;; esac
+      ;;
+  esac
+  [ -n "$gid" ] && [ "$marker_ok" = yes ] && [ "$nss_name" = "$group_record" ] || { printf 'residue\n'; return 0; }
+  if nss_gid=$(nss_group "$gid"); then :; else return 2; fi
+  [ "$nss_gid" = "$group_record" ] || { printf 'residue\n'; return 0; }
+  other_group=enoki-observation-ipc
+  [ "$group" = "$other_group" ] && other_group=enoki-probe-ipc
+  other_count=$(local_record_count /etc/group "$other_group") || return 2
+  if [ "$other_count" = 1 ]; then
+    other_gid=$(local_record /etc/group "$other_group" | awk -F: 'NF == 4 && $3 ~ /^[0-9]+$/ { print $3 }') || return 2
+    [ -n "$other_gid" ] && [ "$other_gid" != "$gid" ] || { printf 'residue\n'; return 0; }
+  fi
+  awk -F: -v gid="$gid" '$1 == "enoki-probe-ipc" || $1 == "enoki-observation-ipc" || NF != 7 || $4 !~ /^[0-9]+$/ || $4 == gid { exit 1 }' /etc/passwd 2>/dev/null || { printf 'residue\n'; return 0; }
+  printf 'harmless\n'
+}
+fixed_unit_state() {
+  unit=$1
+  if output=$(systemctl show "$unit" --no-pager --property=LoadState --value 2>/dev/null); then
+    [ "$(printf '%s\n' "$output" | awk 'NF { count += 1 } END { print count + 0 }')" = 1 ] || return 2
+    case "$output" in not-found) printf 'absent\n' ;; *) printf 'residue\n' ;; esac
+    return 0
+  fi
+  return 2
+}
+fixed_product_residue() {
+  for group in $fixed_ipc_groups; do
+    state=$(fixed_ipc_group_state "$group") || return 2
+    [ "$state" != residue ] || printf 'group:%s\n' "$group"
+  done
+  for candidate in $fixed_necessary_paths; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then printf '%s\n' "$candidate"; fi
+  done
+  for unit in $fixed_necessary_units; do
+    state=$(fixed_unit_state "$unit") || return 2
+    [ "$state" != residue ] || printf '%s\n' "$unit"
+  done
+  for pattern in $fixed_necessary_unit_globs; do
+    units=$(systemctl list-units --all --full --plain "$pattern" --no-legend --no-pager 2>/dev/null) || return 2
+    [ -z "$units" ] || printf '%s\n' "$units" | awk 'NF { print $1 }'
+  done
+}
+fixed_product_is_retired() {
+  residue=$(fixed_product_residue) || return 1
+  [ -z "$residue" ]
+}`;
+}
+
 function hostInventoryScript() {
   const group = shellSingleQuote(releaseE2EGroups[0]);
   const user = shellSingleQuote(releaseE2EUsers[0]);
@@ -4324,10 +4493,18 @@ function hostInventoryScript() {
 set -eu
 json_bool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
 ${harmlessStateShellPrelude()}
+${fixedProductRetirementPrelude()}
 printf '{"accounts":{"group":'
 json_bool getent group ${group}
 printf ',"user":'
 json_bool getent passwd ${user}
+printf '},"fixedIpcGroups":{'
+separator=
+for group in $fixed_ipc_groups; do
+  state=$(fixed_ipc_group_state "$group") || { printf 'could not classify fixed IPC group\\n' >&2; exit 75; }
+  printf '%s"%s":"%s"' "$separator" "$group" "$state"
+  separator=,
+done
 printf '},"files":['
 state_private_seen=false
 separator=
@@ -4349,7 +4526,7 @@ for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} "$state_pri
     separator=,
   fi
 done
-for candidate in /run/systemd/system/enoki-probe*.service; do
+for candidate in /run/systemd/system/enoki-probe*.service $fixed_necessary_paths; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     printf '%s"%s"' "$separator" "$candidate"
     separator=,
@@ -4357,12 +4534,23 @@ for candidate in /run/systemd/system/enoki-probe*.service; do
 done
 printf '],"units":['
 separator=
-systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null |
+for unit in $fixed_necessary_units; do
+  state=$(fixed_unit_state "$unit") || { printf 'could not classify fixed unit\\n' >&2; exit 75; }
+  if [ "$state" = residue ]; then
+    printf '%s"%s"' "$separator" "$unit"
+    separator=,
+  fi
+done
+for pattern in $fixed_necessary_unit_globs; do
+  units=$(systemctl list-units --all --full --plain "$pattern" --no-legend --no-pager 2>/dev/null) || { printf 'could not classify fixed unit instances\\n' >&2; exit 75; }
   while IFS=' ' read -r unit _; do
     [ -n "$unit" ] || continue
     printf '%s"%s"' "$separator" "$unit"
     separator=,
-  done
+  done <<EOF
+$units
+EOF
+done
 printf ']'
 if [ "$harmless_public" = true ] || [ "$harmless_private" = true ]; then
   printf ',"harmlessResidue":['
@@ -4930,6 +5118,7 @@ trap cleanup_rejected_claim EXIT HUP INT TERM
 ( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$acquiring_dir/run-id"; sync -f "$acquiring_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$acquiring_dir/token"; sync -f "$acquiring_dir/token"; sync -f "$acquiring_dir" )
 # enoki-release-e2e:claim-empty-recheck
 ${harmlessStateShellPrelude()}
+${fixedProductRetirementPrelude()}
 residue=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} "$state_private" /run/systemd/system/enoki-probe*.service; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
@@ -4942,8 +5131,7 @@ done
 for account in ${groups}; do
   if getent group "$account" >/dev/null 2>&1; then residue="$residue group:$account"; fi
 done
-units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
-if [ -n "$units" ]; then residue="$residue enoki-probe-unit"; fi
+if ! fixed_product_is_retired; then residue="$residue fixed-product"; fi
 if [ -n "$residue" ]; then
   printf 'Release Test Host became non-empty before claim:%s\n' "$residue" >&2
   exit 74
@@ -5508,6 +5696,7 @@ function removeClaimScript(runId, token) {
   return `# enoki-release-e2e:remove-claim
 set -eu
 ${harmlessStateShellPrelude()}
+${fixedProductRetirementPrelude()}
 claim_root=/var/lib/enoki-release-e2e
 claim="$claim_root/claim"
 retiring="$claim_root/claim-retiring"
@@ -5553,8 +5742,8 @@ if [ -e "$claim" ] || [ -L "$claim" ]; then
   done
   for account in ${users}; do getent passwd "$account" >/dev/null 2>&1 && residue=present || true; done
   for account in ${groups}; do getent group "$account" >/dev/null 2>&1 && residue=present || true; done
-  units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
-  [ -z "$residue$units" ] || fail 'canonical Product is not empty before claim retirement'
+  fixed_product_is_retired || residue=present
+  [ -z "$residue" ] || fail 'canonical Product is not empty before claim retirement'
   mv -- "$claim" "$retiring"
   sync -f "$claim_root" || fail 'could not persist release E2E claim retirement'
 fi
@@ -5717,6 +5906,11 @@ function inventoryResidue(inventory) {
   }
   if (Array.isArray(inventory?.files)) residue.push(...inventory.files);
   if (Array.isArray(inventory?.units)) residue.push(...inventory.units);
+  for (const group of fixedIpcGroupNames) {
+    if (inventory?.fixedIpcGroups?.[group] === "residue") {
+      residue.push(`group:${group}`);
+    }
+  }
   return residue.sort();
 }
 
