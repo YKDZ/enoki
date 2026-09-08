@@ -27,6 +27,16 @@ use std::{
 };
 
 #[cfg(test)]
+mod test_fault_controls {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static STRICT_REPAIR_LOADER_FAILURE: Cell<bool> = const { Cell::new(false) };
+        pub(super) static STATE_SHELL_RETIRE_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+}
+
+#[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
     input: &ProbeUninstallerRunInput,
     install_metadata: &TrustedProbeInstallMetadata,
@@ -315,7 +325,8 @@ fn validate_unbound_installed_bundle_repair_stage(
         Ok(false)
     } else {
         #[cfg(test)]
-        let repair = if STRICT_REPAIR_LOADER_FAILURE.with(std::cell::Cell::get) {
+        let repair = if test_fault_controls::STRICT_REPAIR_LOADER_FAILURE.with(std::cell::Cell::get)
+        {
             Err(crate::runtime_failure::InstalledBundleRepairError::RecoveryPending)
         } else {
             crate::runtime_failure::resume_installed_bundle_repair()
@@ -343,13 +354,8 @@ fn validate_unbound_installed_bundle_repair_stage(
 }
 
 #[cfg(test)]
-thread_local! {
-    static STRICT_REPAIR_LOADER_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
 pub(super) fn set_strict_repair_loader_failure(failure: bool) {
-    STRICT_REPAIR_LOADER_FAILURE.with(|value| value.set(failure));
+    test_fault_controls::STRICT_REPAIR_LOADER_FAILURE.with(|value| value.set(failure));
 }
 
 fn classify_uninstall_repair_stage(
@@ -922,7 +928,7 @@ fn require_repair_intent_absent(root: &TrustedStateRoot) -> Result<(), ProbeUpgr
 
 fn retire_state_shell(layout: &TrustedStateRoot) -> std::io::Result<()> {
     #[cfg(test)]
-    if STATE_SHELL_RETIRE_FAILURE.with(std::cell::Cell::get) {
+    if test_fault_controls::STATE_SHELL_RETIRE_FAILURE.with(std::cell::Cell::get) {
         return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     }
     match layout {
@@ -936,11 +942,6 @@ fn retire_state_shell(layout: &TrustedStateRoot) -> std::io::Result<()> {
             fs::remove_file(public)
         }
     }
-}
-
-#[cfg(test)]
-thread_local! {
-    static STATE_SHELL_RETIRE_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(Debug)]
@@ -1518,16 +1519,16 @@ fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgra
 
 #[cfg(test)]
 mod tests {
+    use super::test_fault_controls::STATE_SHELL_RETIRE_FAILURE;
     use super::{
-        ProbeUpgraderSystemdRunner, STATE_SHELL_RETIRE_FAILURE, TrustedProbeInstallMetadata,
-        classify_uninstall_repair_stage, commit_replacement_cleanup_with_metadata_retirement,
-        execute_committed_replacement_cleanup, execute_probe_uninstall_with_install_metadata_path,
-        finalize_recoverable_uninstall_cleanup, finalize_replacement_local_state_with,
-        plan_committed_replacement_cleanup, plan_probe_uninstall_cleanup,
-        plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
-        remove_lifecycle_companion_binary, remove_probe_bootstrap_state,
-        remove_uninstall_local_state_with, retire_unbound_installed_bundle_repair_stage_with,
-        validate_owned_bootstrap_state,
+        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
+        commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
+        execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
+        finalize_replacement_local_state_with, plan_committed_replacement_cleanup,
+        plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery,
+        prepare_probe_uninstall_cleanup, remove_lifecycle_companion_binary,
+        remove_probe_bootstrap_state, remove_uninstall_local_state_with,
+        retire_unbound_installed_bundle_repair_stage_with, validate_owned_bootstrap_state,
     };
     use crate::upgrader::{
         ProbeUninstallerRunInput, ProbeUpgraderRunError, observation_stop_services,
