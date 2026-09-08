@@ -64,7 +64,7 @@ struct CompanionBinaryFacts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PostCommitSelfFinalizeFacts {
     install_metadata_absent: bool,
-    install_state_absent: bool,
+    install_state_harmless: bool,
     bootstrap_state_absent: bool,
     companion_binary: CompanionBinaryFacts,
 }
@@ -668,12 +668,16 @@ fn read_post_commit_self_finalize_facts(
     companion_binary_path: &Path,
 ) -> Result<PostCommitSelfFinalizeFacts, ProbeUpgraderRunError> {
     let install_metadata_absent = path_absence_fact(install_metadata_path)?;
-    let install_state_absent = path_absence_fact(install_state_dir)?;
+    // No-capsule Resume has no deletion authority.  It may only accept the
+    // fixed state projection after independently proving that it is already
+    // absent or empty; a non-empty or unsafe root stays fail-closed.
+    cleanup::verify_uninstall_state_shell_harmless(install_state_dir)?;
+    let install_state_harmless = true;
     let bootstrap_state_absent = path_absence_fact(bootstrap_state_dir)?;
     let binary = fs::symlink_metadata(companion_binary_path).map_err(ProbeUpgraderRunError::Io)?;
     Ok(PostCommitSelfFinalizeFacts {
         install_metadata_absent,
-        install_state_absent,
+        install_state_harmless,
         bootstrap_state_absent,
         companion_binary: CompanionBinaryFacts {
             regular_file: binary.file_type().is_file(),
@@ -696,7 +700,7 @@ fn post_commit_self_finalize_policy(
     facts: PostCommitSelfFinalizeFacts,
 ) -> Result<ResumeDecision, ()> {
     (facts.install_metadata_absent
-        && facts.install_state_absent
+        && facts.install_state_harmless
         && facts.bootstrap_state_absent
         && facts.companion_binary.regular_file
         && facts.companion_binary.link_count == 1

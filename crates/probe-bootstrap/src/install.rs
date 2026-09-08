@@ -65,6 +65,7 @@ const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const LIFECYCLE_COMPANION_BINARY: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 const STATE: &str = "/var/lib/enoki-probe";
+const PRIVATE_STATE: &str = "/var/lib/private/enoki-probe";
 const RUNTIME_FAILURE_EPOCH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const RUNTIME_FAILURE_LATCH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
 const RUNTIME_FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
@@ -264,6 +265,15 @@ pub trait AccountPort {
         Ok(false)
     }
     fn owns_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<bool, InstallError> {
+        Ok(false)
+    }
+    fn fixed_ipc_group_is_harmless(&mut self, _group_name: &str) -> Result<bool, InstallError> {
+        Ok(false)
+    }
+    fn fixed_ipc_group_is_absent_or_harmless(
+        &mut self,
+        _group_name: &str,
+    ) -> Result<bool, InstallError> {
         Ok(false)
     }
     fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
@@ -1235,7 +1245,7 @@ fn activate_verified_fresh_install_with_admission(
     let is_committed_resume = resumed_journal.is_some();
     if !is_committed_resume {
         preflight_parent_chains(paths)?;
-        preflight_files(paths)?;
+        preflight_files_with_empty_state_shell(paths, true)?;
         preflight_fixed_metadata_directory(&paths.etc_enoki())?;
         if bootstrap_components.is_some() {
             require_bootstrap_roles_absent(paths)?;
@@ -1249,6 +1259,10 @@ fn activate_verified_fresh_install_with_admission(
     if !is_committed_resume {
         ports.accounts.require_absent()?;
         ports.systemd.require_absent()?;
+        retire_empty_state_shell_for_fresh(paths)?;
+        #[cfg(test)]
+        recreate_state_shell_after_fresh_retirement_for_test(paths)?;
+        preflight_files(paths)?;
     }
 
     let mut journal = match resumed_journal {
@@ -1612,6 +1626,25 @@ fn activate_verified_fresh_install_with_admission(
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn recreate_state_shell_after_fresh_retirement_for_test(
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
+    RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE.with(|recreate| {
+        if !recreate.replace(false) {
+            return Ok(());
+        }
+        fs::create_dir(paths.state()).map_err(|_| InstallError::Io)?;
+        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o750))
+            .map_err(|_| InstallError::Io)
+    })
+}
+
 fn abort_prepared_install(
     cause: InstallError,
     journal: &TransactionJournal,
@@ -1847,11 +1880,23 @@ fn recover_interrupted_install(
                     .accounts
                     .remove_transaction_identity(journal.transaction_id(), identity),
             ),
-            Ok(false) if identity.is_some() => failures.push(RollbackFailure::new(
-                RollbackStep::RemoveServiceIdentity,
-                InstallErrorKind::ExistingResidue,
-            )),
-            Ok(false) => {}
+            Ok(false) => {
+                match ports
+                    .accounts
+                    .fixed_ipc_group_is_absent_or_harmless(PROBE_IPC_GROUP)
+                {
+                    Ok(true) => {}
+                    Ok(false) => failures.push(RollbackFailure::new(
+                        RollbackStep::RemoveServiceIdentity,
+                        InstallErrorKind::ExistingResidue,
+                    )),
+                    Err(error) => record_rollback(
+                        &mut failures,
+                        RollbackStep::RemoveServiceIdentity,
+                        Err(error),
+                    ),
+                }
+            }
             Err(error) => record_rollback(
                 &mut failures,
                 RollbackStep::RemoveServiceIdentity,
@@ -2050,7 +2095,7 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -2214,6 +2259,7 @@ fn single_systemd_value(bytes: &[u8]) -> Result<&str, InstallError> {
 pub use account::SystemAccounts;
 #[cfg(test)]
 use account::create_static_service_identity_with_commands;
+pub use account::fixed_ipc_group_is_harmless_records;
 #[cfg(feature = "acquirer")]
 pub use compatible_upgrade::run_compatible_upgrade;
 use filesystem::*;

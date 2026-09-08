@@ -6,10 +6,10 @@ use super::{
 };
 use crate::upgrader::{
     ensure_absolute_path, is_lifecycle_companion_path, is_lifecycle_companion_service,
-    observation_services, preflight_rooted_path, read_trusted_probe_install_metadata_read_only,
-    read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
-    remove_empty_parent_dir, remove_path_if_exists, replacement::fixed_installed_probe_sha256,
-    sync_directory, verify_path_absent,
+    observation_services, observation_stop_services, preflight_rooted_path,
+    read_trusted_probe_install_metadata_read_only, read_trusted_probe_install_preflight,
+    rebase_trusted_install_metadata_paths, remove_empty_parent_dir, remove_path_if_exists,
+    replacement::fixed_installed_probe_sha256, sync_directory, verify_path_absent,
 };
 use enoki_probe_bootstrap::acquisition::{
     INSTALLED_BUNDLE_REPAIR_STAGE_ROOT, discard_validated_unadmitted_installed_bundle_repair_stage,
@@ -19,7 +19,22 @@ use enoki_probe_bootstrap::replacement::{
     ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     commit_and_cleanup_replacement,
 };
-use std::{fs, io::Write, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    fs,
+    io::Write,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::{Path, PathBuf},
+};
+
+#[cfg(test)]
+mod test_fault_controls {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static STRICT_REPAIR_LOADER_FAILURE: Cell<bool> = const { Cell::new(false) };
+        pub(super) static STATE_SHELL_RETIRE_FAILURE: Cell<bool> = const { Cell::new(false) };
+    }
+}
 
 #[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
@@ -166,7 +181,8 @@ pub(super) fn plan_probe_uninstall_cleanup<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage()?;
+    plan.unbound_repair_stage =
+        validate_unbound_installed_bundle_repair_stage(Path::new("/var/lib/enoki-probe"), false)?;
     validate_owned_bootstrap_assets_for_cleanup_with_repair(
         install_metadata,
         plan.unbound_repair_stage.is_some(),
@@ -180,7 +196,8 @@ pub(super) fn plan_probe_uninstall_recovery<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage()?;
+    plan.unbound_repair_stage =
+        validate_unbound_installed_bundle_repair_stage(&install_metadata.state_dir, true)?;
     validate_owned_bootstrap_assets_for_recovery_with_repair(
         install_metadata,
         plan.unbound_repair_stage.is_some(),
@@ -295,20 +312,32 @@ fn validate_owned_bootstrap_assets_for_recovery_with_repair(
 
 /// Planner 只读地区分 fixed child：durable intent 存在时必须先恢复；只有无 intent
 /// 且通过固定 catalog 深验证的 orphan 才进入 executor cleanup plan。
-fn validate_unbound_installed_bundle_repair_stage()
--> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
-    // State root 不存在即可只读证明 intent 不存在；一旦 state 存在，必须在观察
-    // stage 之前通过现有 recovery loader 加锁并完整验证 intent。
-    let persisted_repair = match fs::symlink_metadata("/var/lib/enoki-probe") {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
-        Ok(_) => crate::runtime_failure::resume_installed_bundle_repair()
-            .map(|repair| repair.is_some())
-            .map_err(|_| {
-                ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "Installed Bundle Repair intent is invalid",
-                )
-            }),
+fn validate_unbound_installed_bundle_repair_stage(
+    public_state_dir: &Path,
+    retained_uninstall_capsule: bool,
+) -> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
+    // State root 不存在即可只读证明 intent 不存在。保留的 Uninstall capsule
+    // 已授权本次 cleanup；它在同一无删除 effect pair lock 下证明 intent 缺席后，
+    // 可以继续收敛残余 root，而不能要求已退休的 identity 重走 Repair loader。
+    // 没有 capsule 的首次 Uninstall 对任何非空 root 仍走原严格 loader。
+    let empty_or_absent = trusted_state_root_is_empty_or_absent_under_pair_lock(public_state_dir)?;
+    let persisted_repair = if empty_or_absent || retained_uninstall_capsule {
+        Ok(false)
+    } else {
+        #[cfg(test)]
+        let repair = if test_fault_controls::STRICT_REPAIR_LOADER_FAILURE.with(std::cell::Cell::get)
+        {
+            Err(crate::runtime_failure::InstalledBundleRepairError::RecoveryPending)
+        } else {
+            crate::runtime_failure::resume_installed_bundle_repair()
+        };
+        #[cfg(not(test))]
+        let repair = crate::runtime_failure::resume_installed_bundle_repair();
+        repair.map(|repair| repair.is_some()).map_err(|_| {
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Installed Bundle Repair intent is invalid",
+            )
+        })
     };
     let stage_present = match fs::symlink_metadata(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -322,6 +351,11 @@ fn validate_unbound_installed_bundle_repair_stage()
             )
         })
     })
+}
+
+#[cfg(test)]
+pub(super) fn set_strict_repair_loader_failure(failure: bool) {
+    test_fault_controls::STRICT_REPAIR_LOADER_FAILURE.with(|value| value.set(failure));
 }
 
 fn classify_uninstall_repair_stage(
@@ -344,16 +378,22 @@ pub(super) fn prepare_probe_uninstall_cleanup(
 ) -> Result<(), ProbeUpgraderRunError> {
     let install_metadata = plan.install_metadata;
     if matches!(install_metadata.schema_version, 3..=5) {
-        for service in observation_services(install_metadata.schema_version)
+        for service in observation_stop_services(install_metadata.schema_version)
             .iter()
             .copied()
-            .filter(|service| !is_lifecycle_companion_service(service))
-            .rev()
+            .filter(|service| *service != "enoki-probe-lifecycle-companion.socket")
         {
             systemd.stop_service(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_stop_failed",
                     "stopping an observation role",
+                    error,
+                )
+            })?;
+            systemd.verify_service_stopped(service).map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying an observation role stopped",
                     error,
                 )
             })?;
@@ -372,6 +412,15 @@ pub(super) fn prepare_probe_uninstall_cleanup(
             probe_uninstall_cleanup_error(
                 "probe_uninstall_service_stop_failed",
                 "stopping the service",
+                error,
+            )
+        })?;
+    systemd
+        .verify_service_stopped(&install_metadata.service_name)
+        .map_err(|error| {
+            probe_uninstall_cleanup_error(
+                "probe_uninstall_service_verification_failed",
+                "verifying the service stopped",
                 error,
             )
         })?;
@@ -521,7 +570,7 @@ pub(super) fn remove_probe_install_identities(
         })?;
     if let Some(ipc_group) = install_metadata.observation_ipc_group.as_deref() {
         systemd
-            .remove_service_identity(ipc_group, ipc_group)
+            .remove_fixed_ipc_group(ipc_group, None)
             .map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_group_remove_failed",
@@ -536,7 +585,7 @@ pub(super) fn remove_probe_install_identities(
         .zip(install_metadata.probe_ipc_group_ownership.as_deref())
     {
         systemd
-            .remove_owned_ipc_group(ipc_group, ownership)
+            .remove_fixed_ipc_group(ipc_group, Some(ownership))
             .map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_group_remove_failed",
@@ -571,6 +620,14 @@ pub(super) fn remove_lifecycle_companion_activation(
                 return Err(probe_uninstall_cleanup_error(
                     "probe_uninstall_service_stop_failed",
                     "stopping a lifecycle companion socket",
+                    error,
+                ));
+            }
+            if let Err(error) = systemd.verify_service_stopped(companion_service) {
+                lifecycle_cleanup_diagnostic("socket_stop_verify", companion_service, "error");
+                return Err(probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying a lifecycle companion socket stopped",
                     error,
                 ));
             }
@@ -678,6 +735,7 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
+    systemd.verify_fixed_ipc_groups_absent_or_harmless()?;
     verify_common_cleanup_residue_absent(plan, systemd)?;
     verify_uninstall_local_state_absent(plan)
 }
@@ -712,26 +770,26 @@ pub(super) fn execute_committed_replacement_cleanup(
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_lifecycle_companion_binary(plan)?;
+    systemd.verify_fixed_ipc_groups_absent_or_harmless()?;
     // 手动重装必须让可信 metadata 活过全部可失败清理与核验。cleanup_complete
     // 持久化后，metadata 由 exact commit custody 作为独立、幂等的退休动作处理。
-    finalize_replacement_local_state_with(
-        &plan.input.bootstrap_config_path,
-        &plan.install_metadata.state_dir,
-        remove_path_if_exists,
-        || verify_replacement_residue_absent(plan, systemd),
-    )
+    let state_cleanup = prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir)?;
+    remove_path_if_exists(&plan.input.bootstrap_config_path)?;
+    clear_prepared_state_root_contents_with(state_cleanup, &mut remove_path_if_exists)?;
+    verify_replacement_residue_absent(plan, systemd)
 }
 
 pub(super) fn remove_uninstall_local_state_with(
     plan: &ProbeUninstallCleanupPlan<'_>,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let state_cleanup = prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir)?;
     remove(plan.install_metadata_path)?;
     remove(&plan.input.bootstrap_config_path)?;
-    let _runtime_failure_lock = runtime_failure_cleanup_lock(&plan.install_metadata.state_dir)?;
-    remove(&plan.install_metadata.state_dir)
+    clear_prepared_state_root_contents_with(state_cleanup, &mut remove)
 }
 
+#[cfg(test)]
 pub(super) fn finalize_replacement_local_state_with(
     bootstrap_config_path: &Path,
     state_dir: &Path,
@@ -744,6 +802,7 @@ pub(super) fn finalize_replacement_local_state_with(
     verify()
 }
 
+#[cfg(test)]
 fn runtime_failure_cleanup_lock(
     state_dir: &Path,
 ) -> Result<Option<crate::runtime_failure::RuntimeFailurePairLock>, ProbeUpgraderRunError> {
@@ -764,6 +823,260 @@ fn runtime_failure_cleanup_lock(
     }
 }
 
+/// State is one installation-owned root, not an inventory of independently
+/// retired children.  The caller has already established the metadata or
+/// retained-capsule binding; this function only accepts the two fixed state
+/// projections and keeps the existing pair lock across clear, sync and the
+/// best-effort shell retirement.
+fn clear_prepared_state_root_contents_with(
+    cleanup: TrustedStateCleanup,
+    remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    clear_prepared_state_root_contents_with_shell(cleanup, remove, retire_state_shell)
+}
+
+fn clear_prepared_state_root_contents_with_shell(
+    cleanup: TrustedStateCleanup,
+    remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+    mut retire_shell: impl FnMut(&TrustedStateRoot) -> std::io::Result<()>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let Some(layout) = cleanup.layout else {
+        return Ok(());
+    };
+
+    match fs::read_dir(layout.contents()) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                // remove_path_if_exists uses lstat: an entry symlink is
+                // unlinked and never traversed, while directories recurse.
+                remove(&entry.path())?;
+            }
+            sync_directory(layout.contents())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    verify_state_root_empty(&layout)?;
+
+    // A shell is not data.  Its removal is deliberately best effort, but a
+    // failed rmdir may only be ignored after a fresh empty proof.
+    let _ = retire_shell(&layout);
+    verify_state_root_empty_or_absent(&layout)
+}
+
+struct TrustedStateCleanup {
+    layout: Option<TrustedStateRoot>,
+    // Held from the root proof through metadata/config retirement and content
+    // cleanup; this is intentionally not a durable fact and is never unlinked.
+    _runtime_failure_lock: Option<crate::runtime_failure::RuntimeFailurePairLock>,
+}
+
+fn prepare_trusted_state_root_cleanup(
+    public_state_dir: &Path,
+) -> Result<TrustedStateCleanup, ProbeUpgraderRunError> {
+    // Admission is read-only and is backed by the caller's existing
+    // metadata/capsule authority.  It intentionally has no cleanup effect:
+    // the held-lock reread below is the only layout used for removal.
+    let _admitted_layout = trusted_state_root_layout(public_state_dir)?;
+    let lock = crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
+        public_state_dir,
+        unsafe { libc::geteuid() },
+    )
+    .map_err(ProbeUpgraderRunError::Io)?;
+    // The lock serializes writers, not root authority.  Re-read the exact
+    // fixed projection while held before retiring any binding material.
+    let layout = trusted_state_root_layout(public_state_dir)?;
+    if let Some(root) = layout.as_ref() {
+        require_repair_intent_absent(root)?;
+        crate::runtime_failure::cleanup_runtime_failure_pair_at_concrete_state(
+            root.contents(),
+            unsafe { libc::geteuid() },
+        )
+        .map_err(ProbeUpgraderRunError::Io)?;
+    }
+    Ok(TrustedStateCleanup {
+        layout,
+        _runtime_failure_lock: Some(lock),
+    })
+}
+
+fn require_repair_intent_absent(root: &TrustedStateRoot) -> Result<(), ProbeUpgraderRunError> {
+    let failure_dir = root.contents().join("runtime-failure");
+    let failure_metadata = match fs::symlink_metadata(&failure_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(metadata) => metadata,
+        Err(error) => return Err(error.into()),
+    };
+    if !failure_metadata.is_dir()
+        || failure_metadata.file_type().is_symlink()
+        || failure_metadata.uid() != unsafe { libc::geteuid() }
+        || failure_metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Installed Bundle Repair directory is unsafe",
+        ));
+    }
+    match fs::symlink_metadata(failure_dir.join("repair-intent.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Installed Bundle Repair recovery must finish before uninstall",
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn retire_state_shell(layout: &TrustedStateRoot) -> std::io::Result<()> {
+    #[cfg(test)]
+    if test_fault_controls::STATE_SHELL_RETIRE_FAILURE.with(std::cell::Cell::get) {
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+    }
+    match layout {
+        TrustedStateRoot::Ordinary(path) => fs::remove_dir(path),
+        TrustedStateRoot::Canonical { public, private } => {
+            if let Err(error) = fs::remove_dir(private)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error);
+            }
+            fs::remove_file(public)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TrustedStateRoot {
+    Ordinary(PathBuf),
+    Canonical { public: PathBuf, private: PathBuf },
+}
+
+impl TrustedStateRoot {
+    fn contents(&self) -> &Path {
+        match self {
+            Self::Ordinary(path) => path,
+            Self::Canonical { private, .. } => private,
+        }
+    }
+}
+
+fn trusted_state_root_layout(
+    public_state_dir: &Path,
+) -> Result<Option<TrustedStateRoot>, ProbeUpgraderRunError> {
+    if !public_state_dir.ends_with("var/lib/enoki-probe") {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is not the fixed state root",
+        ));
+    }
+    let private = public_state_dir
+        .parent()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ))?
+        .join("private/enoki-probe");
+    let public_metadata = match fs::symlink_metadata(public_state_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return match fs::symlink_metadata(&private) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+                Ok(metadata) => {
+                    validate_state_root_directory(&metadata, false)?;
+                    Ok(Some(TrustedStateRoot::Canonical {
+                        public: public_state_dir.to_owned(),
+                        private,
+                    }))
+                }
+            };
+        }
+        Err(error) => return Err(error.into()),
+        Ok(metadata) => metadata,
+    };
+    if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
+        validate_state_root_directory(&public_metadata, true)?;
+        match fs::symlink_metadata(&private) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe state directory has conflicting canonical residue",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(Some(TrustedStateRoot::Ordinary(
+            public_state_dir.to_owned(),
+        )));
+    }
+    if !public_metadata.file_type().is_symlink()
+        || (public_metadata.uid(), public_metadata.gid()) != expected_root_owner()
+        || public_metadata.nlink() != 1
+        || fs::read_link(public_state_dir)?.as_os_str().as_bytes() != b"private/enoki-probe"
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    match fs::symlink_metadata(&private) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(metadata) => validate_state_root_directory(&metadata, false)?,
+    }
+    Ok(Some(TrustedStateRoot::Canonical {
+        public: public_state_dir.to_owned(),
+        private,
+    }))
+}
+
+fn validate_state_root_directory(
+    metadata: &fs::Metadata,
+    require_root_owner: bool,
+) -> Result<(), ProbeUpgraderRunError> {
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.mode() & 0o7777 != 0o750
+        || (require_root_owner && (metadata.uid(), metadata.gid()) != expected_root_owner())
+        || (!require_root_owner && metadata.uid() != metadata.gid())
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    Ok(())
+}
+
+fn expected_root_owner() -> (u32, u32) {
+    #[cfg(test)]
+    {
+        // The filesystem adapter maps production root ownership to the test
+        // process identity, so these fixtures remain meaningful in a
+        // non-root CI worker without weakening the production predicate.
+        (unsafe { libc::geteuid() }, unsafe { libc::getegid() })
+    }
+    #[cfg(not(test))]
+    (0, 0)
+}
+
+fn verify_state_root_empty(root: &TrustedStateRoot) -> Result<(), ProbeUpgraderRunError> {
+    match fs::read_dir(root.contents()) {
+        Ok(mut entries) => {
+            if entries.next().is_some() {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe state directory was not cleared",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn verify_state_root_empty_or_absent(root: &TrustedStateRoot) -> Result<(), ProbeUpgraderRunError> {
+    match fs::symlink_metadata(root.contents()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => verify_state_root_empty(root),
+    }
+}
+
 pub(super) fn verify_replacement_residue_absent(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -780,14 +1093,10 @@ pub(super) fn verify_replacement_residue_absent(
             "probe_uninstall_config_residue",
             "verifying the Probe bootstrap config is absent",
         ),
-        (
-            plan.install_metadata.state_dir.as_path(),
-            "probe_uninstall_state_residue",
-            "verifying Probe state is absent",
-        ),
     ] {
         verify_path_absent(path, code, action)?;
     }
+    verify_uninstall_state_shell_harmless(&plan.install_metadata.state_dir)?;
     verify_lifecycle_companion_binary_absent(plan)
 }
 
@@ -810,15 +1119,45 @@ pub(super) fn verify_uninstall_local_state_absent(
             "probe_uninstall_metadata_residue",
             "verifying install metadata is absent",
         ),
-        (
-            plan.install_metadata.state_dir.as_path(),
-            "probe_uninstall_state_residue",
-            "verifying Probe state is absent",
-        ),
     ] {
         verify_path_absent(path, code, action)?;
     }
+    verify_uninstall_state_shell_harmless(&plan.install_metadata.state_dir)?;
     Ok(())
+}
+
+pub(super) fn verify_uninstall_state_shell_harmless(
+    public_state_dir: &Path,
+) -> Result<(), ProbeUpgraderRunError> {
+    match trusted_state_root_layout(public_state_dir)? {
+        None => Ok(()),
+        Some(root) => verify_state_root_empty(&root),
+    }
+}
+
+/// Planner admission has no deletion authority.  It nevertheless observes
+/// the fixed root under the same logical pair lock as cleanup so an empty
+/// shell cannot race a newly published Repair intent into the no-intent path.
+fn trusted_state_root_is_empty_or_absent_under_pair_lock(
+    public_state_dir: &Path,
+) -> Result<bool, ProbeUpgraderRunError> {
+    let _lock = crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
+        public_state_dir,
+        unsafe { libc::geteuid() },
+    )
+    .map_err(ProbeUpgraderRunError::Io)?;
+    let layout = trusted_state_root_layout(public_state_dir)?;
+    match layout {
+        None => Ok(true),
+        Some(root) => {
+            require_repair_intent_absent(&root)?;
+            match fs::read_dir(root.contents()) {
+                Ok(mut entries) => Ok(entries.next().is_none()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
 }
 
 pub(super) fn verify_lifecycle_companion_binary_absent(
@@ -1180,17 +1519,20 @@ fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgra
 
 #[cfg(test)]
 mod tests {
+    use super::test_fault_controls::STATE_SHELL_RETIRE_FAILURE;
     use super::{
         ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
-        commit_replacement_cleanup_with_metadata_retirement,
+        commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
-        finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
-        plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
-        remove_lifecycle_companion_binary, remove_probe_bootstrap_state,
-        remove_uninstall_local_state_with, retire_unbound_installed_bundle_repair_stage_with,
-        validate_owned_bootstrap_state,
+        finalize_replacement_local_state_with, plan_committed_replacement_cleanup,
+        plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery,
+        prepare_probe_uninstall_cleanup, remove_lifecycle_companion_binary,
+        remove_probe_bootstrap_state, remove_uninstall_local_state_with,
+        retire_unbound_installed_bundle_repair_stage_with, validate_owned_bootstrap_state,
     };
-    use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
+    use crate::upgrader::{
+        ProbeUninstallerRunInput, ProbeUpgraderRunError, observation_stop_services,
+    };
     use enoki_probe_bootstrap::replacement::{
         ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     };
@@ -1267,9 +1609,9 @@ mod tests {
         TrustedProbeInstallMetadata {
             schema_version,
             hub_url: "https://hub.example".to_owned(),
-            identity_path: root.join("state/identity.toml"),
+            identity_path: root.join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
             install_path: root.join("bin/enoki-probe"),
-            operation_status_path: root.join("state/status.toml"),
+            operation_status_path: root.join("var/lib/enoki-probe/probe-operation-status.toml"),
             probe_asset_public_key_sha256: "a".repeat(64),
             probe_distribution_root_sha256: None,
             bootstrap_acquirer_path: None,
@@ -1279,7 +1621,7 @@ mod tests {
             service_group: "enoki-probe".to_owned(),
             service_unit_path: root.join("systemd/enoki-probe.service"),
             service_user: "enoki-probe".to_owned(),
-            state_dir: root.join("state"),
+            state_dir: root.join("var/lib/enoki-probe"),
             operation_sudoers_path: None,
             collector_helper_sudoers_path: None,
             old_sudoers_paths: Vec::new(),
@@ -1300,6 +1642,16 @@ mod tests {
 
     fn create_file(path: &Path, mode: u32) {
         fs::create_dir_all(path.parent().expect("file parent")).expect("create parent");
+        if path
+            .parent()
+            .is_some_and(|parent| parent.ends_with("var/lib/enoki-probe"))
+        {
+            fs::set_permissions(
+                path.parent().expect("state parent"),
+                fs::Permissions::from_mode(0o750),
+            )
+            .expect("trusted state root mode");
+        }
         fs::write(path, b"fixture").expect("write fixture");
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("fixture mode");
     }
@@ -1713,6 +2065,8 @@ mod tests {
         for path in &observation_units {
             create_file(path, 0o600);
         }
+        fs::set_permissions(&metadata.state_dir, fs::Permissions::from_mode(0o750))
+            .expect("trusted state root mode");
         create_file(&acquirer, 0o755);
         create_file(&activator, 0o755);
         fs::create_dir(&bootstrap_state).expect("bootstrap state");
@@ -1737,14 +2091,26 @@ mod tests {
         ] {
             assert!(path.exists(), "{} removed during prepare", path.display());
         }
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(true));
         finalize_recoverable_uninstall_cleanup(&plan, &mut systemd).expect("recoverable finalize");
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
         remove_probe_bootstrap_state(&plan).expect("retire Bootstrap state");
         assert!(companion.exists(), "companion is the final reentry asset");
         remove_lifecycle_companion_binary(&plan).expect("remove companion binary");
         assert!(!companion.exists());
         assert!(!install_metadata_path.exists());
         assert!(!metadata.identity_path.exists());
-        assert!(!metadata.state_dir.exists());
+        assert!(
+            metadata.state_dir.exists(),
+            "empty state shell is harmless residue"
+        );
+        assert!(
+            fs::read_dir(&metadata.state_dir)
+                .expect("state shell remains readable")
+                .next()
+                .is_none(),
+            "the coordinator clears the complete trusted state root before retaining its shell"
+        );
         for path in [
             &metadata.install_path,
             &metadata.service_unit_path,
@@ -1812,6 +2178,9 @@ mod tests {
     fn local_state_failure_preserves_the_exact_cleanup_transcript() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let metadata = metadata(temporary.path(), 1);
+        fs::create_dir_all(&metadata.state_dir).expect("state root");
+        let remaining_state = metadata.state_dir.join("actual-state");
+        create_file(&remaining_state, 0o600);
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
         };
@@ -1822,7 +2191,7 @@ mod tests {
 
         let error = remove_uninstall_local_state_with(&plan, |path| {
             calls.push(path.to_path_buf());
-            (path != metadata.state_dir)
+            (path != remaining_state)
                 .then_some(())
                 .ok_or_else(|| ProbeUpgraderRunError::Io(std::io::Error::other("injected")))
         })
@@ -1834,7 +2203,7 @@ mod tests {
             [
                 install_metadata_path,
                 metadata.identity_path,
-                metadata.state_dir,
+                remaining_state,
             ]
         );
     }
@@ -1867,6 +2236,51 @@ mod tests {
             assert!(!calls.iter().any(|path| path == metadata));
             assert_eq!(result.is_err(), verification_fails);
         }
+    }
+
+    #[test]
+    fn committed_replacement_clears_the_exact_canonical_state_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = metadata(temporary.path(), 1);
+        let private = temporary.path().join("var/lib/private/enoki-probe");
+        fs::create_dir_all(private.parent().expect("private parent")).expect("private parent");
+        fs::create_dir(&private).expect("private state root");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750))
+            .expect("private state root mode");
+        symlink(
+            "private/enoki-probe",
+            temporary.path().join("var/lib/enoki-probe"),
+        )
+        .expect("exact public canonical root");
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ] {
+            create_file(path, 0o600);
+        }
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("committed Replacement plan");
+        let mut systemd = TestSystemd::default();
+
+        execute_committed_replacement_cleanup(&plan, &mut systemd)
+            .expect("Replacement uses canonical trusted-root cleanup");
+
+        assert!(
+            fs::symlink_metadata(temporary.path().join("var/lib/enoki-probe")).is_err(),
+            "public canonical shell is retired after its complete contents"
+        );
+        assert!(!private.exists(), "private canonical contents are retired");
+        assert!(
+            install_metadata_path.exists(),
+            "commit custody retires metadata afterwards"
+        );
     }
 
     #[test]
@@ -2082,6 +2496,32 @@ mod tests {
         assert_eq!(
             retired,
             Some((Some(".pending-repair-01".to_owned()), 12345))
+        );
+    }
+
+    #[test]
+    fn schema_five_closes_activation_sockets_before_the_roles_they_can_start() {
+        let services = observation_stop_services(5);
+        let position = |service: &str| services.iter().position(|entry| *entry == service).unwrap();
+        assert!(
+            position("enoki-cpu-resource-provider.socket")
+                < position("enoki-cpu-resource-provider@*.service")
+        );
+        assert!(
+            position("enoki-disk-health-resource-provider.socket")
+                < position("enoki-disk-health-resource-provider@*.service")
+        );
+        assert!(
+            position("enoki-observation-runtime.socket")
+                < position("enoki-observation-runtime.service")
+        );
+        assert!(
+            position("enoki-observation-runtime.service")
+                < position("enoki-observation-runtime-failure.service")
+        );
+        assert!(
+            position("enoki-probe-lifecycle-upgrade.socket")
+                < position("enoki-probe-lifecycle-upgrade@*.service")
         );
     }
 }

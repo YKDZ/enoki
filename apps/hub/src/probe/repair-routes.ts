@@ -7,6 +7,7 @@ import type { EnrollmentRepository } from "../database/enrollments.js";
 import type { HostRepository } from "../database/hosts.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import type { TrustedProxyCidr } from "../network.js";
+import { normalizeSemVer } from "./asset-set.js";
 import { deriveLifecycleAuthorityKey } from "./lifecycle-authority.js";
 import {
   createInstalledBundleRepairRequest,
@@ -139,12 +140,15 @@ export function createProbeRepairAuthorizationRoutes(
       )
         return manualReinstallRequired(context);
 
+      const expectedBundleVersion = normalizeSemVer(host.probeVersion);
+      if (!expectedBundleVersion) return manualReinstallRequired(context);
+
       const { hubOrigin, installKey } = boundary;
       const operationNowMs = now();
       const verified = verifyInstalledBundleFailureEvidence({
         evidence: body.evidence,
         evidenceSignature: body.evidenceSignature,
-        expectedBundleVersion: host.probeVersion,
+        expectedBundleVersion,
         expectedHubOrigin: hubOrigin,
         expectedHostId: String(host.id),
         expectedProbeId: host.probeId,
@@ -213,7 +217,7 @@ export function createProbeRepairAuthorizationRoutes(
         authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,
         evidence: body.evidence,
         evidenceSignature: body.evidenceSignature,
-        expectedBundleVersion: host.probeVersion,
+        expectedBundleVersion,
         expectedHubOrigin: hubOrigin,
         expectedHostId: String(host.id),
         expectedProbeId: host.probeId,

@@ -96,6 +96,13 @@ pub(super) fn validate_component(
 }
 
 pub(super) fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    preflight_files_with_empty_state_shell(paths, false)
+}
+
+pub(super) fn preflight_files_with_empty_state_shell(
+    paths: &FixedInstallPaths,
+    allow_empty_state_shell: bool,
+) -> Result<(), InstallError> {
     for path in [
         paths.binary(),
         paths.observation_runtime_binary(),
@@ -121,13 +128,116 @@ pub(super) fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallEr
         paths.map(LEGACY_SUDOERS),
         paths.map("/etc/enoki/probe-bootstrap.toml"),
     ] {
-        match fs::symlink_metadata(path) {
+        match fs::symlink_metadata(&path) {
+            Ok(_)
+                if allow_empty_state_shell
+                    && path == paths.state()
+                    && empty_state_shell(paths).is_ok() => {}
             Ok(_) => return Err(InstallError::ExistingResidue),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(InstallError::Io),
         }
     }
     Ok(())
+}
+
+pub(super) fn retire_empty_state_shell_for_fresh(
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
+    match empty_state_shell(paths)? {
+        EmptyStateShell::Absent => Ok(()),
+        EmptyStateShell::Ordinary(path) => {
+            fs::remove_dir(&path).map_err(|_| InstallError::Io)?;
+            sync_parent_directory(&path)
+        }
+        EmptyStateShell::Canonical { public, private } => {
+            if let Err(error) = fs::remove_dir(&private)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(InstallError::Io);
+            }
+            sync_parent_directory(&private)?;
+            match fs::remove_file(&public) {
+                Ok(()) => sync_parent_directory(&public),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(_) => Err(InstallError::Io),
+            }
+        }
+    }
+}
+
+enum EmptyStateShell {
+    Absent,
+    Ordinary(PathBuf),
+    Canonical { public: PathBuf, private: PathBuf },
+}
+
+fn empty_state_shell(paths: &FixedInstallPaths) -> Result<EmptyStateShell, InstallError> {
+    use std::os::unix::ffi::OsStrExt;
+    let public = paths.state();
+    let private = paths.map(super::PRIVATE_STATE);
+    let public_metadata = match fs::symlink_metadata(&public) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return match fs::symlink_metadata(&private) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(EmptyStateShell::Absent)
+                }
+                Ok(metadata) if valid_empty_state_directory(&private, &metadata, false) => {
+                    Ok(EmptyStateShell::Canonical { public, private })
+                }
+                _ => Err(InstallError::ExistingResidue),
+            };
+        }
+        Ok(metadata) => metadata,
+        Err(_) => return Err(InstallError::Io),
+    };
+    if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
+        match fs::symlink_metadata(&private) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(InstallError::ExistingResidue),
+            Err(_) => return Err(InstallError::Io),
+        }
+        return valid_empty_state_directory(&public, &public_metadata, true)
+            .then_some(EmptyStateShell::Ordinary(public))
+            .ok_or(InstallError::ExistingResidue);
+    }
+    if !public_metadata.file_type().is_symlink()
+        || (public_metadata.uid(), public_metadata.gid()) != expected_root_owner()
+        || public_metadata.nlink() != 1
+        || fs::read_link(&public)
+            .map_err(|_| InstallError::Io)?
+            .as_os_str()
+            .as_bytes()
+            != b"private/enoki-probe"
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    match fs::symlink_metadata(&private) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(EmptyStateShell::Canonical { public, private })
+        }
+        Ok(metadata) => valid_empty_state_directory(&private, &metadata, false)
+            .then_some(EmptyStateShell::Canonical { public, private })
+            .ok_or(InstallError::ExistingResidue),
+        Err(_) => Err(InstallError::Io),
+    }
+}
+
+fn valid_empty_state_directory(path: &Path, metadata: &fs::Metadata, require_root: bool) -> bool {
+    metadata.is_dir()
+        && !metadata.file_type().is_symlink()
+        && metadata.mode() & 0o7777 == 0o750
+        && (!require_root || (metadata.uid(), metadata.gid()) == expected_root_owner())
+        && (require_root || metadata.uid() == metadata.gid())
+        && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
+fn expected_root_owner() -> (u32, u32) {
+    if cfg!(test) {
+        (unsafe { libc::geteuid() }, unsafe { libc::getegid() })
+    } else {
+        (0, 0)
+    }
 }
 
 pub(super) fn preflight_parent_chains(paths: &FixedInstallPaths) -> Result<(), InstallError> {
