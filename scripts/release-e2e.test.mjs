@@ -4120,6 +4120,194 @@ exit 1
     );
   });
 
+  it.each([
+    ["ordinary", ["/var/lib/enoki-probe"]],
+    ["canonical", ["/var/lib/enoki-probe", "/var/lib/private/enoki-probe"]],
+    ["canonical-dangling", ["/var/lib/enoki-probe"]],
+  ])(
+    "accepts and reports a harmless empty %s state shell during uninstall completion",
+    async (_shape, harmlessResidue) => {
+      const dependencies = JSON.stringify({
+        curl: "/usr/bin/curl",
+        sudo: "/usr/bin/sudo",
+        systemdRun: "/usr/bin/systemd-run",
+      });
+      const harness = createProbeHostHarness({
+        execute: async (command) => {
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText(dependencies);
+          }
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            return successfulCommand({
+              accounts: { group: false, user: false },
+              files: [],
+              harmlessResidue,
+              units: [],
+            });
+          }
+          if (command.includes("# enoki-release-e2e:journald")) {
+            return successfulCommandText("retained Probe journal\n");
+          }
+          if (command.includes("# enoki-release-e2e:daemon-reload")) {
+            return successfulCommandText("");
+          }
+          return successfulCommandText("");
+        },
+      });
+
+      const runId = `run-empty-shell-${_shape}`;
+      await harness.assertDisposable(runId);
+      await harness.install(officialEnrollment(), runId);
+      const completion = await harness.verifyUninstallCompletion(runId);
+
+      expect(completion).toMatchObject({
+        clean: true,
+        inventory: { files: [], harmlessResidue },
+        journaldRetained: true,
+        sharedDependenciesRetained: true,
+      });
+    },
+  );
+
+  it("classifies only exact empty state shells in the host inventory", async () => {
+    const inspect = async ({
+      canonical = false,
+      canonicalPrivateAbsent = false,
+      member = null,
+      publicAbsent = false,
+      publicMode = 0o750,
+      publicTarget = "private/enoki-probe",
+    } = {}) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "enoki-inventory-"));
+      const fakeBin = path.join(root, "fake-bin");
+      const publicParent = path.join(root, "var", "lib");
+      const privateParent = path.join(publicParent, "private");
+      const publicState = path.join(publicParent, "enoki-probe");
+      const privateState = path.join(privateParent, "enoki-probe");
+      const mapHostPaths = (command) =>
+        command
+          .replaceAll("/var/lib/", `${root}/var/lib/`)
+          .replaceAll("/run/", `${root}/run/`)
+          .replaceAll("/etc/", `${root}/etc/`)
+          .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`);
+      try {
+        await mkdir(fakeBin, { recursive: true });
+        await writeFile(
+          path.join(fakeBin, "getent"),
+          "#!/bin/sh\nexit 2\n",
+          "utf8",
+        );
+        await writeFile(
+          path.join(fakeBin, "systemctl"),
+          "#!/bin/sh\nexit 0\n",
+          "utf8",
+        );
+        await chmod(path.join(fakeBin, "getent"), 0o755);
+        await chmod(path.join(fakeBin, "systemctl"), 0o755);
+        await mkdir(publicParent, { recursive: true });
+        if (canonical || publicAbsent) {
+          if (!canonicalPrivateAbsent) {
+            await mkdir(privateState, { recursive: true, mode: 0o750 });
+            await chmod(privateState, 0o750);
+            if (process.getuid?.() === 0) {
+              await chown(privateState, 65534, 65534);
+            }
+          }
+          if (canonical) {
+            await symlink(publicTarget, publicState);
+          }
+        } else {
+          await mkdir(publicState, { recursive: true, mode: publicMode });
+          await chmod(publicState, publicMode);
+        }
+        if (member) {
+          const state = canonical || publicAbsent ? privateState : publicState;
+          await writeFile(path.join(state, member), "data", "utf8");
+        }
+        const harness = createProbeHostHarness({
+          execute: async (command) => {
+            if (command.includes("# enoki-release-e2e:inventory")) {
+              try {
+                const result = await execFileAsync(
+                  "sh",
+                  ["-c", mapHostPaths(command)],
+                  {
+                    env: {
+                      ...process.env,
+                      PATH: `${fakeBin}:${process.env.PATH}`,
+                    },
+                  },
+                );
+                return successfulCommandText(
+                  result.stdout
+                    .replaceAll(`${root}/var/lib/`, "/var/lib/")
+                    .replaceAll(`${root}/run/`, "/run/")
+                    .replaceAll(`${root}/etc/`, "/etc/")
+                    .replaceAll(`${root}/usr/local/bin/`, "/usr/local/bin/"),
+                );
+              } catch (error) {
+                return {
+                  code: typeof error.code === "number" ? error.code : 1,
+                  stderr: error.stderr ?? error.message,
+                  stdout: error.stdout ?? "",
+                };
+              }
+            }
+            if (command.includes("# enoki-release-e2e:dependencies")) {
+              return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+            }
+            throw new Error("unexpected inventory fixture command");
+          },
+        });
+        return await harness.assertDisposable("run-inventory-shape");
+      } finally {
+        await rm(root, { force: true, recursive: true });
+      }
+    };
+
+    await expect(inspect()).resolves.toMatchObject({
+      accounts: { group: false, user: false },
+      files: [],
+      harmlessResidue: ["/var/lib/enoki-probe"],
+      units: [],
+    });
+    await expect(inspect({ canonical: true })).resolves.toMatchObject({
+      accounts: { group: false, user: false },
+      files: [],
+      harmlessResidue: ["/var/lib/enoki-probe", "/var/lib/private/enoki-probe"],
+      units: [],
+    });
+    await expect(
+      inspect({ canonical: true, canonicalPrivateAbsent: true }),
+    ).resolves.toMatchObject({
+      accounts: { group: false, user: false },
+      files: [],
+      harmlessResidue: ["/var/lib/enoki-probe"],
+      units: [],
+    });
+    await expect(inspect({ publicAbsent: true })).resolves.toMatchObject({
+      accounts: { group: false, user: false },
+      files: [],
+      harmlessResidue: ["/var/lib/private/enoki-probe"],
+      units: [],
+    });
+    await expect(inspect({ canonical: false, member: "data" })).rejects.toThrow(
+      "/var/lib/enoki-probe",
+    );
+    await expect(inspect({ publicMode: 0o755 })).rejects.toThrow(
+      "/var/lib/enoki-probe",
+    );
+    await expect(inspect({ canonical: true, member: "data" })).rejects.toThrow(
+      "/var/lib/private/enoki-probe",
+    );
+    await expect(
+      inspect({ publicAbsent: true, member: "data" }),
+    ).rejects.toThrow("/var/lib/private/enoki-probe");
+    await expect(
+      inspect({ canonical: true, publicTarget: "private/not-enoki-probe" }),
+    ).rejects.toThrow("/var/lib/enoki-probe");
+  });
+
   it("uses the public Local Probe Uninstall command and proves its shared cleanup boundary", async () => {
     const commands = [];
     const dependencies = JSON.stringify({
@@ -4743,7 +4931,12 @@ exit 1
             ["-c", mapHostPaths(command)],
             { env: environment },
           );
-          return successfulCommandText(result.stdout);
+          const stdout = result.stdout
+            .replaceAll(`${root}/var/lib/`, "/var/lib/")
+            .replaceAll(`${root}/run/`, "/run/")
+            .replaceAll(`${root}/etc/`, "/etc/")
+            .replaceAll(`${root}/usr/local/bin/`, "/usr/local/bin/");
+          return successfulCommandText(stdout);
         } catch (error) {
           return {
             code: typeof error.code === "number" ? error.code : 1,
@@ -4874,8 +5067,8 @@ exit 0
       },
       {
         adjacent: "preserved",
-        clean: true,
-        projection: [false, false, false],
+        clean: false,
+        projection: [true, true, false],
         scenario: "partial-before-cleanup",
       },
       {
@@ -5057,13 +5250,14 @@ exit 0
       await writeClaim(activeClaim);
       const mappedProduct = path.join(root, "var", "lib", "enoki-probe");
       await mkdir(mappedProduct, { recursive: true, mode: 0o750 });
+      await writeFile(path.join(mappedProduct, "residue"), "data", "utf8");
       await expect(execFileAsync("sh", ["-c", mapped])).rejects.toMatchObject({
         code: 79,
       });
       await expect(
         readFile(path.join(activeClaim, "resources"), "utf8"),
       ).resolves.toBe("exact-resource-evidence\n");
-      await rm(mappedProduct, { force: true, recursive: true });
+      await rm(path.join(mappedProduct, "residue"), { force: true });
       await expect(execFileAsync("sh", ["-c", mapped])).resolves.toMatchObject({
         stdout: "released\n",
       });
@@ -5126,6 +5320,60 @@ exit 0
     } finally {
       await rm(root, { force: true, recursive: true });
     }
+  });
+
+  it("releases the run claim after cleanup with a reported harmless state shell", async () => {
+    const commands = [];
+    const inventory = {
+      accounts: { group: false, user: false },
+      files: [],
+      harmlessResidue: ["/var/lib/enoki-probe"],
+      units: [],
+    };
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand(inventory);
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText("absent\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
+        if (command.includes("# enoki-release-e2e:remove-claim")) {
+          return successfulCommandText("released\n");
+        }
+        return successfulCommandText("recorded\n");
+      },
+    });
+
+    await harness.assertDisposable("run-harmless-cleanup");
+    await harness.install(officialEnrollment(), "run-harmless-cleanup");
+    await expect(harness.cleanup("run-harmless-cleanup")).resolves.toEqual({
+      clean: true,
+      removedPartialInstallation: false,
+    });
+    await expect(harness.verifyClean("run-harmless-cleanup")).resolves.toEqual({
+      clean: true,
+      inventory,
+    });
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:remove-claim"),
+      ),
+    ).toBe(true);
   });
 
   it("reenters an atomically retired claim through the existing cleanup action", async () => {

@@ -1395,10 +1395,36 @@ function assertHostInventoryEvidence(inventory) {
     inventory.files.some((entry) => typeof entry !== "string" || !entry) ||
     !Array.isArray(inventory.units) ||
     inventory.units.some((entry) => typeof entry !== "string" || !entry) ||
-    Object.keys(inventory).sort().join(",") !== "accounts,files,units" ||
+    !["accounts,files,units", "accounts,files,harmlessResidue,units"].includes(
+      Object.keys(inventory).sort().join(","),
+    ) ||
     Object.keys(inventory.accounts).sort().join(",") !== "group,user"
   ) {
     throw new Error("filesystem inventory collection is invalid");
+  }
+  if (inventory.harmlessResidue !== undefined) {
+    const harmlessResidue = inventory.harmlessResidue;
+    const validHarmlessResidue = new Set([
+      "/var/lib/enoki-probe",
+      "/var/lib/private/enoki-probe",
+    ]);
+    if (
+      !Array.isArray(harmlessResidue) ||
+      harmlessResidue.length === 0 ||
+      harmlessResidue.some(
+        (entry) =>
+          typeof entry !== "string" ||
+          !validHarmlessResidue.has(entry) ||
+          harmlessResidue.filter((candidate) => candidate === entry).length > 1,
+      ) ||
+      ![
+        "/var/lib/enoki-probe",
+        "/var/lib/private/enoki-probe",
+        "/var/lib/enoki-probe,/var/lib/private/enoki-probe",
+      ].includes([...harmlessResidue].sort().join(","))
+    ) {
+      throw new Error("filesystem inventory harmless residue is invalid");
+    }
   }
 }
 
@@ -4242,19 +4268,82 @@ json_bool test -f /sys/fs/cgroup/cgroup.controllers
 printf ',"virtualization":"%s"}\n' "$virtualization"`;
 }
 
+function harmlessStateShellPrelude() {
+  return String.raw`state_public=/var/lib/enoki-probe
+state_private=/var/lib/private/enoki-probe
+harmless_public=false
+harmless_private=false
+is_empty_state_directory() {
+  directory=$1
+  owner_kind=$2
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  metadata=$(stat -c '%u:%g:%a' "$directory" 2>/dev/null) || return 1
+  case "$owner_kind" in
+    ordinary) [ "$metadata" = "0:0:750" ] || return 1 ;;
+    canonical)
+      [ "$(printf '%s' "$metadata" | cut -d: -f3)" = "750" ] || return 1
+      owner_uid=$(printf '%s' "$metadata" | cut -d: -f1)
+      owner_gid=$(printf '%s' "$metadata" | cut -d: -f2)
+      [ "$owner_uid" = "$owner_gid" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  entries=$(find -P "$directory" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null) || return 1
+  [ -z "$entries" ]
+}
+if [ ! -e "$state_public" ] && [ ! -L "$state_public" ] &&
+  is_empty_state_directory "$state_private" canonical; then
+  harmless_private=true
+elif [ -d "$state_public" ] && [ ! -L "$state_public" ] &&
+  [ ! -e "$state_private" ] && [ ! -L "$state_private" ] &&
+  is_empty_state_directory "$state_public" ordinary; then
+  harmless_public=true
+elif [ -L "$state_public" ] &&
+  [ "$(stat -c '%u:%g:%h' "$state_public" 2>/dev/null)" = "0:0:1" ] &&
+  [ "$(readlink "$state_public" 2>/dev/null)" = "private/enoki-probe" ]; then
+  if [ ! -e "$state_private" ] && [ ! -L "$state_private" ]; then
+    harmless_public=true
+  elif is_empty_state_directory "$state_private" canonical; then
+    harmless_public=true
+    harmless_private=true
+  fi
+fi
+is_harmless_state_path() {
+  case "$1" in
+    "$state_public") [ "$harmless_public" = true ] ;;
+    "$state_private") [ "$harmless_private" = true ] ;;
+    *) return 1 ;;
+  esac
+}`;
+}
+
 function hostInventoryScript() {
   const group = shellSingleQuote(releaseE2EGroups[0]);
   const user = shellSingleQuote(releaseE2EUsers[0]);
   return String.raw`# enoki-release-e2e:inventory
 set -eu
 json_bool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
+${harmlessStateShellPrelude()}
 printf '{"accounts":{"group":'
 json_bool getent group ${group}
 printf ',"user":'
 json_bool getent passwd ${user}
 printf '},"files":['
+state_private_seen=false
 separator=
-for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
+for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} "$state_private"; do
+  if [ "$candidate" = "$state_private" ]; then
+    if [ "$state_private_seen" = true ]; then
+      continue
+    fi
+    state_private_seen=true
+  fi
+  if [ "$candidate" = "$state_public" ] && [ "$harmless_public" = true ]; then
+    continue
+  fi
+  if [ "$candidate" = "$state_private" ] && [ "$harmless_private" = true ]; then
+    continue
+  fi
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     printf '%s"%s"' "$separator" "$candidate"
     separator=,
@@ -4274,7 +4363,20 @@ systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --n
     printf '%s"%s"' "$separator" "$unit"
     separator=,
   done
-printf ']}\n'
+printf ']'
+if [ "$harmless_public" = true ] || [ "$harmless_private" = true ]; then
+  printf ',"harmlessResidue":['
+  separator=
+  if [ "$harmless_public" = true ]; then
+    printf '%s"%s"' "$separator" "$state_public"
+    separator=,
+  fi
+  if [ "$harmless_private" = true ]; then
+    printf '%s"%s"' "$separator" "$state_private"
+  fi
+  printf ']'
+fi
+printf '}\n'
 `;
 }
 
@@ -4827,9 +4929,12 @@ cleanup_rejected_claim() { rm -f -- "$acquiring_dir/run-id" "$acquiring_dir/toke
 trap cleanup_rejected_claim EXIT HUP INT TERM
 ( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$acquiring_dir/run-id"; sync -f "$acquiring_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$acquiring_dir/token"; sync -f "$acquiring_dir/token"; sync -f "$acquiring_dir" )
 # enoki-release-e2e:claim-empty-recheck
+${harmlessStateShellPrelude()}
 residue=
-for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do
-  if [ -e "$candidate" ] || [ -L "$candidate" ]; then residue="$residue $candidate"; fi
+for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} "$state_private" /run/systemd/system/enoki-probe*.service; do
+  if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    is_harmless_state_path "$candidate" || residue="$residue $candidate"
+  fi
 done
 for account in ${users}; do
   if getent passwd "$account" >/dev/null 2>&1; then residue="$residue user:$account"; fi
@@ -5402,6 +5507,7 @@ function removeClaimScript(runId, token) {
   const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
   return `# enoki-release-e2e:remove-claim
 set -eu
+${harmlessStateShellPrelude()}
 claim_root=/var/lib/enoki-release-e2e
 claim="$claim_root/claim"
 retiring="$claim_root/claim-retiring"
@@ -5440,7 +5546,11 @@ if [ -e "$claim" ] || [ -L "$claim" ]; then
   [ ! -e "$claim/observation-runtime-original" ] && [ ! -L "$claim/observation-runtime-original" ] || fail 'Runtime custody remains held'
   check_members "$claim"
   residue=
-  for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || residue=present; done
+  for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} "$state_private" /run/systemd/system/enoki-probe*.service; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      is_harmless_state_path "$candidate" || residue=present
+    fi
+  done
   for account in ${users}; do getent passwd "$account" >/dev/null 2>&1 && residue=present || true; done
   for account in ${groups}; do getent group "$account" >/dev/null 2>&1 && residue=present || true; done
   units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
