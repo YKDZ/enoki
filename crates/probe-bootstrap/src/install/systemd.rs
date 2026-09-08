@@ -98,6 +98,26 @@ fn require_absent_from_load_state(loaded: &command::BoundedOutput) -> Result<(),
     Ok(())
 }
 
+fn fixed_unit_is_instance_glob(unit: &str) -> bool {
+    matches!(
+        unit,
+        "enoki-cpu-resource-provider@*.service"
+            | "enoki-disk-health-resource-provider@*.service"
+            | "enoki-probe-lifecycle-companion@*.service"
+            | "enoki-probe-lifecycle-upgrade@*.service"
+    )
+}
+
+fn require_fixed_unit_absent(
+    unit: &str,
+    loaded: &command::BoundedOutput,
+) -> Result<(), InstallError> {
+    if fixed_unit_is_instance_glob(unit) && loaded.status.success() && loaded.stdout.is_empty() {
+        return Ok(());
+    }
+    require_absent_from_load_state(loaded)
+}
+
 impl SystemdPort for SystemSystemd {
     fn set_command_deadline(&mut self, deadline: Instant) {
         self.command_deadline = Some(deadline);
@@ -106,19 +126,17 @@ impl SystemdPort for SystemSystemd {
         let deadline = self
             .command_deadline
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-        let loaded = run_bounded(
-            "/usr/bin/systemctl",
-            &[
-                "show",
-                "--property=LoadState",
-                "--value",
-                "enoki-probe.service",
-            ],
-            InstallError::Systemd,
-            deadline,
-            COMMAND_STEP_BUDGET,
-        )?;
-        require_absent_from_load_state(&loaded)
+        for unit in ROLLBACK_VERIFY_UNITS {
+            let loaded = run_bounded(
+                "/usr/bin/systemctl",
+                &["show", "--property=LoadState", "--value", unit],
+                InstallError::Systemd,
+                deadline,
+                COMMAND_STEP_BUDGET,
+            )?;
+            require_fixed_unit_absent(unit, &loaded)?;
+        }
+        Ok(())
     }
     fn daemon_reload(&mut self) -> Result<(), InstallError> {
         require_success(
@@ -269,8 +287,9 @@ impl SystemdPort for SystemSystemd {
 mod tests {
     use super::{
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        attempt_all_fixed_units, canonical_restart_deadline, command,
-        is_live_upgrade_companion_unit, require_absent_from_load_state, rollback_unit_is_absent,
+        attempt_all_fixed_units, canonical_restart_deadline, command, fixed_unit_is_instance_glob,
+        is_live_upgrade_companion_unit, require_absent_from_load_state, require_fixed_unit_absent,
+        rollback_unit_is_absent,
     };
     use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
@@ -324,6 +343,24 @@ mod tests {
                 Err(InstallError::Systemd)
             );
         }
+    }
+
+    #[test]
+    fn fresh_absence_accepts_only_an_empty_fixed_instance_set() {
+        let empty = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+        };
+        assert!(fixed_unit_is_instance_glob(
+            "enoki-probe-lifecycle-companion@*.service"
+        ));
+        assert!(
+            require_fixed_unit_absent("enoki-probe-lifecycle-companion@*.service", &empty).is_ok()
+        );
+        assert_eq!(
+            require_fixed_unit_absent("enoki-probe.service", &empty),
+            Err(InstallError::Systemd)
+        );
     }
 
     #[test]

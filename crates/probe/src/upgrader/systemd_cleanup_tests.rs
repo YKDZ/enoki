@@ -1,4 +1,6 @@
-use super::{CleanupCommandOutput, verify_systemd_service_absent_with};
+use super::{
+    CleanupCommandOutput, verify_systemd_service_absent_with, verify_systemd_service_stopped_with,
+};
 
 fn successful_output(stdout: &str) -> CleanupCommandOutput {
     CleanupCommandOutput {
@@ -72,4 +74,44 @@ fn absence_verification_rejects_query_failure_and_io_failure() {
     )
     .expect_err("an I/O failure must fail closed");
     assert_eq!(error.code(), "probe_uninstall_service_verification_failed");
+}
+
+#[test]
+fn stopped_service_verification_requires_manager_loaded_process_and_killmode_facts() {
+    let mut run = |program: &str, args: &[&str]| {
+        assert_eq!(program, "systemctl");
+        assert_eq!(args[0], "show");
+        assert_eq!(args[1], "-p");
+        assert_eq!(args[3], "--value");
+        assert_eq!(args[4], "enoki-probe.service");
+        let value = match args[2] {
+            "LoadState" => "loaded\n",
+            "ActiveState" => "inactive\n",
+            "SubState" => "dead\n",
+            "Job" => "\n",
+            "MainPID" | "ControlPID" => "0\n",
+            "KillMode" => "control-group\n",
+            property => panic!("unexpected systemd property {property}"),
+        };
+        Ok(successful_output(value))
+    };
+
+    assert!(verify_systemd_service_stopped_with("enoki-probe.service", &mut run).is_ok());
+
+    let mut live_pid = |_: &str, args: &[&str]| {
+        let value = match args[2] {
+            "LoadState" => "loaded\n",
+            "ActiveState" => "inactive\n",
+            "SubState" => "dead\n",
+            "Job" => "\n",
+            "MainPID" => "42\n",
+            "ControlPID" => "0\n",
+            "KillMode" => "control-group\n",
+            property => panic!("unexpected systemd property {property}"),
+        };
+        Ok(successful_output(value))
+    };
+    let error = verify_systemd_service_stopped_with("enoki-probe.service", &mut live_pid)
+        .expect_err("a stopped role cannot retain a manager PID");
+    assert_eq!(error.code(), "probe_uninstall_service_residue");
 }

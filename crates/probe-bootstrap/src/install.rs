@@ -266,6 +266,9 @@ pub trait AccountPort {
     fn owns_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<bool, InstallError> {
         Ok(false)
     }
+    fn fixed_ipc_group_is_harmless(&mut self, _group_name: &str) -> Result<bool, InstallError> {
+        Ok(false)
+    }
     fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
         Ok(())
     }
@@ -1847,10 +1850,20 @@ fn recover_interrupted_install(
                     .accounts
                     .remove_transaction_identity(journal.transaction_id(), identity),
             ),
-            Ok(false) if identity.is_some() => failures.push(RollbackFailure::new(
-                RollbackStep::RemoveServiceIdentity,
-                InstallErrorKind::ExistingResidue,
-            )),
+            Ok(false) if identity.is_some() => {
+                match ports.accounts.fixed_ipc_group_is_harmless(PROBE_IPC_GROUP) {
+                    Ok(true) => {}
+                    Ok(false) => failures.push(RollbackFailure::new(
+                        RollbackStep::RemoveServiceIdentity,
+                        InstallErrorKind::ExistingResidue,
+                    )),
+                    Err(error) => record_rollback(
+                        &mut failures,
+                        RollbackStep::RemoveServiceIdentity,
+                        Err(error),
+                    ),
+                }
+            }
             Ok(false) => {}
             Err(error) => record_rollback(
                 &mut failures,
@@ -2050,7 +2063,7 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -2214,6 +2227,7 @@ fn single_systemd_value(bytes: &[u8]) -> Result<&str, InstallError> {
 pub use account::SystemAccounts;
 #[cfg(test)]
 use account::create_static_service_identity_with_commands;
+pub use account::fixed_ipc_group_is_harmless_records;
 #[cfg(feature = "acquirer")]
 pub use compatible_upgrade::run_compatible_upgrade;
 use filesystem::*;

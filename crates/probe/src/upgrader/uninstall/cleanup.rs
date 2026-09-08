@@ -357,6 +357,13 @@ pub(super) fn prepare_probe_uninstall_cleanup(
                     error,
                 )
             })?;
+            systemd.verify_service_stopped(service).map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying an observation role stopped",
+                    error,
+                )
+            })?;
             systemd.disable_service(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_disable_failed",
@@ -372,6 +379,15 @@ pub(super) fn prepare_probe_uninstall_cleanup(
             probe_uninstall_cleanup_error(
                 "probe_uninstall_service_stop_failed",
                 "stopping the service",
+                error,
+            )
+        })?;
+    systemd
+        .verify_service_stopped(&install_metadata.service_name)
+        .map_err(|error| {
+            probe_uninstall_cleanup_error(
+                "probe_uninstall_service_verification_failed",
+                "verifying the service stopped",
                 error,
             )
         })?;
@@ -521,7 +537,7 @@ pub(super) fn remove_probe_install_identities(
         })?;
     if let Some(ipc_group) = install_metadata.observation_ipc_group.as_deref() {
         systemd
-            .remove_service_identity(ipc_group, ipc_group)
+            .remove_fixed_ipc_group(ipc_group, None)
             .map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_group_remove_failed",
@@ -536,7 +552,7 @@ pub(super) fn remove_probe_install_identities(
         .zip(install_metadata.probe_ipc_group_ownership.as_deref())
     {
         systemd
-            .remove_owned_ipc_group(ipc_group, ownership)
+            .remove_fixed_ipc_group(ipc_group, Some(ownership))
             .map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_group_remove_failed",
@@ -571,6 +587,14 @@ pub(super) fn remove_lifecycle_companion_activation(
                 return Err(probe_uninstall_cleanup_error(
                     "probe_uninstall_service_stop_failed",
                     "stopping a lifecycle companion socket",
+                    error,
+                ));
+            }
+            if let Err(error) = systemd.verify_service_stopped(companion_service) {
+                lifecycle_cleanup_diagnostic("socket_stop_verify", companion_service, "error");
+                return Err(probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying a lifecycle companion socket stopped",
                     error,
                 ));
             }
@@ -678,6 +702,7 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
+    systemd.verify_fixed_ipc_groups_absent_or_harmless()?;
     verify_common_cleanup_residue_absent(plan, systemd)?;
     verify_uninstall_local_state_absent(plan)
 }
@@ -712,6 +737,7 @@ pub(super) fn execute_committed_replacement_cleanup(
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_lifecycle_companion_binary(plan)?;
+    systemd.verify_fixed_ipc_groups_absent_or_harmless()?;
     // 手动重装必须让可信 metadata 活过全部可失败清理与核验。cleanup_complete
     // 持久化后，metadata 由 exact commit custody 作为独立、幂等的退休动作处理。
     finalize_replacement_local_state_with(

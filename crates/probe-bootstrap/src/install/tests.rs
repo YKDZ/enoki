@@ -3,7 +3,8 @@ mod tests {
     use super::account::{
         account_records_match_transaction, classify_gshadow_lookup,
         create_probe_ipc_group_with_commands, create_transaction_identity_with_commands,
-        owned_ipc_group_record_matches, remove_owned_ipc_group_with_commands,
+        fixed_ipc_group_is_harmless_records, owned_ipc_group_record_matches,
+        remove_owned_ipc_group_with_commands,
     };
     use super::upgrade::{upgrade_destinations, write_operation_status};
     use super::*;
@@ -20,6 +21,38 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::sync::OnceLock;
     use tempfile::tempdir;
+
+    #[test]
+    fn retired_fixed_ipc_group_is_reusable_only_without_members_or_primary_gid_users() {
+        let group = "enoki-probe-ipc:x:4242:";
+        let shadow = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::";
+        let nss = "enoki-probe-ipc:x:4242:";
+
+        assert!(fixed_ipc_group_is_harmless_records(
+            "enoki-probe-ipc",
+            group,
+            shadow,
+            "root:x:0:0:root:/root:/bin/bash\n",
+            nss,
+            nss,
+        ));
+        assert!(!fixed_ipc_group_is_harmless_records(
+            "enoki-probe-ipc",
+            "enoki-probe-ipc:x:4242:other",
+            shadow,
+            "root:x:0:0:root:/root:/bin/bash\n",
+            nss,
+            nss,
+        ));
+        assert!(!fixed_ipc_group_is_harmless_records(
+            "enoki-probe-ipc",
+            group,
+            shadow,
+            "other:x:1000:4242:other:/nonexistent:/usr/sbin/nologin\n",
+            nss,
+            nss,
+        ));
+    }
 
     fn coordinate_fresh_install_for_test(
         components: VerifiedCompleteFreshComponents<'_>,
