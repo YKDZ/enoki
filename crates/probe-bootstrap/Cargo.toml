@@ -15,6 +15,11 @@ name = "enoki-probe-bootstrap-activate"
 path = "src/bin/activate.rs"
 required-features = ["activator"]
 
+[[test]]
+name = "boot_probe_build_trust"
+path = "tests/boot_probe_build_trust.rs"
+required-features = ["compiled-trust"]
+
 [features]
 default = []
 acquirer = ["dep:flate2", "dep:tar", "dep:ureq", "dep:url"]

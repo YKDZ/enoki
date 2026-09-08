@@ -97,10 +97,18 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
+          ENOKI_BOOT_PROBE: "1"
+          ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION: enoki
+          ENOKI_BOOTSTRAP_BUILD_ROOT_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_BOOTSTRAP_BUILD_ROLE: activator
+          ENOKI_BOOTSTRAP_BUILD_TARGET: ${{ matrix.target }}
+          ENOKI_BOOTSTRAP_BUILD_VERSION: ${{ inputs.version }}
           ENOKI_PROBE_VERSION: ${{ inputs.version }}
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace -C link-arg=-Wl,--build-id=none
           SOURCE_DATE_EPOCH: "0"
-        run: cargo build -p enoki-probe --release --target ${{ matrix.target }}
+        run: >-
+          cargo build -p enoki-probe --release --features release-companion-trust
+          --target ${{ matrix.target }}
 
       - name: Build and package Probe twice from clean target state
         if: inputs.verify-reproducible && inputs.package-artifacts
@@ -111,13 +119,19 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
+          ENOKI_BOOT_PROBE: "1"
+          ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION: enoki
+          ENOKI_BOOTSTRAP_BUILD_ROOT_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_BOOTSTRAP_BUILD_ROLE: activator
+          ENOKI_BOOTSTRAP_BUILD_TARGET: ${{ matrix.target }}
+          ENOKI_BOOTSTRAP_BUILD_VERSION: ${{ inputs.version }}
           ENOKI_PROBE_VERSION: ${{ inputs.version }}
           PROBE_TARGET: ${{ matrix.target }}
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace -C link-arg=-Wl,--build-id=none
           SOURCE_DATE_EPOCH: "0"
         run: |
           rm -rf target/reproducible dist dist-reproducibility-second
-          CARGO_TARGET_DIR=target/reproducible cargo build -p enoki-probe --release --target "$PROBE_TARGET"
+          CARGO_TARGET_DIR=target/reproducible cargo build -p enoki-probe --release --features release-companion-trust --target "$PROBE_TARGET"
           node scripts/release-candidate.mjs package-probe \
             --binary "target/reproducible/${PROBE_TARGET}/release/enoki-probe" \
             --output-dir dist \
@@ -126,7 +140,7 @@ jobs:
             --version "$CANDIDATE_VERSION"
 
           rm -rf target/reproducible
-          CARGO_TARGET_DIR=target/reproducible cargo build -p enoki-probe --release --target "$PROBE_TARGET"
+          CARGO_TARGET_DIR=target/reproducible cargo build -p enoki-probe --release --features release-companion-trust --target "$PROBE_TARGET"
           node scripts/release-candidate.mjs package-probe \
             --binary "target/reproducible/${PROBE_TARGET}/release/enoki-probe" \
             --output-dir dist-reproducibility-second \
