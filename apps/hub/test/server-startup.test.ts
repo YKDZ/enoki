@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +14,7 @@ import {
   canonicalInstalledBundleFailureEvidence,
   signInstalledBundleFailureEvidence,
 } from "../src/probe/repair-authority";
+import { startHubRuntime } from "../src/server";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import { createTestProbeIdentity } from "./probe-test-auth";
 
@@ -41,7 +42,7 @@ describe("Hub server startup", () => {
     { expectedStatus: 200, imageRoot: true, name: "the configured image root" },
     { expectedStatus: 409, imageRoot: false, name: "a missing image root" },
   ])(
-    "keeps Installed Bundle Failure Repair on the Probe listener safe with $name",
+    "keeps Installed Bundle Failure Repair on real listeners safe with $name",
     async ({ expectedStatus, imageRoot: hasImageRoot }) => {
       const dataRoot = await mkdtemp(
         path.join(os.tmpdir(), "enoki-server-db-"),
@@ -58,22 +59,25 @@ describe("Hub server startup", () => {
         targetVersion: "0.1.75",
         transition: "compatible",
       });
-      const imageRoot = hasImageRoot
-        ? await installImageDistributionRoot(release.rootPublicKeyPem)
-        : undefined;
-      let server: StartedServer | undefined;
+      let runtime: Awaited<ReturnType<typeof startHubRuntime>> | undefined;
 
       try {
-        server = await startListeningServer({
-          ENOKI_DATA_ROOT: dataRoot,
-          ENOKI_MANAGEMENT_ORIGIN: managementOrigin,
-          ENOKI_PROBE_API_ORIGIN: probeOrigin,
-          ENOKI_PROBE_ASSET_DIR: assetDir,
-          ENOKI_PROBE_HOST: "127.0.0.1",
-          ENOKI_PROBE_PORT: String(probePort),
-          HOST: "127.0.0.1",
-          OWNER_PASSWORD: "test-owner-password",
-          PORT: String(managementPort),
+        runtime = await startHubRuntime({
+          environment: {
+            ...process.env,
+            ENOKI_DATA_ROOT: dataRoot,
+            ENOKI_MANAGEMENT_ORIGIN: managementOrigin,
+            ENOKI_PROBE_API_ORIGIN: probeOrigin,
+            ENOKI_PROBE_ASSET_DIR: assetDir,
+            ENOKI_PROBE_HOST: "127.0.0.1",
+            ENOKI_PROBE_PORT: String(probePort),
+            HOST: "127.0.0.1",
+            OWNER_PASSWORD: "test-owner-password",
+            PORT: String(managementPort),
+          },
+          ...(hasImageRoot
+            ? { probeDistributionRootPublicKeyPem: release.rootPublicKeyPem }
+            : {}),
         });
         await expect(waitForHealthy(managementOrigin)).resolves.toBeUndefined();
         await expect(waitForHealthy(probeOrigin)).resolves.toBeUndefined();
@@ -124,21 +128,17 @@ describe("Hub server startup", () => {
 
         expect(response.status).toBe(expectedStatus);
       } finally {
-        await server?.stop();
-        await imageRoot?.cleanup();
-        await Promise.all([
-          rm(dataRoot, { force: true, recursive: true }),
-          rm(assetDir, { force: true, recursive: true }),
-        ]);
+        try {
+          await runtime?.close();
+        } finally {
+          await rm(dataRoot, { force: true, recursive: true });
+          await rm(assetDir, { force: true, recursive: true });
+        }
       }
     },
     30_000,
   );
 });
-
-type StartedServer = {
-  stop: () => Promise<void>;
-};
 
 async function allocatePort() {
   const server = createServer();
@@ -154,95 +154,6 @@ async function allocatePort() {
     server.close((error) => (error ? reject(error) : resolve()));
   });
   return address.port;
-}
-
-async function installImageDistributionRoot(rootPublicKeyPem: Buffer | string) {
-  const directory = "/app/probe-distribution-root";
-  const rootPath = path.join(directory, "root-key.pem");
-  const appExisted = await pathExists("/app");
-  const directoryExisted = await pathExists(directory);
-  if (await pathExists(rootPath)) {
-    throw new Error(`Test image root already exists at ${rootPath}.`);
-  }
-  await mkdir(directory, { recursive: true });
-  await writeFile(rootPath, rootPublicKeyPem);
-
-  return {
-    async cleanup() {
-      await rm(rootPath, { force: true });
-      if (!directoryExisted)
-        await rm(directory, { force: true, recursive: true });
-      if (!appExisted) await rm("/app", { force: true, recursive: true });
-    },
-  };
-}
-
-async function pathExists(candidate: string) {
-  try {
-    await access(candidate);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function startListeningServer(environment: Record<string, string>) {
-  return new Promise<StartedServer>((resolve, reject) => {
-    const server = spawn(process.execPath, ["dist/src/server.js"], {
-      cwd: hubRoot,
-      env: { ...process.env, ...environment },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let output = "";
-    let started = false;
-    const timeout = setTimeout(() => {
-      void stopServer(server).then(() => {
-        reject(new Error(`Hub did not start both listeners: ${output}`));
-      });
-    }, 10_000);
-    const onOutput = (chunk: Buffer) => {
-      output += chunk.toString();
-      if (!started && output.includes('"listener":"probe"')) {
-        started = true;
-        clearTimeout(timeout);
-        resolve({ stop: () => stopServer(server) });
-      }
-    };
-    server.stdout.on("data", onOutput);
-    server.stderr.on("data", onOutput);
-    server.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    server.once("close", (code) => {
-      if (!started) {
-        clearTimeout(timeout);
-        reject(
-          new Error(
-            `Hub exited before both listeners started (${code}): ${output}`,
-          ),
-        );
-      }
-    });
-  });
-}
-
-async function stopServer(server: ReturnType<typeof spawn>) {
-  if (server.exitCode !== null || server.signalCode !== null) return;
-  const closed = new Promise<void>((resolve) => server.once("close", resolve));
-  server.kill("SIGTERM");
-  let forceKill: NodeJS.Timeout | undefined;
-  await Promise.race([
-    closed,
-    new Promise<void>((resolve) => {
-      forceKill = setTimeout(() => {
-        server.kill("SIGKILL");
-        resolve();
-      }, 5_000);
-    }),
-  ]);
-  if (forceKill) clearTimeout(forceKill);
-  await closed;
 }
 
 async function waitForHealthy(origin: string) {
