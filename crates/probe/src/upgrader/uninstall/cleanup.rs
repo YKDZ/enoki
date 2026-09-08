@@ -35,6 +35,7 @@ mod test_fault_controls {
         pub(super) static STRICT_REPAIR_LOADER_FAILURE: Cell<bool> = const { Cell::new(false) };
         pub(super) static STATE_SHELL_RETIRE_FAILURE: Cell<bool> = const { Cell::new(false) };
         pub(super) static EXPECTED_ROOT_OWNER: Cell<Option<(u32, u32)>> = const { Cell::new(None) };
+        pub(super) static EMPTY_SHELL_CHILD_AFTER_ADMISSION: Cell<bool> = const { Cell::new(false) };
     }
 }
 
@@ -863,22 +864,41 @@ fn clear_prepared_state_root_contents_with_shell(
     remove: &mut impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
     mut retire_shell: impl FnMut(&TrustedStateRoot) -> std::io::Result<()>,
 ) -> Result<ClearedStateShell, ProbeUpgraderRunError> {
-    let Some(layout) = cleanup.layout else {
+    let Some(admission) = cleanup.admission else {
         return Ok(ClearedStateShell(None));
     };
+    let layout = admission.layout;
 
-    match fs::read_dir(layout.contents()) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry?;
-                // remove_path_if_exists uses lstat: an entry symlink is
-                // unlinked and never traversed, while directories recurse.
-                remove(&entry.path())?;
+    #[cfg(test)]
+    if admission.authority == StateRootCleanupAuthority::EmptyShellOnly
+        && test_fault_controls::EMPTY_SHELL_CHILD_AFTER_ADMISSION.with(std::cell::Cell::get)
+    {
+        fs::write(
+            layout.contents().join("appeared-after-empty-admission"),
+            b"fixture",
+        )?;
+    }
+
+    match admission.authority {
+        StateRootCleanupAuthority::ContentAuthorized => {
+            match fs::read_dir(layout.contents()) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let entry = entry?;
+                        // remove_path_if_exists uses lstat: an entry symlink is
+                        // unlinked and never traversed, while directories recurse.
+                        remove(&entry.path())?;
+                    }
+                    sync_directory(layout.contents())?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
+        }
+        StateRootCleanupAuthority::EmptyShellOnly => {
+            verify_state_root_empty(&layout)?;
             sync_directory(layout.contents())?;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
     }
     verify_state_root_empty(&layout)?;
 
@@ -902,8 +922,19 @@ impl ClearedStateShell {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StateRootCleanupAuthority {
+    ContentAuthorized,
+    EmptyShellOnly,
+}
+
+struct TrustedStateRootAdmission {
+    layout: TrustedStateRoot,
+    authority: StateRootCleanupAuthority,
+}
+
 struct TrustedStateCleanup {
-    layout: Option<TrustedStateRoot>,
+    admission: Option<TrustedStateRootAdmission>,
     // Held from the root proof through metadata/config retirement and content
     // cleanup; this is intentionally not a durable fact and is never unlinked.
     _runtime_failure_lock: Option<crate::runtime_failure::RuntimeFailurePairLock>,
@@ -916,7 +947,7 @@ fn prepare_trusted_state_root_cleanup(
     // Admission is read-only and is backed by the caller's existing
     // metadata/capsule authority.  It intentionally has no cleanup effect:
     // the held-lock reread below is the only layout used for removal.
-    let _admitted_layout = trusted_state_root_layout(public_state_dir, ordinary_owner)?;
+    let _admission = trusted_state_root_layout(public_state_dir, ordinary_owner)?;
     let lock = crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
         public_state_dir,
         unsafe { libc::geteuid() },
@@ -924,17 +955,19 @@ fn prepare_trusted_state_root_cleanup(
     .map_err(ProbeUpgraderRunError::Io)?;
     // The lock serializes writers, not root authority.  Re-read the exact
     // fixed projection while held before retiring any binding material.
-    let layout = trusted_state_root_layout(public_state_dir, ordinary_owner)?;
-    if let Some(root) = layout.as_ref() {
-        require_repair_intent_absent(root)?;
+    let admission = trusted_state_root_layout(public_state_dir, ordinary_owner)?;
+    if let Some(admission) = admission.as_ref()
+        && admission.authority == StateRootCleanupAuthority::ContentAuthorized
+    {
+        require_repair_intent_absent(&admission.layout)?;
         crate::runtime_failure::cleanup_runtime_failure_pair_at_concrete_state(
-            root.contents(),
+            admission.layout.contents(),
             unsafe { libc::geteuid() },
         )
         .map_err(ProbeUpgraderRunError::Io)?;
     }
     Ok(TrustedStateCleanup {
-        layout,
+        admission,
         _runtime_failure_lock: Some(lock),
     })
 }
@@ -1007,7 +1040,7 @@ impl TrustedStateRoot {
 fn trusted_state_root_layout(
     public_state_dir: &Path,
     ordinary_owner: StateRootOwner<'_>,
-) -> Result<Option<TrustedStateRoot>, ProbeUpgraderRunError> {
+) -> Result<Option<TrustedStateRootAdmission>, ProbeUpgraderRunError> {
     if !public_state_dir.ends_with("var/lib/enoki-probe") {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is not the fixed state root",
@@ -1025,14 +1058,17 @@ fn trusted_state_root_layout(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
                 Ok(metadata) => {
-                    validate_state_root_directory(
+                    let authority = validate_state_root_directory(
                         &private,
                         &metadata,
                         StateRootOwner::EqualUidGid,
                     )?;
-                    Ok(Some(TrustedStateRoot::Canonical {
-                        public: public_state_dir.to_owned(),
-                        private,
+                    Ok(Some(TrustedStateRootAdmission {
+                        layout: TrustedStateRoot::Canonical {
+                            public: public_state_dir.to_owned(),
+                            private,
+                        },
+                        authority,
                     }))
                 }
             };
@@ -1041,7 +1077,8 @@ fn trusted_state_root_layout(
         Ok(metadata) => metadata,
     };
     if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
-        validate_state_root_directory(public_state_dir, &public_metadata, ordinary_owner)?;
+        let authority =
+            validate_state_root_directory(public_state_dir, &public_metadata, ordinary_owner)?;
         match fs::symlink_metadata(&private) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(_) => {
@@ -1051,9 +1088,10 @@ fn trusted_state_root_layout(
             }
             Err(error) => return Err(error.into()),
         }
-        return Ok(Some(TrustedStateRoot::Ordinary(
-            public_state_dir.to_owned(),
-        )));
+        return Ok(Some(TrustedStateRootAdmission {
+            layout: TrustedStateRoot::Ordinary(public_state_dir.to_owned()),
+            authority,
+        }));
     }
     if !public_metadata.file_type().is_symlink()
         || (public_metadata.uid(), public_metadata.gid()) != expected_root_owner()
@@ -1064,16 +1102,21 @@ fn trusted_state_root_layout(
             "Probe state directory is unsafe",
         ));
     }
-    match fs::symlink_metadata(&private) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+    let authority = match fs::symlink_metadata(&private) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            StateRootCleanupAuthority::ContentAuthorized
+        }
         Err(error) => return Err(error.into()),
         Ok(metadata) => {
             validate_state_root_directory(&private, &metadata, StateRootOwner::EqualUidGid)?
         }
-    }
-    Ok(Some(TrustedStateRoot::Canonical {
-        public: public_state_dir.to_owned(),
-        private,
+    };
+    Ok(Some(TrustedStateRootAdmission {
+        layout: TrustedStateRoot::Canonical {
+            public: public_state_dir.to_owned(),
+            private,
+        },
+        authority,
     }))
 }
 
@@ -1081,42 +1124,43 @@ fn validate_state_root_directory(
     path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
-) -> Result<(), ProbeUpgraderRunError> {
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.mode() & 0o7777 != 0o750
-        || !state_root_owner_matches(path, metadata, owner)?
+) -> Result<StateRootCleanupAuthority, ProbeUpgraderRunError> {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.mode() & 0o7777 != 0o750
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
     }
-    Ok(())
+    state_root_authority(path, metadata, owner)?.ok_or(
+        ProbeUpgraderRunError::InvalidInstallMetadata("Probe state directory is unsafe"),
+    )
 }
 
-fn state_root_owner_matches(
+fn state_root_authority(
     path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
-) -> Result<bool, ProbeUpgraderRunError> {
+) -> Result<Option<StateRootCleanupAuthority>, ProbeUpgraderRunError> {
     let actual = (metadata.uid(), metadata.gid());
     let root = expected_root_owner();
     match owner {
-        StateRootOwner::Root => Ok(state_root_owner_tuple_matches(actual, root, None)),
+        StateRootOwner::Root => Ok(state_root_owner_tuple_matches(actual, root, None)
+            .then_some(StateRootCleanupAuthority::ContentAuthorized)),
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
             if state_root_owner_tuple_matches(
                 actual,
                 root,
                 service_identity_owner(user, group).ok(),
             ) {
-                return Ok(true);
+                return Ok(Some(StateRootCleanupAuthority::ContentAuthorized));
             }
             if metadata.uid() != metadata.gid() {
-                return Ok(false);
+                return Ok(None);
             }
-            state_root_is_empty(path)
+            Ok(state_root_is_empty(path)?.then_some(StateRootCleanupAuthority::EmptyShellOnly))
         }
-        StateRootOwner::EqualUidGid => Ok(metadata.uid() == metadata.gid()),
+        StateRootOwner::EqualUidGid => Ok((metadata.uid() == metadata.gid())
+            .then_some(StateRootCleanupAuthority::ContentAuthorized)),
     }
 }
 
@@ -1253,7 +1297,7 @@ pub(super) fn verify_uninstall_state_shell_harmless(
 ) -> Result<(), ProbeUpgraderRunError> {
     match trusted_state_root_layout(public_state_dir, StateRootOwner::Root)? {
         None => Ok(()),
-        Some(root) => verify_state_root_empty(&root),
+        Some(admission) => verify_state_root_empty(&admission.layout),
     }
 }
 
@@ -1271,9 +1315,9 @@ fn trusted_state_root_is_empty_or_absent_under_pair_lock(
     let layout = trusted_state_root_layout(public_state_dir, StateRootOwner::Root)?;
     match layout {
         None => Ok(true),
-        Some(root) => {
-            require_repair_intent_absent(&root)?;
-            match fs::read_dir(root.contents()) {
+        Some(admission) => {
+            require_repair_intent_absent(&admission.layout)?;
+            match fs::read_dir(admission.layout.contents()) {
                 Ok(mut entries) => Ok(entries.next().is_none()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
                 Err(error) => Err(error.into()),
@@ -1641,7 +1685,9 @@ fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgra
 
 #[cfg(test)]
 mod tests {
-    use super::test_fault_controls::{EXPECTED_ROOT_OWNER, STATE_SHELL_RETIRE_FAILURE};
+    use super::test_fault_controls::{
+        EMPTY_SHELL_CHILD_AFTER_ADMISSION, EXPECTED_ROOT_OWNER, STATE_SHELL_RETIRE_FAILURE,
+    };
     use super::{
         ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
@@ -2538,6 +2584,56 @@ mod tests {
         execute_committed_replacement_cleanup(&retry, &mut TestSystemd::default())
             .expect("empty shell retry completes");
         EXPECTED_ROOT_OWNER.with(|owner| owner.set(None));
+    }
+
+    #[test]
+    fn empty_shell_only_retains_a_child_written_after_held_lock_admission() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = metadata(temporary.path(), 1);
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ] {
+            create_file(path, 0o600);
+        }
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("initial committed Replacement plan");
+        let mut failing_systemd = TestSystemd {
+            fail_fixed_ipc_verification: true,
+            ..TestSystemd::default()
+        };
+
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(true));
+        execute_committed_replacement_cleanup(&plan, &mut failing_systemd)
+            .expect_err("post-identity failure retains cleanup");
+        STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
+
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(Some((u32::MAX, u32::MAX))));
+        let retry = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("empty shell is admitted");
+        EMPTY_SHELL_CHILD_AFTER_ADMISSION.with(|fault| fault.set(true));
+        let result = execute_committed_replacement_cleanup(&retry, &mut TestSystemd::default());
+        EMPTY_SHELL_CHILD_AFTER_ADMISSION.with(|fault| fault.set(false));
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(None));
+
+        assert!(
+            result.is_err(),
+            "empty-shell-only cleanup must fail closed after a child appears"
+        );
+        assert!(
+            metadata
+                .state_dir
+                .join("appeared-after-empty-admission")
+                .exists(),
+            "empty-shell-only cleanup must not delete a post-admission child"
+        );
     }
 
     #[test]
