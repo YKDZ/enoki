@@ -25,6 +25,12 @@ fn exact_record<'a>(database: &'a str, name: &str) -> Option<Vec<&'a str>> {
     records.next().is_none().then_some(record)
 }
 
+fn has_record(database: &str, name: &str) -> bool {
+    database
+        .lines()
+        .any(|line| line.split(':').next() == Some(name))
+}
+
 fn nss_group_matches(record: &str, group_name: &str, gid: u32) -> bool {
     let mut records = record.lines();
     let fields = records
@@ -32,7 +38,10 @@ fn nss_group_matches(record: &str, group_name: &str, gid: u32) -> bool {
         .map(|line| line.split(':').collect::<Vec<_>>());
     records.next().is_none()
         && fields.is_some_and(|fields| {
-            fields.len() == 4 && fields[0] == group_name && fields[2].parse::<u32>() == Ok(gid)
+            fields.len() == 4
+                && fields[0] == group_name
+                && fields[2].parse::<u32>() == Ok(gid)
+                && fields[3].is_empty()
         })
 }
 
@@ -149,9 +158,7 @@ fn fixed_ipc_group_is_harmless(group_name: &str, deadline: Instant) -> Result<bo
 fn fixed_ipc_group_is_absent(group_name: &str, deadline: Instant) -> Result<bool, InstallError> {
     let local_group = read_local_account_file("/etc/group")?;
     let local_gshadow = read_local_account_file("/etc/gshadow")?;
-    if exact_record(&local_group, group_name).is_some()
-        || exact_record(&local_gshadow, group_name).is_some()
-    {
+    if has_record(&local_group, group_name) || has_record(&local_gshadow, group_name) {
         return Ok(false);
     }
     Ok(nss_group_lookup(group_name, deadline)?.is_none())
@@ -286,6 +293,15 @@ impl AccountPort for SystemAccounts {
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
         fixed_ipc_group_is_harmless(group_name, deadline)
     }
+    fn fixed_ipc_group_is_absent_or_harmless(
+        &mut self,
+        group_name: &str,
+    ) -> Result<bool, InstallError> {
+        let deadline = self
+            .command_deadline
+            .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+        fixed_ipc_group_is_absent_or_harmless(group_name, deadline)
+    }
     fn remove_observation_ipc_group(&mut self, transaction_id: &str) -> Result<(), InstallError> {
         let deadline = self
             .command_deadline
@@ -298,7 +314,9 @@ impl AccountPort for SystemAccounts {
             COMMAND_STEP_BUDGET,
         )?;
         let Some(record) = classify_gshadow_lookup(output.status.code(), output.stdout)? else {
-            return Ok(());
+            return fixed_ipc_group_is_absent_or_harmless(OBSERVATION_IPC_GROUP, deadline)?
+                .then_some(())
+                .ok_or(InstallError::ExistingResidue);
         };
         let fields = record.trim_end().split(':').collect::<Vec<_>>();
         if fields.len() != 4
@@ -310,12 +328,16 @@ impl AccountPort for SystemAccounts {
             }
             return Err(InstallError::ExistingResidue);
         }
-        require_success(
+        match require_success(
             "/usr/sbin/groupdel",
             &[OBSERVATION_IPC_GROUP],
             InstallError::Account,
             deadline,
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err(_) if fixed_ipc_group_is_harmless(OBSERVATION_IPC_GROUP, deadline)? => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -356,24 +378,46 @@ fn remove_owned_ipc_group(
     deadline: Option<Instant>,
 ) -> Result<(), InstallError> {
     let deadline = deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-    remove_owned_ipc_group_with_commands(
-        group_name,
-        transaction_id,
-        identity,
-        &mut |group_name| {
-            let output = run_bounded(
-                "/usr/bin/getent",
-                &["gshadow", group_name],
-                InstallError::Account,
-                deadline,
-                COMMAND_STEP_BUDGET,
-            )?;
-            classify_gshadow_lookup(output.status.code(), output.stdout)
-        },
-        &mut |program, arguments| {
-            require_success(program, arguments, InstallError::Account, deadline)
-        },
-    )
+    let output = run_bounded(
+        "/usr/bin/getent",
+        &["gshadow", group_name],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    let Some(record) = classify_gshadow_lookup(output.status.code(), output.stdout)? else {
+        return if is_fixed_ipc_group(group_name)
+            && fixed_ipc_group_is_absent_or_harmless(group_name, deadline)?
+        {
+            Ok(())
+        } else {
+            Err(InstallError::ExistingResidue)
+        };
+    };
+    if !owned_ipc_group_record_matches(group_name, transaction_id, identity, &record) {
+        return if is_fixed_ipc_group(group_name)
+            && fixed_ipc_group_is_harmless(group_name, deadline)?
+        {
+            Ok(())
+        } else {
+            Err(InstallError::ExistingResidue)
+        };
+    }
+    match require_success(
+        "/usr/sbin/groupdel",
+        &[group_name],
+        InstallError::Account,
+        deadline,
+    ) {
+        Ok(()) => Ok(()),
+        Err(_error)
+            if is_fixed_ipc_group(group_name)
+                && fixed_ipc_group_is_harmless(group_name, deadline)? =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn classify_gshadow_lookup(
@@ -389,6 +433,7 @@ pub(super) fn classify_gshadow_lookup(
     }
 }
 
+#[cfg(test)]
 pub(super) fn remove_owned_ipc_group_with_commands(
     group_name: &str,
     transaction_id: &str,

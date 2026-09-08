@@ -93,6 +93,35 @@ fn observation_services(schema_version: u32) -> &'static [&'static str] {
     }
 }
 
+fn observation_stop_services(schema_version: u32) -> &'static [&'static str] {
+    match schema_version {
+        5 => &[
+            "enoki-cpu-resource-provider.socket",
+            "enoki-disk-health-resource-provider.socket",
+            "enoki-observation-runtime.socket",
+            "enoki-cpu-resource-provider@*.service",
+            "enoki-disk-health-resource-provider@*.service",
+            "enoki-observation-runtime.service",
+            "enoki-observation-runtime-failure.service",
+            "enoki-probe-lifecycle-upgrade@*.service",
+        ],
+        4 => &[
+            "enoki-disk-health-resource-provider@*.service",
+            "enoki-cpu-resource-provider@*.service",
+            "enoki-disk-health-resource-provider.socket",
+            "enoki-cpu-resource-provider.socket",
+            "enoki-observation-runtime.socket",
+            "enoki-observation-runtime.service",
+        ],
+        _ => &[
+            "enoki-disk-health-resource-provider.socket",
+            "enoki-cpu-resource-provider.socket",
+            "enoki-observation-runtime.socket",
+            "enoki-observation-runtime.service",
+        ],
+    }
+}
+
 fn is_lifecycle_companion_service(service: &str) -> bool {
     matches!(
         service,
@@ -940,21 +969,65 @@ fn systemd_property_with(
     }
 }
 
+fn systemd_property_values(
+    service_name: &str,
+    property: &'static str,
+    run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
+) -> Result<Vec<String>, ProbeUpgraderRunError> {
+    let output = systemd_property_with(service_name, property, run)?;
+    Ok(output
+        .strip_suffix('\n')
+        .unwrap_or(&output)
+        .split('\n')
+        .map(str::to_owned)
+        .collect())
+}
+
+fn systemd_property_values_match(
+    service_name: &str,
+    property: &'static str,
+    expected: &str,
+    expected_instances: usize,
+    run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
+) -> Result<bool, ProbeUpgraderRunError> {
+    let values = systemd_property_values(service_name, property, run)?;
+    Ok(values.len() == expected_instances && values.iter().all(|value| value == expected))
+}
+
 fn verify_systemd_service_stopped_with(
     service_name: &str,
     run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let action = "verifying the stopped service state";
-    let load_state = systemd_property_with(service_name, "LoadState", run)?;
-    if is_instance_service_glob(service_name) && load_state.trim().is_empty() {
+    let load_state = systemd_property_values(service_name, "LoadState", run)?;
+    if is_instance_service_glob(service_name) && load_state == [""] {
         return Ok(());
     }
-    if load_state.trim() != "loaded"
-        || systemd_property_with(service_name, "ActiveState", run)?.trim() != "inactive"
-        || systemd_property_with(service_name, "SubState", run)?.trim() != "dead"
-        || !systemd_property_with(service_name, "Job", run)?
-            .trim()
-            .is_empty()
+    if load_state == ["not-found"] {
+        return Ok(());
+    }
+    let expected_instances = if is_instance_service_glob(service_name) {
+        load_state.len()
+    } else {
+        1
+    };
+    if load_state.len() != expected_instances
+        || load_state.iter().any(|value| value != "loaded")
+        || !systemd_property_values_match(
+            service_name,
+            "ActiveState",
+            "inactive",
+            expected_instances,
+            run,
+        )?
+        || !systemd_property_values_match(
+            service_name,
+            "SubState",
+            "dead",
+            expected_instances,
+            run,
+        )?
+        || !systemd_property_values_match(service_name, "Job", "", expected_instances, run)?
     {
         return Err(uninstall_cleanup_failure(
             "probe_uninstall_service_residue",
@@ -963,9 +1036,21 @@ fn verify_systemd_service_stopped_with(
         ));
     }
     if service_name.ends_with(".service")
-        && (systemd_property_with(service_name, "MainPID", run)?.trim() != "0"
-            || systemd_property_with(service_name, "ControlPID", run)?.trim() != "0"
-            || systemd_property_with(service_name, "KillMode", run)?.trim() != "control-group")
+        && (!systemd_property_values_match(service_name, "MainPID", "0", expected_instances, run)?
+            || !systemd_property_values_match(
+                service_name,
+                "ControlPID",
+                "0",
+                expected_instances,
+                run,
+            )?
+            || !systemd_property_values_match(
+                service_name,
+                "KillMode",
+                "control-group",
+                expected_instances,
+                run,
+            )?)
     {
         return Err(uninstall_cleanup_failure(
             "probe_uninstall_service_residue",
@@ -1067,6 +1152,13 @@ fn local_account_record<'a>(database: &'a str, name: &str) -> Option<Vec<&'a str
     records.next().is_none().then_some(record)
 }
 
+fn local_account_record_count(database: &str, name: &str) -> usize {
+    database
+        .lines()
+        .filter(|line| line.split(':').next() == Some(name))
+        .count()
+}
+
 fn fixed_ipc_group_cleanup_error(
     code: &'static str,
     action: &'static str,
@@ -1128,18 +1220,30 @@ fn lookup_fixed_ipc_group_with(
     ))
 }
 
-fn verify_fixed_ipc_group_absent_or_harmless_with(
+enum FixedIpcGroupDisposition {
+    Absent,
+    Harmless { local_gshadow: String },
+}
+
+fn classify_fixed_ipc_group_with(
     group: &str,
+    read_accounts: &mut impl FnMut() -> Result<(String, String, String), ProbeUpgraderRunError>,
     run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
-) -> Result<(), ProbeUpgraderRunError> {
+) -> Result<FixedIpcGroupDisposition, ProbeUpgraderRunError> {
     let action = "verifying a fixed IPC group is absent or harmless";
-    let (local_group, local_gshadow, local_passwd) = read_local_fixed_ipc_group_accounts()?;
+    let (local_group, local_gshadow, local_passwd) = read_accounts()?;
     let nss_by_name = lookup_fixed_ipc_group_with(group, action, run)?;
-    if local_account_record(&local_group, group).is_none()
-        && local_account_record(&local_gshadow, group).is_none()
-        && nss_by_name.is_none()
-    {
-        return Ok(());
+    let group_records = local_account_record_count(&local_group, group);
+    let gshadow_records = local_account_record_count(&local_gshadow, group);
+    if group_records == 0 && gshadow_records == 0 && nss_by_name.is_none() {
+        return Ok(FixedIpcGroupDisposition::Absent);
+    }
+    if group_records != 1 || gshadow_records != 1 {
+        return Err(fixed_ipc_group_cleanup_error(
+            "probe_uninstall_service_group_residue",
+            action,
+            "local IPC group records are duplicate or incomplete",
+        ));
     }
     let Some(group_record) = local_account_record(&local_group, group) else {
         return Err(fixed_ipc_group_cleanup_error(
@@ -1180,7 +1284,7 @@ fn verify_fixed_ipc_group_absent_or_harmless_with(
         &nss_by_name,
         &nss_by_gid,
     )
-    .then_some(())
+    .then_some(FixedIpcGroupDisposition::Harmless { local_gshadow })
     .ok_or_else(|| {
         fixed_ipc_group_cleanup_error(
             "probe_uninstall_service_group_residue",
@@ -1190,36 +1294,30 @@ fn verify_fixed_ipc_group_absent_or_harmless_with(
     })
 }
 
-fn verify_fixed_ipc_group_marker_with(
+fn verify_fixed_ipc_group_absent_or_harmless_with(
     group: &str,
-    ownership_marker: Option<&str>,
+    run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
 ) -> Result<(), ProbeUpgraderRunError> {
-    let Some(ownership_marker) = ownership_marker else {
-        return Ok(());
-    };
-    let action = "verifying the lifecycle IPC group ownership";
-    let local_gshadow = fs::read_to_string("/etc/gshadow").map_err(|error| {
-        fixed_ipc_group_cleanup_error(
-            "probe_uninstall_service_group_verification_failed",
-            action,
-            error.to_string(),
-        )
-    })?;
-    local_account_record(&local_gshadow, group)
-        .is_some_and(|fields| fields.len() == 4 && fields[1] == ownership_marker)
-        .then_some(())
-        .ok_or_else(|| {
-            fixed_ipc_group_cleanup_error(
-                "probe_uninstall_service_group_residue",
-                action,
-                "lifecycle IPC group ownership receipt does not match",
-            )
-        })
+    classify_fixed_ipc_group_with(group, &mut read_local_fixed_ipc_group_accounts, run).map(|_| ())
 }
 
 fn remove_fixed_ipc_group_with(
     group: &str,
     ownership_marker: Option<&str>,
+    run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
+) -> Result<(), ProbeUpgraderRunError> {
+    remove_fixed_ipc_group_with_accounts(
+        group,
+        ownership_marker,
+        &mut read_local_fixed_ipc_group_accounts,
+        run,
+    )
+}
+
+fn remove_fixed_ipc_group_with_accounts(
+    group: &str,
+    ownership_marker: Option<&str>,
+    read_accounts: &mut impl FnMut() -> Result<(String, String, String), ProbeUpgraderRunError>,
     run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if !matches!(group, PROBE_IPC_GROUP | "enoki-observation-ipc") {
@@ -1230,10 +1328,22 @@ fn remove_fixed_ipc_group_with(
         ));
     }
     let action = "removing a fixed IPC group";
-    let Some(_) = lookup_fixed_ipc_group_with(group, action, run)? else {
+    let disposition = classify_fixed_ipc_group_with(group, read_accounts, run)?;
+    let FixedIpcGroupDisposition::Harmless { local_gshadow } = disposition else {
         return Ok(());
     };
-    verify_fixed_ipc_group_marker_with(group, ownership_marker)?;
+    if let Some(ownership_marker) = ownership_marker {
+        local_account_record(&local_gshadow, group)
+            .is_some_and(|fields| fields.len() == 4 && fields[1] == ownership_marker)
+            .then_some(())
+            .ok_or_else(|| {
+                fixed_ipc_group_cleanup_error(
+                    "probe_uninstall_service_group_residue",
+                    "verifying the lifecycle IPC group ownership",
+                    "lifecycle IPC group ownership receipt does not match",
+                )
+            })?;
+    }
     let output = run("groupdel", &[group]).map_err(|error| {
         fixed_ipc_group_cleanup_error(
             "probe_uninstall_service_group_remove_failed",
@@ -1242,10 +1352,10 @@ fn remove_fixed_ipc_group_with(
         )
     })?;
     if output.successful || output.code == Some(6) {
-        return verify_fixed_ipc_group_absent_or_harmless_with(group, run);
+        return classify_fixed_ipc_group_with(group, read_accounts, run).map(|_| ());
     }
     // groupdel 失败不能立即冒充成功；只有完整、可复验的无害记录才能暂留到最终 H5 后复验。
-    verify_fixed_ipc_group_absent_or_harmless_with(group, run)
+    classify_fixed_ipc_group_with(group, read_accounts, run).map(|_| ())
 }
 
 #[allow(clippy::too_many_arguments)]

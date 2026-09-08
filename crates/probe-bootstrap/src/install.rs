@@ -269,6 +269,12 @@ pub trait AccountPort {
     fn fixed_ipc_group_is_harmless(&mut self, _group_name: &str) -> Result<bool, InstallError> {
         Ok(false)
     }
+    fn fixed_ipc_group_is_absent_or_harmless(
+        &mut self,
+        _group_name: &str,
+    ) -> Result<bool, InstallError> {
+        Ok(false)
+    }
     fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
         Ok(())
     }
@@ -1851,7 +1857,10 @@ fn recover_interrupted_install(
                     .remove_transaction_identity(journal.transaction_id(), identity),
             ),
             Ok(false) if identity.is_some() => {
-                match ports.accounts.fixed_ipc_group_is_harmless(PROBE_IPC_GROUP) {
+                match ports
+                    .accounts
+                    .fixed_ipc_group_is_absent_or_harmless(PROBE_IPC_GROUP)
+                {
                     Ok(true) => {}
                     Ok(false) => failures.push(RollbackFailure::new(
                         RollbackStep::RemoveServiceIdentity,

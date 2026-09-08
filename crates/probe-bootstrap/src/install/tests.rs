@@ -54,6 +54,31 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn retired_fixed_ipc_group_rejects_duplicate_local_records_and_nss_members() {
+        let group = "enoki-probe-ipc:x:4242:";
+        let shadow = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::";
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n";
+        let nss = "enoki-probe-ipc:x:4242:";
+
+        assert!(!fixed_ipc_group_is_harmless_records(
+            "enoki-probe-ipc",
+            &format!("{group}\n{group}"),
+            shadow,
+            passwd,
+            nss,
+            nss,
+        ));
+        assert!(!fixed_ipc_group_is_harmless_records(
+            "enoki-probe-ipc",
+            group,
+            shadow,
+            passwd,
+            "enoki-probe-ipc:x:4242:outsider",
+            nss,
+        ));
+    }
+
     fn coordinate_fresh_install_for_test(
         components: VerifiedCompleteFreshComponents<'_>,
         enrollment: &Enrollment,

@@ -6,10 +6,10 @@ use super::{
 };
 use crate::upgrader::{
     ensure_absolute_path, is_lifecycle_companion_path, is_lifecycle_companion_service,
-    observation_services, preflight_rooted_path, read_trusted_probe_install_metadata_read_only,
-    read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
-    remove_empty_parent_dir, remove_path_if_exists, replacement::fixed_installed_probe_sha256,
-    sync_directory, verify_path_absent,
+    observation_services, observation_stop_services, preflight_rooted_path,
+    read_trusted_probe_install_metadata_read_only, read_trusted_probe_install_preflight,
+    rebase_trusted_install_metadata_paths, remove_empty_parent_dir, remove_path_if_exists,
+    replacement::fixed_installed_probe_sha256, sync_directory, verify_path_absent,
 };
 use enoki_probe_bootstrap::acquisition::{
     INSTALLED_BUNDLE_REPAIR_STAGE_ROOT, discard_validated_unadmitted_installed_bundle_repair_stage,
@@ -344,11 +344,10 @@ pub(super) fn prepare_probe_uninstall_cleanup(
 ) -> Result<(), ProbeUpgraderRunError> {
     let install_metadata = plan.install_metadata;
     if matches!(install_metadata.schema_version, 3..=5) {
-        for service in observation_services(install_metadata.schema_version)
+        for service in observation_stop_services(install_metadata.schema_version)
             .iter()
             .copied()
             .filter(|service| !is_lifecycle_companion_service(service))
-            .rev()
         {
             systemd.stop_service(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
@@ -1216,7 +1215,9 @@ mod tests {
         remove_uninstall_local_state_with, retire_unbound_installed_bundle_repair_stage_with,
         validate_owned_bootstrap_state,
     };
-    use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
+    use crate::upgrader::{
+        ProbeUninstallerRunInput, ProbeUpgraderRunError, observation_stop_services,
+    };
     use enoki_probe_bootstrap::replacement::{
         ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     };
@@ -2108,6 +2109,28 @@ mod tests {
         assert_eq!(
             retired,
             Some((Some(".pending-repair-01".to_owned()), 12345))
+        );
+    }
+
+    #[test]
+    fn schema_five_closes_activation_sockets_before_the_roles_they_can_start() {
+        let services = observation_stop_services(5);
+        let position = |service: &str| services.iter().position(|entry| *entry == service).unwrap();
+        assert!(
+            position("enoki-cpu-resource-provider.socket")
+                < position("enoki-cpu-resource-provider@*.service")
+        );
+        assert!(
+            position("enoki-disk-health-resource-provider.socket")
+                < position("enoki-disk-health-resource-provider@*.service")
+        );
+        assert!(
+            position("enoki-observation-runtime.socket")
+                < position("enoki-observation-runtime.service")
+        );
+        assert!(
+            position("enoki-observation-runtime.service")
+                < position("enoki-observation-runtime-failure.service")
         );
     }
 }
