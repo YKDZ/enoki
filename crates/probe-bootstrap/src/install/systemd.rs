@@ -151,6 +151,25 @@ fn require_fixed_unit_absent(
     require_absent_from_load_state(loaded)
 }
 
+fn require_rollback_unit_absent(
+    unit: &str,
+    output: &command::BoundedOutput,
+) -> Result<(), InstallError> {
+    // systemd 255 对没有任何实例匹配的已知 instance glob 返回 status=4 且没有 stdout。
+    // 这只说明该编译期 fixed glob 已收敛；普通 unit 的同样输出仍必须 fail closed。
+    if fixed_unit_is_instance_glob(unit)
+        && output.status.code() == Some(4)
+        && output.stdout.is_empty()
+    {
+        return Ok(());
+    }
+    let state = std::str::from_utf8(&output.stdout).map_err(|_| InstallError::Systemd)?;
+    if state.lines().count() != 1 || !state.lines().all(rollback_unit_is_absent) {
+        return Err(InstallError::Systemd);
+    }
+    Ok(())
+}
+
 impl SystemdPort for SystemSystemd {
     fn set_command_deadline(&mut self, deadline: Instant) {
         self.command_deadline = Some(deadline);
@@ -294,11 +313,7 @@ impl SystemdPort for SystemSystemd {
                 deadline,
                 COMMAND_STEP_BUDGET,
             )?;
-            let state = String::from_utf8(output.stdout).map_err(|_| InstallError::Systemd)?;
-            if state.lines().count() != 1 || !state.lines().all(rollback_unit_is_absent) {
-                return Err(InstallError::Systemd);
-            }
-            Ok(())
+            require_rollback_unit_absent(unit, &output)
         }) && first_error.is_none()
         {
             first_error = Some(error);
@@ -322,7 +337,7 @@ mod tests {
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
         SystemSystemd, attempt_all_fixed_units, canonical_restart_deadline, command,
         fixed_unit_is_instance_glob, require_absent_from_load_state, require_fixed_unit_absent,
-        rollback_unit_is_absent,
+        require_rollback_unit_absent, rollback_unit_is_absent,
     };
     use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
@@ -394,6 +409,55 @@ mod tests {
             require_fixed_unit_absent("enoki-probe.service", &empty),
             Err(InstallError::Systemd)
         );
+    }
+
+    #[test]
+    fn fixed_provider_glob_empty_systemd_255_is_active_result_is_absent() {
+        let empty_no_match = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(4 << 8),
+            stdout: Vec::new(),
+        };
+
+        for unit in [
+            "enoki-cpu-resource-provider@*.service",
+            "enoki-disk-health-resource-provider@*.service",
+        ] {
+            assert_eq!(require_rollback_unit_absent(unit, &empty_no_match), Ok(()));
+        }
+    }
+
+    #[test]
+    fn rollback_verify_rejects_empty_non_glob_and_non_absent_output() {
+        let empty_no_match = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(4 << 8),
+            stdout: Vec::new(),
+        };
+        assert_eq!(
+            require_rollback_unit_absent("enoki-probe.service", &empty_no_match),
+            Err(InstallError::Systemd)
+        );
+        let empty_command_failure = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+        };
+        assert_eq!(
+            require_rollback_unit_absent(
+                "enoki-cpu-resource-provider@*.service",
+                &empty_command_failure
+            ),
+            Err(InstallError::Systemd)
+        );
+
+        for stdout in [b"active\n".as_slice(), b"failed\n", b"inactive\nactive\n"] {
+            let output = command::BoundedOutput {
+                status: std::process::ExitStatus::from_raw(3 << 8),
+                stdout: stdout.to_vec(),
+            };
+            assert_eq!(
+                require_rollback_unit_absent("enoki-cpu-resource-provider@*.service", &output),
+                Err(InstallError::Systemd)
+            );
+        }
     }
 
     #[test]
