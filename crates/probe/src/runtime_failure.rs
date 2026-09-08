@@ -761,15 +761,37 @@ pub(crate) fn acquire_runtime_failure_pair_lock_for_state(
     Ok(RuntimeFailurePairLock { _file: file })
 }
 
+#[cfg(test)]
 pub(crate) fn acquire_runtime_failure_pair_cleanup_lock_for_state(
     state_dir: &Path,
     expected_uid: u32,
 ) -> std::io::Result<RuntimeFailurePairLock> {
-    let lock = acquire_runtime_failure_pair_lock_for_state(state_dir, expected_uid)?;
-    let failure_dir = state_dir.join("runtime-failure");
+    acquire_runtime_failure_pair_cleanup_lock_for_logical_and_concrete_state(
+        state_dir,
+        state_dir,
+        expected_uid,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn acquire_runtime_failure_pair_cleanup_lock_for_logical_and_concrete_state(
+    logical_state_dir: &Path,
+    concrete_state_dir: &Path,
+    expected_uid: u32,
+) -> std::io::Result<RuntimeFailurePairLock> {
+    let lock = acquire_runtime_failure_pair_lock_for_state(logical_state_dir, expected_uid)?;
+    cleanup_runtime_failure_pair_at_concrete_state(concrete_state_dir, expected_uid)?;
+    Ok(lock)
+}
+
+pub(crate) fn cleanup_runtime_failure_pair_at_concrete_state(
+    concrete_state_dir: &Path,
+    expected_uid: u32,
+) -> std::io::Result<()> {
+    let failure_dir = concrete_state_dir.join("runtime-failure");
     let metadata = match fs::symlink_metadata(&failure_dir) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(lock),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
     if !metadata.is_dir()
@@ -789,7 +811,7 @@ pub(crate) fn acquire_runtime_failure_pair_cleanup_lock_for_state(
             Err(error) => return Err(error),
         }
     }
-    Ok(lock)
+    Ok(())
 }
 
 pub(crate) fn runtime_failure_pair_lock_path_for_state(

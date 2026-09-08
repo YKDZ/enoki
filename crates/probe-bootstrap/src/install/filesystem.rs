@@ -96,6 +96,13 @@ pub(super) fn validate_component(
 }
 
 pub(super) fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    preflight_files_with_empty_state_shell(paths, false)
+}
+
+pub(super) fn preflight_files_with_empty_state_shell(
+    paths: &FixedInstallPaths,
+    allow_empty_state_shell: bool,
+) -> Result<(), InstallError> {
     for path in [
         paths.binary(),
         paths.observation_runtime_binary(),
@@ -122,7 +129,10 @@ pub(super) fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallEr
         paths.map("/etc/enoki/probe-bootstrap.toml"),
     ] {
         match fs::symlink_metadata(&path) {
-            Ok(_) if path == paths.state() && empty_state_shell(paths).is_ok() => {}
+            Ok(_)
+                if allow_empty_state_shell
+                    && path == paths.state()
+                    && empty_state_shell(paths).is_ok() => {}
             Ok(_) => return Err(InstallError::ExistingResidue),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(InstallError::Io),
@@ -136,15 +146,19 @@ pub(super) fn retire_empty_state_shell_for_fresh(
 ) -> Result<(), InstallError> {
     match empty_state_shell(paths)? {
         EmptyStateShell::Absent => Ok(()),
-        EmptyStateShell::Ordinary(path) => fs::remove_dir(path).map_err(|_| InstallError::Io),
+        EmptyStateShell::Ordinary(path) => {
+            fs::remove_dir(&path).map_err(|_| InstallError::Io)?;
+            sync_parent_directory(&path)
+        }
         EmptyStateShell::Canonical { public, private } => {
-            if let Err(error) = fs::remove_dir(private)
+            if let Err(error) = fs::remove_dir(&private)
                 && error.kind() != std::io::ErrorKind::NotFound
             {
                 return Err(InstallError::Io);
             }
-            match fs::remove_file(public) {
-                Ok(()) => Ok(()),
+            sync_parent_directory(&private)?;
+            match fs::remove_file(&public) {
+                Ok(()) => sync_parent_directory(&public),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(_) => Err(InstallError::Io),
             }

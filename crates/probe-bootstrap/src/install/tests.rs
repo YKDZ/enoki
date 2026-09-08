@@ -1650,6 +1650,48 @@ mod tests {
     }
 
     #[test]
+    fn fresh_second_preflight_rejects_a_shell_recreated_after_retirement() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir(paths.state()).unwrap();
+        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o750)).unwrap();
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE.with(|recreate| recreate.set(true));
+
+        assert_eq!(
+            activate_layout_without_roles_for_test(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue),
+            "the coordinator re-runs strict preflight after retirement"
+        );
+        assert!(
+            !temporary
+                .path()
+                .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
+                .exists(),
+            "the strict second preflight fails before a new journal begins"
+        );
+    }
+
+    #[test]
     fn fresh_machine_installs_bundled_bootstrap_receipts_before_probe_activation() {
         let temporary = tempdir().unwrap();
         for parent in [

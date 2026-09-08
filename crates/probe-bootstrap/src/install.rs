@@ -1245,7 +1245,7 @@ fn activate_verified_fresh_install_with_admission(
     let is_committed_resume = resumed_journal.is_some();
     if !is_committed_resume {
         preflight_parent_chains(paths)?;
-        preflight_files(paths)?;
+        preflight_files_with_empty_state_shell(paths, true)?;
         preflight_fixed_metadata_directory(&paths.etc_enoki())?;
         if bootstrap_components.is_some() {
             require_bootstrap_roles_absent(paths)?;
@@ -1260,9 +1260,8 @@ fn activate_verified_fresh_install_with_admission(
         ports.accounts.require_absent()?;
         ports.systemd.require_absent()?;
         retire_empty_state_shell_for_fresh(paths)?;
-        if fs::symlink_metadata(paths.state()).is_ok() {
-            return Err(InstallError::ExistingResidue);
-        }
+        #[cfg(test)]
+        recreate_state_shell_after_fresh_retirement_for_test(paths)?;
         preflight_files(paths)?;
     }
 
@@ -1625,6 +1624,25 @@ fn activate_verified_fresh_install_with_admission(
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn recreate_state_shell_after_fresh_retirement_for_test(
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
+    RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE.with(|recreate| {
+        if !recreate.replace(false) {
+            return Ok(());
+        }
+        fs::create_dir(paths.state()).map_err(|_| InstallError::Io)?;
+        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o750))
+            .map_err(|_| InstallError::Io)
+    })
 }
 
 fn abort_prepared_install(

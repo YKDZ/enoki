@@ -1,10 +1,10 @@
 use super::{
     CompanionBinaryFacts, LocalUninstallIntent, PostCommitSelfFinalizeFacts, ResumeDecision,
     UninstallCapsulePhase, adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
-    coordinate_at, coordinate_lifecycle_companion_recovery_at,
-    lifecycle_response_from_resume_decision, post_commit_self_finalize_policy,
-    read_uninstall_capsule, resume_lifecycle_companion_at, run_uninstall_lifecycle_adapter,
-    uninstall_capsule_path,
+    commit_replacement_and_cleanup_install_with_systemd, coordinate_at,
+    coordinate_lifecycle_companion_recovery_at, lifecycle_response_from_resume_decision,
+    post_commit_self_finalize_policy, read_uninstall_capsule, resume_lifecycle_companion_at,
+    run_uninstall_lifecycle_adapter, uninstall_capsule_path,
 };
 use crate::upgrader::replacement::ReplacementCoordinatorGuard;
 use crate::{
@@ -18,7 +18,9 @@ use crate::{
 use enoki_probe_bootstrap::{
     install::commit_current_layout_for_test,
     lifecycle::{LifecycleRequest, LifecycleResponse},
+    replacement::{ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent},
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
@@ -226,7 +228,7 @@ fn uninstall_coordinator_fixture(root: &Path) -> UninstallCoordinatorFixture {
         root.join("etc/systemd/system/enoki-probe-lifecycle-companion.socket"),
     ];
     let mut metadata = recovery_metadata(root);
-    metadata.state_dir = state_dir;
+    metadata.state_dir = state_dir.clone();
     metadata.identity_path = identity_path.clone();
     metadata.install_path = root.join("usr/local/bin/enoki-probe");
     metadata.service_unit_path = root.join("etc/systemd/system/enoki-probe.service");
@@ -285,6 +287,7 @@ fn uninstall_coordinator_fixture(root: &Path) -> UninstallCoordinatorFixture {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("trust entry mode");
     }
     fs::create_dir_all(identity_path.parent().unwrap()).expect("identity parent");
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o750)).expect("state root mode");
     fs::write(
         &identity_path,
         [
@@ -373,7 +376,7 @@ fn lifecycle_commit_deletes_only_the_capsule_before_process_self_finalization() 
 fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
     let trusted = PostCommitSelfFinalizeFacts {
         install_metadata_absent: true,
-        install_state_absent: true,
+        install_state_harmless: true,
         bootstrap_state_absent: true,
         companion_binary: CompanionBinaryFacts {
             regular_file: true,
@@ -393,7 +396,7 @@ fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
             ..trusted
         },
         PostCommitSelfFinalizeFacts {
-            install_state_absent: false,
+            install_state_harmless: false,
             ..trusted
         },
         PostCommitSelfFinalizeFacts {
@@ -1057,6 +1060,33 @@ fn production_recovery_resumes_when_capsule_retirement_fails_before_lock_retirem
     assert!(recovery_transport.status_url.is_empty());
 }
 
+#[test]
+fn production_recovery_resumes_a_retained_capsule_from_an_empty_state_shell() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let capsule_path = prepare_state_absent_terminal_capsule(temporary.path());
+    let state = temporary.path().join("var/lib/enoki-probe");
+    fs::create_dir(&state).expect("interrupted empty state shell");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o750))
+        .expect("trusted state shell mode");
+    assert!(
+        read_uninstall_capsule(&capsule_path)
+            .expect("read retained capsule")
+            .is_some()
+    );
+
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    let response = coordinate_lifecycle_companion_recovery_at(
+        Some(temporary.path()),
+        &mut transport,
+        &mut systemd,
+    );
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.is_empty());
+    assert!(transport.status_url.is_empty());
+}
+
 fn prepare_state_absent_terminal_capsule(root: &Path) -> PathBuf {
     let (capsule_path, interrupted) = finalize_terminal_capsule_with(root, |_| {
         Err(ProbeUpgraderRunError::Io(std::io::Error::other(
@@ -1367,6 +1397,82 @@ fn schema_five_uninstall_clears_the_exact_canonical_root_without_following_neste
         fs::read(&outside).expect("nested target survives"),
         b"must remain outside the trusted root"
     );
+}
+
+#[test]
+fn replacement_commit_coordinator_clears_the_exact_canonical_state_root() {
+    use std::os::unix::fs::symlink;
+
+    struct Store(Option<ReplacementCommitFact>);
+    impl ReplacementCommitStore for Store {
+        type Error = ();
+
+        fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
+            Ok(self.0.clone())
+        }
+
+        fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
+            self.0 = Some(fact.clone());
+            Ok(())
+        }
+    }
+
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    fs::write(
+        &fixture.metadata_path,
+        crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
+    )
+    .expect("schema five install metadata");
+    fs::set_permissions(&fixture.metadata_path, fs::Permissions::from_mode(0o600))
+        .expect("metadata mode");
+    fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
+        .expect("identity mode");
+    fs::set_permissions(
+        &fixture.metadata.install_path,
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("installed Probe mode");
+    commit_current_layout_for_test(temporary.path(), "1.2.3")
+        .expect("canonical install producer commits current-layout receipt");
+    let public = fixture.metadata.state_dir.clone();
+    let private = temporary.path().join("var/lib/private/enoki-probe");
+    fs::create_dir_all(private.parent().expect("private parent")).expect("private parent");
+    fs::rename(&public, &private).expect("move trusted state to canonical private root");
+    symlink("private/enoki-probe", &public).expect("exact canonical public link");
+    let source_probe_sha256 = format!(
+        "{:x}",
+        Sha256::digest(fs::read(&fixture.metadata.install_path).expect("installed Probe bytes"))
+    );
+    let intent = ReplacementIntent {
+        enrollment_id: "enr_0123456789abcdef".to_owned(),
+        enrollment_token_sha256: "a".repeat(64),
+        host_id: "7".to_owned(),
+        hub_origin: "https://hub.example".to_owned(),
+        old_probe_id: "probe_01".to_owned(),
+        source_probe_version: "1.2.3".to_owned(),
+        source_probe_sha256,
+        target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+        target_probe_version: "1.2.4".to_owned(),
+        target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+        target_manifest_sha256: "d".repeat(64),
+    };
+    let mut store = Store(None);
+    let mut systemd = RecordingSystemdRunner::default();
+
+    commit_replacement_and_cleanup_install_with_systemd(
+        intent,
+        &mut store,
+        Path::new("/etc/enoki/probe-install.toml"),
+        Some(temporary.path()),
+        &mut systemd,
+    )
+    .expect("committed Replacement coordinator clears canonical state");
+
+    assert!(fs::symlink_metadata(&public).is_err());
+    assert!(!private.exists());
+    assert!(!fixture.metadata_path.exists());
+    assert!(store.0.expect("durable commit").cleanup_complete);
 }
 
 #[test]
@@ -2019,36 +2125,47 @@ fn empty_resume_rejects_a_healthy_install_without_self_finalizing() {
 
 #[test]
 fn empty_resume_accepts_an_empty_state_shell_after_capsule_retirement() {
-    let temporary = tempfile::tempdir().expect("temporary directory");
-    let metadata = temporary.path().join("etc/enoki/probe-install.toml");
-    let state = temporary.path().join("var/lib/enoki-probe");
-    let binary = temporary
-        .path()
-        .join("usr/local/bin/enoki-probe-lifecycle-companion");
-    fs::create_dir_all(state.parent().expect("state parent")).expect("state parent");
-    fs::create_dir(&state).expect("empty trusted state shell");
-    fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).expect("state shell mode");
-    fs::create_dir_all(binary.parent().expect("companion parent")).expect("companion parent");
-    fs::write(&binary, "companion").expect("companion binary");
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("companion mode");
-    let mut transport = RecordingValidationTransport::default();
-    let mut systemd = RecordingSystemdRunner::default();
-    let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
+    use std::os::unix::fs::symlink;
 
-    let response = resume_lifecycle_companion_at(
-        &metadata,
-        &state,
-        &bootstrap_state,
-        &binary,
-        &mut transport,
-        &mut systemd,
-    );
+    for canonical_dangling in [false, true] {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = temporary.path().join("etc/enoki/probe-install.toml");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        let binary = temporary
+            .path()
+            .join("usr/local/bin/enoki-probe-lifecycle-companion");
+        fs::create_dir_all(state.parent().expect("state parent")).expect("state parent");
+        if canonical_dangling {
+            symlink("private/enoki-probe", &state).expect("exact dangling public root");
+        } else {
+            fs::create_dir(&state).expect("empty trusted state shell");
+            fs::set_permissions(&state, fs::Permissions::from_mode(0o750))
+                .expect("state shell mode");
+        }
+        fs::create_dir_all(binary.parent().expect("companion parent")).expect("companion parent");
+        fs::write(&binary, "companion").expect("companion binary");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("companion mode");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+        let bootstrap_state = temporary.path().join("var/lib/enoki-probe-bootstrap");
 
-    assert_eq!(response, LifecycleResponse::succeeded());
-    assert!(state.exists(), "no-capsule proof is read-only");
-    assert!(fs::read_dir(&state).unwrap().next().is_none());
-    assert!(transport.url.is_empty());
-    assert!(systemd.calls.is_empty());
+        let response = resume_lifecycle_companion_at(
+            &metadata,
+            &state,
+            &bootstrap_state,
+            &binary,
+            &mut transport,
+            &mut systemd,
+        );
+
+        assert_eq!(response, LifecycleResponse::succeeded());
+        assert!(
+            fs::symlink_metadata(&state).is_ok(),
+            "no-capsule proof is read-only"
+        );
+        assert!(transport.url.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
 }
 
 #[test]
