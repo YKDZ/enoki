@@ -63,6 +63,7 @@ fn main() {
     }
     let role = required("ENOKI_BOOTSTRAP_BUILD_ROLE");
     let boot_probe = env::var("ENOKI_BOOT_PROBE").as_deref() == Ok("1");
+    let companion_activator_trust = feature_enabled("CARGO_FEATURE_COMPANION_ACTIVATOR_TRUST");
     let role_variant = match role.as_str() {
         "acquirer"
             if feature_enabled("CARGO_FEATURE_ACQUIRER")
@@ -72,7 +73,8 @@ fn main() {
         }
         "activator"
             if feature_enabled("CARGO_FEATURE_ACTIVATOR")
-                && (!feature_enabled("CARGO_FEATURE_ACQUIRER") || boot_probe) =>
+                && (!feature_enabled("CARGO_FEATURE_ACQUIRER")
+                    || (boot_probe && companion_activator_trust)) =>
         {
             "BootstrapRole::Activator"
         }

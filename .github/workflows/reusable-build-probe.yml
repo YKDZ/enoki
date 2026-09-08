@@ -89,8 +89,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends
           musl-tools="${{ matrix.musl_tools_version }}"
 
-      - name: Build Probe
-        if: ${{ !inputs.verify-reproducible }}
+      - name: Build Probe for CI
+        if: ${{ !inputs.package-artifacts && !inputs.verify-reproducible }}
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace -C link-arg=-Wl,--build-id=none
+          SOURCE_DATE_EPOCH: "0"
+        run: >-
+          cargo build -p enoki-probe --release
+          --target ${{ matrix.target }}
+
+      - name: Build Probe for release artifacts
+        if: ${{ inputs.package-artifacts && !inputs.verify-reproducible }}
         env:
           CARGO_INCREMENTAL: "0"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc

@@ -25,6 +25,7 @@ default = []
 acquirer = ["dep:flate2", "dep:tar", "dep:ureq", "dep:url"]
 activator = []
 compiled-trust = []
+companion-activator-trust = []
 deterministic-test-seams = []
 
 [dependencies]
