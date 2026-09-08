@@ -2100,7 +2100,7 @@ fn service_unit() -> String {
 }
 
 fn lifecycle_companion_socket_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Probe Lifecycle Companion Socket\n\n[Socket]\nListenStream=/run/enoki-probe-lifecycle-companion.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe-ipc\nAccept=yes\nMaxConnections=1\nMaxConnectionsPerSource=1\nExecStopPost=/usr/bin/rm -rf -- /run/systemd/system/enoki-observation-runtime.service.d\n\n[Install]\nWantedBy=sockets.target\n"
+    "[Unit]\nDescription=Enoki Probe Lifecycle Companion Socket\n\n[Socket]\nListenStream=/run/enoki-probe-lifecycle-companion.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe-ipc\nAccept=yes\nMaxConnections=1\nMaxConnectionsPerSource=1\nExecStopPost=/usr/bin/rm -f -- /run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
 fn lifecycle_companion_unit() -> String {

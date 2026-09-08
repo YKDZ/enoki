@@ -454,18 +454,28 @@ impl RuntimeValidator for UnixRuntimeValidator {
         &mut self,
         validation: RuntimeValidation,
     ) -> Result<(), LiveInstalledBundleRepairError> {
-        crate::observation_runtime::UnixObservationRuntimeClient::production()
-            .request_finalized_window(Duration::from_secs(1), 0)
-            .map(|_| ())
-            .map_err(|_| match validation {
-                RuntimeValidation::Temporary => {
-                    contract_failure("probe_repair_runtime_validation_failed")
-                }
-                RuntimeValidation::Canonical => {
-                    contract_failure("probe_repair_canonical_runtime_validation_failed")
-                }
-            })
+        validate_runtime_window(
+            &crate::observation_runtime::UnixObservationRuntimeClient::production(),
+            validation,
+        )
     }
+}
+
+fn validate_runtime_window(
+    client: &impl crate::observation_runtime::ObservationWindowClient,
+    validation: RuntimeValidation,
+) -> Result<(), LiveInstalledBundleRepairError> {
+    client
+        .request_finalized_window(Duration::from_secs(1), 1)
+        .map(|_| ())
+        .map_err(|_| match validation {
+            RuntimeValidation::Temporary => {
+                contract_failure("probe_repair_runtime_validation_failed")
+            }
+            RuntimeValidation::Canonical => {
+                contract_failure("probe_repair_canonical_runtime_validation_failed")
+            }
+        })
 }
 
 const RUNTIME_REPAIR_RUN_DIR: &str = "/run/enoki-probe";
@@ -559,9 +569,12 @@ mod tests {
     use std::{
         cell::RefCell,
         fs,
+        io::Read,
         os::unix::fs::PermissionsExt,
+        os::unix::net::UnixListener,
         panic::{AssertUnwindSafe, catch_unwind},
         rc::Rc,
+        sync::mpsc,
     };
 
     use crate::runtime_failure::{
@@ -569,6 +582,75 @@ mod tests {
         installed_bundle_failure_is_current_at, resume_installed_bundle_repair_at,
         tests::{repair_completion_fixture, repair_test_bundle},
     };
+
+    #[test]
+    fn runtime_validation_requests_reach_the_unix_socket_with_the_minimum_sequence() {
+        let root = tempfile::tempdir().expect("temporary Runtime socket root");
+        let socket = root.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let (sender, request_receiver) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("Runtime connection");
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).expect("Runtime request");
+                sender.send(request).expect("record Runtime request");
+            }
+        });
+        let client = crate::observation_runtime::UnixObservationRuntimeClient::new(
+            socket,
+            "expected-bundle-version",
+        );
+
+        assert_eq!(
+            validate_runtime_window(&client, RuntimeValidation::Temporary)
+                .expect_err("closed peer must remain a validation failure")
+                .code(),
+            "probe_repair_runtime_validation_failed"
+        );
+        assert_eq!(
+            validate_runtime_window(&client, RuntimeValidation::Canonical)
+                .expect_err("closed peer must remain a validation failure")
+                .code(),
+            "probe_repair_canonical_runtime_validation_failed"
+        );
+        let mut expected = crate::observation_runtime::OBSERVATION_WINDOW_PULL.to_vec();
+        expected.extend_from_slice(&1_u16.to_be_bytes());
+        expected.extend_from_slice(&1_u64.to_be_bytes());
+        for _ in 0..2 {
+            assert_eq!(
+                request_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("Runtime request must reach Unix socket"),
+                expected
+            );
+        }
+        server.join().expect("Runtime receiver");
+    }
+
+    #[test]
+    fn runtime_gate_cleanup_removes_only_the_owned_drop_in_child() {
+        let root = tempfile::tempdir().expect("temporary repair root");
+        let parent = rooted(root.path(), RUNTIME_REPAIR_DROP_IN_DIR);
+        let owned_drop_in = rooted(root.path(), RUNTIME_REPAIR_DROP_IN);
+        let unknown_child = parent.join("operator.conf");
+        fs::create_dir_all(&parent).expect("validation parent");
+        fs::create_dir_all(rooted(root.path(), RUNTIME_REPAIR_RUN_DIR))
+            .expect("repair runtime directory");
+        write_mode(owned_drop_in.clone(), b"owned", 0o600);
+        write_mode(unknown_child.clone(), b"operator", 0o600);
+        write_mode(rooted(root.path(), RUNTIME_REPAIR_PERMIT), b"permit", 0o600);
+
+        remove_runtime_repair_validation_gate(root.path()).expect("owned gate cleanup");
+
+        assert!(!owned_drop_in.exists());
+        assert!(!rooted(root.path(), RUNTIME_REPAIR_PERMIT).exists());
+        assert!(
+            parent.is_dir(),
+            "cleanup must not recursively remove parent"
+        );
+        assert_eq!(fs::read(unknown_child).unwrap(), b"operator");
+    }
 
     struct TerminalRuntime;
 

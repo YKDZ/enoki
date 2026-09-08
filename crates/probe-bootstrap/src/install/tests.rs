@@ -4364,7 +4364,7 @@ mod tests {
             "BindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\n"
         ));
         assert!(socket.contains(
-            "ExecStopPost=/usr/bin/rm -rf -- /run/systemd/system/enoki-observation-runtime.service.d\n"
+            "ExecStopPost=/usr/bin/rm -f -- /run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf\n"
         ));
         assert!(!write_paths.contains(&"/var/lib/enoki-probe-registration"));
         assert!(write_paths.iter().all(|path| {
