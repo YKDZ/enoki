@@ -4223,7 +4223,7 @@ export function createProbeHostHarness({
       assertRunId(runId);
       const [inventoryResult, lifecycleCompanion, service, journald, sudoers] =
         await Promise.all([
-          execute(hostInventoryScript()),
+          execute(hostInventoryScript(), { root: true }),
           execute(lifecycleCompanionDiagnosticsScript(), { root: true }),
           execute(systemdEvidenceScript()),
           execute(journaldEvidenceScript(), { root: true }),
@@ -4481,9 +4481,12 @@ fixed_product_residue() {
   done
 }
 fixed_product_is_retired() {
-  residue=$(fixed_product_residue) || return 1
-  [ -z "$residue" ]
-}`;
+  (
+    residue=$(fixed_product_residue) || exit 1
+    [ -z "$residue" ]
+  )
+}
+`;
 }
 
 function hostInventoryScript() {

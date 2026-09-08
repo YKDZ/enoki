@@ -1904,9 +1904,16 @@ exit "$status"
     expect(claim).toContain("# enoki-release-e2e:claim-empty-recheck");
     expect(claim).not.toContain("runs/run-claim");
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-claim-acquire-"));
+    const fakeBin = path.join(root, "fake-bin");
     const mapped = claim
       .replaceAll("/var/lib/", `${root}/var/lib/`)
-      .replaceAll("/run/", `${root}/run/`);
+      .replaceAll("/run/", `${root}/run/`)
+      .replaceAll("/etc/", `${root}/etc/`)
+      .replaceAll("/usr/local/bin/", `${root}/usr/local/bin/`);
+    const runMapped = () =>
+      execFileAsync("sh", ["-c", mapped], {
+        env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+      });
     const token = claim.match(
       /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/,
     )?.[0];
@@ -1920,6 +1927,25 @@ exit "$status"
       "claim-acquiring",
     );
     try {
+      await mkdir(fakeBin, { recursive: true });
+      await mkdir(path.join(root, "etc"), { recursive: true });
+      await Promise.all(
+        ["group", "gshadow", "passwd"].map((name) =>
+          writeFile(path.join(root, "etc", name), "", "utf8"),
+        ),
+      );
+      await writeFile(
+        path.join(fakeBin, "getent"),
+        "#!/bin/sh\nexit 2\n",
+        "utf8",
+      );
+      await writeFile(
+        path.join(fakeBin, "systemctl"),
+        "#!/bin/sh\n[ \"$1\" != show ] || printf 'not-found\\n'\nexit 0\n",
+        "utf8",
+      );
+      await chmod(path.join(fakeBin, "getent"), 0o755);
+      await chmod(path.join(fakeBin, "systemctl"), 0o755);
       await mkdir(active, { recursive: true, mode: 0o700 });
       for (const [name, value] of [
         ["run-id", "run-claim\n"],
@@ -1952,6 +1978,12 @@ exit "$status"
       });
       await expect(lstat(unknown)).resolves.toBeDefined();
       await rm(unknown);
+      const legacyState = path.join(root, "var", "lib", "enoki-probe");
+      await mkdir(legacyState, { recursive: true, mode: 0o750 });
+      await writeFile(path.join(legacyState, "residue"), "data", "utf8");
+      await expect(runMapped()).rejects.toMatchObject({ code: 74 });
+      await expect(lstat(active)).rejects.toMatchObject({ code: "ENOENT" });
+      await rm(path.join(legacyState, "residue"));
       const lockRoot = path.join(root, "run", "enoki-release-e2e");
       await mkdir(lockRoot, { recursive: true, mode: 0o700 });
       await chmod(lockRoot, 0o755);
@@ -4731,11 +4763,15 @@ exit 0
   it("collects successful post-Uninstall systemd, journald, privilege, and filesystem observations", async () => {
     const commands = [];
     const harness = createProbeHostHarness({
-      execute: async (command) => {
-        commands.push(command);
+      execute: async (command, options) => {
+        commands.push({ command, options });
         if (command.includes("# enoki-release-e2e:inventory")) {
           return successfulCommand({
             accounts: { group: false, user: false },
+            fixedIpcGroups: {
+              "enoki-observation-ipc": "absent",
+              "enoki-probe-ipc": "absent",
+            },
             files: [],
             units: [],
           });
@@ -4775,6 +4811,10 @@ exit 0
       },
       inventory: {
         accounts: { group: false, user: false },
+        fixedIpcGroups: {
+          "enoki-observation-ipc": "absent",
+          "enoki-probe-ipc": "absent",
+        },
         files: [],
         units: [],
       },
@@ -4796,17 +4836,21 @@ exit 0
           "stage=post-uninstall\nLoadState=not-found\nActiveState=inactive\nunitCount=0\nfailedUnitCount=0\n",
       },
     });
-    const systemd = commands.find((command) =>
+    const inventory = commands.find(({ command }) =>
+      command.includes("# enoki-release-e2e:inventory"),
+    );
+    expect(inventory.options).toEqual({ root: true });
+    const systemd = commands.find(({ command }) =>
       command.includes("# enoki-release-e2e:systemd-evidence"),
     );
-    expect(systemd).toContain("set -eu");
-    expect(systemd).toContain("stage=post-uninstall");
-    expect(systemd).not.toContain("|| true");
-    const sudoers = commands.find((command) =>
+    expect(systemd.command).toContain("set -eu");
+    expect(systemd.command).toContain("stage=post-uninstall");
+    expect(systemd.command).not.toContain("|| true");
+    const sudoers = commands.find(({ command }) =>
       command.includes("# enoki-release-e2e:sudoers-evidence"),
     );
-    expect(sudoers).toContain("managedSudoersCount=0");
-    expect(sudoers).toContain("exit 1");
+    expect(sudoers.command).toContain("managedSudoersCount=0");
+    expect(sudoers.command).toContain("exit 1");
   });
 
   it("retains partial component diagnostics before Host ownership is established", async () => {
@@ -5378,17 +5422,8 @@ exit 0
       await chmod(path.join(fakeBin, "systemctl"), 0o755);
       await writeClaim(activeClaim);
       const mappedProduct = path.join(root, "var", "lib", "enoki-probe");
-      const mappedRuntime = path.join(
-        root,
-        "usr",
-        "local",
-        "bin",
-        "enoki-observation-runtime",
-      );
       await mkdir(mappedProduct, { recursive: true, mode: 0o750 });
       await writeFile(path.join(mappedProduct, "residue"), "data", "utf8");
-      await mkdir(path.dirname(mappedRuntime), { recursive: true });
-      await writeFile(mappedRuntime, "residue", "utf8");
       await expect(runMapped()).rejects.toMatchObject({
         code: 79,
       });
@@ -5396,7 +5431,6 @@ exit 0
         readFile(path.join(activeClaim, "resources"), "utf8"),
       ).resolves.toBe("exact-resource-evidence\n");
       await rm(path.join(mappedProduct, "residue"), { force: true });
-      await rm(mappedRuntime, { force: true });
       await expect(runMapped()).resolves.toMatchObject({
         stdout: "released\n",
       });
