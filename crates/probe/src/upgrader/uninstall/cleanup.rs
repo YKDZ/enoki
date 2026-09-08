@@ -34,6 +34,7 @@ mod test_fault_controls {
     thread_local! {
         pub(super) static STRICT_REPAIR_LOADER_FAILURE: Cell<bool> = const { Cell::new(false) };
         pub(super) static STATE_SHELL_RETIRE_FAILURE: Cell<bool> = const { Cell::new(false) };
+        pub(super) static EXPECTED_ROOT_OWNER: Cell<Option<(u32, u32)>> = const { Cell::new(None) };
     }
 }
 
@@ -212,6 +213,16 @@ pub(super) fn plan_committed_replacement_cleanup<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    // This is an admission-only projection: it establishes the fixed root's
+    // type, mode and exact owner before any service or filesystem cleanup.
+    // The executor deliberately repeats it while holding the pair lock.
+    trusted_state_root_layout(
+        &install_metadata.state_dir,
+        StateRootOwner::BoundService {
+            user: &install_metadata.service_user,
+            group: &install_metadata.service_group,
+        },
+    )?;
     if matches!(install_metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role_for_recovery(
             install_metadata.bootstrap_acquirer_path.as_deref(),
@@ -1077,15 +1088,26 @@ fn validate_state_root_directory(
 }
 
 fn state_root_owner_matches(metadata: &fs::Metadata, owner: StateRootOwner<'_>) -> bool {
+    let actual = (metadata.uid(), metadata.gid());
+    let root = expected_root_owner();
     match owner {
-        StateRootOwner::Root => (metadata.uid(), metadata.gid()) == expected_root_owner(),
+        StateRootOwner::Root => state_root_owner_tuple_matches(actual, root, None),
         StateRootOwner::BoundService { user, group } => {
-            (metadata.uid(), metadata.gid()) == expected_root_owner()
-                || service_identity_owner(user, group)
-                    .is_ok_and(|owner| (metadata.uid(), metadata.gid()) == owner)
+            if actual == root {
+                return true;
+            }
+            state_root_owner_tuple_matches(actual, root, service_identity_owner(user, group).ok())
         }
         StateRootOwner::EqualUidGid => metadata.uid() == metadata.gid(),
     }
+}
+
+fn state_root_owner_tuple_matches(
+    actual: (u32, u32),
+    root: (u32, u32),
+    service: Option<(u32, u32)>,
+) -> bool {
+    actual == root || service == Some(actual)
 }
 
 fn service_identity_owner(
@@ -1122,7 +1144,9 @@ fn expected_root_owner() -> (u32, u32) {
         // The filesystem adapter maps production root ownership to the test
         // process identity, so these fixtures remain meaningful in a
         // non-root CI worker without weakening the production predicate.
-        (unsafe { libc::geteuid() }, unsafe { libc::getegid() })
+        test_fault_controls::EXPECTED_ROOT_OWNER
+            .with(std::cell::Cell::get)
+            .unwrap_or_else(|| (unsafe { libc::geteuid() }, unsafe { libc::getegid() }))
     }
     #[cfg(not(test))]
     (0, 0)
@@ -1594,7 +1618,7 @@ fn sync_and_verify_bootstrap_state_retired(path: &Path) -> Result<(), ProbeUpgra
 
 #[cfg(test)]
 mod tests {
-    use super::test_fault_controls::STATE_SHELL_RETIRE_FAILURE;
+    use super::test_fault_controls::{EXPECTED_ROOT_OWNER, STATE_SHELL_RETIRE_FAILURE};
     use super::{
         ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
@@ -1603,7 +1627,8 @@ mod tests {
         plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery,
         prepare_probe_uninstall_cleanup, remove_lifecycle_companion_binary,
         remove_probe_bootstrap_state, remove_uninstall_local_state_with,
-        retire_unbound_installed_bundle_repair_stage_with, validate_owned_bootstrap_state,
+        retire_unbound_installed_bundle_repair_stage_with, state_root_owner_tuple_matches,
+        validate_owned_bootstrap_state,
     };
     use crate::upgrader::{
         ProbeUninstallerRunInput, ProbeUpgraderRunError, observation_stop_services,
@@ -1612,9 +1637,8 @@ mod tests {
         ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     };
     use std::{
-        ffi::CString,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink},
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::{Path, PathBuf},
         sync::mpsc::{self, RecvTimeoutError},
         thread,
@@ -1730,13 +1754,6 @@ mod tests {
         }
         fs::write(path, b"fixture").expect("write fixture");
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("fixture mode");
-    }
-
-    fn account_identity(name: &str) -> (u32, u32) {
-        let name = CString::new(name).expect("account name");
-        let account = unsafe { libc::getpwnam(name.as_ptr()) };
-        assert!(!account.is_null(), "account is available");
-        unsafe { ((*account).pw_uid, (*account).pw_gid) }
     }
 
     #[test]
@@ -2367,12 +2384,23 @@ mod tests {
     }
 
     #[test]
-    fn committed_replacement_clears_a_bound_legacy_service_owned_state_root() {
+    fn bound_service_owner_tuple_accepts_only_root_or_the_exact_service_pair() {
+        let root = (0, 0);
+        let service = (995, 995);
+
+        assert!(state_root_owner_tuple_matches(service, root, Some(service)));
+        assert!(state_root_owner_tuple_matches(root, root, Some(service)));
+        assert!(!state_root_owner_tuple_matches(
+            (996, 996),
+            root,
+            Some(service)
+        ));
+    }
+
+    #[test]
+    fn committed_replacement_keeps_identity_until_an_empty_state_shell() {
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let mut metadata = metadata(temporary.path(), 1);
-        metadata.service_user = "nobody".to_owned();
-        metadata.service_group = "nogroup".to_owned();
-        let (uid, gid) = account_identity("nobody");
+        let metadata = metadata(temporary.path(), 1);
         for path in [
             &metadata.identity_path,
             &metadata.install_path,
@@ -2381,7 +2409,6 @@ mod tests {
         ] {
             create_file(path, 0o600);
         }
-        chown(&metadata.state_dir, Some(uid), Some(gid)).expect("legacy service-owned state root");
         let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
         create_file(&install_metadata_path, 0o600);
         let input = ProbeUninstallerRunInput {
@@ -2393,7 +2420,7 @@ mod tests {
 
         STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(true));
         execute_committed_replacement_cleanup(&plan, &mut systemd)
-            .expect("Replacement clears the producer-bound legacy service state root");
+            .expect("Replacement clears the state root before retiring its identity");
         STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
 
         assert!(
@@ -2405,7 +2432,7 @@ mod tests {
                 .expect("state shell remains readable")
                 .next()
                 .is_none(),
-            "the service-owned shell is empty before identity retirement"
+            "the state shell is empty before identity retirement"
         );
         assert!(
             install_metadata_path.exists(),
@@ -2414,12 +2441,11 @@ mod tests {
     }
 
     #[test]
-    fn committed_replacement_rejects_a_mismatched_ordinary_state_owner_before_retiring_identity() {
+    fn committed_replacement_planner_rejects_mismatched_owner_before_cleanup_effects() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let mut metadata = metadata(temporary.path(), 1);
-        metadata.service_user = "nobody".to_owned();
-        metadata.service_group = "nogroup".to_owned();
-        let (uid, gid) = account_identity("daemon");
+        metadata.service_user = "daemon".to_owned();
+        metadata.service_group = "daemon".to_owned();
         for path in [
             &metadata.identity_path,
             &metadata.install_path,
@@ -2428,31 +2454,31 @@ mod tests {
         ] {
             create_file(path, 0o600);
         }
-        chown(&metadata.state_dir, Some(uid), Some(gid)).expect("mismatched state root");
         let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
         create_file(&install_metadata_path, 0o600);
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
         };
-        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
-            .expect("committed Replacement plan");
-        let mut systemd = TestSystemd::default();
 
-        let error = execute_committed_replacement_cleanup(&plan, &mut systemd)
-            .expect_err("unknown service owner must fail closed");
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(Some((u32::MAX, u32::MAX))));
+        let error = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect_err("unknown service owner must fail closed during planning");
+        EXPECTED_ROOT_OWNER.with(|owner| owner.set(None));
 
         assert!(matches!(
             error,
             ProbeUpgraderRunError::InvalidInstallMetadata(_)
         ));
-        assert!(metadata.state_dir.exists(), "state was not cleared");
-        assert!(
-            !systemd
-                .calls
-                .iter()
-                .any(|call| call.starts_with("remove-identity")),
-            "identity retirement follows state cleanup"
-        );
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+            &metadata.state_dir,
+            &install_metadata_path,
+        ] {
+            assert!(path.exists(), "planner admission did not clean {path:?}");
+        }
     }
 
     #[test]
