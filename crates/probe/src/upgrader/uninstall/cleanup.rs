@@ -1023,12 +1023,11 @@ fn retire_state_shell(layout: &TrustedStateRoot) -> std::io::Result<()> {
     #[cfg(test)]
     if test_fault_controls::STATE_SHELL_RETIRE_CANONICAL_PROJECTION_CHANGE
         .with(std::cell::Cell::get)
+        && let TrustedStateRoot::Canonical { public, .. } = layout
     {
-        if let TrustedStateRoot::Canonical { public, .. } = layout {
-            fs::remove_file(public)?;
-            std::os::unix::fs::symlink("private/untrusted", public)?;
-            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-        }
+        fs::remove_file(public)?;
+        std::os::unix::fs::symlink("private/untrusted", public)?;
+        return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     }
     #[cfg(test)]
     if test_fault_controls::STATE_SHELL_RETIRE_FAILURE.with(std::cell::Cell::get) {
