@@ -286,6 +286,15 @@ where
             .map_err(|_| contract_failure("probe_repair_systemd_failed"))
     }
 
+    fn quiesce_status_published(&mut self) -> Result<(), Self::Error> {
+        mask_canonical_runtime_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))
+    }
+
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error> {
         mask_runtime_validation_socket(&mut self.context.runner)?;
         remove_runtime_repair_validation_gate(&self.context.root)?;
@@ -585,7 +594,7 @@ fn install_runtime_repair_validation_gate(
     .map_err(|_| contract_failure("probe_repair_validation_gate_failed"))?;
     let drop_in = match validation {
         RuntimeValidation::Temporary => b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n".as_slice(),
-        RuntimeValidation::Canonical => b"[Unit]\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n".as_slice(),
+        RuntimeValidation::Canonical => b"[Unit]\nConditionPathExists=\nConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n".as_slice(),
     };
     atomic_write(
         &rooted(root, RUNTIME_REPAIR_DROP_IN),
@@ -723,6 +732,39 @@ mod tests {
             "cleanup must not recursively remove parent"
         );
         assert_eq!(fs::read(unknown_child).unwrap(), b"operator");
+    }
+
+    #[test]
+    fn validation_gate_projects_the_temporary_and_canonical_condition_shapes() {
+        let root = tempfile::tempdir().unwrap();
+        let conditions = |contents: &str| {
+            contents
+                .lines()
+                .filter_map(|line| line.strip_prefix("ConditionPathExists="))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+
+        install_runtime_repair_validation_gate(root.path(), RuntimeValidation::Temporary).unwrap();
+        let temporary = fs::read_to_string(rooted(root.path(), RUNTIME_REPAIR_DROP_IN)).unwrap();
+        assert_eq!(
+            conditions(&temporary),
+            vec!["", "/run/enoki-probe/runtime-repair-permit"],
+            "Temporary must clear the ordinary conditions before permitting the root validator"
+        );
+
+        remove_runtime_repair_validation_gate(root.path()).unwrap();
+        install_runtime_repair_validation_gate(root.path(), RuntimeValidation::Canonical).unwrap();
+        let canonical = fs::read_to_string(rooted(root.path(), RUNTIME_REPAIR_DROP_IN)).unwrap();
+        assert_eq!(
+            conditions(&canonical),
+            vec![
+                "",
+                "!/var/lib/enoki-probe/runtime-failure/latch",
+                "/run/enoki-probe/runtime-repair-permit",
+            ],
+            "Canonical validation must retain latch admission while bypassing only the J barrier"
+        );
     }
 
     struct TerminalRuntime;
@@ -1201,7 +1243,7 @@ mod tests {
         }
     }
 
-    fn fixed_live_effect_order() -> [FaultEvent; 39] {
+    fn fixed_live_effect_order() -> [FaultEvent; 42] {
         [
             FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
@@ -1232,8 +1274,11 @@ mod tests {
             FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::SystemdReload,
-            FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
+            FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::SystemdReload,
             FaultEvent::StageRetirement,
+            FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
             FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::SystemdReload,
@@ -1334,7 +1379,7 @@ mod tests {
                 InstalledBundleRepairCrashPoint::Reload
                 | InstalledBundleRepairCrashPoint::Cleanup(_)
                 | InstalledBundleRepairCrashPoint::Complete => 6,
-                InstalledBundleRepairCrashPoint::JournalCleanup => 30,
+                InstalledBundleRepairCrashPoint::JournalCleanup => 34,
             };
             assert_eq!(
                 transcript,
@@ -1723,6 +1768,76 @@ mod tests {
                 .path()
                 .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn status_published_retires_stage_before_the_restore_journal() {
+        let fixture = LiveFixture::new();
+        set_installed_bundle_repair_crash_for_test(InstalledBundleRepairCrashPoint::JournalCleanup)
+            .unwrap();
+
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err(),
+            "journal unlink crash must interrupt the live driver"
+        );
+        assert!(
+            !fixture.stage.exists(),
+            "StatusPublished must retire the verified stage before the J-last cleanup can begin"
+        );
+        let restored_runtime = fs::read_to_string(
+            fixture
+                .root
+                .path()
+                .join("etc/systemd/system/enoki-observation-runtime.service"),
+        )
+        .unwrap();
+        let conditions = restored_runtime
+            .lines()
+            .filter_map(|line| line.strip_prefix("ConditionPathExists="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            conditions,
+            [
+                "!/var/lib/enoki-probe/runtime-failure/latch",
+                "!/var/lib/enoki-probe-bootstrap/installed-bundle-repair.json",
+            ],
+            "the restored signed Runtime unit must retain the reboot barrier before J cleanup"
+        );
+    }
+
+    #[test]
+    fn status_published_journal_absence_requires_a_durable_parent_sync_before_final_activation() {
+        let fixture = LiveFixture::new();
+        set_installed_bundle_repair_crash_for_test(InstalledBundleRepairCrashPoint::JournalCleanup)
+            .unwrap();
+
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err()
+        );
+        assert!(!fixture.stage.exists());
+        let bootstrap_state = fixture.root.path().join("var/lib/enoki-probe-bootstrap");
+        fs::remove_dir(&bootstrap_state).unwrap();
+
+        assert!(
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_err(),
+            "J absence without a repeatable parent sync must remain typed incomplete"
+        );
+        assert!(
+            fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .exists(),
+            "failed J absence verification must retain the StatusPublished resume authority"
         );
     }
 

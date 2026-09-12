@@ -4734,6 +4734,10 @@ pub(super) mod tests {
             Ok(())
         }
 
+        fn quiesce_status_published(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         fn error_code<'a>(&self, error: &'a Self::Error) -> &'a str {
             error.0
         }

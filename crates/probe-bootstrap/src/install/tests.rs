@@ -296,6 +296,24 @@ mod tests {
     }
 
     #[test]
+    fn canonical_runtime_projection_requires_latch_and_restore_journal_absence() {
+        let conditions = observation_runtime_unit()
+            .lines()
+            .filter_map(|line| line.strip_prefix("ConditionPathExists="))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            conditions,
+            vec![
+                "!/var/lib/enoki-probe/runtime-failure/latch",
+                "!/var/lib/enoki-probe-bootstrap/installed-bundle-repair.json",
+            ],
+            "signed canonical Runtime projection must reject both an active latch and an unretired restore journal"
+        );
+    }
+
+    #[test]
     fn proc_subset_units_make_only_already_hidden_proc_paths_optional() {
         let hidden_proc_paths = [
             "/proc/stat",

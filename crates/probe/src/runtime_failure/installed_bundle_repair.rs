@@ -224,6 +224,7 @@ pub(crate) trait InstalledBundleRepairEffects {
     fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error>;
     fn validate_canonical_runtime(&mut self) -> Result<(), Self::Error>;
     fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error>;
+    fn quiesce_status_published(&mut self) -> Result<(), Self::Error>;
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error>;
     fn verify_bundle_restore_complete(
         &mut self,
@@ -393,10 +394,13 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
         })?
     };
     effects
-        .retire_bundle_restore(&stage_receipt, stage_owner_uid, grant.authority())
+        .quiesce_status_published()
         .map_err(InstalledBundleRepairDriveError::Effect)?;
     effects
         .remove_stage(&stage_receipt.operation_id, stage_owner_uid)
+        .map_err(InstalledBundleRepairDriveError::Effect)?;
+    effects
+        .retire_bundle_restore(&stage_receipt, stage_owner_uid, grant.authority())
         .map_err(InstalledBundleRepairDriveError::Effect)?;
     effects
         .activate_final_ordinary_probe()
