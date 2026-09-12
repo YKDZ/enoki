@@ -3302,7 +3302,7 @@ exit 1
             });
           }
           return successfulCommandText(
-            `bundleVersion=1.2.3\nfaultBackupExists=1\nrepairOutput=Probe repair completed.\nruntimeSha256=${runtimeSha256}\nunit=enoki-observation-runtime.service\n`,
+            `bundleVersion=1.2.3\nfaultBackupExists=1\nrepairOutput=本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准\nruntimeSha256=${runtimeSha256}\nunit=enoki-observation-runtime.service\n`,
           );
         },
         ownershipToken: "00000000-0000-4000-8000-000000000001",
@@ -3458,7 +3458,7 @@ exit 1
             [
               "bundleVersion=1.2.3",
               "faultBackupExists=1",
-              "repairOutput=Probe repair completed.",
+              "repairOutput=本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准",
               `runtimeSha256=${runtimeSha256}`,
               "unit=enoki-observation-runtime.service",
               "",
