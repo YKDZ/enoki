@@ -195,7 +195,7 @@ where
     }
 
     fn validate_temporary_runtime(&mut self) -> Result<(), Self::Error> {
-        install_runtime_repair_validation_gate(&self.context.root)?;
+        install_runtime_repair_validation_gate(&self.context.root, RuntimeValidation::Temporary)?;
         self.context
             .crash
             .after(LiveRepairEffect::TemporaryGateInstalled)?;
@@ -212,13 +212,17 @@ where
         self.context.runtime.validate(RuntimeValidation::Temporary)
     }
 
-    fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error> {
-        restore_canonical_runtime_gate(
+    fn normalize_canonical_runtime(&mut self) -> Result<(), Self::Error> {
+        install_canonical_runtime_gate(
             &self.context.root,
             &mut self.context.systemd,
             &mut self.context.runner,
             &mut self.context.crash,
-        )?;
+        )
+    }
+
+    fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error> {
+        self.normalize_canonical_runtime()?;
         self.context
             .systemd
             .start()
@@ -235,12 +239,46 @@ where
             .run(RepairSystemdAction::ResetRuntimeFailed)?;
         self.context
             .runner
+            .run(RepairSystemdAction::UnmaskRuntimeSocket)?;
+        self.context
+            .runner
             .run(RepairSystemdAction::StartRuntimeSocket)?;
-        self.context.runtime.validate(RuntimeValidation::Canonical)
+        self.context
+            .runtime
+            .validate(RuntimeValidation::Canonical)?;
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))
+    }
+
+    fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error> {
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::UnmaskRuntimeSocket)?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::StartRuntimeSocket)?;
+        self.context
+            .systemd
+            .start()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        self.context
+            .systemd
+            .wait_local_activated()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))
     }
 
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error> {
-        restore_canonical_runtime_gate(
+        install_canonical_runtime_gate(
             &self.context.root,
             &mut self.context.systemd,
             &mut self.context.runner,
@@ -366,10 +404,10 @@ impl RepairStageOpener for ProductionStageOpener {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepairSystemdAction {
     StopRepairServices,
+    StopCanonicalRuntime,
     MaskRuntimeSocket,
     ResetRuntimeFailed,
     StartRuntimeSocket,
-    StopRuntime,
     UnmaskRuntimeSocket,
 }
 
@@ -388,6 +426,11 @@ impl FixedRepairSystemdRunner for ProcessRepairSystemdRunner {
                 "enoki-observation-runtime.socket",
                 "enoki-observation-runtime.service",
             ],
+            RepairSystemdAction::StopCanonicalRuntime => &[
+                "stop",
+                "enoki-observation-runtime.socket",
+                "enoki-observation-runtime.service",
+            ],
             RepairSystemdAction::MaskRuntimeSocket => {
                 &["mask", "--runtime", "enoki-observation-runtime.socket"]
             }
@@ -397,7 +440,6 @@ impl FixedRepairSystemdRunner for ProcessRepairSystemdRunner {
             RepairSystemdAction::StartRuntimeSocket => {
                 &["start", "enoki-observation-runtime.socket"]
             }
-            RepairSystemdAction::StopRuntime => &["stop", "enoki-observation-runtime.service"],
             RepairSystemdAction::UnmaskRuntimeSocket => {
                 &["unmask", "--runtime", "enoki-observation-runtime.socket"]
             }
@@ -497,6 +539,7 @@ fn mask_runtime_validation_socket(
 
 fn install_runtime_repair_validation_gate(
     root: &Path,
+    validation: RuntimeValidation,
 ) -> Result<(), LiveInstalledBundleRepairError> {
     let uid = unsafe { libc::geteuid() };
     ensure_directory(
@@ -518,9 +561,13 @@ fn install_runtime_repair_validation_gate(
         Some((uid, uid)),
     )
     .map_err(|_| contract_failure("probe_repair_validation_gate_failed"))?;
+    let drop_in = match validation {
+        RuntimeValidation::Temporary => b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n".as_slice(),
+        RuntimeValidation::Canonical => b"[Unit]\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n".as_slice(),
+    };
     atomic_write(
         &rooted(root, RUNTIME_REPAIR_DROP_IN),
-        b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n",
+        drop_in,
         0o600,
         Some((uid, uid)),
     )
@@ -541,19 +588,23 @@ fn remove_runtime_repair_validation_gate(
     Ok(())
 }
 
-fn restore_canonical_runtime_gate(
+fn install_canonical_runtime_gate(
     root: &Path,
     systemd: &mut impl SystemdPort,
     runner: &mut impl FixedRepairSystemdRunner,
     crash: &mut impl LiveRepairCrashHook,
 ) -> Result<(), LiveInstalledBundleRepairError> {
-    runner.run(RepairSystemdAction::StopRuntime)?;
+    runner.run(RepairSystemdAction::StopCanonicalRuntime)?;
+    runner.run(RepairSystemdAction::MaskRuntimeSocket)?;
     remove_runtime_repair_validation_gate(root)?;
     crash.after(LiveRepairEffect::CanonicalGateRemoved)?;
     systemd
         .daemon_reload()
         .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
-    runner.run(RepairSystemdAction::UnmaskRuntimeSocket)
+    install_runtime_repair_validation_gate(root, RuntimeValidation::Canonical)?;
+    systemd
+        .daemon_reload()
+        .map_err(|_| contract_failure("probe_repair_systemd_failed"))
 }
 
 fn contract_failure(code: &'static str) -> LiveInstalledBundleRepairError {
@@ -739,10 +790,6 @@ mod tests {
         fn start(&mut self) -> Result<(), InstallError> {
             self.transcript.borrow_mut().push("start-probe");
             let mut state = self.state.borrow_mut();
-            assert!(
-                !state.socket_masked,
-                "Probe cannot start behind a masked gate"
-            );
             state.services_stopped = false;
             state.probe_started = true;
             drop(state);
@@ -794,8 +841,11 @@ mod tests {
                     state.probe_active = false;
                     state.socket_started = false;
                 }
+                RepairSystemdAction::StopCanonicalRuntime => {
+                    state.runtime_stopped = true;
+                    state.socket_started = false;
+                }
                 RepairSystemdAction::MaskRuntimeSocket => {
-                    assert!(state.services_stopped);
                     state.socket_masked = true;
                     state.socket_started = false;
                 }
@@ -806,10 +856,6 @@ mod tests {
                     assert!(!state.socket_masked);
                     state.socket_started = true;
                     state.runtime_stopped = false;
-                }
-                RepairSystemdAction::StopRuntime => {
-                    state.runtime_stopped = true;
-                    state.socket_started = false;
                 }
                 RepairSystemdAction::UnmaskRuntimeSocket => state.socket_masked = false,
             }
@@ -1112,13 +1158,10 @@ mod tests {
             FaultEvent::ProbeWait => assert!(state.probe_active),
             FaultEvent::Runner(action) => match action {
                 RepairSystemdAction::StopRepairServices => assert!(state.services_stopped),
+                RepairSystemdAction::StopCanonicalRuntime => assert!(state.runtime_stopped),
                 RepairSystemdAction::MaskRuntimeSocket => assert!(state.socket_masked),
                 RepairSystemdAction::ResetRuntimeFailed => assert!(state.probe_active),
                 RepairSystemdAction::StartRuntimeSocket => assert!(state.socket_started),
-                RepairSystemdAction::StopRuntime => {
-                    assert!(state.runtime_stopped);
-                    assert!(!state.socket_started);
-                }
                 RepairSystemdAction::UnmaskRuntimeSocket => assert!(!state.socket_masked),
             },
             FaultEvent::Runtime(RuntimeValidation::Temporary) => {
@@ -1131,7 +1174,7 @@ mod tests {
         }
     }
 
-    fn fixed_live_effect_order() -> [FaultEvent; 23] {
+    fn fixed_live_effect_order() -> [FaultEvent; 35] {
         [
             FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
@@ -1144,17 +1187,29 @@ mod tests {
             FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
             FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
             FaultEvent::Runtime(RuntimeValidation::Temporary),
-            FaultEvent::Runner(RepairSystemdAction::StopRuntime),
+            FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved),
             FaultEvent::SystemdReload,
-            FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
+            FaultEvent::SystemdReload,
             FaultEvent::ProbeStart,
             FaultEvent::ProbeWait,
             FaultEvent::Runner(RepairSystemdAction::ResetRuntimeFailed),
+            FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
             FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
             FaultEvent::Runtime(RuntimeValidation::Canonical),
+            FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::SystemdReload,
             FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
             FaultEvent::StageRetirement,
+            FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::SystemdReload,
+            FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
+            FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
+            FaultEvent::ProbeStart,
+            FaultEvent::ProbeWait,
             FaultEvent::Gate(LiveRepairEffect::IntentRetired),
         ]
     }
@@ -1179,8 +1234,12 @@ mod tests {
                 .copied()
                 .collect(),
             6..=10 => baseline[6..].to_vec(),
-            11..=16 => baseline[11..].to_vec(),
-            17..=19 => baseline[17..].to_vec(),
+            11..=17 => baseline[11..].to_vec(),
+            18..=21 => baseline[11..16]
+                .iter()
+                .chain(&baseline[18..])
+                .copied()
+                .collect(),
             _ => unreachable!(),
         };
         let expected = baseline[..=cut]
@@ -1244,7 +1303,7 @@ mod tests {
                 InstalledBundleRepairCrashPoint::Reload
                 | InstalledBundleRepairCrashPoint::Cleanup(_)
                 | InstalledBundleRepairCrashPoint::Complete => 6,
-                InstalledBundleRepairCrashPoint::JournalCleanup => 21,
+                InstalledBundleRepairCrashPoint::JournalCleanup => 26,
             };
             assert_eq!(
                 transcript,
@@ -1322,7 +1381,10 @@ mod tests {
                 1,
             ),
             (FaultEvent::Runtime(RuntimeValidation::Temporary), 1),
-            (FaultEvent::Runner(RepairSystemdAction::StopRuntime), 1),
+            (
+                FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+                1,
+            ),
             (FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved), 1),
             (FaultEvent::SystemdReload, 4),
             (

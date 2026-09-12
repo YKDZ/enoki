@@ -13,6 +13,29 @@ const MAX_STDOUT: u64 = 4097;
 pub(super) struct BoundedOutput {
     pub status: ExitStatus,
     pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> bool {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0
+}
+
+fn drain_pipe(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> Result<bool, ()> {
+    let mut chunk = [0_u8; 512];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(read) => {
+                bytes.extend_from_slice(&chunk[..read]);
+                if bytes.len() as u64 >= MAX_STDOUT {
+                    return Err(());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(_) => return Err(()),
+        }
+    }
 }
 
 /// 在单步与事务总 deadline 内运行固定主机命令。超时返回前必须终止并回收子进程，
@@ -35,7 +58,7 @@ pub(super) fn run_bounded(
         .env("LANG", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     // 固定主机命令仍可能 fork；每一步使用独立进程组，使超时清理在回收前关闭继承管道。
     unsafe {
         command.pre_exec(|| {
@@ -48,45 +71,54 @@ pub(super) fn run_bounded(
     }
     let mut child = command.spawn().map_err(|_| error.clone())?;
     let mut stdout = child.stdout.take().ok_or_else(|| error.clone())?;
-    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
-    {
+    let mut stderr = child.stderr.take().ok_or_else(|| error.clone())?;
+    if !set_nonblocking(stdout.as_raw_fd()) || !set_nonblocking(stderr.as_raw_fd()) {
         let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        drop(stdout);
+        drop(stderr);
         let _ = child.wait();
         return Err(error);
     }
-    let mut bytes = Vec::new();
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
     let mut child_status = None;
     loop {
-        let mut chunk = [0_u8; 512];
-        loop {
-            match stdout.read(&mut chunk) {
-                Ok(0) if child_status.is_some() => {
-                    return Ok(BoundedOutput {
-                        status: child_status.expect("status was checked"),
-                        stdout: bytes,
-                    });
-                }
-                Ok(0) => break,
-                Ok(read) => {
-                    bytes.extend_from_slice(&chunk[..read]);
-                    if bytes.len() as u64 >= MAX_STDOUT {
-                        child_status = None;
-                        break;
-                    }
-                }
-                Err(read_error) if read_error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => {
-                    child_status = None;
-                    break;
+        if !stdout_closed {
+            match drain_pipe(&mut stdout, &mut stdout_bytes) {
+                Ok(closed) => stdout_closed = closed,
+                Err(()) => {
+                    let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                    let _ = child.kill();
+                    drop(stdout);
+                    drop(stderr);
+                    let _ = child.wait();
+                    return Err(error);
                 }
             }
         }
-        if bytes.len() as u64 >= MAX_STDOUT || Instant::now() >= deadline {
+        if !stderr_closed {
+            match drain_pipe(&mut stderr, &mut stderr_bytes) {
+                Ok(closed) => stderr_closed = closed,
+                Err(()) => {
+                    let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                    let _ = child.kill();
+                    drop(stdout);
+                    drop(stderr);
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+        }
+        if stdout_bytes.len() as u64 >= MAX_STDOUT
+            || stderr_bytes.len() as u64 >= MAX_STDOUT
+            || Instant::now() >= deadline
+        {
             let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
             let _ = child.kill();
             drop(stdout);
+            drop(stderr);
             let _ = child.wait();
             return Err(error);
         }
@@ -98,10 +130,21 @@ pub(super) fn run_bounded(
                     let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                     let _ = child.kill();
                     drop(stdout);
+                    drop(stderr);
                     let _ = child.wait();
                     return Err(error);
                 }
             }
+        }
+        if let Some(status) = child_status
+            && stdout_closed
+            && stderr_closed
+        {
+            return Ok(BoundedOutput {
+                status,
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            });
         }
         std::thread::sleep(POLL_INTERVAL);
     }
@@ -151,6 +194,23 @@ mod tests {
             run_bounded(
                 "/bin/sh",
                 &["-c", "sleep 10 &"],
+                InstallError::Systemd,
+                Instant::now() + Duration::from_secs(1),
+                Duration::from_millis(50),
+            )
+            .map(|_| ()),
+            Err(InstallError::Systemd)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stderr_flood_is_drained_and_terminated_within_the_step_budget() {
+        let started = Instant::now();
+        assert_eq!(
+            run_bounded(
+                "/bin/sh",
+                &["-c", "yes blocked >&2"],
                 InstallError::Systemd,
                 Instant::now() + Duration::from_secs(1),
                 Duration::from_millis(50),

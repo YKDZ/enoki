@@ -220,8 +220,10 @@ pub(crate) trait InstalledBundleRepairEffects {
         authority: &InstalledBundleRepairAuthorityV1,
     ) -> Result<(), Self::Error>;
     fn validate_temporary_runtime(&mut self) -> Result<(), Self::Error>;
+    fn normalize_canonical_runtime(&mut self) -> Result<(), Self::Error>;
     fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error>;
     fn validate_canonical_runtime(&mut self) -> Result<(), Self::Error>;
+    fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error>;
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error>;
     fn verify_bundle_restore_complete(
         &mut self,
@@ -278,6 +280,7 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
         stage_receipt,
     } = session;
 
+    let mut canonical_shape_prepared = false;
     let preboundary = (|| {
         if progress == InstalledBundleRepairProgress::Admitted {
             effects
@@ -305,6 +308,7 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
             effects
                 .activate_probe_on_canonical_gate()
                 .map_err(InstalledBundleRepairDriveError::Effect)?;
+            canonical_shape_prepared = true;
             grant.mark_probe_active().map_err(|_| {
                 InstalledBundleRepairDriveError::RecoveryPending(
                     "probe_repair_intent_persist_failed",
@@ -334,6 +338,12 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
             | InstalledBundleRepairProgress::EpochRemoved
             | InstalledBundleRepairProgress::LatchRemoved
     ) {
+        if progress == InstalledBundleRepairProgress::ProbeActive && !canonical_shape_prepared {
+            effects
+                .normalize_canonical_runtime()
+                .map_err(InstalledBundleRepairDriveError::Effect)?;
+            canonical_shape_prepared = true;
+        }
         if grant.invalidate_failure_evidence().is_err() {
             let code = "probe_repair_completion_persist_failed";
             let _ = grant.persist_failure(code);
@@ -342,6 +352,11 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
         progress = InstalledBundleRepairProgress::LatchRemoved;
     }
     if progress == InstalledBundleRepairProgress::LatchRemoved {
+        if !canonical_shape_prepared {
+            effects
+                .normalize_canonical_runtime()
+                .map_err(InstalledBundleRepairDriveError::Effect)?;
+        }
         if let Err(error) = effects.validate_canonical_runtime() {
             let code = effects.error_code(&error).to_owned();
             grant.persist_failure(&code).map_err(|_| {
@@ -376,6 +391,9 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
         .map_err(InstalledBundleRepairDriveError::Effect)?;
     effects
         .remove_stage(&stage_receipt.operation_id, stage_owner_uid)
+        .map_err(InstalledBundleRepairDriveError::Effect)?;
+    effects
+        .activate_final_ordinary_probe()
         .map_err(InstalledBundleRepairDriveError::Effect)?;
     grant.finish_success().map_err(|_| {
         InstalledBundleRepairDriveError::RecoveryPending("probe_repair_completion_persist_failed")

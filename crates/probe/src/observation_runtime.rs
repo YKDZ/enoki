@@ -2,7 +2,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     ffi::CStr,
+    fs,
     io::{self, Read, Write},
     os::fd::{AsRawFd, RawFd},
     os::unix::net::{UnixListener, UnixStream},
@@ -1605,9 +1607,52 @@ fn serve_runtime_admission(
         admission,
         sender,
         completion_receiver,
-        |socket_fd| require_peer_uid(socket_fd, c"enoki-probe").is_ok(),
+        runtime_peer_is_authorized,
         Instant::now,
     );
+}
+
+const RUNTIME_REPAIR_VALIDATION_ENV: &str = "ENOKI_RUNTIME_REPAIR_VALIDATION";
+const RUNTIME_REPAIR_PERMIT_ALIAS: &str = "/run/enoki-runtime-repair-permit";
+
+fn runtime_peer_is_authorized(socket_fd: RawFd) -> bool {
+    match env::var(RUNTIME_REPAIR_VALIDATION_ENV) {
+        Err(env::VarError::NotPresent) => require_peer_uid(socket_fd, c"enoki-probe").is_ok(),
+        Ok(value) if value == "1" => repair_permit_is_valid() && peer_uid_is_root(socket_fd),
+        Ok(_) | Err(env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+fn repair_permit_is_valid() -> bool {
+    let Ok(metadata) = fs::metadata(RUNTIME_REPAIR_PERMIT_ALIAS) else {
+        return false;
+    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    metadata.file_type().is_file()
+        && metadata.uid() == 0
+        && metadata.gid() == 0
+        && metadata.permissions().mode() & 0o777 == 0o600
+        && metadata.nlink() == 1
+}
+
+fn peer_uid_is_root(socket_fd: RawFd) -> bool {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    unsafe {
+        libc::getsockopt(
+            socket_fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        ) == 0
+            && length as usize == std::mem::size_of::<libc::ucred>()
+            && credentials.uid == 0
+    }
 }
 
 fn serve_runtime_admission_with(

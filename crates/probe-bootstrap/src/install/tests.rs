@@ -4363,6 +4363,9 @@ mod tests {
         assert!(lifecycle.contains(
             "BindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\n"
         ));
+        assert!(lifecycle.contains(
+            "ExecStopPost=/usr/bin/rm -f -- /run/enoki-probe/runtime-repair-permit\n"
+        ));
         assert!(socket.contains(
             "ExecStopPost=/usr/bin/rm -f -- /run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf\n"
         ));

@@ -105,16 +105,23 @@ impl SystemSystemd {
         }
     }
 
-    fn preserves_live_upgrade_reset_unit(&self, unit: &str) -> bool {
+    fn preserves_live_companion_reset_unit(&self, unit: &str) -> bool {
+        self.preserves_live_companion_stop_or_verify_unit(unit)
+    }
+
+    fn uses_general_restore_adapter(&self) -> bool {
         matches!(
             self.preserve_live_companion,
-            Some(LiveCompanionFamily::Upgrade)
-        ) && is_live_upgrade_companion_unit(unit)
+            Some(LiveCompanionFamily::General)
+        )
     }
 }
 
 fn is_live_general_companion_unit(unit: &str) -> bool {
-    unit == "enoki-probe-lifecycle-companion@*.service"
+    matches!(
+        unit,
+        "enoki-probe-lifecycle-companion.socket" | "enoki-probe-lifecycle-companion@*.service"
+    )
 }
 
 fn is_live_upgrade_companion_unit(unit: &str) -> bool {
@@ -168,6 +175,24 @@ fn require_rollback_unit_absent(
         return Err(InstallError::Systemd);
     }
     Ok(())
+}
+
+fn require_general_restore_unit_absent(
+    unit: &str,
+    output: &command::BoundedOutput,
+    manager_matches: &command::BoundedOutput,
+) -> Result<(), InstallError> {
+    if fixed_unit_is_instance_glob(unit)
+        && output.status.code() == Some(3)
+        && output.stdout.is_empty()
+        && output.stderr.is_empty()
+        && manager_matches.status.success()
+        && manager_matches.stdout.is_empty()
+        && manager_matches.stderr.is_empty()
+    {
+        return Ok(());
+    }
+    require_rollback_unit_absent(unit, output)
 }
 
 impl SystemdPort for SystemSystemd {
@@ -289,7 +314,7 @@ impl SystemdPort for SystemSystemd {
         })
         .err();
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_RESET_UNITS, |unit| {
-            if self.preserves_live_upgrade_reset_unit(unit) {
+            if self.preserves_live_companion_reset_unit(unit) {
                 return Ok(());
             }
             require_success(
@@ -313,7 +338,26 @@ impl SystemdPort for SystemSystemd {
                 deadline,
                 COMMAND_STEP_BUDGET,
             )?;
-            require_rollback_unit_absent(unit, &output)
+            if self.uses_general_restore_adapter() && fixed_unit_is_instance_glob(unit) {
+                let manager_matches = run_bounded(
+                    "/usr/bin/systemctl",
+                    &[
+                        "list-units",
+                        "--all",
+                        "--plain",
+                        "--no-legend",
+                        "--no-pager",
+                        "--full",
+                        unit,
+                    ],
+                    InstallError::Systemd,
+                    deadline,
+                    COMMAND_STEP_BUDGET,
+                )?;
+                require_general_restore_unit_absent(unit, &output, &manager_matches)
+            } else {
+                require_rollback_unit_absent(unit, &output)
+            }
         }) && first_error.is_none()
         {
             first_error = Some(error);
@@ -337,7 +381,7 @@ mod tests {
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
         SystemSystemd, attempt_all_fixed_units, canonical_restart_deadline, command,
         fixed_unit_is_instance_glob, require_absent_from_load_state, require_fixed_unit_absent,
-        require_rollback_unit_absent, rollback_unit_is_absent,
+        require_general_restore_unit_absent, require_rollback_unit_absent, rollback_unit_is_absent,
     };
     use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
@@ -347,6 +391,7 @@ mod tests {
         let loaded = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(0),
             stdout: b"not-found\n".to_vec(),
+            stderr: Vec::new(),
         };
 
         assert_eq!(require_absent_from_load_state(&loaded), Ok(()));
@@ -357,6 +402,7 @@ mod tests {
         let loaded = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(0),
             stdout: b"loaded\n".to_vec(),
+            stderr: Vec::new(),
         };
 
         assert_eq!(
@@ -370,6 +416,7 @@ mod tests {
         let loaded = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(1 << 8),
             stdout: b"not-found\n".to_vec(),
+            stderr: Vec::new(),
         };
 
         assert_eq!(
@@ -384,6 +431,7 @@ mod tests {
             let loaded = command::BoundedOutput {
                 status: std::process::ExitStatus::from_raw(0),
                 stdout: stdout.to_vec(),
+                stderr: Vec::new(),
             };
 
             assert_eq!(
@@ -398,6 +446,7 @@ mod tests {
         let empty = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(0),
             stdout: Vec::new(),
+            stderr: Vec::new(),
         };
         assert!(fixed_unit_is_instance_glob(
             "enoki-probe-lifecycle-companion@*.service"
@@ -416,6 +465,7 @@ mod tests {
         let empty_no_match = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(4 << 8),
             stdout: Vec::new(),
+            stderr: Vec::new(),
         };
 
         for unit in [
@@ -431,6 +481,7 @@ mod tests {
         let empty_no_match = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(4 << 8),
             stdout: Vec::new(),
+            stderr: Vec::new(),
         };
         assert_eq!(
             require_rollback_unit_absent("enoki-probe.service", &empty_no_match),
@@ -439,6 +490,7 @@ mod tests {
         let empty_command_failure = command::BoundedOutput {
             status: std::process::ExitStatus::from_raw(1 << 8),
             stdout: Vec::new(),
+            stderr: Vec::new(),
         };
         assert_eq!(
             require_rollback_unit_absent(
@@ -452,12 +504,75 @@ mod tests {
             let output = command::BoundedOutput {
                 status: std::process::ExitStatus::from_raw(3 << 8),
                 stdout: stdout.to_vec(),
+                stderr: Vec::new(),
             };
             assert_eq!(
                 require_rollback_unit_absent("enoki-cpu-resource-provider@*.service", &output),
                 Err(InstallError::Systemd)
             );
         }
+    }
+
+    #[test]
+    fn general_restore_accepts_only_systemd_249_empty_instance_glob_with_no_manager_matches() {
+        let status_3 = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(3 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let empty_manager = command::BoundedOutput {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let unit = "enoki-probe-lifecycle-companion@*.service";
+
+        assert_eq!(
+            require_general_restore_unit_absent(unit, &status_3, &empty_manager),
+            Ok(())
+        );
+
+        for (output, matches) in [
+            (
+                command::BoundedOutput {
+                    status: std::process::ExitStatus::from_raw(3 << 8),
+                    stdout: Vec::new(),
+                    stderr: b"unexpected error".to_vec(),
+                },
+                &empty_manager,
+            ),
+            (
+                command::BoundedOutput {
+                    status: std::process::ExitStatus::from_raw(1 << 8),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+                &empty_manager,
+            ),
+            (
+                command::BoundedOutput {
+                    status: std::process::ExitStatus::from_raw(3 << 8),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+                &command::BoundedOutput {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: b"enoki-probe-lifecycle-companion@9.service loaded active running"
+                        .to_vec(),
+                    stderr: Vec::new(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                require_general_restore_unit_absent(unit, &output, matches),
+                Err(InstallError::Systemd)
+            );
+        }
+
+        assert_eq!(
+            require_general_restore_unit_absent("enoki-probe.service", &status_3, &empty_manager),
+            Err(InstallError::Systemd)
+        );
     }
 
     #[test]
@@ -486,26 +601,32 @@ mod tests {
         assert!(!systemd.preserves_live_companion_stop_or_verify_unit(
             "enoki-probe-lifecycle-companion.socket"
         ));
-        assert!(systemd.preserves_live_upgrade_reset_unit("enoki-probe-lifecycle-upgrade.socket"));
+        assert!(
+            systemd.preserves_live_companion_reset_unit("enoki-probe-lifecycle-upgrade.socket")
+        );
     }
 
     #[test]
-    fn live_general_companion_preserves_its_instance_but_not_its_activation_socket() {
+    fn live_general_companion_preserves_its_entry_family_across_restore_actions() {
         let systemd = SystemSystemd::for_live_general_companion();
 
         assert!(systemd.preserves_live_companion_stop_or_verify_unit(
             "enoki-probe-lifecycle-companion@*.service"
         ));
-        assert!(!systemd.preserves_live_companion_stop_or_verify_unit(
+        assert!(systemd.preserves_live_companion_stop_or_verify_unit(
             "enoki-probe-lifecycle-companion.socket"
         ));
+        assert!(
+            systemd
+                .preserves_live_companion_reset_unit("enoki-probe-lifecycle-companion@*.service")
+        );
+        assert!(
+            systemd.preserves_live_companion_reset_unit("enoki-probe-lifecycle-companion.socket")
+        );
         assert!(!systemd.preserves_live_companion_stop_or_verify_unit(
             "enoki-probe-lifecycle-upgrade@*.service"
         ));
         assert!(!systemd.preserves_live_companion_stop_or_verify_unit("enoki-probe.service"));
-        assert!(
-            !systemd.preserves_live_upgrade_reset_unit("enoki-probe-lifecycle-companion@*.service")
-        );
         assert_eq!(
             ROLLBACK_STOP_UNITS
                 .iter()
@@ -517,7 +638,6 @@ mod tests {
                 "enoki-observation-runtime.socket",
                 "enoki-cpu-resource-provider.socket",
                 "enoki-disk-health-resource-provider.socket",
-                "enoki-probe-lifecycle-companion.socket",
                 "enoki-probe-lifecycle-upgrade.socket",
                 "enoki-probe.service",
                 "enoki-observation-runtime.service",
