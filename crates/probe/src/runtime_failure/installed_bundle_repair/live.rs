@@ -1811,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn status_published_journal_absence_requires_a_durable_parent_sync_before_final_activation() {
+    fn status_published_stage_absence_requires_a_durable_parent_sync_before_final_activation() {
         let fixture = LiveFixture::new();
         set_installed_bundle_repair_crash_for_test(InstalledBundleRepairCrashPoint::JournalCleanup)
             .unwrap();
@@ -1829,7 +1829,7 @@ mod tests {
 
         assert!(
             drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_err(),
-            "J absence without a repeatable parent sync must remain typed incomplete"
+            "stage absence without a repeatable parent sync must remain typed incomplete"
         );
         assert!(
             fixture
@@ -1837,7 +1837,7 @@ mod tests {
                 .path()
                 .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
                 .exists(),
-            "failed J absence verification must retain the StatusPublished resume authority"
+            "failed stage absence verification must retain the StatusPublished resume authority"
         );
     }
 

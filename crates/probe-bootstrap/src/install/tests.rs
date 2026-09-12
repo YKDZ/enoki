@@ -3097,6 +3097,41 @@ mod tests {
     }
 
     #[test]
+    fn installed_bundle_repair_journal_absence_requires_a_trusted_parent_sync() {
+        let fixture = installed_bundle_fixture();
+        restore_bundle_fixture(&fixture, &mut Systemd::default()).unwrap();
+        let journal = fixture
+            .paths
+            .bootstrap_state()
+            .join("installed-bundle-repair.json");
+        assert!(journal.exists());
+
+        bundle_restore::set_crash("journal-cleanup");
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = cleanup_installed_bundle_repair(&fixture.repair, &fixture.paths);
+            }))
+            .is_err(),
+            "J unlink 后的骤停必须留下 J-absent 重试窗口"
+        );
+        assert!(
+            !journal.exists(),
+            "crash point 必须位于真实 J unlink 与 parent sync 之后"
+        );
+        fs::set_permissions(
+            fixture.paths.bootstrap_state(),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup_installed_bundle_repair(&fixture.repair, &fixture.paths),
+            Err(InstallError::ExistingResidue),
+            "J-absent 续行必须直接重验并 sync 固定 bootstrap parent，不能接受不可信目录"
+        );
+    }
+
+    #[test]
     fn installed_bundle_repair_rejects_wrong_resume_binding_before_effects() {
         let fixture = installed_bundle_fixture();
         bundle_restore::set_crash("prepare:0");
