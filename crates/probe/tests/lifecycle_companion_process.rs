@@ -5,6 +5,7 @@ use std::{
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
+            ffi::OsStrExt,
             fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixStream,
             process::CommandExt,
@@ -33,6 +34,243 @@ fn replacement_request() -> LifecycleRequest {
         "1.2.3",
     )
     .expect("固定 Replacement request 有效")
+}
+
+const UNINSTALL_DIAGNOSTIC_CASE: &str = "ENOKI_TEST_UNINSTALL_DIAGNOSTIC_CASE";
+const UNINSTALL_DIAGNOSTIC_SECRET: &str = "formal241-secret-sentinel";
+
+fn schema_five_metadata() -> String {
+    [
+        "schema_version = 5",
+        "hub_url = \"https://hub.example\"",
+        "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+        "install_path = \"/usr/local/bin/enoki-probe\"",
+        "observation_runtime_path = \"/usr/local/bin/enoki-observation-runtime\"",
+        "cpu_provider_path = \"/usr/local/bin/enoki-cpu-resource-provider\"",
+        "disk_health_provider_path = \"/usr/local/bin/enoki-disk-health-resource-provider\"",
+        "lifecycle_companion_path = \"/usr/local/bin/enoki-probe-lifecycle-companion\"",
+        "probe_ipc_group = \"enoki-probe-ipc\"",
+        "probe_ipc_group_ownership = \"!enoki-bootstrap-dddddddddddddddddddddddddddddddd\"",
+        "observation_ipc_group = \"enoki-observation-ipc\"",
+        "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+        "state_dir = \"/var/lib/enoki-probe\"",
+        "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        "install_state_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+        "target_manifest_sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"",
+        "bundle_version = \"1.2.3\"",
+        "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+        "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+        "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
+        "service_name = \"enoki-probe\"",
+        "service_user = \"enoki-probe\"",
+        "service_group = \"enoki-probe\"",
+        "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+        "observation_runtime_service_unit_path = \"/etc/systemd/system/enoki-observation-runtime.service\"",
+        "observation_runtime_socket_unit_path = \"/etc/systemd/system/enoki-observation-runtime.socket\"",
+        "cpu_provider_service_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider@.service\"",
+        "cpu_provider_socket_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider.socket\"",
+        "disk_health_provider_service_unit_path = \"/etc/systemd/system/enoki-disk-health-resource-provider@.service\"",
+        "disk_health_provider_socket_unit_path = \"/etc/systemd/system/enoki-disk-health-resource-provider.socket\"",
+        "lifecycle_companion_service_unit_path = \"/etc/systemd/system/enoki-probe-lifecycle-companion@.service\"",
+        "lifecycle_companion_socket_unit_path = \"/etc/systemd/system/enoki-probe-lifecycle-companion.socket\"",
+        "collector_helper_sudoers_path = \"/etc/sudoers.d/enoki-probe-collector-helpers\"",
+        "lifecycle_upgrade_service_unit_path = \"/etc/systemd/system/enoki-probe-lifecycle-upgrade@.service\"",
+        "lifecycle_upgrade_socket_unit_path = \"/etc/systemd/system/enoki-probe-lifecycle-upgrade.socket\"",
+        "lifecycle_authority_install_key = \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
+    ]
+    .join("\n")
+}
+
+fn create_uninstall_process_fixture(root: &Path) -> (String, String, String) {
+    let metadata_contents = schema_five_metadata();
+    let identity_contents = [
+        "hub_url = \"https://hub.example\"",
+        "probe_id = \"probe_01\"",
+        "probe_private_key_pem = \"formal241-fixture-key\"",
+        "",
+    ]
+    .join("\n");
+    let capsule_contents = format!("request = \"{UNINSTALL_DIAGNOSTIC_SECRET}");
+    let identity = root.join("var/lib/enoki-probe/identity/probe-bootstrap.toml");
+    fs::create_dir_all(identity.parent().expect("identity parent")).expect("identity parent");
+    fs::write(&identity, &identity_contents).expect("identity config");
+    fs::set_permissions(&identity, fs::Permissions::from_mode(0o600)).expect("identity mode");
+    let metadata = root.join("etc/enoki/probe-install.toml");
+    fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("metadata parent");
+    fs::write(&metadata, &metadata_contents).expect("schema five metadata");
+    fs::set_permissions(&metadata, fs::Permissions::from_mode(0o600)).expect("metadata mode");
+    let capsule = root.join("etc/enoki/probe-uninstall.capsule");
+    fs::write(&capsule, &capsule_contents).expect("malformed uninstall capsule");
+    fs::set_permissions(&capsule, fs::Permissions::from_mode(0o600)).expect("capsule mode");
+    fs::create_dir_all(root.join("run/lock")).expect("isolated run lock");
+
+    (metadata_contents, identity_contents, capsule_contents)
+}
+
+fn bind_mount(source: &Path, target: &str) {
+    let source = CString::new(source.as_os_str().as_bytes()).expect("source path has no NUL");
+    let target = CString::new(target).expect("target path has no NUL");
+    assert_eq!(
+        unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        },
+        0,
+        "bind mount the isolated Companion fixture"
+    );
+}
+
+fn enter_uninstall_process_namespace(root: &Path) {
+    assert_eq!(
+        unsafe { libc::unshare(libc::CLONE_NEWNS) },
+        0,
+        "unshare mount namespace"
+    );
+    assert_eq!(
+        unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c"/".as_ptr(),
+                std::ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                std::ptr::null(),
+            )
+        },
+        0,
+        "make test mounts private"
+    );
+    bind_mount(&root.join("etc"), "/etc");
+    bind_mount(&root.join("var"), "/var");
+    bind_mount(&root.join("run/lock"), "/run/lock");
+}
+
+fn run_uninstall_process_child(case: &str) -> std::process::Output {
+    let mut command = Command::new(std::env::current_exe().expect("current test process"));
+    command
+        .args(["--exact", "uninstall_failure_process_child", "--nocapture"])
+        .env(UNINSTALL_DIAGNOSTIC_CASE, case)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+        .spawn()
+        .expect("start isolated Companion test child")
+        .wait_with_output()
+        .expect("collect isolated Companion test child")
+}
+
+#[test]
+fn uninstall_failure_process_child() {
+    let Ok(case) = std::env::var(UNINSTALL_DIAGNOSTIC_CASE) else {
+        return;
+    };
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "namespace fixture requires root"
+    );
+    let temporary = tempfile::tempdir().expect("isolated production root");
+    let (metadata_contents, identity_contents, capsule_contents) =
+        create_uninstall_process_fixture(temporary.path());
+    enter_uninstall_process_namespace(temporary.path());
+    let (mut peer, child_socket) = UnixStream::pair().expect("real UnixStream peer");
+    let socket_fd = child_socket.as_raw_fd();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"));
+    command
+        .env_remove("ENOKI_LIFECYCLE_LEASE_FD")
+        .env_remove("ENOKI_TEST_REPLACEMENT_PRODUCTION_ROOT")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(if case == "stderr-full" {
+            Stdio::from(
+                OpenOptions::new()
+                    .write(true)
+                    .open("/dev/full")
+                    .expect("open deterministic failing stderr"),
+            )
+        } else {
+            Stdio::piped()
+        });
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(socket_fd, libc::STDIN_FILENO) != libc::STDIN_FILENO {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().expect("start real Companion binary");
+    let request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        UNINSTALL_DIAGNOSTIC_SECRET,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        "1.2.3",
+    )
+    .expect("fixed Uninstall request");
+    peer.write_all(&request.encode().expect("canonical request"))
+        .expect("send real Uninstall request");
+    drop(peer);
+    let output = child
+        .wait_with_output()
+        .expect("wait for real Companion binary");
+    let expected = LifecycleResponse::failed("probe_uninstall_metadata_invalid").encode();
+    assert_eq!(
+        output.stdout, expected,
+        "stdout remains the original terminal response bytes",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Companion exits with failure"
+    );
+    if case == "stderr-piped" {
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic stderr is UTF-8");
+        assert_eq!(
+            stderr,
+            "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=resume_decision code=probe_uninstall_metadata_invalid reason=uninstall capsule is malformed\n",
+        );
+        assert!(!stderr.contains(UNINSTALL_DIAGNOSTIC_SECRET));
+        assert!(!stderr.contains("formal241-fixture-key"));
+        assert!(!stderr.contains("probe-uninstall.capsule"));
+    }
+    assert_eq!(
+        fs::read(temporary.path().join("etc/enoki/probe-install.toml")).expect("metadata remains"),
+        metadata_contents.as_bytes(),
+    );
+    assert_eq!(
+        fs::read(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
+        )
+        .expect("identity remains"),
+        identity_contents.as_bytes(),
+    );
+    assert_eq!(
+        fs::read(temporary.path().join("etc/enoki/probe-uninstall.capsule"))
+            .expect("capsule remains"),
+        capsule_contents.as_bytes(),
+    );
+}
+
+#[test]
+fn uninstall_failure_process_keeps_stdout_when_stderr_fails() {
+    let output = run_uninstall_process_child("stderr-full");
+
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn uninstall_failure_process_keeps_protocol_and_diagnostic_separate() {
+    let output = run_uninstall_process_child("stderr-piped");
+
+    assert!(output.status.success(), "{output:?}");
 }
 
 struct CreatedStableLock {
