@@ -6,6 +6,10 @@ license.workspace = true
 
 [features]
 deterministic-test-seams = ["enoki-probe-bootstrap/deterministic-test-seams"]
+release-companion-trust = [
+  "enoki-probe-bootstrap/compiled-trust",
+  "enoki-probe-bootstrap/companion-activator-trust",
+]
 
 [dependencies]
 enoki-probe-bootstrap = { path = "../probe-bootstrap", features = [

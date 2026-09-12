@@ -85,6 +85,21 @@ const probeTargets = [
   "x86_64-unknown-linux-musl",
 ];
 const testDistributionRoot = rsa4096TestKeyPair("candidate-root");
+const bootProbeBuildIdentityMagic = Buffer.from(
+  "ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0",
+);
+
+function bootProbeBuildIdentity(binary) {
+  const start = binary.indexOf(bootProbeBuildIdentityMagic);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const lengthOffset = start + bootProbeBuildIdentityMagic.byteLength;
+  const length = binary.readUInt32BE(lengthOffset);
+  return JSON.parse(
+    binary
+      .subarray(lengthOffset + 4, lengthOffset + 4 + length)
+      .toString("utf8"),
+  );
+}
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
   it("prepares every isolated Release workspace before its Node tooling runs", async () => {
@@ -963,7 +978,7 @@ with open(os.devnull, "rb") as input_stream:
     }
   });
 
-  it("packages the optimized native Probe bundle only when its release identity is retained", async () => {
+  it("packages the optimized native Probe bundle with Activator-only Companion trust", async () => {
     const targetDir = await mkdtemp(
       path.join(tmpdir(), "enoki-candidate-native-probe-target-"),
     );
@@ -976,16 +991,49 @@ with open(os.devnull, "rb") as input_stream:
     try {
       await execFileAsync(
         "cargo",
-        ["build", "-p", "enoki-probe", "--release", "--target", target],
+        [
+          "build",
+          "-p",
+          "enoki-probe",
+          "--release",
+          "--features",
+          "release-companion-trust",
+          "--target",
+          target,
+        ],
         {
           cwd: process.cwd(),
           env: {
             ...process.env,
             CARGO_TARGET_DIR: targetDir,
+            ENOKI_BOOT_PROBE: "1",
+            ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION: "enoki",
+            ENOKI_BOOTSTRAP_BUILD_ROOT_PEM: testDistributionRoot.publicKey,
+            ENOKI_BOOTSTRAP_BUILD_ROLE: "activator",
+            ENOKI_BOOTSTRAP_BUILD_TARGET: target,
+            ENOKI_BOOTSTRAP_BUILD_VERSION: version,
             ENOKI_PROBE_VERSION: version,
           },
         },
       );
+
+      expect(
+        bootProbeBuildIdentity(
+          await readFile(
+            path.join(
+              targetDir,
+              target,
+              "release",
+              "enoki-probe-lifecycle-companion",
+            ),
+          ),
+        ),
+      ).toMatchObject({
+        distribution: "enoki",
+        role: "activator",
+        target,
+        version,
+      });
 
       await expect(
         runCandidateCli([
@@ -1007,6 +1055,123 @@ with open(os.devnull, "rb") as input_stream:
       await rm(outputDir, { force: true, recursive: true });
     }
   }, 60_000);
+
+  it("rejects Activator trust in a standalone dual-API Bootstrap build", async () => {
+    const targetDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-standalone-bootstrap-target-"),
+    );
+    const target = "x86_64-unknown-linux-gnu";
+
+    try {
+      await expect(
+        execFileAsync(
+          "cargo",
+          [
+            "build",
+            "-p",
+            "enoki-probe-bootstrap",
+            "--release",
+            "--no-default-features",
+            "--features",
+            "acquirer,activator,compiled-trust",
+            "--bin",
+            "enoki-probe-bootstrap-acquire",
+            "--target",
+            target,
+          ],
+          {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              CARGO_TARGET_DIR: targetDir,
+              ENOKI_BOOT_PROBE: "1",
+              ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION: "enoki",
+              ENOKI_BOOTSTRAP_BUILD_ROOT_PEM: testDistributionRoot.publicKey,
+              ENOKI_BOOTSTRAP_BUILD_ROLE: "activator",
+              ENOKI_BOOTSTRAP_BUILD_TARGET: target,
+              ENOKI_BOOTSTRAP_BUILD_VERSION: "v1.2.3",
+            },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 101,
+        stderr: expect.stringContaining(
+          "must exactly match one compiled Bootstrap role feature",
+        ),
+      });
+    } finally {
+      await rm(targetDir, { force: true, recursive: true });
+    }
+  }, 120_000);
+
+  it("builds the default reusable Probe workflow without version or production trust", async () => {
+    const workflow = await readFile(
+      ".github/workflows/reusable-build-probe.yml",
+      "utf8",
+    );
+    const stepStart = workflow.indexOf("- name: Build Probe for CI");
+    const stepEnd = workflow.indexOf("- name:", stepStart + 1);
+    const defaultBuildStep = workflow.slice(stepStart, stepEnd);
+
+    expect(stepStart).toBeGreaterThanOrEqual(0);
+    expect(defaultBuildStep).toContain(
+      "if: ${{ !inputs.package-artifacts && !inputs.verify-reproducible }}",
+    );
+    expect(defaultBuildStep).toContain("cargo build -p enoki-probe --release");
+    expect(defaultBuildStep).not.toContain("release-companion-trust");
+    expect(defaultBuildStep).not.toContain("ENOKI_BOOT_PROBE");
+    expect(defaultBuildStep).not.toContain("ENOKI_BOOTSTRAP_BUILD_");
+    expect(defaultBuildStep).not.toContain("ENOKI_PROBE_VERSION");
+
+    const targetDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-default-probe-target-"),
+    );
+    const target = "x86_64-unknown-linux-gnu";
+    const buildEnv = { ...process.env };
+    for (const variable of [
+      "ENOKI_BOOT_PROBE",
+      "ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION",
+      "ENOKI_BOOTSTRAP_BUILD_ROOT_PEM",
+      "ENOKI_BOOTSTRAP_BUILD_ROLE",
+      "ENOKI_BOOTSTRAP_BUILD_TARGET",
+      "ENOKI_BOOTSTRAP_BUILD_VERSION",
+      "ENOKI_PROBE_VERSION",
+    ]) {
+      delete buildEnv[variable];
+    }
+
+    try {
+      await execFileAsync(
+        "cargo",
+        ["build", "-p", "enoki-probe", "--release", "--target", target],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...buildEnv,
+            CARGO_INCREMENTAL: "0",
+            CARGO_TARGET_DIR: targetDir,
+            RUSTFLAGS: `--remap-path-prefix=${process.cwd()}=/workspace -C link-arg=-Wl,--build-id=none`,
+            SOURCE_DATE_EPOCH: "0",
+          },
+        },
+      );
+
+      expect(
+        (
+          await readFile(
+            path.join(
+              targetDir,
+              target,
+              "release",
+              "enoki-probe-lifecycle-companion",
+            ),
+          )
+        ).includes(bootProbeBuildIdentityMagic),
+      ).toBe(false);
+    } finally {
+      await rm(targetDir, { force: true, recursive: true });
+    }
+  }, 120_000);
 
   it("pins release toolchain and base inputs while normalizing build metadata", async () => {
     const [

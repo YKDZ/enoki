@@ -5239,7 +5239,8 @@ exit 0
     ]);
   });
 
-  it("retains successful installer evidence when run-resource recording fails", async () => {
+  it("fails successful manual reinstall when run-resource renewal fails", async () => {
+    let installations = 0;
     const harness = createProbeHostHarness({
       execute: async (command) => {
         if (command.includes("# enoki-release-e2e:inventory")) {
@@ -5256,20 +5257,85 @@ exit 0
           return successfulCommandText("owned\n");
         }
         if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:renew-resources")) {
           return { code: 1, stderr: "resource recording failed", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+          installations += 1;
+          return successfulCommandText(productInstallerOutput());
         }
         return successfulCommandText(productInstallerOutput());
       },
     });
 
     await harness.assertDisposable("run-recording-failure");
+    await harness.install(officialEnrollment(), "run-recording-failure");
     await expect(
-      harness.install(officialEnrollment(), "run-recording-failure"),
+      harness.manualReinstall(officialEnrollment(), "run-recording-failure"),
     ).rejects.toMatchObject({
       code: "probe_resource_recording_failed",
       installerEvidence: {
         code: 0,
         stdout: expect.stringContaining("ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE"),
+      },
+    });
+    expect(installations).toBe(2);
+  });
+
+  it("keeps an installer failure primary when manual reinstall renewal also fails", async () => {
+    let installations = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:renew-resources")) {
+          return { code: 1, stderr: "renewal owner is absent", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+          installations += 1;
+          return installations === 1
+            ? successfulCommandText(productInstallerOutput())
+            : { code: 23, stderr: "bootstrap activation failed", stdout: "" };
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-installer-and-renewal-failure");
+    await harness.install(
+      officialEnrollment(),
+      "run-installer-and-renewal-failure",
+    );
+    await expect(
+      harness.manualReinstall(
+        officialEnrollment(),
+        "run-installer-and-renewal-failure",
+      ),
+    ).rejects.toMatchObject({
+      code: "probe_installation_failed",
+      installerEvidence: {
+        code: 23,
+        stderr: "bootstrap activation failed",
+      },
+      resourceRecordingEvidence: {
+        code: 1,
+        stderr: "renewal owner is absent",
       },
     });
   });
@@ -9174,6 +9240,120 @@ describe("Release E2E Orchestrator", () => {
     const serialized = JSON.stringify(artifact);
     expect(serialized).not.toContain("enk_enroll_secret");
     expect(serialized).not.toContain("enk_enroll_failed_installer_token");
+    expect(serialized).not.toContain(officialInstallCommand);
+  });
+
+  it("retains redacted renewal evidence in the failed Replacement artifact", async () => {
+    const calls = [];
+    const candidateManifest = candidateManifestWithMigrationBaseline();
+    const environment = migrationBaselineEnvironment(calls, candidateManifest);
+    const { host, hub } = await environment.start();
+    const runId = "run-manual-reinstall-artifact-failure";
+    let installations = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:renew-resources")) {
+          return {
+            code: 1,
+            stderr: "renewal owner is absent",
+            stdout: "renewal output retained",
+          };
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+          installations += 1;
+          return installations === 1
+            ? successfulCommandText(productInstallerOutput())
+            : {
+                code: 23,
+                stderr: "bootstrap activation failed",
+                stdout: `${officialInstallCommand}\ninstaller output`,
+              };
+        }
+        return successfulCommandText("");
+      },
+    });
+    await harness.assertDisposable(runId);
+    await harness.install(officialEnrollment(), runId);
+    const replacementMigration = {
+      enrollmentId: "enr_manual_reinstall_artifact_failure",
+      expectedProbeId: "probe_release_legacy",
+      sourceProbeSha256: ["a", "b", "c", "d"].map((value) => value.repeat(64)),
+      sourceProbeVersion: "0.1.74",
+      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+      targetHostId: "7",
+      targetProbeVersion: "1.2.3",
+    };
+    const replacementEnrollment = officialEnrollment({
+      enrollmentId: replacementMigration.enrollmentId,
+      enrollmentToken: "enk_enroll_replacement_artifact_failure",
+      installCommand: renderInstallCommand(
+        {
+          bootstrapRecipe: {
+            ...officialEnrollment().bootstrapRecipe,
+            distribution: "enoki",
+          },
+          probeApiOrigin: "https://hub.example",
+        },
+        {
+          enrollmentToken: "enk_enroll_replacement_artifact_failure",
+          replacementMigration,
+        },
+      ).installCommand,
+      target: { hostId: 7, kind: "manual_reinstall" },
+    });
+    hub.createManualReinstallEnrollment = async () => replacementEnrollment;
+    host.manualReinstall = (enrollment, actualRunId) =>
+      harness.manualReinstall(enrollment, actualRunId);
+    const written = [];
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest,
+        environment,
+        evidenceSink: { write: async (evidence) => written.push(evidence) },
+        ownerPassword: "owner-password",
+        runId,
+        scenario: "replacement-migration-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).rejects.toMatchObject({ code: "probe_installation_failed" });
+
+    const artifact = written.at(-1);
+    expect(artifact).toMatchObject({
+      result: {
+        error: {
+          code: "probe_installation_failed",
+          installerEvidence: {
+            code: 23,
+            stderr: "bootstrap activation failed",
+            stdout: expect.stringContaining("[REDACTED_INSTALLER_COMMAND]"),
+          },
+          resourceRecordingEvidence: {
+            code: 1,
+            stderr: "renewal owner is absent",
+            stdout: "renewal output retained",
+          },
+        },
+      },
+    });
+    const serialized = JSON.stringify(artifact);
+    expect(serialized).not.toContain("enk_enroll_secret");
     expect(serialized).not.toContain(officialInstallCommand);
   });
 });

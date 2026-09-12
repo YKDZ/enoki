@@ -1103,13 +1103,29 @@ pub fn remove_verified_installed_bundle_repair_stage(
     operation_id: &str,
     expected_owner_uid: u32,
 ) -> Result<(), AcquisitionFailure> {
-    let root = Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT);
+    remove_verified_installed_bundle_repair_stage_at(
+        Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT),
+        operation_id,
+        expected_owner_uid,
+        0,
+    )
+}
+
+fn remove_verified_installed_bundle_repair_stage_at(
+    root: &Path,
+    operation_id: &str,
+    expected_owner_uid: u32,
+    expected_parent_uid: u32,
+) -> Result<(), AcquisitionFailure> {
     match fs::symlink_metadata(root) {
         Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return sync_trusted_repair_stage_parent(root, expected_parent_uid);
+        }
         Err(_) => return Err(AcquisitionFailure::Local),
     }
-    discard_repair_stage_at(root, expected_owner_uid, Some(operation_id), None)
+    discard_repair_stage_at(root, expected_owner_uid, Some(operation_id), None)?;
+    sync_trusted_repair_stage_parent(root, expected_parent_uid)
 }
 
 pub fn validate_unadmitted_installed_bundle_repair_stage()
@@ -1197,6 +1213,24 @@ fn discard_repair_stage_at(
     fs::remove_dir(&directory).map_err(|_| AcquisitionFailure::Local)?;
     fs::remove_dir(root).map_err(|_| AcquisitionFailure::Local)?;
     let parent = root.parent().ok_or(AcquisitionFailure::Local)?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| AcquisitionFailure::Local)
+}
+
+fn sync_trusted_repair_stage_parent(
+    root: &Path,
+    expected_parent_uid: u32,
+) -> Result<(), AcquisitionFailure> {
+    let parent = root.parent().ok_or(AcquisitionFailure::Local)?;
+    let metadata = fs::symlink_metadata(parent).map_err(|_| AcquisitionFailure::Local)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != expected_parent_uid
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| AcquisitionFailure::Local)
@@ -1951,6 +1985,7 @@ fn create_exclusive_staging_file(staging_dir: &Path) -> Result<File, Acquisition
 mod tests {
     use super::*;
     use crate::verifier::VerificationPolicy;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     struct Root;
@@ -2457,6 +2492,27 @@ mod tests {
         });
 
         assert_eq!(result, Err(AcquisitionFailure::Permanent));
+    }
+
+    #[test]
+    fn retired_repair_stage_rechecks_its_fixed_parent_before_idempotent_success() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent = temporary.path().join("bootstrap-state");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = parent.join("installed-bundle-repair-stage");
+        let parent_uid = unsafe { libc::geteuid() };
+
+        assert_eq!(
+            remove_verified_installed_bundle_repair_stage_at(&root, "repair-01", 12345, parent_uid),
+            Ok(())
+        );
+        fs::remove_dir(&parent).unwrap();
+        assert_eq!(
+            remove_verified_installed_bundle_repair_stage_at(&root, "repair-01", 12345, parent_uid),
+            Err(AcquisitionFailure::Local),
+            "an absent stage is resumable only after its fixed bootstrap parent can be synced"
+        );
     }
 
     #[test]

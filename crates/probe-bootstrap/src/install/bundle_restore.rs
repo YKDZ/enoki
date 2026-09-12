@@ -177,7 +177,7 @@ pub(super) fn retire_complete(
     let retirement_binding_sha256 = repair.retirement_binding_sha256()?;
     let journal_path = paths.bootstrap_state().join(JOURNAL_NAME);
     let Some(journal) = load_journal(&journal_path, paths.expected_root_uid())? else {
-        return Ok(());
+        return sync_trusted_journal_parent(&journal_path, paths.expected_root_uid());
     };
     if journal.schema_version != 1
         || journal.retirement_binding_sha256 != retirement_binding_sha256
@@ -190,7 +190,7 @@ pub(super) fn retire_complete(
     }
     verify_journal_destinations(&journal, paths)?;
     fs::remove_file(&journal_path).map_err(|_| InstallError::Io)?;
-    sync_parent(&journal_path)?;
+    sync_trusted_journal_parent(&journal_path, paths.expected_root_uid())?;
     crash("journal-cleanup");
     Ok(())
 }
@@ -783,6 +783,21 @@ fn require_absent(path: &Path) -> Result<(), InstallError> {
 
 fn sync_parent(path: &Path) -> Result<(), InstallError> {
     File::open(path.parent().ok_or(InstallError::Io)?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| InstallError::Io)
+}
+
+fn sync_trusted_journal_parent(path: &Path, expected_uid: u32) -> Result<(), InstallError> {
+    let parent = path.parent().ok_or(InstallError::Io)?;
+    let metadata = fs::symlink_metadata(parent).map_err(|_| InstallError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| InstallError::Io)
 }

@@ -4648,8 +4648,10 @@ pub(super) mod tests {
     struct RepairEffects {
         restored: usize,
         temporary_validations: usize,
+        canonical_normalizations: usize,
         canonical_activations: usize,
         canonical_validations: usize,
+        final_ordinary_activations: usize,
         fail_canonical: bool,
         fail_verify: bool,
     }
@@ -4675,8 +4677,14 @@ pub(super) mod tests {
             Ok(())
         }
 
+        fn normalize_canonical_runtime(&mut self) -> Result<(), Self::Error> {
+            self.canonical_normalizations += 1;
+            Ok(())
+        }
+
         fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error> {
             self.canonical_activations += 1;
+            self.normalize_canonical_runtime()?;
             Ok(())
         }
 
@@ -4718,6 +4726,15 @@ pub(super) mod tests {
         }
 
         fn remove_stage(&mut self, _: &str, _: u32) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error> {
+            self.final_ordinary_activations += 1;
+            Ok(())
+        }
+
+        fn quiesce_status_published(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -4792,6 +4809,24 @@ pub(super) mod tests {
                         | InstalledBundleRepairProgress::LatchRemoved
                 )),
                 "成功只能由 latch 移除后的 canonical Runtime 验证产生"
+            );
+            assert_eq!(
+                effects.canonical_normalizations,
+                usize::from(matches!(
+                    progress,
+                    InstalledBundleRepairProgress::Admitted
+                        | InstalledBundleRepairProgress::ValidationPending
+                        | InstalledBundleRepairProgress::TemporaryRuntimeHealthy
+                        | InstalledBundleRepairProgress::ProbeActive
+                        | InstalledBundleRepairProgress::InvalidationCommitted
+                        | InstalledBundleRepairProgress::EpochRemoved
+                        | InstalledBundleRepairProgress::LatchRemoved
+                )),
+                "进入 forward-only 前或后均先恢复 canonical-validation shape"
+            );
+            assert_eq!(
+                effects.final_ordinary_activations, 1,
+                "intent 退休前必须完成最终 ordinary Probe 激活"
             );
         }
     }

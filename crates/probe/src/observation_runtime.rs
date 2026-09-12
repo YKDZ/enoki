@@ -2,11 +2,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     ffi::CStr,
+    fs,
     io::{self, Read, Write},
     os::fd::{AsRawFd, RawFd},
     os::unix::net::{UnixListener, UnixStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -1605,9 +1607,70 @@ fn serve_runtime_admission(
         admission,
         sender,
         completion_receiver,
-        |socket_fd| require_peer_uid(socket_fd, c"enoki-probe").is_ok(),
+        runtime_peer_is_authorized,
         Instant::now,
     );
+}
+
+const RUNTIME_REPAIR_VALIDATION_ENV: &str = "ENOKI_RUNTIME_REPAIR_VALIDATION";
+const RUNTIME_REPAIR_PERMIT_ALIAS: &str = "/run/enoki-runtime-repair-permit";
+
+fn runtime_peer_is_authorized(socket_fd: RawFd) -> bool {
+    match env::var(RUNTIME_REPAIR_VALIDATION_ENV) {
+        Err(env::VarError::NotPresent) => {
+            runtime_peer_is_authorized_at(socket_fd, None, Path::new(RUNTIME_REPAIR_PERMIT_ALIAS))
+        }
+        Ok(value) => runtime_peer_is_authorized_at(
+            socket_fd,
+            Some(value.as_str()),
+            Path::new(RUNTIME_REPAIR_PERMIT_ALIAS),
+        ),
+        Err(env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+fn runtime_peer_is_authorized_at(
+    socket_fd: RawFd,
+    validation_marker: Option<&str>,
+    repair_permit: &Path,
+) -> bool {
+    match validation_marker {
+        None => require_peer_uid(socket_fd, c"enoki-probe").is_ok(),
+        Some("1") => repair_permit_is_valid_at(repair_permit) && peer_uid_is_root(socket_fd),
+        Some(_) => false,
+    }
+}
+
+fn repair_permit_is_valid_at(repair_permit: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(repair_permit) else {
+        return false;
+    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    metadata.file_type().is_file()
+        && metadata.uid() == 0
+        && metadata.gid() == 0
+        && metadata.permissions().mode() & 0o777 == 0o600
+        && metadata.nlink() == 1
+}
+
+fn peer_uid_is_root(socket_fd: RawFd) -> bool {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    unsafe {
+        libc::getsockopt(
+            socket_fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        ) == 0
+            && length as usize == std::mem::size_of::<libc::ucred>()
+            && credentials.uid == 0
+    }
 }
 
 fn serve_runtime_admission_with(
@@ -1663,6 +1726,10 @@ fn serve_runtime_admission_with(
             }
             Err(_) => continue,
         };
+        if !peer_is_authorized(connection.as_raw_fd()) {
+            let _ = write_window_failure(&mut connection);
+            continue;
+        }
         if admission.arrive(request, now()) == WindowAdmissionDecision::Reject {
             let _ = write_window_failure(&mut connection);
             continue;
@@ -2243,6 +2310,229 @@ mod tests {
         drop(completion_sender);
         drop(admission_receiver);
         admission_thread.join().expect("admission exits");
+    }
+
+    fn write_validation_permit(path: &Path, mode: u32) {
+        fs::write(path, b"installed-bundle-repair\n").expect("write validation permit");
+        fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .expect("set validation permit mode");
+    }
+
+    fn start_validation_admission(
+        socket: &Path,
+        marker: Option<&'static str>,
+        permit: PathBuf,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::sync::mpsc::Receiver<AdmissionMessage>,
+        std::sync::mpsc::SyncSender<AdmissionCompletion>,
+    ) {
+        let listener = UnixListener::bind(socket).expect("validation listener");
+        listener
+            .set_nonblocking(true)
+            .expect("validation listener nonblocking");
+        let (admission_sender, admission_receiver) = std::sync::mpsc::sync_channel(1);
+        let (completion_sender, completion_receiver) = std::sync::mpsc::sync_channel(1);
+        let admission_thread = std::thread::spawn(move || {
+            serve_runtime_admission_with(
+                &listener,
+                &mut ObservationWindowAdmission::default(),
+                &admission_sender,
+                &completion_receiver,
+                move |socket_fd| runtime_peer_is_authorized_at(socket_fd, marker, &permit),
+                Instant::now,
+            )
+        });
+        (admission_thread, admission_receiver, completion_sender)
+    }
+
+    fn send_complete_window_request(
+        socket: &Path,
+        request: ObservationWindowRequest,
+    ) -> UnixStream {
+        let mut client = UnixStream::connect(socket).expect("root Unix peer");
+        client
+            .write_all(&encode_window_request(request))
+            .expect("complete Window frame");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("Window frame EOF");
+        client
+    }
+
+    fn stop_validation_admission(
+        admission_thread: std::thread::JoinHandle<()>,
+        admission_receiver: std::sync::mpsc::Receiver<AdmissionMessage>,
+        completion_sender: std::sync::mpsc::SyncSender<AdmissionCompletion>,
+    ) {
+        drop(admission_receiver);
+        drop(completion_sender);
+        admission_thread.join().expect("validation admission exits");
+    }
+
+    #[test]
+    fn validation_gate_admits_a_real_root_peer_and_keeps_an_inflight_seq1_window() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let permit = temporary.path().join("repair-permit");
+        write_validation_permit(&permit, 0o600);
+        let socket = temporary.path().join("runtime.sock");
+        let (admission_thread, admission_receiver, completion_sender) =
+            start_validation_admission(&socket, Some("1"), permit.clone());
+        let request = ObservationWindowRequest::new(Duration::from_secs(1)).unwrap();
+        let mut client = send_complete_window_request(&socket, request);
+
+        let AdmissionMessage::Window(window) = admission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root seq1 is admitted")
+        else {
+            panic!("listener failed");
+        };
+        assert_eq!(window.request.sequence_start, 1);
+        fs::remove_file(&permit).expect("revoke gate after Window arrival");
+        let (acknowledged, acknowledgement) = std::sync::mpsc::sync_channel(0);
+        completion_sender
+            .send(AdmissionCompletion {
+                acknowledged,
+                delivered_sequence_end: Some(3),
+            })
+            .expect("complete root Window");
+        acknowledgement
+            .recv_timeout(Duration::from_secs(1))
+            .expect("in-flight root Window completion acknowledged after revocation");
+        drop(window.stream);
+        let mut completion = Vec::new();
+        client
+            .read_to_end(&mut completion)
+            .expect("root Window closes after completion");
+
+        stop_validation_admission(admission_thread, admission_receiver, completion_sender);
+    }
+
+    fn assert_root_peer_is_not_admitted_by(
+        marker: Option<&'static str>,
+        permit_mode: u32,
+        assertion: &str,
+    ) {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let permit = temporary.path().join("repair-permit");
+        write_validation_permit(&permit, permit_mode);
+        let socket = temporary.path().join("runtime.sock");
+        let (admission_thread, admission_receiver, completion_sender) =
+            start_validation_admission(&socket, marker, permit);
+        let _client = send_complete_window_request(
+            &socket,
+            ObservationWindowRequest::new(Duration::from_secs(1)).unwrap(),
+        );
+
+        assert!(
+            matches!(
+                admission_receiver.recv_timeout(Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "{assertion}"
+        );
+        stop_validation_admission(admission_thread, admission_receiver, completion_sender);
+    }
+
+    #[test]
+    fn ordinary_runtime_rejects_a_real_root_peer_without_admission() {
+        assert_root_peer_is_not_admitted_by(
+            None,
+            0o600,
+            "ordinary policy must not consume a root Window admission",
+        );
+    }
+
+    #[test]
+    fn validation_runtime_rejects_a_root_peer_with_an_invalid_permit() {
+        assert_root_peer_is_not_admitted_by(
+            Some("1"),
+            0o644,
+            "invalid validation permit must not consume a root Window admission",
+        );
+    }
+
+    #[test]
+    fn revoking_validation_permit_after_frame_decode_prevents_a_new_admission() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let permit = temporary.path().join("repair-permit");
+        write_validation_permit(&permit, 0o600);
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("validation listener");
+        listener
+            .set_nonblocking(true)
+            .expect("validation listener nonblocking");
+        let (admission_sender, admission_receiver) = std::sync::mpsc::sync_channel(1);
+        let (completion_sender, completion_receiver) = std::sync::mpsc::sync_channel(1);
+        let (authorized_sender, authorized_receiver) = std::sync::mpsc::sync_channel(1);
+        let first_authorization = Arc::new(AtomicBool::new(true));
+        let authorized_permit = permit.clone();
+        let admission_thread = std::thread::spawn(move || {
+            serve_runtime_admission_with(
+                &listener,
+                &mut ObservationWindowAdmission::default(),
+                &admission_sender,
+                &completion_receiver,
+                move |socket_fd| {
+                    let authorized =
+                        runtime_peer_is_authorized_at(socket_fd, Some("1"), &authorized_permit);
+                    if first_authorization.swap(false, Ordering::SeqCst) {
+                        let _ = authorized_sender.send(());
+                    }
+                    authorized
+                },
+                Instant::now,
+            )
+        });
+        let mut client = UnixStream::connect(&socket).expect("root Unix peer");
+        authorized_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("accept-time authorization");
+        assert!(
+            admission_receiver.try_recv().is_err(),
+            "frame completion 前不能有 admitted window"
+        );
+
+        fs::remove_file(&permit).expect("revoke validation permit");
+        let request = ObservationWindowRequest::new(Duration::from_secs(1)).unwrap();
+        client
+            .write_all(&encode_window_request(request))
+            .expect("complete Window frame after revocation");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("Window frame EOF after revocation");
+        assert!(
+            matches!(
+                admission_receiver.recv_timeout(Duration::from_millis(200)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "撤销 permit 后不得新增 admitted window 或 Provider 工作"
+        );
+        let mut status = [0_u8; 1];
+        client
+            .read_exact(&mut status)
+            .expect("revoked request receives failure");
+        assert_eq!(status, [1]);
+
+        write_validation_permit(&permit, 0o600);
+        let _next_client = send_complete_window_request(&socket, request);
+        let AdmissionMessage::Window(next_window) = admission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("revoked request did not consume seq1 admission")
+        else {
+            panic!("listener failed");
+        };
+        assert_eq!(next_window.request.sequence_start, 1);
+        drop(next_window.stream);
+
+        drop(admission_receiver);
+        drop(completion_sender);
+        admission_thread.join().expect("validation admission exits");
     }
 
     struct UnusedProvider;

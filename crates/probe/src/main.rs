@@ -25,7 +25,7 @@ fn main() {
             }
         },
         ProbeCommand::Repair => match enoki_probe::runtime::request_local_probe_repair() {
-            Ok(()) => println!("Probe repair completed."),
+            Ok(()) => println!("本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准"),
             Err(code) => {
                 eprint!("{}", render_probe_repair_failure(code));
                 std::process::exit(1);
