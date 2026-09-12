@@ -186,7 +186,7 @@ function parseRepairEvidence(stdout, expectedBundleVersion) {
   if (
     values.bundleVersion !== expectedBundleVersion ||
     values.unit !== observationRuntimeUnit ||
-    values.repairOutput !== "Probe repair completed." ||
+    values.repairOutput !== "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准" ||
     values.faultBackupExists !== "1"
   ) {
     throw new Error("Installed Bundle Failure Repair evidence is invalid");
@@ -308,7 +308,7 @@ ${runtimeClaimPreflight(runId, ownershipToken)}
 [ -f "$backup" ]
 runtime_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1)
 repair_output=$(/usr/local/bin/enoki-probe repair)
-[ "$repair_output" = 'Probe repair completed.' ]
+[ "$repair_output" = '本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准' ]
 [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$runtime_sha256" ]
 version_output=$(/usr/local/bin/enoki-probe --version)
 bundle_version=\${version_output#"enoki-probe "}

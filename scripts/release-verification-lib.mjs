@@ -517,7 +517,7 @@ function validateInstalledBundleFailureRepair(
     }) ||
     failure.status !== "recorded" ||
     repair.faultRemoved !== true ||
-    repair.output !== "Probe repair completed." ||
+    repair.output !== "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准" ||
     repair.repairedVersion !== version ||
     !/^[0-9a-f]{64}$/.test(repair.runtimeSha256 ?? "") ||
     repair.sameBundle !== true ||

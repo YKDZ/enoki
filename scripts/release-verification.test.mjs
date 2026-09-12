@@ -2316,7 +2316,7 @@ function successfulHostEvidence(
         identity: { after: initialIdentity, before: initialIdentity },
         repair: {
           faultRemoved: true,
-          output: "Probe repair completed.",
+          output: "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准",
           probeId: initialIdentity.probeId,
           repairedVersion: "1.2.3",
           runtimeSha256: "7".repeat(64),
