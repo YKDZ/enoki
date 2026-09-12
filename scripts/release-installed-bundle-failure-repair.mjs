@@ -186,7 +186,8 @@ function parseRepairEvidence(stdout, expectedBundleVersion) {
   if (
     values.bundleVersion !== expectedBundleVersion ||
     values.unit !== observationRuntimeUnit ||
-    values.repairOutput !== "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准" ||
+    values.repairOutput !==
+      "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准" ||
     values.faultBackupExists !== "1"
   ) {
     throw new Error("Installed Bundle Failure Repair evidence is invalid");
