@@ -195,6 +195,15 @@ where
     }
 
     fn validate_temporary_runtime(&mut self) -> Result<(), Self::Error> {
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .crash
+            .after(LiveRepairEffect::RuntimeGateRemoved)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
         install_runtime_repair_validation_gate(&self.context.root, RuntimeValidation::Temporary)?;
         self.context
             .crash
@@ -246,7 +255,7 @@ where
         self.context
             .runtime
             .validate(RuntimeValidation::Canonical)?;
-        mask_runtime_validation_socket(&mut self.context.runner)?;
+        mask_canonical_runtime_socket(&mut self.context.runner)?;
         remove_runtime_repair_validation_gate(&self.context.root)?;
         self.context
             .systemd
@@ -278,12 +287,18 @@ where
     }
 
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error> {
-        install_canonical_runtime_gate(
-            &self.context.root,
-            &mut self.context.systemd,
-            &mut self.context.runner,
-            &mut self.context.crash,
-        )?;
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::UnmaskRuntimeSocket)?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::StartRuntimeSocket)?;
         self.context
             .systemd
             .start()
@@ -534,6 +549,13 @@ fn mask_runtime_validation_socket(
     runner: &mut impl FixedRepairSystemdRunner,
 ) -> Result<(), LiveInstalledBundleRepairError> {
     runner.run(RepairSystemdAction::StopRepairServices)?;
+    runner.run(RepairSystemdAction::MaskRuntimeSocket)
+}
+
+fn mask_canonical_runtime_socket(
+    runner: &mut impl FixedRepairSystemdRunner,
+) -> Result<(), LiveInstalledBundleRepairError> {
+    runner.run(RepairSystemdAction::StopCanonicalRuntime)?;
     runner.run(RepairSystemdAction::MaskRuntimeSocket)
 }
 
@@ -870,6 +892,7 @@ mod tests {
         transcript: Rc<RefCell<Vec<RuntimeValidation>>>,
         fault: SharedFault,
         state: SharedSystemState,
+        fail_on: Option<RuntimeValidation>,
     }
 
     impl RuntimeValidator for TestRuntime {
@@ -883,6 +906,9 @@ mod tests {
                 state.socket_started,
                 "Runtime validation requires its socket"
             );
+            if self.fail_on == Some(validation) {
+                return Err(contract_failure("probe_repair_runtime_validation_failed"));
+            }
             match validation {
                 RuntimeValidation::Temporary => state.temporary_runtime_healthy = true,
                 RuntimeValidation::Canonical => {
@@ -1043,6 +1069,7 @@ mod tests {
                     transcript: Rc::new(RefCell::new(Vec::new())),
                     fault: fault.clone(),
                     state: state.clone(),
+                    fail_on: None,
                 },
                 state,
                 removed: Rc::new(RefCell::new(0)),
@@ -1174,13 +1201,17 @@ mod tests {
         }
     }
 
-    fn fixed_live_effect_order() -> [FaultEvent; 35] {
+    fn fixed_live_effect_order() -> [FaultEvent; 39] {
         [
             FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
             FaultEvent::SystemdReload,
             FaultEvent::SystemdStop,
+            FaultEvent::SystemdReload,
+            FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
             FaultEvent::SystemdReload,
             FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled),
             FaultEvent::SystemdReload,
@@ -1198,7 +1229,7 @@ mod tests {
             FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
             FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
             FaultEvent::Runtime(RuntimeValidation::Canonical),
-            FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+            FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::SystemdReload,
             FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
@@ -1233,11 +1264,11 @@ mod tests {
                 .chain(&baseline[5..])
                 .copied()
                 .collect(),
-            6..=10 => baseline[6..].to_vec(),
-            11..=17 => baseline[11..].to_vec(),
-            18..=21 => baseline[11..16]
+            6..=14 => baseline[6..].to_vec(),
+            15..=21 => baseline[15..].to_vec(),
+            22..=25 => baseline[15..20]
                 .iter()
-                .chain(&baseline[18..])
+                .chain(&baseline[22..])
                 .copied()
                 .collect(),
             _ => unreachable!(),
@@ -1303,7 +1334,7 @@ mod tests {
                 InstalledBundleRepairCrashPoint::Reload
                 | InstalledBundleRepairCrashPoint::Cleanup(_)
                 | InstalledBundleRepairCrashPoint::Complete => 6,
-                InstalledBundleRepairCrashPoint::JournalCleanup => 26,
+                InstalledBundleRepairCrashPoint::JournalCleanup => 30,
             };
             assert_eq!(
                 transcript,
@@ -1456,6 +1487,113 @@ mod tests {
     }
 
     #[test]
+    fn validation_pending_resume_normalizes_before_creating_a_fresh_temporary_runtime() {
+        let fault = (FaultEvent::Runtime(RuntimeValidation::Temporary), 1);
+        let fixture = LiveFixture::with_fault(Some(fault));
+
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err()
+        );
+
+        let first_runtime = fixture.fault.borrow().transcript.len();
+        assert!(
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_ok()
+        );
+        let resume = &fixture.fault.borrow().transcript[first_runtime..];
+        assert_eq!(
+            &resume[..5],
+            [
+                FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+                FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+                FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
+                FaultEvent::SystemdReload,
+                FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled),
+            ],
+            "ValidationPending resume must retire the old R1/gate before creating fresh Temporary R1"
+        );
+    }
+
+    #[test]
+    fn forward_only_resume_normalizes_canonical_shape_before_consuming_the_remaining_pair() {
+        for (progress, epoch_present) in
+            [("invalidation-committed", true), ("epoch-removed", false)]
+        {
+            let fixture = LiveFixture::with_fault(Some((
+                FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved),
+                1,
+            )));
+            let intent_path = fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json");
+            let mut intent: serde_json::Value =
+                serde_json::from_slice(&fs::read(&intent_path).unwrap()).unwrap();
+            intent["state"] = serde_json::Value::String(progress.to_owned());
+            fs::write(&intent_path, serde_json::to_vec(&intent).unwrap()).unwrap();
+            let epoch = rooted(
+                fixture.root.path(),
+                "/var/lib/enoki-probe/runtime-failure/epoch.toml",
+            );
+            let latch = rooted(
+                fixture.root.path(),
+                "/var/lib/enoki-probe/runtime-failure/latch",
+            );
+            if !epoch_present {
+                fs::remove_file(&epoch).unwrap();
+            }
+
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _ = drive_live_installed_bundle_repair_with(
+                        fixture.resume(),
+                        fixture.context(),
+                    );
+                }))
+                .is_err()
+            );
+            assert!(
+                latch.exists(),
+                "{progress} must normalize before deleting latch"
+            );
+            assert_eq!(epoch.exists(), epoch_present);
+        }
+    }
+
+    #[test]
+    fn temporary_validation_failure_recovers_ordinary_reporting_without_a_root_gate() {
+        let mut fixture = LiveFixture::with_fault(None);
+        fixture.runtime.fail_on = Some(RuntimeValidation::Temporary);
+
+        assert!(
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_err()
+        );
+        for path in [RUNTIME_REPAIR_PERMIT, RUNTIME_REPAIR_DROP_IN] {
+            assert!(
+                !rooted(fixture.root.path(), path).exists(),
+                "preboundary recovery must remove root gate: {path}"
+            );
+        }
+        let state = fixture.state.borrow();
+        assert!(state.probe_active, "ordinary reporting must be restored");
+        assert!(state.socket_started);
+        assert!(!state.socket_masked);
+        drop(state);
+        for path in [
+            "/var/lib/enoki-probe/runtime-failure/epoch.toml",
+            "/var/lib/enoki-probe/runtime-failure/latch",
+        ] {
+            assert!(
+                rooted(fixture.root.path(), path).exists(),
+                "preboundary failure must not consume the failure pair"
+            );
+        }
+    }
+
+    #[test]
     fn production_repair_driver_retains_exact_custody_across_the_status_window() {
         let fault = (
             FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
@@ -1493,6 +1631,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status.matches("status = \"succeeded\"").count(), 1);
+        assert!(
+            fixture.state.borrow().probe_active,
+            "canonical validation 后到 status/retirement 窗口必须保留 P2 reporting"
+        );
 
         let installed_probe = fixture.root.path().join("usr/local/bin/enoki-probe");
         let metadata = fs::metadata(&installed_probe).unwrap();

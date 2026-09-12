@@ -338,7 +338,13 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
             | InstalledBundleRepairProgress::EpochRemoved
             | InstalledBundleRepairProgress::LatchRemoved
     ) {
-        if progress == InstalledBundleRepairProgress::ProbeActive && !canonical_shape_prepared {
+        if matches!(
+            progress,
+            InstalledBundleRepairProgress::ProbeActive
+                | InstalledBundleRepairProgress::InvalidationCommitted
+                | InstalledBundleRepairProgress::EpochRemoved
+        ) && !canonical_shape_prepared
+        {
             effects
                 .normalize_canonical_runtime()
                 .map_err(InstalledBundleRepairDriveError::Effect)?;
