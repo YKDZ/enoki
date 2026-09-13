@@ -569,8 +569,13 @@ fn validate_unix_runtime_window(
                 .map(|value| format!("{value:?}"))
                 .unwrap_or_else(|| "none".to_owned());
             let request = runtime_failure_diagnostic_request(&detail.request_bytes);
+            let response_prefix = (!detail.response_prefix_truncated && !detail.response_prefix_unsafe)
+                .then(|| runtime_failure_diagnostic_response(&detail.response_prefix))
+                .filter(|value| value != "unavailable")
+                .unwrap_or_else(|| "unavailable".to_owned());
+            let response_replay_ready = response_prefix != "unavailable";
             let rendered = format!(
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready=false",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
                 detail.operation,
                 detail.cause,
                 detail.request_cadence_millis,
@@ -613,6 +618,13 @@ fn runtime_failure_diagnostic_request(bytes: &[u8]) -> String {
         return "unavailable".to_owned();
     }
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn runtime_failure_diagnostic_response(bytes: &[u8]) -> String {
+    if bytes.len() > 512 {
+        return "unavailable".to_owned();
+    }
+    runtime_failure_diagnostic_request(bytes)
 }
 
 fn runtime_validation_code(validation: RuntimeValidation) -> (&'static str, &'static str) {

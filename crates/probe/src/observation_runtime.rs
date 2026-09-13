@@ -1927,6 +1927,7 @@ impl UnixObservationRuntimeClient {
             })?;
         let encoded_request = encode_window_request(request);
         let mut response_prefix = Vec::new();
+        let mut response_prefix_unsafe = false;
         let result = (|| {
             let request_bytes = encoded_request.len();
             let response_bytes = 0;
@@ -1985,7 +1986,11 @@ impl UnixObservationRuntimeClient {
                         Some(&error),
                     )
                 })?;
-            let mut response = RecordingRuntimeResponse::new(stream, &mut response_prefix);
+            let mut response = RecordingRuntimeResponse::new(
+                stream,
+                &mut response_prefix,
+                &mut response_prefix_unsafe,
+            );
             let mut status = [0; 1];
             response.read_exact(&mut status).map_err(|error| {
                 observation_client_failure(
@@ -2083,6 +2088,7 @@ impl UnixObservationRuntimeClient {
                     ));
                 }
                 let mut encoded = vec![0; host_profile_len];
+                response.mark_opaque_payload();
                 response.read_exact(&mut encoded).map_err(|error| {
                     observation_client_failure(
                         ObservationClientError::InvalidResponse,
@@ -2197,6 +2203,7 @@ impl UnixObservationRuntimeClient {
                         ));
                     }
                     let mut encoded = vec![0; encoded_len];
+                    response.mark_opaque_payload();
                     response.read_exact(&mut encoded).map_err(|error| {
                         observation_client_failure(
                             ObservationClientError::InvalidResponse,
@@ -2256,6 +2263,7 @@ impl UnixObservationRuntimeClient {
             detail.request_bytes = encoded_request;
             detail.response_prefix = response_prefix;
             detail.response_prefix_truncated = detail.response_bytes > detail.response_prefix.len();
+            detail.response_prefix_unsafe = response_prefix_unsafe;
             detail
         })
     }
@@ -2280,6 +2288,7 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) request_bytes: Vec<u8>,
     pub(crate) response_prefix: Vec<u8>,
     pub(crate) response_prefix_truncated: bool,
+    pub(crate) response_prefix_unsafe: bool,
     pub(crate) errno: Option<i32>,
     pub(crate) io_kind: Option<io::ErrorKind>,
 }
@@ -2301,6 +2310,7 @@ fn observation_client_failure(
         request_bytes: Vec::new(),
         response_prefix: Vec::new(),
         response_prefix_truncated: false,
+        response_prefix_unsafe: false,
         errno: error.and_then(io::Error::raw_os_error),
         io_kind: error.map(io::Error::kind),
     }
@@ -2432,19 +2442,29 @@ struct RecordingRuntimeResponse<'a> {
     stream: UnixStream,
     bytes: usize,
     prefix: &'a mut Vec<u8>,
+    prefix_contains_opaque_payload: &'a mut bool,
 }
 
 impl<'a> RecordingRuntimeResponse<'a> {
-    fn new(stream: UnixStream, prefix: &'a mut Vec<u8>) -> Self {
+    fn new(
+        stream: UnixStream,
+        prefix: &'a mut Vec<u8>,
+        prefix_contains_opaque_payload: &'a mut bool,
+    ) -> Self {
         Self {
             stream,
             bytes: 0,
             prefix,
+            prefix_contains_opaque_payload,
         }
     }
 
     fn consumed_bytes(&self) -> usize {
         self.bytes
+    }
+
+    fn mark_opaque_payload(&mut self) {
+        *self.prefix_contains_opaque_payload = true;
     }
 }
 
@@ -3051,6 +3071,8 @@ mod tests {
         assert_eq!(detail.operation, "read_version");
         assert_eq!(detail.response_bytes, 5);
         assert_eq!(detail.response_prefix, vec![0, 0, 5, b'1', b'.']);
+        assert!(!detail.response_prefix_truncated);
+        assert!(!detail.response_prefix_unsafe);
         let mut expected = OBSERVATION_WINDOW_PULL.to_vec();
         expected.extend_from_slice(&1_u16.to_be_bytes());
         expected.extend_from_slice(&1_u64.to_be_bytes());
