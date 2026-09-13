@@ -560,44 +560,51 @@ fn validate_unix_runtime_window(
         .map(|_| ())
         .map_err(|detail| {
             let (validation, code) = runtime_validation_code(validation);
-            let errno = detail
-                .errno
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let io_kind = detail
-                .io_kind
-                .map(|value| format!("{value:?}"))
-                .unwrap_or_else(|| "none".to_owned());
-            let request = runtime_failure_diagnostic_request(&detail.request_bytes);
-            let response_prefix = (!detail.response_prefix_truncated && !detail.response_prefix_unsafe)
-                .then(|| runtime_failure_diagnostic_response(&detail.response_prefix))
-                .filter(|value| value != "unavailable")
-                .unwrap_or_else(|| "unavailable".to_owned());
-            let response_replay_ready = response_prefix != "unavailable";
-            let rendered = format!(
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
-                detail.operation,
-                detail.cause,
-                detail.request_cadence_millis,
-                detail.request_sequence_start,
-                detail.response_bytes,
-                response_prefix = "unavailable",
-            );
-            let rendered = if rendered.len() <= 8 * 1024 {
-                rendered
-            } else {
-                format!(
-                    "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex=unavailable response_prefix_hex=unavailable response_replay_ready=false",
-                    detail.operation,
-                    detail.cause,
-                    detail.request_cadence_millis,
-                    detail.request_sequence_start,
-                    detail.response_bytes,
-                )
-            };
+            let rendered = runtime_validation_diagnostic(&detail, validation, code);
             let _ = writeln!(std::io::stderr().lock(), "{rendered}");
             contract_failure(code)
         })
+}
+
+fn runtime_validation_diagnostic(
+    detail: &crate::observation_runtime::ObservationClientFailureDetail,
+    validation: &str,
+    code: &str,
+) -> String {
+    let errno = detail
+        .errno
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let io_kind = detail
+        .io_kind
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_else(|| "none".to_owned());
+    let request = runtime_failure_diagnostic_request(&detail.request_bytes);
+    let response_prefix = (!detail.response_prefix_truncated && !detail.response_prefix_unsafe)
+        .then(|| runtime_failure_diagnostic_response(&detail.response_prefix))
+        .filter(|value| value != "unavailable")
+        .unwrap_or_else(|| "unavailable".to_owned());
+    let response_replay_ready = response_prefix != "unavailable";
+    let rendered = format!(
+        "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
+        detail.operation,
+        detail.cause,
+        detail.request_cadence_millis,
+        detail.request_sequence_start,
+        detail.response_bytes,
+    );
+    if rendered.len() <= 8 * 1024 {
+        rendered
+    } else {
+        format!(
+            "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex=unavailable response_prefix_hex=unavailable response_replay_ready=false",
+            detail.operation,
+            detail.cause,
+            detail.request_cadence_millis,
+            detail.request_sequence_start,
+            detail.response_bytes,
+        )
+    }
 }
 
 fn runtime_failure_diagnostic_request(bytes: &[u8]) -> String {
@@ -757,6 +764,33 @@ mod tests {
         installed_bundle_failure_is_current_at, resume_installed_bundle_repair_at,
         tests::{repair_completion_fixture, repair_test_bundle},
     };
+
+    #[test]
+    fn runtime_validation_diagnostic_keeps_a_safe_early_response_prefix() {
+        let detail = crate::observation_runtime::ObservationClientFailureDetail {
+            cause: crate::observation_runtime::ObservationClientError::InvalidResponse,
+            operation: "read_version",
+            request_cadence_millis: 1_000,
+            request_sequence_start: 1,
+            response_bytes: 5,
+            request_bytes: vec![1, 2, 3],
+            response_prefix: vec![0, 0, 5, b'1', b'.'],
+            response_prefix_truncated: false,
+            response_prefix_unsafe: false,
+            errno: None,
+            io_kind: Some(std::io::ErrorKind::UnexpectedEof),
+        };
+
+        let diagnostic = runtime_validation_diagnostic(
+            &detail,
+            "temporary",
+            "probe_repair_runtime_validation_failed",
+        );
+
+        assert!(diagnostic.contains("response_prefix_hex=000005312e"));
+        assert!(diagnostic.contains("response_replay_ready=true"));
+        assert!(diagnostic.len() <= 8 * 1024);
+    }
 
     #[test]
     fn process_result_reports_closed_action_and_numeric_status_without_child_output() {
