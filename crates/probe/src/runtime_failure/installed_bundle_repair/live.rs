@@ -585,8 +585,24 @@ fn runtime_validation_diagnostic(
         .filter(|value| value != "unavailable")
         .unwrap_or_else(|| "unavailable".to_owned());
     let response_replay_ready = response_prefix != "unavailable";
+    let read_events = detail
+        .read_events
+        .iter()
+        .map(|event| {
+            format!(
+                "{}:{}:{}:{}",
+                event.offset,
+                event.requested,
+                event.received,
+                event
+                    .error_kind
+                    .map_or("ok".to_owned(), |kind| format!("{kind:?}"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     let rendered = format!(
-        "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
+        "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} read_events={read_events} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
         detail.operation,
         detail.cause,
         detail.request_cadence_millis,
