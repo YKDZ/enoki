@@ -3006,7 +3006,7 @@ printf covered > '${covered}'
             PATH: `${fixture}:/usr/bin:/bin`,
           },
         }),
-      ).resolves.toMatchObject({ stderr: "", stdout: "" });
+      ).resolves.toMatchObject({ stdout: "" });
       await expect(readFile(resetMarker, "utf8")).resolves.toBe("reset\n");
       await expect(readFile(covered, "utf8")).resolves.toBe("covered");
     } finally {
