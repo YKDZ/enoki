@@ -1926,179 +1926,26 @@ impl UnixObservationRuntimeClient {
                 )
             })?;
         let encoded_request = encode_window_request(request);
-        let request_bytes = encoded_request.len();
-        let mut response_bytes = 0;
-        let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::Unavailable,
-                "connect",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        configure_deadline(
-            &stream,
-            runtime_window_deadline(cadence).ok_or_else(|| {
-                observation_client_failure(
-                    ObservationClientError::InvalidRequest,
-                    "validate_deadline",
-                    cadence,
-                    sequence_start,
-                    response_bytes,
-                    None,
-                )
-            })?,
-        )
-        .map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::Unavailable,
-                "configure_deadline",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        stream.write_all(&encoded_request).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::Unavailable,
-                "write_request",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(|error| {
+        let mut response_prefix = Vec::new();
+        let result = (|| {
+            let request_bytes = encoded_request.len();
+            let mut response_bytes = 0;
+            let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::Unavailable,
-                    "shutdown_write",
+                    "connect",
                     cadence,
                     sequence_start,
                     response_bytes,
                     Some(&error),
                 )
             })?;
-        let mut status = [0; 1];
-        stream.read_exact(&mut status).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::Unavailable,
-                "read_status",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        response_bytes += status.len();
-        if status[0] != 0 {
-            return Err(observation_client_failure(
-                ObservationClientError::WindowFailed,
-                "validate_status",
-                cadence,
-                sequence_start,
-                response_bytes,
-                None,
-            ));
-        }
-        let version_len = read_u16(&mut stream).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "read_version_length",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })? as usize;
-        response_bytes += 2;
-        if version_len == 0 || version_len > 128 {
-            return Err(observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "validate_version_length",
-                cadence,
-                sequence_start,
-                response_bytes,
-                None,
-            ));
-        }
-        let mut version = vec![0; version_len];
-        stream.read_exact(&mut version).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "read_version",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        response_bytes += version.len();
-        if String::from_utf8(version).map_err(|_| {
-            observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "decode_version",
-                cadence,
-                sequence_start,
-                response_bytes,
-                None,
-            )
-        })? != self.expected_bundle_version
-        {
-            return Err(observation_client_failure(
-                ObservationClientError::BundleIncoherent,
-                "validate_version",
-                cadence,
-                sequence_start,
-                response_bytes,
-                None,
-            ));
-        }
-        let host_profile_len = read_u32(&mut stream).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "read_profile_length",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })? as usize;
-        response_bytes += 4;
-        let host_profile = if host_profile_len == 0 {
-            None
-        } else {
-            if host_profile_len > MAX_RUNTIME_RESPONSE_BYTES {
-                return Err(observation_client_failure(
-                    ObservationClientError::InvalidResponse,
-                    "validate_profile_length",
-                    cadence,
-                    sequence_start,
-                    response_bytes,
-                    None,
-                ));
-            }
-            let mut encoded = vec![0; host_profile_len];
-            stream.read_exact(&mut encoded).map_err(|error| {
-                observation_client_failure(
-                    ObservationClientError::InvalidResponse,
-                    "read_profile",
-                    cadence,
-                    sequence_start,
-                    response_bytes,
-                    Some(&error),
-                )
-            })?;
-            response_bytes += encoded.len();
-            Some(
-                HostProfileSnapshot::decode(encoded.as_slice()).map_err(|_| {
+            configure_deadline(
+                &stream,
+                runtime_window_deadline(cadence).ok_or_else(|| {
                     observation_client_failure(
-                        ObservationClientError::InvalidResponse,
-                        "decode_profile",
+                        ObservationClientError::InvalidRequest,
+                        "validate_deadline",
                         cadence,
                         sequence_start,
                         response_bytes,
@@ -2106,106 +1953,150 @@ impl UnixObservationRuntimeClient {
                     )
                 })?,
             )
-        };
-        let attempt_count = read_u16(&mut stream).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "read_attempt_count",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        response_bytes += 2;
-        if attempt_count as usize != CPU_SAMPLES_PER_WINDOW {
-            return Err(observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "validate_attempt_count",
-                cadence,
-                sequence_start,
-                response_bytes,
-                None,
-            ));
-        }
-        let mut attempts = Vec::with_capacity(attempt_count as usize);
-        for offset in 0..attempt_count {
-            let sequence = read_u64(&mut stream).map_err(|error| {
+            .map_err(|error| {
                 observation_client_failure(
-                    ObservationClientError::InvalidResponse,
-                    "read_sequence",
+                    ObservationClientError::Unavailable,
+                    "configure_deadline",
                     cadence,
                     sequence_start,
                     response_bytes,
                     Some(&error),
                 )
             })?;
-            response_bytes += 8;
-            if sequence != sequence_start + u64::from(offset) {
+            stream.write_all(&encoded_request).map_err(|error| {
+                observation_client_failure(
+                    ObservationClientError::Unavailable,
+                    "write_request",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    Some(&error),
+                )
+            })?;
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .map_err(|error| {
+                    observation_client_failure(
+                        ObservationClientError::Unavailable,
+                        "shutdown_write",
+                        cadence,
+                        sequence_start,
+                        response_bytes,
+                        Some(&error),
+                    )
+                })?;
+            let mut status = [0; 1];
+            stream.read_exact(&mut status).map_err(|error| {
+                observation_client_failure(
+                    ObservationClientError::Unavailable,
+                    "read_status",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    Some(&error),
+                )
+            })?;
+            response_bytes += status.len();
+            record_response_prefix(&mut response_prefix, &status);
+            if status[0] != 0 {
                 return Err(observation_client_failure(
-                    ObservationClientError::InvalidResponse,
-                    "validate_sequence",
+                    ObservationClientError::WindowFailed,
+                    "validate_status",
                     cadence,
                     sequence_start,
                     response_bytes,
                     None,
                 ));
             }
-            let mut outcome = [0; 1];
-            stream.read_exact(&mut outcome).map_err(|error| {
+            let version_len = read_u16(&mut stream).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,
-                    "read_outcome",
+                    "read_version_length",
                     cadence,
                     sequence_start,
                     response_bytes,
                     Some(&error),
                 )
             })?;
-            response_bytes += 1;
-            let cpu_resource_outcome = match outcome[0] {
-                0 => None,
-                1 => Some(SystemStateResourceAcquisitionFailure::Unavailable),
-                2 => Some(SystemStateResourceAcquisitionFailure::Malformed),
-                3 => Some(SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted),
-                _ => {
+            response_bytes += 2;
+            record_response_prefix(&mut response_prefix, &version_len.to_be_bytes());
+            let version_len = version_len as usize;
+            if version_len == 0 || version_len > 128 {
+                return Err(observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "validate_version_length",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    None,
+                ));
+            }
+            let mut version = vec![0; version_len];
+            read_exact_with_response_progress(
+                &mut stream,
+                &mut version,
+                &mut response_bytes,
+                &mut response_prefix,
+            )
+            .map_err(|error| {
+                observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "read_version",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    Some(&error),
+                )
+            })?;
+            if String::from_utf8(version).map_err(|_| {
+                observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "decode_version",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    None,
+                )
+            })? != self.expected_bundle_version
+            {
+                return Err(observation_client_failure(
+                    ObservationClientError::BundleIncoherent,
+                    "validate_version",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    None,
+                ));
+            }
+            let host_profile_len = read_u32(&mut stream).map_err(|error| {
+                observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "read_profile_length",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    Some(&error),
+                )
+            })? as usize;
+            response_bytes += 4;
+            let host_profile = if host_profile_len == 0 {
+                None
+            } else {
+                if host_profile_len > MAX_RUNTIME_RESPONSE_BYTES {
                     return Err(observation_client_failure(
                         ObservationClientError::InvalidResponse,
-                        "validate_outcome",
+                        "validate_profile_length",
                         cadence,
                         sequence_start,
                         response_bytes,
                         None,
                     ));
                 }
-            };
-            let sample = if cpu_resource_outcome.is_none() {
-                let encoded_len = read_u32(&mut stream).map_err(|error| {
-                    observation_client_failure(
-                        ObservationClientError::InvalidResponse,
-                        "read_sample_length",
-                        cadence,
-                        sequence_start,
-                        response_bytes,
-                        Some(&error),
-                    )
-                })? as usize;
-                response_bytes += 4;
-                if encoded_len == 0 || encoded_len > MAX_RUNTIME_RESPONSE_BYTES {
-                    return Err(observation_client_failure(
-                        ObservationClientError::InvalidResponse,
-                        "validate_sample_length",
-                        cadence,
-                        sequence_start,
-                        response_bytes,
-                        None,
-                    ));
-                }
-                let mut encoded = vec![0; encoded_len];
+                let mut encoded = vec![0; host_profile_len];
                 stream.read_exact(&mut encoded).map_err(|error| {
                     observation_client_failure(
                         ObservationClientError::InvalidResponse,
-                        "read_sample",
+                        "read_profile",
                         cadence,
                         sequence_start,
                         response_bytes,
@@ -2213,49 +2104,174 @@ impl UnixObservationRuntimeClient {
                     )
                 })?;
                 response_bytes += encoded.len();
-                Some(MetricSample::decode(encoded.as_slice()).map_err(|_| {
+                Some(
+                    HostProfileSnapshot::decode(encoded.as_slice()).map_err(|_| {
+                        observation_client_failure(
+                            ObservationClientError::InvalidResponse,
+                            "decode_profile",
+                            cadence,
+                            sequence_start,
+                            response_bytes,
+                            None,
+                        )
+                    })?,
+                )
+            };
+            let attempt_count = read_u16(&mut stream).map_err(|error| {
+                observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "read_attempt_count",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    Some(&error),
+                )
+            })?;
+            response_bytes += 2;
+            if attempt_count as usize != CPU_SAMPLES_PER_WINDOW {
+                return Err(observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "validate_attempt_count",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    None,
+                ));
+            }
+            let mut attempts = Vec::with_capacity(attempt_count as usize);
+            for offset in 0..attempt_count {
+                let sequence = read_u64(&mut stream).map_err(|error| {
                     observation_client_failure(
                         ObservationClientError::InvalidResponse,
-                        "decode_sample",
+                        "read_sequence",
+                        cadence,
+                        sequence_start,
+                        response_bytes,
+                        Some(&error),
+                    )
+                })?;
+                response_bytes += 8;
+                if sequence != sequence_start + u64::from(offset) {
+                    return Err(observation_client_failure(
+                        ObservationClientError::InvalidResponse,
+                        "validate_sequence",
                         cadence,
                         sequence_start,
                         response_bytes,
                         None,
+                    ));
+                }
+                let mut outcome = [0; 1];
+                stream.read_exact(&mut outcome).map_err(|error| {
+                    observation_client_failure(
+                        ObservationClientError::InvalidResponse,
+                        "read_outcome",
+                        cadence,
+                        sequence_start,
+                        response_bytes,
+                        Some(&error),
                     )
-                })?)
-            } else {
-                None
-            };
-            attempts.push(ObservationAttemptResult {
-                sequence,
-                sample,
-                cpu_resource_outcome,
-            });
-        }
-        let eof = stream.read(&mut [0; 1]).map_err(|error| {
-            observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "read_eof",
-                cadence,
-                sequence_start,
-                response_bytes,
-                Some(&error),
-            )
-        })?;
-        if eof != 0 {
-            return Err(observation_client_failure(
-                ObservationClientError::InvalidResponse,
-                "validate_eof",
-                cadence,
-                sequence_start,
-                response_bytes + eof,
-                None,
-            ));
-        }
-        let _ = request_bytes;
-        Ok(ObservationWindowResult {
-            attempts,
-            host_profile,
+                })?;
+                response_bytes += 1;
+                let cpu_resource_outcome = match outcome[0] {
+                    0 => None,
+                    1 => Some(SystemStateResourceAcquisitionFailure::Unavailable),
+                    2 => Some(SystemStateResourceAcquisitionFailure::Malformed),
+                    3 => Some(SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted),
+                    _ => {
+                        return Err(observation_client_failure(
+                            ObservationClientError::InvalidResponse,
+                            "validate_outcome",
+                            cadence,
+                            sequence_start,
+                            response_bytes,
+                            None,
+                        ));
+                    }
+                };
+                let sample = if cpu_resource_outcome.is_none() {
+                    let encoded_len = read_u32(&mut stream).map_err(|error| {
+                        observation_client_failure(
+                            ObservationClientError::InvalidResponse,
+                            "read_sample_length",
+                            cadence,
+                            sequence_start,
+                            response_bytes,
+                            Some(&error),
+                        )
+                    })? as usize;
+                    response_bytes += 4;
+                    if encoded_len == 0 || encoded_len > MAX_RUNTIME_RESPONSE_BYTES {
+                        return Err(observation_client_failure(
+                            ObservationClientError::InvalidResponse,
+                            "validate_sample_length",
+                            cadence,
+                            sequence_start,
+                            response_bytes,
+                            None,
+                        ));
+                    }
+                    let mut encoded = vec![0; encoded_len];
+                    stream.read_exact(&mut encoded).map_err(|error| {
+                        observation_client_failure(
+                            ObservationClientError::InvalidResponse,
+                            "read_sample",
+                            cadence,
+                            sequence_start,
+                            response_bytes,
+                            Some(&error),
+                        )
+                    })?;
+                    response_bytes += encoded.len();
+                    Some(MetricSample::decode(encoded.as_slice()).map_err(|_| {
+                        observation_client_failure(
+                            ObservationClientError::InvalidResponse,
+                            "decode_sample",
+                            cadence,
+                            sequence_start,
+                            response_bytes,
+                            None,
+                        )
+                    })?)
+                } else {
+                    None
+                };
+                attempts.push(ObservationAttemptResult {
+                    sequence,
+                    sample,
+                    cpu_resource_outcome,
+                });
+            }
+            let eof = stream.read(&mut [0; 1]).map_err(|error| {
+                observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "read_eof",
+                    cadence,
+                    sequence_start,
+                    response_bytes,
+                    Some(&error),
+                )
+            })?;
+            if eof != 0 {
+                return Err(observation_client_failure(
+                    ObservationClientError::InvalidResponse,
+                    "validate_eof",
+                    cadence,
+                    sequence_start,
+                    response_bytes + eof,
+                    None,
+                ));
+            }
+            let _ = request_bytes;
+            Ok(ObservationWindowResult {
+                attempts,
+                host_profile,
+            })
+        })();
+        result.map_err(|mut detail| {
+            detail.request_bytes = encoded_request;
+            detail.response_prefix = response_prefix;
+            detail
         })
     }
 }
@@ -2276,6 +2292,8 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) request_cadence_millis: u64,
     pub(crate) request_sequence_start: u64,
     pub(crate) response_bytes: usize,
+    pub(crate) request_bytes: Vec<u8>,
+    pub(crate) response_prefix: Vec<u8>,
     pub(crate) errno: Option<i32>,
     pub(crate) io_kind: Option<io::ErrorKind>,
 }
@@ -2294,9 +2312,40 @@ fn observation_client_failure(
         request_cadence_millis: cadence.as_millis().min(u128::from(u64::MAX)) as u64,
         request_sequence_start: sequence_start,
         response_bytes,
+        request_bytes: Vec::new(),
+        response_prefix: Vec::new(),
         errno: error.and_then(io::Error::raw_os_error),
         io_kind: error.map(io::Error::kind),
     }
+}
+
+const MAX_FAILURE_RESPONSE_PREFIX_BYTES: usize = 8 * 1024;
+
+fn record_response_prefix(prefix: &mut Vec<u8>, bytes: &[u8]) {
+    let remaining = MAX_FAILURE_RESPONSE_PREFIX_BYTES.saturating_sub(prefix.len());
+    prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+}
+
+fn read_exact_with_response_progress(
+    stream: &mut UnixStream,
+    buffer: &mut [u8],
+    response_bytes: &mut usize,
+    response_prefix: &mut Vec<u8>,
+) -> io::Result<()> {
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let read = stream.read(&mut buffer[offset..])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "runtime response ended before a complete field",
+            ));
+        }
+        record_response_prefix(response_prefix, &buffer[offset..offset + read]);
+        *response_bytes += read;
+        offset += read;
+    }
+    Ok(())
 }
 
 fn configure_deadline(stream: &UnixStream, deadline: Duration) -> io::Result<()> {
@@ -2984,6 +3033,37 @@ mod tests {
         let mut expected = OBSERVATION_WINDOW_PULL.to_vec();
         expected.extend_from_slice(&1_u16.to_be_bytes());
         expected.extend_from_slice(&1_u64.to_be_bytes());
+        assert_eq!(server.join().expect("Runtime server"), expected);
+    }
+
+    #[test]
+    fn detailed_client_retains_partial_response_prefix_and_request_bytes() {
+        let temporary = tempfile::tempdir().expect("Runtime socket root");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            stream
+                .write_all(&[0, 0, 5, b'1', b'.'])
+                .expect("partial Runtime response");
+            request
+        });
+        let client = UnixObservationRuntimeClient::new(&socket, "1.2.3");
+
+        let detail = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("partial version remains a typed client failure");
+
+        assert_eq!(detail.cause, ObservationClientError::InvalidResponse);
+        assert_eq!(detail.operation, "read_version");
+        assert_eq!(detail.response_bytes, 5);
+        assert_eq!(detail.response_prefix, vec![0, 0, 5, b'1', b'.']);
+        let mut expected = OBSERVATION_WINDOW_PULL.to_vec();
+        expected.extend_from_slice(&1_u16.to_be_bytes());
+        expected.extend_from_slice(&1_u64.to_be_bytes());
+        assert_eq!(detail.request_bytes, expected);
         assert_eq!(server.join().expect("Runtime server"), expected);
     }
 }
