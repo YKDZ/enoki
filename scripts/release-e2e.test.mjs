@@ -2869,6 +2869,7 @@ exit "$status"
       failureDetail: {
         phase: "repair",
         result: { code: 0, stdout: "not repair evidence\n", stderr: "" },
+        executionTiming: { unavailable: true },
       },
     });
   });
@@ -10275,6 +10276,11 @@ describe("Release E2E command", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/terminated by SIGKILL|timed out/i);
+    expect(result.executionTiming).toMatchObject({
+      elapsedMs: expect.any(Number),
+      timeoutMs: 50,
+      timedOut: true,
+    });
   });
 
   it("retains failed Bootstrap staging ownership when deletion cannot be verified", async () => {
