@@ -3342,6 +3342,85 @@ exit 1
     }
   });
 
+  it("通过已监听的 socket 恢复 Runtime，并允许新 Host driver 重入 custody", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-socket-recovery-",
+    );
+    const root = path.resolve(path.dirname(fixture.paths.runtime), "../../..");
+    try {
+      await copyFile(fixture.paths.runtime, fixture.paths.backup);
+      await writeFile(
+        path.join(root, "fake-bin", "systemctl"),
+        `#!/bin/sh
+set -eu
+state="$ENOKI_UNIT_STATES/$2"
+case "$1" in
+  stop|reset-failed) printf 'inactive dead\\n' > "$state" ;;
+  show)
+    values=$(cat "$state" 2>/dev/null || printf 'inactive dead')
+    printf 'LoadState=loaded\\nActiveState=%s\\nSubState=%s\\n' $values
+    case "$*" in
+      *--property=MainPID*) printf 'MainPID=0\\nControlPID=0\\nJob=\\n' ;;
+    esac
+    ;;
+  start)
+    if [ "$2" = enoki-observation-runtime.service ]; then
+      [ "$(cat "$ENOKI_UNIT_STATES/enoki-observation-runtime.socket")" = 'active listening' ] || {
+        printf 'Runtime activation listener is unavailable\\n' >&2
+        exit 1
+      }
+    fi
+    case "$2" in
+      *.socket) printf 'active listening\\n' > "$state" ;;
+      *) printf 'active running\\n' > "$state" ;;
+    esac
+    ;;
+  is-active) [ "$(cat "$ENOKI_UNIT_STATES/$3")" = 'active running' ] ;;
+  *) exit 1 ;;
+esac
+`,
+      );
+      const companion = path.join(
+        path.dirname(fixture.paths.runtime),
+        "enoki-probe-lifecycle-companion",
+      );
+      await writeFile(
+        companion,
+        `#!/bin/sh
+set -eu
+[ "$1" = retry-runtime ]
+systemctl reset-failed enoki-observation-runtime.service
+systemctl start enoki-observation-runtime.service
+systemctl is-active --quiet enoki-observation-runtime.service
+`,
+      );
+      await chmod(companion, 0o755);
+      const driverInput = {
+        assertOwnedRun() {},
+        execute: (command) =>
+          fixture.runHostScript(command, { ENOKI_UNIT_STATES: root }),
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      };
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const driver =
+          createInstalledBundleFailureRepairHostDriver(driverInput);
+        await expect(driver.cleanup("run-runtime-custody")).resolves.toEqual({
+          clean: true,
+          recoveredBundleVersion: "1.2.3",
+        });
+      }
+      await expect(readFile(fixture.paths.runtime, "utf8")).resolves.toBe(
+        "canonical runtime\n",
+      );
+      await expect(readFile(fixture.paths.backup, "utf8")).resolves.toBe(
+        "canonical runtime\n",
+      );
+    } finally {
+      await fixture.remove();
+    }
+  });
+
   it("rewrites an interrupted fixed restore temp only for the exact active owner", async () => {
     const fixture = await createRuntimeFailureCustodyFixture(
       "enoki-runtime-restore-temp-",

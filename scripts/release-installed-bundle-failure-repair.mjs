@@ -372,8 +372,8 @@ if [ -f "$backup" ] && [ ! -L "$backup" ]; then
   sync -f /usr/local/bin || fail 'could not persist Runtime restore'
   [ "$(stat -c '%u:%a:%h' "$runtime")" = 0:755:1 ] || fail 'restored Observation Runtime boundary is invalid'
   [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$backup_sha256" ] || fail 'restored Observation Runtime digest changed'
-  "$companion" retry-runtime || fail 'could not reconcile and retry fixed Runtime'
   systemctl start enoki-observation-runtime.socket >/dev/null 2>&1 || fail 'could not restart Observation Runtime socket'
+  "$companion" retry-runtime || fail 'could not reconcile and retry fixed Runtime'
   systemctl start enoki-probe.service >/dev/null 2>&1 || fail 'could not restart canonical Probe'
   wait_for_unit_state enoki-observation-runtime.socket active listening
   wait_for_unit_state enoki-probe.service active running

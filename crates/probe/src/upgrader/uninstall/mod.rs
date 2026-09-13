@@ -21,6 +21,7 @@ use enoki_probe_bootstrap::lifecycle::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
@@ -94,9 +95,27 @@ fn coordinate_at(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> LifecycleResponse {
     let Ok(guard) = ReplacementCoordinatorGuard::acquire_existing(production_root) else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=guard_acquire code=probe_uninstall_metadata_invalid"
+        );
         return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
     };
+    coordinate_after_guard(guard, request, production_root, transport, systemd)
+}
+
+fn coordinate_after_guard(
+    guard: ReplacementCoordinatorGuard,
+    request: Option<&LifecycleRequest>,
+    production_root: Option<&Path>,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> LifecycleResponse {
     if guard.validate_stable().is_err() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=guard_validate code=probe_uninstall_metadata_invalid"
+        );
         return LifecycleResponse::failed("probe_uninstall_metadata_invalid");
     }
     let install_metadata_path = production_path(PRODUCTION_INSTALL_METADATA_PATH, production_root);
@@ -578,7 +597,25 @@ fn lifecycle_response_from_resume_decision(
     match decision {
         Ok(ResumeDecision::Completed) => LifecycleResponse::succeeded(),
         Ok(ResumeDecision::RecoveryPending) => LifecycleResponse::recovery_pending(),
-        Err(error) => LifecycleResponse::failed(error.code()),
+        Err(error) => {
+            let code = error.code();
+            match &error {
+                ProbeUpgraderRunError::InvalidInstallMetadata(reason) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=resume_decision code={code} reason={}",
+                        reason.escape_default(),
+                    );
+                }
+                _ => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=resume_decision code={code}"
+                    );
+                }
+            }
+            LifecycleResponse::failed(code)
+        }
     }
 }
 

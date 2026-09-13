@@ -75,10 +75,18 @@ pub(super) fn response(
 ) -> LifecycleResponse {
     match result {
         Ok(_) => LifecycleResponse::succeeded(),
-        Err(error) if error.code() == "probe_manual_reinstall_required" => {
-            LifecycleResponse::failed("probe_manual_reinstall_required")
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=probe_repair step=response code={}",
+                error.code()
+            );
+            if error.code() == "probe_manual_reinstall_required" {
+                LifecycleResponse::failed("probe_manual_reinstall_required")
+            } else {
+                LifecycleResponse::failed("lifecycle.repair_unresolved")
+            }
         }
-        Err(_) => LifecycleResponse::failed("lifecycle.repair_unresolved"),
     }
 }
 
@@ -312,7 +320,13 @@ struct InstalledBundleRepairAuthorizationResponse {
 }
 
 fn decode_authority_response<T: DeserializeOwned>(output: &[u8]) -> Result<T, ProbeRepairRunError> {
-    serde_json::from_slice(output).map_err(|_| contract_failure("probe_repair_authority_invalid"))
+    serde_json::from_slice(output).map_err(|_| {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=decode_authority_response code=probe_repair_authority_invalid"
+        );
+        contract_failure("probe_repair_authority_invalid")
+    })
 }
 
 /// Repair coordinator 的内部事实与 authority exchange Interface。
@@ -572,6 +586,51 @@ fn contract_failure(code: &'static str) -> ProbeRepairRunError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn acquired_invalid_authority_reports_decode_before_unresolved_response() {
+        const CHILD: &str = "ENOKI_REPAIR_AUTHORITY_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut dependencies = DeterministicRepairDependencies::successful(
+                br#"{"authority":{},"signature":"secret-authority-sentinel"}"#.to_vec(),
+            );
+            let result = exchange_installed_bundle_authority_with(
+                &mut dependencies,
+                b"secret-request-sentinel",
+                1000,
+                1000,
+            )
+            .and_then(|output| {
+                decode_authority_response::<InstalledBundleRepairAuthorizationResponse>(&output)
+            });
+            let error = result.err().expect("invalid authority must be rejected");
+            assert_eq!(error.code(), "probe_repair_authority_invalid");
+            assert_eq!(
+                response(Err(error)),
+                LifecycleResponse::failed("lifecycle.repair_unresolved")
+            );
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "upgrader::repair::tests::acquired_invalid_authority_reports_decode_before_unresolved_response",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.lines().collect::<Vec<_>>(),
+            [
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=decode_authority_response code=probe_repair_authority_invalid",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=probe_repair step=response code=probe_repair_authority_invalid",
+            ]
+        );
+        assert!(!stderr.contains("secret-"));
+    }
+
     struct DeterministicRepairDependencies {
         failure: Option<RepairDependencyFailure>,
         now_ms: u64,
@@ -662,6 +721,30 @@ mod tests {
 
     #[test]
     fn response_keeps_manual_reinstall_distinct_from_unresolved_repair() {
+        const CHILD: &str = "ENOKI_REPAIR_RESPONSE_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "upgrader::repair::tests::response_keeps_manual_reinstall_distinct_from_unresolved_repair",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(
+                stderr.lines().collect::<Vec<_>>(),
+                [
+                    "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=probe_repair step=response code=probe_manual_reinstall_required",
+                    "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=probe_repair step=response code=probe_repair_recovery_pending",
+                    "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=probe_repair step=response code=probe_repair_authority_invalid",
+                ]
+            );
+            assert!(!stderr.contains("secret-"));
+            return;
+        }
         assert_eq!(
             response(Err(
                 ProbeUpgraderRunError::ManualProbeReinstallRequired.into()
@@ -671,6 +754,20 @@ mod tests {
         assert_eq!(
             response(Err(contract_failure("probe_repair_recovery_pending"))),
             LifecycleResponse::failed("lifecycle.repair_unresolved")
+        );
+        assert_eq!(
+            response(Err(ProbeRepairRunError::ServiceReconstruction {
+                code: "probe_repair_authority_invalid",
+                message: "secret-error-detail-sentinel".to_owned(),
+            })),
+            LifecycleResponse::failed("lifecycle.repair_unresolved")
+        );
+        assert_eq!(
+            response(Ok(ProbeRepairResult {
+                probe_id: "secret-identity-sentinel".to_owned(),
+                repaired_version: "1.2.3".to_owned(),
+            })),
+            LifecycleResponse::succeeded()
         );
     }
 

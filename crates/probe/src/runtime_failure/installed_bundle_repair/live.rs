@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -468,14 +469,37 @@ impl FixedRepairSystemdRunner for ProcessRepairSystemdRunner {
                 &["unmask", "--runtime", "enoki-observation-runtime.socket"]
             }
         };
-        let status = Command::new("/usr/bin/systemctl")
-            .args(arguments)
-            .status()
-            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
-        status
-            .success()
-            .then_some(())
-            .ok_or_else(|| contract_failure("probe_repair_systemd_failed"))
+        Self::finish(
+            action,
+            Command::new("/usr/bin/systemctl").args(arguments).status(),
+        )
+    }
+}
+
+impl ProcessRepairSystemdRunner {
+    fn finish(
+        action: RepairSystemdAction,
+        result: std::io::Result<std::process::ExitStatus>,
+    ) -> Result<(), LiveInstalledBundleRepairError> {
+        let (field, value) = match result {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => ("exit", status.code()),
+            Err(error) => ("errno", error.raw_os_error()),
+        };
+        let action = match action {
+            RepairSystemdAction::StopRepairServices => "stop_repair_services",
+            RepairSystemdAction::StopCanonicalRuntime => "stop_canonical_runtime",
+            RepairSystemdAction::MaskRuntimeSocket => "mask_runtime_socket",
+            RepairSystemdAction::ResetRuntimeFailed => "reset_runtime_failed",
+            RepairSystemdAction::StartRuntimeSocket => "start_runtime_socket",
+            RepairSystemdAction::UnmaskRuntimeSocket => "unmask_runtime_socket",
+        };
+        let value = value.map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action={action} code=probe_repair_systemd_failed {field}={value}"
+        );
+        Err(contract_failure("probe_repair_systemd_failed"))
     }
 }
 
@@ -534,13 +558,20 @@ fn validate_runtime_window(
     client
         .request_finalized_window(Duration::from_secs(1), 1)
         .map(|_| ())
-        .map_err(|_| match validation {
-            RuntimeValidation::Temporary => {
-                contract_failure("probe_repair_runtime_validation_failed")
-            }
-            RuntimeValidation::Canonical => {
-                contract_failure("probe_repair_canonical_runtime_validation_failed")
-            }
+        .map_err(|_| {
+            let (validation, code) = match validation {
+                RuntimeValidation::Temporary => {
+                    ("temporary", "probe_repair_runtime_validation_failed")
+                }
+                RuntimeValidation::Canonical => {
+                    ("canonical", "probe_repair_canonical_runtime_validation_failed")
+                }
+            };
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation={validation} code={code}"
+            );
+            contract_failure(code)
         })
 }
 
@@ -651,7 +682,7 @@ mod tests {
     use std::{
         cell::RefCell,
         fs,
-        io::Read,
+        io::{Read, Write},
         os::unix::fs::PermissionsExt,
         os::unix::net::UnixListener,
         panic::{AssertUnwindSafe, catch_unwind},
@@ -664,6 +695,105 @@ mod tests {
         installed_bundle_failure_is_current_at, resume_installed_bundle_repair_at,
         tests::{repair_completion_fixture, repair_test_bundle},
     };
+
+    #[test]
+    fn process_result_reports_closed_action_and_numeric_status_without_child_output() {
+        const CHILD: &str = "ENOKI_REPAIR_PROCESS_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let output = Command::new("/bin/sh")
+                .args(["-c", "printf secret-child-stderr-sentinel >&2; exit 23"])
+                .output()
+                .unwrap();
+            assert_eq!(output.stderr, b"secret-child-stderr-sentinel");
+            for action in [
+                RepairSystemdAction::StopRepairServices,
+                RepairSystemdAction::StopCanonicalRuntime,
+                RepairSystemdAction::MaskRuntimeSocket,
+                RepairSystemdAction::ResetRuntimeFailed,
+                RepairSystemdAction::StartRuntimeSocket,
+                RepairSystemdAction::UnmaskRuntimeSocket,
+            ] {
+                assert_eq!(
+                    ProcessRepairSystemdRunner::finish(action, Ok(output.status))
+                        .unwrap_err()
+                        .code(),
+                    "probe_repair_systemd_failed",
+                );
+            }
+            let root = tempfile::tempdir().unwrap();
+            let missing =
+                Command::new(root.path().join("secret-missing-executable-sentinel")).status();
+            assert_eq!(
+                missing.as_ref().unwrap_err().raw_os_error(),
+                Some(libc::ENOENT)
+            );
+            assert!(
+                ProcessRepairSystemdRunner::finish(
+                    RepairSystemdAction::StartRuntimeSocket,
+                    missing,
+                )
+                .is_err()
+            );
+            assert!(
+                ProcessRepairSystemdRunner::finish(
+                    RepairSystemdAction::StartRuntimeSocket,
+                    Err(std::io::Error::other("secret-io-detail-sentinel")),
+                )
+                .is_err()
+            );
+            let signaled = Command::new("/bin/sh")
+                .args(["-c", "kill -TERM $$"])
+                .status()
+                .unwrap();
+            assert_eq!(signaled.code(), None);
+            assert!(
+                ProcessRepairSystemdRunner::finish(
+                    RepairSystemdAction::StopRepairServices,
+                    Ok(signaled),
+                )
+                .is_err()
+            );
+            let success = Command::new("/bin/sh").args(["-c", "exit 0"]).status();
+            assert!(
+                ProcessRepairSystemdRunner::finish(
+                    RepairSystemdAction::StartRuntimeSocket,
+                    success,
+                )
+                .is_ok()
+            );
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime_failure::installed_bundle_repair::live::tests::process_result_reports_closed_action_and_numeric_status_without_child_output",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(
+            stderr.lines().collect::<Vec<_>>(),
+            [
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=stop_repair_services code=probe_repair_systemd_failed exit=23",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=stop_canonical_runtime code=probe_repair_systemd_failed exit=23",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=mask_runtime_socket code=probe_repair_systemd_failed exit=23",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=reset_runtime_failed code=probe_repair_systemd_failed exit=23",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=start_runtime_socket code=probe_repair_systemd_failed exit=23",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=unmask_runtime_socket code=probe_repair_systemd_failed exit=23",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=start_runtime_socket code=probe_repair_systemd_failed errno=2",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=start_runtime_socket code=probe_repair_systemd_failed errno=unknown",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=repair_systemd action=stop_repair_services code=probe_repair_systemd_failed exit=unknown",
+            ]
+        );
+        assert!(!stderr.contains("secret-"));
+    }
 
     #[test]
     fn runtime_validation_requests_reach_the_unix_socket_with_the_minimum_sequence() {
@@ -949,7 +1079,22 @@ mod tests {
                 "Runtime validation requires its socket"
             );
             if self.fail_on == Some(validation) {
-                return Err(contract_failure("probe_repair_runtime_validation_failed"));
+                let root = tempfile::tempdir().unwrap();
+                let socket = root.path().join("runtime.sock");
+                let listener = UnixListener::bind(&socket).unwrap();
+                let server = std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = Vec::new();
+                    stream.read_to_end(&mut request).unwrap();
+                    stream
+                        .write_all(b"secret-runtime-response-sentinel")
+                        .unwrap();
+                });
+                let client =
+                    crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+                let result = validate_runtime_window(&client, validation);
+                server.join().unwrap();
+                return result;
             }
             match validation {
                 RuntimeValidation::Temporary => state.temporary_runtime_healthy = true,
@@ -1605,6 +1750,83 @@ mod tests {
                 "{progress} must normalize before deleting latch"
             );
             assert_eq!(epoch.exists(), epoch_present);
+        }
+    }
+
+    #[test]
+    fn live_validation_failure_reports_its_window_and_preserves_resume() {
+        const CHILD: &str = "ENOKI_REPAIR_VALIDATION_DIAGNOSTIC_CHILD";
+        if let Ok(case) = std::env::var(CHILD) {
+            let mut fixture = LiveFixture::new();
+            let identity_before = fs::read(
+                fixture
+                    .root
+                    .path()
+                    .join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+            )
+            .unwrap();
+            fixture.runtime.fail_on = match case.as_str() {
+                "temporary" => Some(RuntimeValidation::Temporary),
+                "canonical" => Some(RuntimeValidation::Canonical),
+                "success" => None,
+                _ => panic!("unknown validation test case"),
+            };
+            let result =
+                drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            if case == "success" {
+                assert!(result.is_ok());
+            } else {
+                let expected_code = if case == "temporary" {
+                    "probe_repair_runtime_validation_failed"
+                } else {
+                    "probe_repair_canonical_runtime_validation_failed"
+                };
+                assert_eq!(
+                    result.err().expect("validation failure").code(),
+                    expected_code
+                );
+                if case == "temporary" {
+                    assert!(fixture.state.borrow().probe_active);
+                    assert!(!rooted(fixture.root.path(), RUNTIME_REPAIR_PERMIT).exists());
+                    assert!(!rooted(fixture.root.path(), RUNTIME_REPAIR_DROP_IN).exists());
+                }
+                fixture.runtime.fail_on = None;
+                assert!(
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context(),)
+                        .is_ok()
+                );
+            }
+            assert_converged(&fixture, &identity_before);
+            return;
+        }
+        for (case, expected) in [
+            (
+                "temporary",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation=temporary code=probe_repair_runtime_validation_failed",
+            ),
+            (
+                "canonical",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation=canonical code=probe_repair_canonical_runtime_validation_failed",
+            ),
+            ("success", ""),
+        ] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime_failure::installed_bundle_repair::live::tests::live_validation_failure_reports_its_window_and_preserves_resume",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(stderr.trim_end(), expected, "{case}");
+            assert!(!stderr.contains("secret-"));
         }
     }
 

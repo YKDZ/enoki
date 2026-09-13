@@ -12,12 +12,18 @@ fn cpu_provider_rejects_the_fixed_pull_when_stdin_is_a_direct_pipe() {
         .stdout(Stdio::piped())
         .spawn()
         .expect("CPU Provider starts");
-    child
+    if let Err(error) = child
         .stdin
         .take()
         .expect("Provider stdin")
         .write_all(CPU_PULL)
-        .expect("fixed request writes");
+    {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "fixed request writes: {error}"
+        );
+    }
     let output = child.wait_with_output().expect("Provider exits");
 
     assert!(!output.status.success());
@@ -31,12 +37,18 @@ fn cpu_provider_rejects_every_non_fixed_request_without_a_result() {
         .stdout(Stdio::piped())
         .spawn()
         .expect("CPU Provider starts");
-    child
+    if let Err(error) = child
         .stdin
         .take()
         .expect("Provider stdin")
         .write_all(b"enoki.cpu-counters.v1 /etc/shadow\n")
-        .expect("hostile request writes");
+    {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "hostile request writes: {error}"
+        );
+    }
     let output = child.wait_with_output().expect("Provider exits");
 
     assert!(!output.status.success());

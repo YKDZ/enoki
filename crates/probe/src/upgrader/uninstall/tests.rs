@@ -2,7 +2,7 @@ use super::cleanup::set_strict_repair_loader_failure;
 use super::{
     CompanionBinaryFacts, LocalUninstallIntent, PostCommitSelfFinalizeFacts, ResumeDecision,
     UninstallCapsulePhase, adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
-    commit_replacement_and_cleanup_install_with_systemd, coordinate_at,
+    commit_replacement_and_cleanup_install_with_systemd, coordinate_after_guard, coordinate_at,
     coordinate_lifecycle_companion_recovery_at, lifecycle_response_from_resume_decision,
     post_commit_self_finalize_policy, read_uninstall_capsule, resume_lifecycle_companion_at,
     run_uninstall_lifecycle_adapter, uninstall_capsule_path,
@@ -24,17 +24,311 @@ use enoki_probe_bootstrap::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    ffi::CString,
     fs::{self, OpenOptions},
     os::{
         fd::AsRawFd,
-        unix::fs::{PermissionsExt, chown},
+        unix::{
+            ffi::OsStrExt,
+            fs::{PermissionsExt, chown},
+        },
     },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     sync::mpsc,
     thread,
     time::Duration,
 };
+
+const UNINSTALL_DIAGNOSTIC_CASE: &str = "ENOKI_TEST_UNINSTALL_DIAGNOSTIC_CASE";
+const UNINSTALL_DIAGNOSTIC_SECRET: &str = "formal241-secret-sentinel";
+
+fn run_uninstall_diagnostic_child(case: &str) -> Output {
+    Command::new(std::env::current_exe().expect("current test process"))
+        .args([
+            "--exact",
+            "upgrader::uninstall::tests::uninstall_diagnostic_child_process",
+            "--nocapture",
+        ])
+        .env(UNINSTALL_DIAGNOSTIC_CASE, case)
+        .output()
+        .expect("run the uninstall coordinator in a fresh process")
+}
+
+fn run_uninstall_diagnostic_child_with_full_stderr(case: &str) -> Output {
+    Command::new(std::env::current_exe().expect("current test process"))
+        .args([
+            "--exact",
+            "upgrader::uninstall::tests::uninstall_diagnostic_child_process",
+            "--nocapture",
+        ])
+        .env(UNINSTALL_DIAGNOSTIC_CASE, case)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::from(
+            OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .expect("open deterministic failing stderr"),
+        ))
+        .spawn()
+        .expect("run the uninstall coordinator with failing stderr")
+        .wait_with_output()
+        .expect("collect the uninstall coordinator child")
+}
+
+fn bind_mount(source: &Path, target: &str) {
+    let source = CString::new(source.as_os_str().as_bytes()).expect("source path has no NUL");
+    let target = CString::new(target).expect("target path has no NUL");
+    assert_eq!(
+        unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND,
+                std::ptr::null(),
+            )
+        },
+        0,
+        "bind mount the controlled stable lock directory"
+    );
+}
+
+fn enter_private_stable_lock_namespace(root: &Path) {
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "stable lock fixture requires root"
+    );
+    assert_eq!(
+        unsafe { libc::unshare(libc::CLONE_NEWNS) },
+        0,
+        "unshare mount namespace"
+    );
+    assert_eq!(
+        unsafe {
+            libc::mount(
+                std::ptr::null(),
+                c"/".as_ptr(),
+                std::ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                std::ptr::null(),
+            )
+        },
+        0,
+        "make stable lock mount private"
+    );
+    bind_mount(&root.join("run/lock"), "/run/lock");
+}
+
+#[test]
+fn guard_acquire_failure_emits_its_diagnostic_without_changing_the_response() {
+    let output = run_uninstall_diagnostic_child("guard-acquire");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("diagnostic stderr is UTF-8"),
+        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=guard_acquire code=probe_uninstall_metadata_invalid\n",
+    );
+}
+
+#[test]
+fn guard_validate_failure_emits_its_diagnostic_without_effects() {
+    let output = run_uninstall_diagnostic_child("guard-validate");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("diagnostic stderr is UTF-8"),
+        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=guard_validate code=probe_uninstall_metadata_invalid\n",
+    );
+}
+
+#[test]
+fn guard_validate_failure_keeps_its_response_when_stderr_fails() {
+    let output = run_uninstall_diagnostic_child_with_full_stderr("guard-validate");
+
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn metadata_failures_emit_distinct_static_reasons_without_leaking_input() {
+    for (case, reason) in [
+        (
+            "current-layout",
+            "Probe Bootstrap current layout receipt is invalid",
+        ),
+        (
+            "current-layout-mode",
+            "Probe Bootstrap current layout receipt is not a root-owned regular 0600 file",
+        ),
+    ] {
+        let output = run_uninstall_diagnostic_child(case);
+
+        assert!(output.status.success(), "case: {case}");
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic stderr is UTF-8");
+        assert_eq!(
+            stderr,
+            format!(
+                "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=resume_decision code=probe_uninstall_metadata_invalid reason={reason}\n"
+            ),
+            "case: {case}",
+        );
+        assert!(!stderr.contains(UNINSTALL_DIAGNOSTIC_SECRET));
+    }
+}
+
+#[test]
+fn non_metadata_failure_emits_only_its_static_code() {
+    let output = run_uninstall_diagnostic_child("status-failure");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("diagnostic stderr is UTF-8");
+    assert_eq!(
+        stderr,
+        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=uninstall step=resume_decision code=probe_uninstall_failed\n",
+    );
+    assert!(!stderr.contains(UNINSTALL_DIAGNOSTIC_SECRET));
+    assert!(!stderr.contains("temporary report failure"));
+}
+
+#[test]
+fn successful_and_recovery_pending_uninstalls_emit_no_failure_diagnostic() {
+    for case in ["success", "recovery-pending"] {
+        let output = run_uninstall_diagnostic_child(case);
+
+        assert!(output.status.success(), "case: {case}");
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic stderr is UTF-8");
+        assert!(!stderr.contains("phase=uninstall_failure"), "case: {case}");
+        assert!(!stderr.contains(UNINSTALL_DIAGNOSTIC_SECRET));
+    }
+}
+
+#[test]
+fn uninstall_diagnostic_child_process() {
+    let Ok(case) = std::env::var(UNINSTALL_DIAGNOSTIC_CASE) else {
+        return;
+    };
+    let temporary = tempfile::tempdir().expect("temporary production root");
+    if case == "guard-validate" {
+        fs::create_dir_all(temporary.path().join("run/lock"))
+            .expect("controlled stable lock parent");
+        enter_private_stable_lock_namespace(temporary.path());
+        let legacy_path = temporary
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/activation.lock");
+        fs::create_dir_all(legacy_path.parent().expect("legacy parent"))
+            .expect("legacy lock parent");
+        fs::set_permissions(
+            legacy_path.parent().expect("legacy parent"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("legacy parent mode");
+        fs::write(&legacy_path, []).expect("canonical legacy lock");
+        fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o600))
+            .expect("legacy lock mode");
+        let guard = ReplacementCoordinatorGuard::acquire_existing(Some(temporary.path()))
+            .expect("real coordinator acquires both lock generations");
+        let stable_path = Path::new("/run/lock/enoki-probe-lifecycle.lock");
+        fs::remove_file(stable_path).expect("retire the acquired stable lock generation");
+        fs::write(stable_path, []).expect("replace stable lock generation");
+        fs::set_permissions(stable_path, fs::Permissions::from_mode(0o600))
+            .expect("replacement stable lock mode");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+        let response = coordinate_after_guard(
+            guard,
+            None,
+            Some(temporary.path()),
+            &mut transport,
+            &mut systemd,
+        );
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+        );
+        assert!(transport.url.is_empty());
+        assert!(transport.status_url.is_empty());
+        assert!(transport.downloads.is_empty());
+        assert!(systemd.calls.is_empty());
+        return;
+    }
+    if case != "guard-acquire" {
+        let fixture = uninstall_coordinator_fixture(temporary.path());
+        fs::write(
+            &fixture.metadata_path,
+            crate::upgrader::install_metadata_tests::schema_five_metadata_contents(),
+        )
+        .expect("schema five install metadata");
+        fs::set_permissions(&fixture.metadata_path, fs::Permissions::from_mode(0o600))
+            .expect("install metadata mode");
+        fs::set_permissions(&fixture.identity_path, fs::Permissions::from_mode(0o600))
+            .expect("identity mode");
+        commit_current_layout_for_test(temporary.path(), "1.2.3")
+            .expect("canonical install producer commits current-layout receipt");
+        let bootstrap_state = fixture
+            .metadata
+            .bootstrap_state_dir
+            .expect("bootstrap state");
+        match case.as_str() {
+            "current-layout" => fs::write(
+                bootstrap_state.join("current-layout"),
+                format!("schema_version=1\nversion={UNINSTALL_DIAGNOSTIC_SECRET}\n"),
+            )
+            .expect("mismatched current-layout receipt"),
+            "current-layout-mode" => fs::set_permissions(
+                bootstrap_state.join("current-layout"),
+                fs::Permissions::from_mode(0o4600),
+            )
+            .expect("noncanonical current-layout mode"),
+            "status-failure" | "success" | "recovery-pending" => {}
+            _ => panic!("unknown uninstall diagnostic case: {case}"),
+        }
+    }
+    let mut transport = RecordingValidationTransport {
+        status_failure: case == "status-failure",
+        ..RecordingValidationTransport::default()
+    };
+    let mut systemd = RecordingSystemdRunner {
+        final_verification_failure_after: (case == "recovery-pending").then_some(1),
+        ..RecordingSystemdRunner::default()
+    };
+    let request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        UNINSTALL_DIAGNOSTIC_SECRET,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        "1.2.3",
+    )
+    .expect("bound Hub uninstall request");
+
+    let response = coordinate_at(
+        Some(&request),
+        Some(temporary.path()),
+        &mut transport,
+        &mut systemd,
+    );
+
+    let expected = match case.as_str() {
+        "guard-acquire" | "current-layout" | "current-layout-mode" => {
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+        }
+        "status-failure" => LifecycleResponse::failed("probe_uninstall_failed"),
+        "success" => LifecycleResponse::succeeded(),
+        "recovery-pending" => LifecycleResponse::recovery_pending(),
+        _ => unreachable!(),
+    };
+    assert_eq!(response, expected);
+    if matches!(
+        case.as_str(),
+        "guard-acquire" | "current-layout" | "current-layout-mode"
+    ) {
+        assert!(transport.url.is_empty());
+        assert!(transport.status_url.is_empty());
+        assert!(transport.downloads.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+}
 
 #[derive(Default)]
 struct RecordingValidationTransport {
