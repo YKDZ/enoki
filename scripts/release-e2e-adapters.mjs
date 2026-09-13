@@ -2170,6 +2170,7 @@ export function serializeRunError(error, secrets = []) {
 
 function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {
   return new Promise((resolve, reject) => {
+    const startedAt = process.hrtime.bigint();
     const usesProcessGroup = process.platform !== "win32";
     const child = spawn(command, arguments_, {
       detached: usesProcessGroup,
@@ -2218,6 +2219,11 @@ function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {
         code: code ?? 1,
         stderr: Buffer.concat(stderr).toString("utf8"),
         stdout: Buffer.concat(stdout).toString("utf8"),
+        executionTiming: {
+          elapsedMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n),
+          timeoutMs,
+          timedOut,
+        },
       };
       if (signal) {
         result.stderr += `\nprocess terminated by ${signal}`;

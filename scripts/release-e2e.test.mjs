@@ -2851,7 +2851,11 @@ exit "$status"
     const driver = createInstalledBundleFailureRepairHostDriver({
       assertOwnedRun() {},
       async execute(command) {
-        if (command.includes("# enoki-release-e2e:exhaust-observation-runtime-budget")) {
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
           return successfulCommandText("recorded\n");
         }
         return successfulCommandText("not repair evidence\n");
@@ -2859,7 +2863,9 @@ exit "$status"
       ownershipToken: "00000000-0000-4000-8000-000000000001",
     });
 
-    await expect(driver.repair("run-runtime-invalid-evidence", "1.2.3")).rejects.toMatchObject({
+    await expect(
+      driver.repair("run-runtime-invalid-evidence", "1.2.3"),
+    ).rejects.toMatchObject({
       failureDetail: {
         phase: "repair",
         result: { code: 0, stdout: "not repair evidence\n", stderr: "" },
@@ -3110,11 +3116,18 @@ read_unit_state enoki-observation-runtime.service
       const helperStart = cleanupCommand.indexOf("read_unit_state() {");
       const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
       await expect(
-        execFileAsync("/bin/sh", ["-c", `set -eu
+        execFileAsync(
+          "/bin/sh",
+          [
+            "-c",
+            `set -eu
 ${cleanupCommand.slice(helperStart, helperEnd)}
-read_unit_state enoki-observation-runtime.service`], {
-          env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
-        }),
+read_unit_state enoki-observation-runtime.service`,
+          ],
+          {
+            env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+          },
+        ),
       ).rejects.toMatchObject({
         code: 1,
         stderr: expect.stringContaining("stdout_hex=unavailable"),

@@ -604,6 +604,16 @@ function boundedCommandResult(phase, result) {
       stderr: typeof result?.stderr === "string" ? result.stderr : "",
       stdout: typeof result?.stdout === "string" ? result.stdout : "",
     },
+    executionTiming:
+      Number.isSafeInteger(result?.executionTiming?.elapsedMs) &&
+      Number.isSafeInteger(result?.executionTiming?.timeoutMs) &&
+      typeof result?.executionTiming?.timedOut === "boolean"
+        ? {
+            elapsedMs: result.executionTiming.elapsedMs,
+            timeoutMs: result.executionTiming.timeoutMs,
+            timedOut: result.executionTiming.timedOut,
+          }
+        : { unavailable: true },
   };
   const encoded = JSON.stringify(detail);
   if (

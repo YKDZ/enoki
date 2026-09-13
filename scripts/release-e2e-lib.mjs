@@ -7917,6 +7917,21 @@ export function sanitizeFailureDetail(value, secrets = []) {
     phase: value.phase,
     result: { code: result.code, stderr: result.stderr, stdout: result.stdout },
   };
+  if (value.executionTiming?.unavailable === true) {
+    normalized.executionTiming = { unavailable: true };
+  } else if (
+    Number.isSafeInteger(value.executionTiming?.elapsedMs) &&
+    Number.isSafeInteger(value.executionTiming?.timeoutMs) &&
+    typeof value.executionTiming?.timedOut === "boolean"
+  ) {
+    normalized.executionTiming = {
+      elapsedMs: value.executionTiming.elapsedMs,
+      timeoutMs: value.executionTiming.timeoutMs,
+      timedOut: value.executionTiming.timedOut,
+    };
+  } else if (value.executionTiming !== undefined) {
+    return unavailable();
+  }
   const redactedStderr = redactSensitiveText(result.stderr, secrets);
   const redactedStdout = redactSensitiveText(result.stdout, secrets);
   if (
