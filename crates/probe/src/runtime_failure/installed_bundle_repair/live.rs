@@ -937,6 +937,48 @@ mod tests {
     }
 
     #[test]
+    fn production_runtime_validator_keeps_the_closed_client_causes() {
+        for (label, response) in [
+            ("wrong version", vec![0, 0, 5, b'w', b'r', b'o', b'n', b'g']),
+            (
+                "wrong sequence",
+                vec![
+                    0, 0, 5, b'1', b'.', b'2', b'.', b'3', 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2,
+                ],
+            ),
+            ("partial version", vec![0, 0, 5, b'1', b'.']),
+        ] {
+            let root = tempfile::tempdir().expect("Runtime socket root");
+            let socket = root.path().join("runtime.sock");
+            let listener = UnixListener::bind(&socket).expect("Runtime listener");
+            let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().expect("Runtime connection");
+                    let mut request = Vec::new();
+                    stream.read_to_end(&mut request).expect("Runtime request");
+                    stream.write_all(&response).expect("Runtime response");
+                }
+            });
+            let client =
+                crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+
+            assert_eq!(
+                validate_unix_runtime_window(&client, RuntimeValidation::Temporary)
+                    .expect_err(label)
+                    .code(),
+                "probe_repair_runtime_validation_failed",
+            );
+            assert_eq!(
+                validate_unix_runtime_window(&client, RuntimeValidation::Canonical)
+                    .expect_err(label)
+                    .code(),
+                "probe_repair_canonical_runtime_validation_failed",
+            );
+            server.join().expect("Runtime server");
+        }
+    }
+
+    #[test]
     fn runtime_gate_cleanup_removes_only_the_owned_drop_in_child() {
         let root = tempfile::tempdir().expect("temporary repair root");
         let parent = rooted(root.path(), RUNTIME_REPAIR_DROP_IN_DIR);

@@ -3124,4 +3124,46 @@ mod tests {
         assert_eq!(sequence.response_prefix.len(), sequence.response_bytes);
         server.join().expect("Runtime server");
     }
+
+    #[test]
+    fn public_and_detailed_clients_share_a_coherent_window_decoder() {
+        let temporary = tempfile::tempdir().expect("Runtime socket root");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let expected = ObservationWindowResult {
+            attempts: (1..=CPU_SAMPLES_PER_WINDOW as u64)
+                .map(|sequence| ObservationAttemptResult {
+                    sequence,
+                    sample: None,
+                    cpu_resource_outcome: Some(SystemStateResourceAcquisitionFailure::Unavailable),
+                })
+                .collect(),
+            host_profile: None,
+        };
+        let server_result = expected.clone();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("Runtime connection");
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).expect("Runtime request");
+                write_window_success(&mut stream, "1.2.3", &server_result)
+                    .expect("coherent Runtime response");
+            }
+        });
+        let client = UnixObservationRuntimeClient::new(&socket, "1.2.3");
+
+        assert_eq!(
+            client
+                .request_finalized_window(Duration::from_secs(1), 1)
+                .expect("public client accepts coherent response"),
+            expected
+        );
+        assert_eq!(
+            client
+                .request_finalized_window_detailed(Duration::from_secs(1), 1)
+                .expect("detailed client accepts coherent response"),
+            expected
+        );
+        server.join().expect("Runtime server");
+    }
 }
