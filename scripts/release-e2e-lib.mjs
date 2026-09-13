@@ -3419,7 +3419,9 @@ export function createProbeHostHarness({
           kind: "installed_bundle_failure_repair",
           phase: "repair",
           result: result.repairCommand,
-          executionTiming: result.repairCommand?.executionTiming,
+          executionTiming: result.repairCommand?.executionTiming ?? {
+            unavailable: true,
+          },
         };
         if (error?.failureDetail?.phase === "cleanup") {
           error.failureDetail.priorState = "repair_succeeded";
@@ -7947,6 +7949,8 @@ export function sanitizeFailureDetail(value, secrets = []) {
     };
   } else if (value.priorState !== "repair_succeeded") {
     return unavailableForPhase();
+  } else {
+    normalized.priorState = "repair_succeeded";
   }
   if (value.priorRepair !== undefined) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);

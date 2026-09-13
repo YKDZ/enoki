@@ -3174,6 +3174,78 @@ mod tests {
     }
 
     #[test]
+    fn detailed_client_marks_an_unsafe_version_field_unavailable_before_replay() {
+        const UNSAFE_VERSION: &[u8] = b"-----BEGIN PRIVATE KEY-----";
+        let temporary = tempfile::tempdir().expect("Runtime socket root");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            stream.write_all(&[0]).expect("Runtime status");
+            stream
+                .write_all(&(UNSAFE_VERSION.len() as u16).to_be_bytes())
+                .expect("Runtime version length");
+            stream.write_all(UNSAFE_VERSION).expect("Runtime version");
+            request
+        });
+        let client = UnixObservationRuntimeClient::new(&socket, "1.2.3");
+
+        let detail = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("opaque version remains a typed client failure");
+
+        assert_eq!(detail.cause, ObservationClientError::BundleIncoherent);
+        assert_eq!(detail.operation, "validate_version");
+        assert!(detail.response_prefix_unsafe);
+        assert!(!detail.response_prefix_truncated);
+        assert!(
+            detail
+                .response_prefix
+                .windows(UNSAFE_VERSION.len())
+                .any(|bytes| bytes == UNSAFE_VERSION)
+        );
+        assert_eq!(
+            server.join().expect("Runtime server").len(),
+            OBSERVATION_WINDOW_PULL.len() + 10
+        );
+    }
+
+    #[test]
+    fn detailed_client_marks_the_first_dropped_read_event_unavailable() {
+        let temporary = tempfile::tempdir().expect("Runtime socket root");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            stream
+                .write_all(&[0, 0, 40])
+                .expect("Runtime response prefix");
+            stream.flush().expect("flush Runtime response prefix");
+            for _ in 0..40 {
+                stream.write_all(b"1").expect("Runtime version fragment");
+                stream.flush().expect("flush Runtime version fragment");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let client = UnixObservationRuntimeClient::new(&socket, "1.2.3");
+
+        let detail = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("long fragmented version remains a typed client failure");
+
+        assert_eq!(detail.cause, ObservationClientError::BundleIncoherent);
+        assert_eq!(detail.operation, "validate_version");
+        assert_eq!(detail.read_events.len(), 32);
+        assert!(detail.read_events_truncated);
+        assert!(!detail.response_prefix_unsafe);
+        server.join().expect("Runtime server");
+    }
+
+    #[test]
     fn public_and_detailed_clients_share_version_and_sequence_validation() {
         let temporary = tempfile::tempdir().expect("Runtime socket root");
         let socket = temporary.path().join("runtime.sock");

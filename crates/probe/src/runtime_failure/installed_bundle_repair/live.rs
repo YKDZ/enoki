@@ -820,6 +820,67 @@ mod tests {
     }
 
     #[test]
+    fn runtime_validation_diagnostic_omits_opaque_or_truncated_runtime_reads() {
+        let root = tempfile::tempdir().expect("Runtime socket root");
+        let socket = root.path().join("opaque-runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            let version = b"-----BEGIN PRIVATE KEY-----";
+            stream.write_all(&[0]).expect("Runtime status");
+            stream
+                .write_all(&(version.len() as u16).to_be_bytes())
+                .expect("Runtime version length");
+            stream.write_all(version).expect("Runtime version");
+        });
+        let client = crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+        let opaque = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("opaque version must be rejected");
+        server.join().expect("Runtime server");
+        let opaque_diagnostic = runtime_validation_diagnostic(
+            &opaque,
+            "temporary",
+            "probe_repair_runtime_validation_failed",
+        );
+        assert!(opaque_diagnostic.contains("response_prefix_hex=unavailable"));
+        assert!(opaque_diagnostic.contains("response_replay_ready=false"));
+
+        let root = tempfile::tempdir().expect("Runtime socket root");
+        let socket = root.path().join("fragmented-runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            stream
+                .write_all(&[0, 0, 40])
+                .expect("Runtime response prefix");
+            stream.flush().expect("flush Runtime response prefix");
+            for _ in 0..40 {
+                stream.write_all(b"1").expect("Runtime version fragment");
+                stream.flush().expect("flush Runtime version fragment");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let client = crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+        let truncated = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("fragmented response must retain an event limit");
+        server.join().expect("Runtime server");
+        let truncated_diagnostic = runtime_validation_diagnostic(
+            &truncated,
+            "temporary",
+            "probe_repair_runtime_validation_failed",
+        );
+        assert!(truncated_diagnostic.contains("read_events_truncated=true"));
+        assert!(truncated_diagnostic.contains("response_prefix_hex=unavailable"));
+        assert!(truncated_diagnostic.contains("response_replay_ready=false"));
+    }
+
+    #[test]
     fn process_result_reports_closed_action_and_numeric_status_without_child_output() {
         const CHILD: &str = "ENOKI_REPAIR_PROCESS_DIAGNOSTIC_CHILD";
         if std::env::var_os(CHILD).is_some() {
