@@ -581,24 +581,6 @@ fn validate_unix_runtime_window(
         })
 }
 
-#[cfg(test)]
-fn validate_runtime_window(
-    client: &impl crate::observation_runtime::ObservationWindowClient,
-    validation: RuntimeValidation,
-) -> Result<(), LiveInstalledBundleRepairError> {
-    client
-        .request_finalized_window(Duration::from_secs(1), 1)
-        .map(|_| ())
-        .map_err(|_| {
-            let (validation, code) = runtime_validation_code(validation);
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation={validation} code={code}"
-            );
-            contract_failure(code)
-        })
-}
-
 fn runtime_validation_code(validation: RuntimeValidation) -> (&'static str, &'static str) {
     match validation {
         RuntimeValidation::Temporary => ("temporary", "probe_repair_runtime_validation_failed"),
@@ -849,13 +831,13 @@ mod tests {
         );
 
         assert_eq!(
-            validate_runtime_window(&client, RuntimeValidation::Temporary)
+            validate_unix_runtime_window(&client, RuntimeValidation::Temporary)
                 .expect_err("closed peer must remain a validation failure")
                 .code(),
             "probe_repair_runtime_validation_failed"
         );
         assert_eq!(
-            validate_runtime_window(&client, RuntimeValidation::Canonical)
+            validate_unix_runtime_window(&client, RuntimeValidation::Canonical)
                 .expect_err("closed peer must remain a validation failure")
                 .code(),
             "probe_repair_canonical_runtime_validation_failed"
@@ -1126,7 +1108,7 @@ mod tests {
                 });
                 let client =
                     crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
-                let result = validate_runtime_window(&client, validation);
+                let result = validate_unix_runtime_window(&client, validation);
                 server.join().unwrap();
                 return result;
             }
@@ -1836,11 +1818,11 @@ mod tests {
         for (case, expected) in [
             (
                 "temporary",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation=temporary code=probe_repair_runtime_validation_failed",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1",
             ),
             (
                 "canonical",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation=canonical code=probe_repair_canonical_runtime_validation_failed",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1",
             ),
             ("success", ""),
         ] {
