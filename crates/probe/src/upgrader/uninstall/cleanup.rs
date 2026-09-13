@@ -1071,7 +1071,15 @@ enum StateRootRead<T> {
 enum StateRootNssOwner {
     #[default]
     NotReached,
-    Unavailable,
+    UserUnavailable,
+    GroupUnavailable,
+    Success(u32, u32),
+}
+
+#[derive(Clone, Copy)]
+enum StateRootServiceIdentity {
+    UserUnavailable,
+    GroupUnavailable,
     Success(u32, u32),
 }
 
@@ -1237,7 +1245,11 @@ fn trusted_state_root_layout_with_facts(
             readlink
         }
         Err(error) => {
-            facts.public_readlink = StateRootRead::IoError;
+            facts.public_readlink = if error.kind() == std::io::ErrorKind::NotFound {
+                StateRootRead::NotFound
+            } else {
+                StateRootRead::IoError
+            };
             facts.first_rejection.get_or_insert("public_readlink");
             return Err(error.into());
         }
@@ -1301,11 +1313,17 @@ fn state_root_authority(
             .then_some(StateRootCleanupAuthority::ContentAuthorized)),
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
             let service_owner = service_identity_owner(user, group);
-            facts.nss_owner = match service_owner.as_ref() {
-                Ok((uid, gid)) => StateRootNssOwner::Success(*uid, *gid),
-                Err(_) => StateRootNssOwner::Unavailable,
+            facts.nss_owner = match service_owner {
+                StateRootServiceIdentity::UserUnavailable => StateRootNssOwner::UserUnavailable,
+                StateRootServiceIdentity::GroupUnavailable => StateRootNssOwner::GroupUnavailable,
+                StateRootServiceIdentity::Success(uid, gid) => StateRootNssOwner::Success(uid, gid),
             };
-            if state_root_owner_tuple_matches(actual, root, service_owner.ok()) {
+            let service_owner = match service_owner {
+                StateRootServiceIdentity::Success(uid, gid) => Some((uid, gid)),
+                StateRootServiceIdentity::UserUnavailable
+                | StateRootServiceIdentity::GroupUnavailable => None,
+            };
+            if state_root_owner_tuple_matches(actual, root, service_owner) {
                 return Ok(Some(StateRootCleanupAuthority::ContentAuthorized));
             }
             if metadata.uid() != metadata.gid() {
@@ -1317,9 +1335,13 @@ fn state_root_authority(
                     empty
                 }
                 Err(error) => {
-                    facts.empty_shell = StateRootRead::IoError;
+                    facts.empty_shell = if error.kind() == std::io::ErrorKind::NotFound {
+                        StateRootRead::NotFound
+                    } else {
+                        StateRootRead::IoError
+                    };
                     facts.first_rejection.get_or_insert("empty_shell");
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
             Ok(empty.then_some(StateRootCleanupAuthority::EmptyShellOnly))
@@ -1348,7 +1370,8 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
     };
     let nss = match facts.nss_owner {
         StateRootNssOwner::NotReached => "not_reached".to_owned(),
-        StateRootNssOwner::Unavailable => "unavailable".to_owned(),
+        StateRootNssOwner::UserUnavailable => "user_unavailable".to_owned(),
+        StateRootNssOwner::GroupUnavailable => "group_unavailable".to_owned(),
         StateRootNssOwner::Success(uid, gid) => format!("{uid}:{gid}"),
     };
     let empty = match facts.empty_shell {
@@ -1366,7 +1389,7 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
     );
 }
 
-fn state_root_is_empty(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
+fn state_root_is_empty(path: &Path) -> std::io::Result<bool> {
     let mut entries = fs::read_dir(path)?;
     Ok(entries.next().transpose()?.is_none())
 }
@@ -1379,32 +1402,25 @@ fn state_root_owner_tuple_matches(
     actual == root || service == Some(actual)
 }
 
-fn service_identity_owner(
-    service_user: &str,
-    service_group: &str,
-) -> Result<(u32, u32), ProbeUpgraderRunError> {
-    let service_user = CString::new(service_user).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata("service account name is unsafe")
-    })?;
-    let service_group = CString::new(service_group).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata("service group name is unsafe")
-    })?;
+fn service_identity_owner(service_user: &str, service_group: &str) -> StateRootServiceIdentity {
+    let Ok(service_user) = CString::new(service_user) else {
+        return StateRootServiceIdentity::UserUnavailable;
+    };
+    let Ok(service_group) = CString::new(service_group) else {
+        return StateRootServiceIdentity::GroupUnavailable;
+    };
     // SAFETY: this copies the numeric fields while the NUL-terminated name
     // and the libc passwd result remain valid.
     let account = unsafe { libc::getpwnam(service_user.as_ptr()) };
     if account.is_null() {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "service account owner is unavailable",
-        ));
+        return StateRootServiceIdentity::UserUnavailable;
     }
     let (uid, account_gid) = unsafe { ((*account).pw_uid, (*account).pw_gid) };
     let group = unsafe { libc::getgrnam(service_group.as_ptr()) };
     if group.is_null() || account_gid != unsafe { (*group).gr_gid } {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "service account and group ownership is unavailable",
-        ));
+        return StateRootServiceIdentity::GroupUnavailable;
     }
-    Ok((uid, unsafe { (*group).gr_gid }))
+    StateRootServiceIdentity::Success(uid, unsafe { (*group).gr_gid })
 }
 
 fn expected_root_owner_for(_path: &Path) -> (u32, u32) {
@@ -1927,8 +1943,12 @@ mod tests {
         ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     };
     use std::{
+        ffi::OsString,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        os::unix::{
+            ffi::OsStringExt,
+            fs::{MetadataExt, PermissionsExt, symlink},
+        },
         path::{Path, PathBuf},
         sync::mpsc::{self, RecvTimeoutError},
         thread,
@@ -2678,6 +2698,46 @@ mod tests {
         assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
         assert!(matches!(facts.nss_owner, StateRootNssOwner::NotReached));
         assert!(matches!(facts.empty_shell, StateRootRead::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_keep_a_user_lookup_failure_distinct_from_group_lookup() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir_all(&state).expect("ordinary state root");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).expect("state root mode");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        trusted_state_root_layout_with_facts(
+            &state,
+            StateRootOwner::BoundServiceOrEmptyShell {
+                user: "invalid\0account",
+                group: "root",
+            },
+            &mut facts,
+        )
+        .expect("root-owned state remains admitted");
+
+        assert!(matches!(
+            facts.nss_owner,
+            StateRootNssOwner::UserUnavailable
+        ));
+        assert!(matches!(facts.empty_shell, StateRootRead::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_keep_the_public_lstat_io_rejection_point() {
+        let state = PathBuf::from(OsString::from_vec(
+            b"/tmp/enoki\0/var/lib/enoki-probe".to_vec(),
+        ));
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
+
+        assert!(result.is_err(), "NUL path causes the reached lstat to fail");
+        assert!(matches!(facts.public_lstat, StateRootRead::IoError));
+        assert_eq!(facts.first_rejection, Some("public_lstat"));
+        assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
     }
 
     #[test]
