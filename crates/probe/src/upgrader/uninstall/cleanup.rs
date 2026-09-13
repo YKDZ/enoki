@@ -1058,13 +1058,31 @@ enum StateRootOwner<'a> {
     BoundServiceOrEmptyShell { user: &'a str, group: &'a str },
 }
 
+#[derive(Clone, Copy, Default)]
+enum StateRootRead<T> {
+    #[default]
+    NotReached,
+    NotFound,
+    IoError,
+    Success(T),
+}
+
+#[derive(Clone, Copy, Default)]
+enum StateRootNssOwner {
+    #[default]
+    NotReached,
+    Unavailable,
+    Success(u32, u32),
+}
+
 #[derive(Default)]
 struct StateRootAdmissionFacts {
-    public_lstat: Option<StateRootLstatFacts>,
-    private_lstat: Option<StateRootLstatFacts>,
-    public_readlink: Option<Vec<u8>>,
-    nss_owner: Option<Option<(u32, u32)>>,
-    empty_shell: Option<bool>,
+    public_lstat: StateRootRead<StateRootLstatFacts>,
+    private_lstat: StateRootRead<StateRootLstatFacts>,
+    public_readlink: StateRootRead<Vec<u8>>,
+    nss_owner: StateRootNssOwner,
+    empty_shell: StateRootRead<bool>,
+    first_rejection: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -1112,7 +1130,11 @@ fn trusted_state_root_layout(
 ) -> Result<Option<TrustedStateRootAdmission>, ProbeUpgraderRunError> {
     let mut facts = StateRootAdmissionFacts::default();
     let result = trusted_state_root_layout_with_facts(public_state_dir, ordinary_owner, &mut facts);
-    if result.is_err() {
+    if let Err(error) = &result {
+        facts.first_rejection = Some(match error {
+            ProbeUpgraderRunError::InvalidInstallMetadata(point) => point,
+            _ => "state_root_io_error",
+        });
         emit_state_root_admission_facts(&facts);
     }
     result
@@ -1136,11 +1158,18 @@ fn trusted_state_root_layout_with_facts(
         .join("private/enoki-probe");
     let public_metadata = match fs::symlink_metadata(public_state_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            facts.public_lstat = StateRootRead::NotFound;
             return match fs::symlink_metadata(&private) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    facts.private_lstat = StateRootRead::NotFound;
+                    Ok(None)
+                }
+                Err(error) => {
+                    facts.private_lstat = StateRootRead::IoError;
+                    Err(error.into())
+                }
                 Ok(metadata) => {
-                    facts.private_lstat = Some((&metadata).into());
+                    facts.private_lstat = StateRootRead::Success((&metadata).into());
                     let authority =
                         validate_state_root_directory(&private, &metadata, ordinary_owner, facts)?;
                     Ok(Some(TrustedStateRootAdmission {
@@ -1153,9 +1182,12 @@ fn trusted_state_root_layout_with_facts(
                 }
             };
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            facts.public_lstat = StateRootRead::IoError;
+            return Err(error.into());
+        }
         Ok(metadata) => {
-            facts.public_lstat = Some((&metadata).into());
+            facts.public_lstat = StateRootRead::Success((&metadata).into());
             metadata
         }
     };
@@ -1169,7 +1201,7 @@ fn trusted_state_root_layout_with_facts(
         match fs::symlink_metadata(&private) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Ok(metadata) => {
-                facts.private_lstat = Some((&metadata).into());
+                facts.private_lstat = StateRootRead::Success((&metadata).into());
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe state directory has conflicting canonical residue",
                 ));
@@ -1190,8 +1222,17 @@ fn trusted_state_root_layout_with_facts(
             "Probe state directory is unsafe",
         ));
     }
-    let readlink = fs::read_link(public_state_dir)?;
-    facts.public_readlink = Some(readlink.as_os_str().as_bytes().to_vec());
+    let readlink = match fs::read_link(public_state_dir) {
+        Ok(readlink) => {
+            facts.public_readlink =
+                StateRootRead::Success(readlink.as_os_str().as_bytes().to_vec());
+            readlink
+        }
+        Err(error) => {
+            facts.public_readlink = StateRootRead::IoError;
+            return Err(error.into());
+        }
+    };
     if readlink.as_os_str().as_bytes() != b"private/enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
@@ -1199,11 +1240,15 @@ fn trusted_state_root_layout_with_facts(
     }
     let authority = match fs::symlink_metadata(&private) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            facts.private_lstat = StateRootRead::NotFound;
             StateRootCleanupAuthority::ContentAuthorized
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            facts.private_lstat = StateRootRead::IoError;
+            return Err(error.into());
+        }
         Ok(metadata) => {
-            facts.private_lstat = Some((&metadata).into());
+            facts.private_lstat = StateRootRead::Success((&metadata).into());
             validate_state_root_directory(&private, &metadata, ordinary_owner, facts)?
         }
     };
@@ -1246,51 +1291,67 @@ fn state_root_authority(
             .then_some(StateRootCleanupAuthority::ContentAuthorized)),
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
             let service_owner = service_identity_owner(user, group);
-            facts.nss_owner = Some(service_owner.as_ref().ok().copied());
+            facts.nss_owner = match service_owner.as_ref() {
+                Ok((uid, gid)) => StateRootNssOwner::Success(*uid, *gid),
+                Err(_) => StateRootNssOwner::Unavailable,
+            };
             if state_root_owner_tuple_matches(actual, root, service_owner.ok()) {
                 return Ok(Some(StateRootCleanupAuthority::ContentAuthorized));
             }
             if metadata.uid() != metadata.gid() {
                 return Ok(None);
             }
-            let empty = state_root_is_empty(path)?;
-            facts.empty_shell = Some(empty);
+            let empty = match state_root_is_empty(path) {
+                Ok(empty) => {
+                    facts.empty_shell = StateRootRead::Success(empty);
+                    empty
+                }
+                Err(error) => {
+                    facts.empty_shell = StateRootRead::IoError;
+                    return Err(error);
+                }
+            };
             Ok(empty.then_some(StateRootCleanupAuthority::EmptyShellOnly))
         }
     }
 }
 
 fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
-    let render = |value: Option<StateRootLstatFacts>| match value {
-        None => "not_reached".to_owned(),
-        Some(value) => format!(
+    let render = |value: &StateRootRead<StateRootLstatFacts>| match value {
+        StateRootRead::NotReached => "not_reached".to_owned(),
+        StateRootRead::NotFound => "not_found".to_owned(),
+        StateRootRead::IoError => "io_error".to_owned(),
+        StateRootRead::Success(value) => format!(
             "dir={},link={},uid={},gid={},mode={:o},nlink={}",
             value.directory, value.symlink, value.uid, value.gid, value.mode, value.nlink
         ),
     };
-    let readlink = facts
-        .public_readlink
-        .as_ref()
-        .map(|value| {
-            value
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        })
-        .unwrap_or_else(|| "not_reached".to_owned());
-    let nss = match facts.nss_owner {
-        None => "not_reached".to_owned(),
-        Some(None) => "unavailable".to_owned(),
-        Some(Some((uid, gid))) => format!("{uid}:{gid}"),
+    let readlink = match &facts.public_readlink {
+        StateRootRead::Success(value) => value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        StateRootRead::NotReached => "not_reached".to_owned(),
+        StateRootRead::NotFound => "not_found".to_owned(),
+        StateRootRead::IoError => "io_error".to_owned(),
     };
-    let empty = facts
-        .empty_shell
-        .map_or("not_reached".to_owned(), |value| value.to_string());
+    let nss = match facts.nss_owner {
+        StateRootNssOwner::NotReached => "not_reached".to_owned(),
+        StateRootNssOwner::Unavailable => "unavailable".to_owned(),
+        StateRootNssOwner::Success(uid, gid) => format!("{uid}:{gid}"),
+    };
+    let empty = match facts.empty_shell {
+        StateRootRead::NotReached => "not_reached".to_owned(),
+        StateRootRead::NotFound => "not_found".to_owned(),
+        StateRootRead::IoError => "io_error".to_owned(),
+        StateRootRead::Success(value) => value.to_string(),
+    };
     let _ = writeln!(
         std::io::stderr(),
-        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=state_root_admission public_lstat={} private_lstat={} public_readlink_hex={readlink} nss_owner={nss} empty_shell={empty}",
-        render(facts.public_lstat),
-        render(facts.private_lstat),
+        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=state_root_admission rejection={} public_lstat={} private_lstat={} public_readlink_hex={readlink} nss_owner={nss} empty_shell={empty}",
+        facts.first_rejection.unwrap_or("unknown"),
+        render(&facts.public_lstat),
+        render(&facts.private_lstat),
     );
 }
 
@@ -1837,7 +1898,7 @@ mod tests {
         STATE_SHELL_RETIRE_FAILURE, STATE_SHELL_RETIRE_MODE_CHANGE,
     };
     use super::{
-        ProbeUpgraderSystemdRunner, StateRootAdmissionFacts, StateRootOwner,
+        ProbeUpgraderSystemdRunner, StateRootAdmissionFacts, StateRootOwner, StateRootRead,
         TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
@@ -2580,19 +2641,10 @@ mod tests {
         let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
 
         assert!(result.is_err(), "unsafe state root is rejected");
-        assert!(facts.public_lstat.is_some(), "actual public lstat is kept");
-        assert!(
-            facts.private_lstat.is_none(),
-            "short circuit does not read private root"
-        );
-        assert!(
-            facts.public_readlink.is_none(),
-            "ordinary root does not readlink"
-        );
-        assert!(
-            facts.empty_shell.is_none(),
-            "rejected mode does not inspect contents"
-        );
+        assert!(matches!(facts.public_lstat, StateRootRead::Success(_)));
+        assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
+        assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
+        assert!(matches!(facts.empty_shell, StateRootRead::NotReached));
     }
 
     #[test]
