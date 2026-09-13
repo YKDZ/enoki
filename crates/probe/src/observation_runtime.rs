@@ -1929,6 +1929,7 @@ impl UnixObservationRuntimeClient {
         let mut response_prefix = Vec::new();
         let mut response_prefix_unsafe = false;
         let mut read_events = Vec::new();
+        let mut read_events_truncated = false;
         let started = Instant::now();
         let configured_deadline_millis = runtime_window_deadline(cadence)
             .map(|deadline| deadline.as_millis().min(u128::from(u32::MAX)) as u32)
@@ -1996,6 +1997,7 @@ impl UnixObservationRuntimeClient {
                 &mut response_prefix,
                 &mut response_prefix_unsafe,
                 &mut read_events,
+                &mut read_events_truncated,
                 started,
             );
             let mut status = [0; 1];
@@ -2272,6 +2274,7 @@ impl UnixObservationRuntimeClient {
             detail.response_prefix_truncated = detail.response_bytes > detail.response_prefix.len();
             detail.response_prefix_unsafe = response_prefix_unsafe;
             detail.read_events = read_events.into_boxed_slice();
+            detail.read_events_truncated = read_events_truncated;
             detail.configured_deadline_millis = configured_deadline_millis;
             detail.terminal_elapsed_millis =
                 started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
@@ -2301,6 +2304,7 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) response_prefix_truncated: bool,
     pub(crate) response_prefix_unsafe: bool,
     pub(crate) read_events: Box<[RuntimeReadEvent]>,
+    pub(crate) read_events_truncated: bool,
     pub(crate) configured_deadline_millis: u32,
     pub(crate) terminal_elapsed_millis: u32,
     pub(crate) errno: Option<i32>,
@@ -2335,6 +2339,7 @@ fn observation_client_failure(
         response_prefix_truncated: false,
         response_prefix_unsafe: false,
         read_events: Box::default(),
+        read_events_truncated: false,
         configured_deadline_millis: 0,
         terminal_elapsed_millis: 0,
         errno: error.and_then(io::Error::raw_os_error),
@@ -2470,6 +2475,7 @@ struct RecordingRuntimeResponse<'a> {
     prefix: &'a mut Vec<u8>,
     prefix_contains_opaque_payload: &'a mut bool,
     events: &'a mut Vec<RuntimeReadEvent>,
+    events_truncated: &'a mut bool,
     started: Instant,
 }
 
@@ -2479,6 +2485,7 @@ impl<'a> RecordingRuntimeResponse<'a> {
         prefix: &'a mut Vec<u8>,
         prefix_contains_opaque_payload: &'a mut bool,
         events: &'a mut Vec<RuntimeReadEvent>,
+        events_truncated: &'a mut bool,
         started: Instant,
     ) -> Self {
         Self {
@@ -2487,6 +2494,7 @@ impl<'a> RecordingRuntimeResponse<'a> {
             prefix,
             prefix_contains_opaque_payload,
             events,
+            events_truncated,
             started,
         }
     }
@@ -2516,6 +2524,8 @@ impl Read for RecordingRuntimeResponse<'_> {
                         elapsed_millis: self.started.elapsed().as_millis().min(u128::from(u64::MAX))
                             as u64,
                     });
+                } else {
+                    *self.events_truncated = true;
                 }
                 return Err(error);
             }
@@ -2528,6 +2538,8 @@ impl Read for RecordingRuntimeResponse<'_> {
                 error_kind,
                 elapsed_millis: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             });
+        } else {
+            *self.events_truncated = true;
         }
         self.bytes += read;
         let remaining = MAX_FAILURE_RESPONSE_PREFIX_BYTES.saturating_sub(self.prefix.len());

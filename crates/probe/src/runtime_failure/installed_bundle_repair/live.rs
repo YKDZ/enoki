@@ -580,7 +580,9 @@ fn runtime_validation_diagnostic(
         .map(|value| format!("{value:?}"))
         .unwrap_or_else(|| "none".to_owned());
     let request = runtime_failure_diagnostic_request(&detail.request_bytes);
-    let response_prefix = (!detail.response_prefix_truncated && !detail.response_prefix_unsafe)
+    let response_prefix = (!detail.response_prefix_truncated
+        && !detail.response_prefix_unsafe
+        && !detail.read_events_truncated)
         .then(|| runtime_failure_diagnostic_response(&detail.response_prefix))
         .filter(|value| value != "unavailable")
         .unwrap_or_else(|| "unavailable".to_owned());
@@ -603,12 +605,15 @@ fn runtime_validation_diagnostic(
         .collect::<Vec<_>>()
         .join(",");
     let rendered = format!(
-        "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} read_events={read_events} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
+        "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} deadline_ms={} elapsed_ms={} read_events_truncated={} read_events={read_events} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
         detail.operation,
         detail.cause,
         detail.request_cadence_millis,
         detail.request_sequence_start,
         detail.response_bytes,
+        detail.configured_deadline_millis,
+        detail.terminal_elapsed_millis,
+        detail.read_events_truncated,
     );
     if rendered.len() <= 8 * 1024 {
         rendered
@@ -629,6 +634,7 @@ fn runtime_failure_diagnostic_request(bytes: &[u8]) -> String {
         || [
             b"password".as_slice(),
             b"private_key",
+            b"private key",
             b"signing_secret",
             b"enk_enroll_",
         ]
@@ -795,6 +801,7 @@ mod tests {
             response_prefix_truncated: false,
             response_prefix_unsafe: false,
             read_events: Box::default(),
+            read_events_truncated: false,
             configured_deadline_millis: 0,
             terminal_elapsed_millis: 0,
             errno: None,
@@ -1960,11 +1967,11 @@ mod tests {
         for (case, expected) in [
             (
                 "temporary",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms=0 read_events_truncated=false read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             (
                 "canonical",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms=0 read_events_truncated=false read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             ("success", ""),
         ] {
