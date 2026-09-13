@@ -795,6 +795,8 @@ mod tests {
             response_prefix_truncated: false,
             response_prefix_unsafe: false,
             read_events: Box::default(),
+            configured_deadline_millis: 0,
+            terminal_elapsed_millis: 0,
             errno: None,
             io_kind: Some(std::io::ErrorKind::UnexpectedEof),
         };

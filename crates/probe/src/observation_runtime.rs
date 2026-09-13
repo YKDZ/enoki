@@ -1930,6 +1930,9 @@ impl UnixObservationRuntimeClient {
         let mut response_prefix_unsafe = false;
         let mut read_events = Vec::new();
         let started = Instant::now();
+        let configured_deadline_millis = runtime_window_deadline(cadence)
+            .map(|deadline| deadline.as_millis().min(u128::from(u32::MAX)) as u32)
+            .unwrap_or(0);
         let result = (|| {
             let request_bytes = encoded_request.len();
             let response_bytes = 0;
@@ -2269,6 +2272,9 @@ impl UnixObservationRuntimeClient {
             detail.response_prefix_truncated = detail.response_bytes > detail.response_prefix.len();
             detail.response_prefix_unsafe = response_prefix_unsafe;
             detail.read_events = read_events.into_boxed_slice();
+            detail.configured_deadline_millis = configured_deadline_millis;
+            detail.terminal_elapsed_millis =
+                started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
             detail
         })
     }
@@ -2295,6 +2301,8 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) response_prefix_truncated: bool,
     pub(crate) response_prefix_unsafe: bool,
     pub(crate) read_events: Box<[RuntimeReadEvent]>,
+    pub(crate) configured_deadline_millis: u32,
+    pub(crate) terminal_elapsed_millis: u32,
     pub(crate) errno: Option<i32>,
     pub(crate) io_kind: Option<io::ErrorKind>,
 }
@@ -2327,6 +2335,8 @@ fn observation_client_failure(
         response_prefix_truncated: false,
         response_prefix_unsafe: false,
         read_events: Box::default(),
+        configured_deadline_millis: 0,
+        terminal_elapsed_millis: 0,
         errno: error.and_then(io::Error::raw_os_error),
         io_kind: error.map(io::Error::kind),
     }
