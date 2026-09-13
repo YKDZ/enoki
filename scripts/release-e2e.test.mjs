@@ -4057,6 +4057,26 @@ exit 1
     expect(
       sanitizeFailureDetail({
         kind: "installed_bundle_failure_repair",
+        phase: "custody",
+        priorState: "repair_succeeded",
+        priorRepair: {
+          kind: "installed_bundle_failure_repair",
+          phase: "repair",
+          result: { code: 0, stderr: "", stdout: "repaired" },
+          executionTiming: { elapsedMs: 7, timeoutMs: 50, timedOut: false },
+        },
+      }),
+    ).toMatchObject({
+      phase: "custody",
+      priorRepair: {
+        phase: "repair",
+        result: { code: 0 },
+        executionTiming: { elapsedMs: 7, timeoutMs: 50, timedOut: false },
+      },
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
         phase: "cleanup",
         result: { code: null, stderr: "", stdout: "" },
       }),

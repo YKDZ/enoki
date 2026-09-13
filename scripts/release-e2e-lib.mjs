@@ -7963,15 +7963,15 @@ export function sanitizeFailureDetail(value, secrets = []) {
   } else if (value.executionTiming !== undefined) {
     return unavailableForPhase();
   }
-  const redactedStderr = redactSensitiveText(result.stderr, secrets);
-  const redactedStdout = redactSensitiveText(result.stdout, secrets);
+  const redactedStderr = redactSensitiveText(result?.stderr ?? "", secrets);
+  const redactedStdout = redactSensitiveText(result?.stdout ?? "", secrets);
   if (
     /(?:enrollment.?token|password|private.?key|signing.?secret|enk_enroll_)/i.test(
-      `${result.stderr}\n${result.stdout}`,
+      `${result?.stderr ?? ""}\n${result?.stdout ?? ""}`,
     ) ||
-    redactedStderr !== result.stderr ||
-    redactedStdout !== result.stdout ||
-    /\bstdout_hex=[0-9a-f]*\b/i.test(result.stderr) ||
+    redactedStderr !== (result?.stderr ?? "") ||
+    redactedStdout !== (result?.stdout ?? "") ||
+    /\bstdout_hex=[0-9a-f]*\b/i.test(result?.stderr ?? "") ||
     Buffer.byteLength(JSON.stringify(normalized), "utf8") > 8 * 1024
   ) {
     return unavailableForPhase();
