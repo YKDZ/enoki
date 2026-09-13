@@ -3892,7 +3892,11 @@ exit 1
           inventoryCount += 1;
           return successfulCommand(
             inventoryCount === 1
-              ? { accounts: { group: false, user: false }, files: [], units: [] }
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
               : {
                   accounts: { group: true, user: true },
                   files: [
