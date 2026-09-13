@@ -2053,6 +2053,12 @@ impl UnixObservationRuntimeClient {
                     Some(&error),
                 )
             })?;
+            if !version
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || *byte == b'.')
+            {
+                response.mark_opaque_payload();
+            }
             if String::from_utf8(version).map_err(|_| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,

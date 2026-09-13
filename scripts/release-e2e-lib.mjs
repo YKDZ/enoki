@@ -3415,11 +3415,21 @@ export function createProbeHostHarness({
       try {
         await completeRuntimeRecoveryCustody(runId, expectedBundleVersion);
       } catch (error) {
+        const priorRepair = {
+          kind: "installed_bundle_failure_repair",
+          phase: "repair",
+          result: result.repairCommand,
+          executionTiming: result.repairCommand?.executionTiming,
+        };
         if (error?.failureDetail?.phase === "cleanup") {
-          error.failureDetail.priorRepair = {
+          error.failureDetail.priorState = "repair_succeeded";
+          error.failureDetail.priorRepair = priorRepair;
+        } else if (error && typeof error === "object") {
+          error.failureDetail = {
             kind: "installed_bundle_failure_repair",
-            phase: "repair",
-            result: result.repairCommand,
+            phase: "custody",
+            priorState: "repair_succeeded",
+            priorRepair,
           };
         }
         throw error;
@@ -7909,26 +7919,30 @@ export function sanitizeFailureDetail(value, secrets = []) {
     !value ||
     typeof value !== "object" ||
     value.kind !== "installed_bundle_failure_repair" ||
-    !["cleanup", "exhaust", "repair"].includes(value.phase)
+    !["cleanup", "custody", "exhaust", "repair"].includes(value.phase)
   ) {
     return unavailable();
   }
   const unavailableForPhase = () => unavailable(value.phase);
   const result = value.result;
-  if (
+  if (value.phase !== "custody" && (
     !result ||
     typeof result !== "object" ||
     !Number.isInteger(result.code) ||
     typeof result.stderr !== "string" ||
     typeof result.stdout !== "string"
-  ) {
+  )) {
     return unavailableForPhase();
   }
   const normalized = {
     kind: "installed_bundle_failure_repair",
     phase: value.phase,
-    result: { code: result.code, stderr: result.stderr, stdout: result.stdout },
   };
+  if (value.phase !== "custody") {
+    normalized.result = { code: result.code, stderr: result.stderr, stdout: result.stdout };
+  } else if (value.priorState !== "repair_succeeded") {
+    return unavailableForPhase();
+  }
   if (value.priorRepair !== undefined) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
     if (!priorRepair) return unavailableForPhase();
