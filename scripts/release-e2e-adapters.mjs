@@ -2152,11 +2152,13 @@ async function replaceJsonAtomically(destination, value) {
 
 function serializeRunError(error, secrets) {
   const message = error instanceof Error ? error.message : String(error);
-  return {
+  const serialized = {
     code: typeof error?.code === "string" ? error.code : "release_e2e_failed",
     message: redactText(message, secrets),
     name: error instanceof Error ? error.name : "Error",
   };
+  if (error?.failureDetail) serialized.failureDetail = error.failureDetail;
+  return serialized;
 }
 
 function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {

@@ -53,8 +53,10 @@ export function createInstalledBundleFailureRepairHostDriver({
       if (result.code !== 0 || result.stdout.trim() !== "cleaned") {
         const recovered = result.stdout.trim().match(/^recovered=(.+)$/);
         if (result.code !== 0 || !recovered) {
-          throw new Error(
+          throw commandResultFailure(
             `Observation Runtime failure cleanup failed: ${result.stderr || result.stdout}`,
+            "cleanup",
+            result,
           );
         }
         assertProbeVersion(recovered[1]);
@@ -81,8 +83,10 @@ export function createInstalledBundleFailureRepairHostDriver({
         { root: true },
       );
       if (exhausted.code !== 0) {
-        throw new Error(
+        throw commandResultFailure(
           `Installed Bundle Failure lacks durable Observation Runtime failure eligibility: ${exhausted.stderr || exhausted.stdout}`,
+          "exhaust",
+          exhausted,
         );
       }
       if (exhausted.stdout.trim() !== "recorded") {
@@ -99,8 +103,10 @@ export function createInstalledBundleFailureRepairHostDriver({
         { root: true },
       );
       if (repaired.code !== 0) {
-        throw new Error(
+        throw commandResultFailure(
           `Installed Bundle Failure Repair failed (${repaired.code}): ${repaired.stderr || repaired.stdout}`,
+          "repair",
+          repaired,
         );
       }
       const repair = parseRepairEvidence(
@@ -543,6 +549,33 @@ function assertProbeVersion(version) {
   if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version ?? "")) {
     throw new Error("Installed Bundle Failure Repair version is invalid");
   }
+}
+
+function commandResultFailure(message, phase, result) {
+  const error = new Error(message);
+  error.failureDetail = boundedCommandResult(phase, result);
+  return error;
+}
+
+function boundedCommandResult(phase, result) {
+  const detail = {
+    kind: "installed_bundle_failure_repair",
+    phase,
+    result: {
+      code: Number.isInteger(result?.code) ? result.code : null,
+      stderr: typeof result?.stderr === "string" ? result.stderr : "",
+      stdout: typeof result?.stdout === "string" ? result.stdout : "",
+    },
+  };
+  if (Buffer.byteLength(JSON.stringify(detail), "utf8") <= 8 * 1024) {
+    return detail;
+  }
+  return {
+    kind: detail.kind,
+    phase,
+    replayReady: false,
+    unavailable: "record_exceeds_limit",
+  };
 }
 
 function shellSingleQuote(value) {

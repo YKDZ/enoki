@@ -7860,6 +7860,9 @@ function serializedError(error) {
   if (error?.resourceRecordingEvidence) {
     serialized.resourceRecordingEvidence = error.resourceRecordingEvidence;
   }
+  if (error?.failureDetail) {
+    serialized.failureDetail = error.failureDetail;
+  }
   if (error instanceof AggregateError) {
     serialized.errors = error.errors.map((nested) => serializedError(nested));
   }

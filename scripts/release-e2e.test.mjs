@@ -372,6 +372,7 @@ exit 1
       backup: path.join(claim, "observation-runtime-original"),
       backupTemp: path.join(claim, "observation-runtime-original.next"),
       claim,
+      fakeSystemctl: path.join(fakeBin, "systemctl"),
       restoreTemp: path.join(
         runtimeDirectory,
         ".enoki-observation-runtime.release-e2e.restore",
@@ -3658,6 +3659,41 @@ systemctl is-active --quiet enoki-observation-runtime.service
     );
     expect(renewed.options).toEqual({ root: true });
     expect(renewed.command).toContain("actual_snapshot=$(fingerprint)");
+  });
+
+  it("keeps the actual cleanup command result when generated cleanup fails", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-cleanup-detail-",
+    );
+    try {
+      await copyFile(fixture.paths.runtime, fixture.paths.backup);
+      await writeFile(
+        fixture.paths.fakeSystemctl,
+        "#!/bin/sh\nexit 1\n",
+        "utf8",
+      );
+      await chmod(fixture.paths.fakeSystemctl, 0o755);
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun(runId) {
+          expect(runId).toBe("run-runtime-custody");
+        },
+        execute: (command) => fixture.runHostScript(command),
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+
+      await expect(driver.cleanup("run-runtime-custody")).rejects.toMatchObject({
+        failureDetail: {
+          phase: "cleanup",
+          result: {
+            code: 79,
+            stderr: "could not stop enoki-probe.service\n",
+            stdout: "",
+          },
+        },
+      });
+    } finally {
+      await fixture.remove();
+    }
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
