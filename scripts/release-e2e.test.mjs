@@ -3883,6 +3883,109 @@ exit 1
     }
   });
 
+  it("retains a successful Repair result when Runtime custody cleanup fails", async () => {
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      async execute(command) {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? { accounts: { group: false, user: false }, files: [], units: [] }
+              : {
+                  accounts: { group: true, user: true },
+                  files: [
+                    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                    "/var/lib/enoki-probe-bootstrap",
+                    "/etc/enoki/probe-install.toml",
+                    "/etc/systemd/system/enoki-probe.service",
+                    "/usr/local/bin/enoki-probe",
+                    "/var/lib/enoki-probe",
+                  ],
+                  units: ["enoki-probe.service"],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(
+            '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+          );
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
+          return successfulCommandText("");
+        }
+        if (command.includes("# enoki-release-e2e:binary-version")) {
+          return successfulCommandText("enoki-probe 1.2.3\n");
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
+          return successfulCommandText("1\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText(
+            [
+              "bundleVersion=1.2.3",
+              "faultBackupExists=1",
+              "repairOutput=本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准",
+              `runtimeSha256=${"a".repeat(64)}`,
+              "unit=enoki-observation-runtime.service",
+              "",
+            ].join("\n"),
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return { code: 79, stderr: "custody cleanup failed", stdout: "" };
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-custody-failure");
+    await harness.install(officialEnrollment(), "run-runtime-custody-failure");
+    const error = await harness
+      .repairInstalledBundleFailure("run-runtime-custody-failure", "1.2.3")
+      .catch((error) => error);
+    expect(error).toMatchObject({
+      failureDetail: {
+        phase: "cleanup",
+        result: { code: 79, stderr: "custody cleanup failed", stdout: "" },
+        priorRepair: {
+          phase: "repair",
+          result: { code: 0 },
+        },
+      },
+    });
+    expect(serializeRunError(error)).toMatchObject({
+      failureDetail: {
+        phase: "cleanup",
+        priorRepair: { phase: "repair", result: { code: 0 } },
+      },
+    });
+  });
+
   it("omits unsafe cleanup payloads without replacing the primary failure", async () => {
     const driver = createInstalledBundleFailureRepairHostDriver({
       assertOwnedRun(runId) {
