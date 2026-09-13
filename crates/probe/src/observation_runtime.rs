@@ -1928,6 +1928,7 @@ impl UnixObservationRuntimeClient {
         let encoded_request = encode_window_request(request);
         let mut response_prefix = Vec::new();
         let mut response_prefix_unsafe = false;
+        let mut read_events = Vec::new();
         let result = (|| {
             let request_bytes = encoded_request.len();
             let response_bytes = 0;
@@ -1990,6 +1991,7 @@ impl UnixObservationRuntimeClient {
                 stream,
                 &mut response_prefix,
                 &mut response_prefix_unsafe,
+                &mut read_events,
             );
             let mut status = [0; 1];
             response.read_exact(&mut status).map_err(|error| {
@@ -2264,6 +2266,7 @@ impl UnixObservationRuntimeClient {
             detail.response_prefix = response_prefix;
             detail.response_prefix_truncated = detail.response_bytes > detail.response_prefix.len();
             detail.response_prefix_unsafe = response_prefix_unsafe;
+            detail.read_events = read_events;
             detail
         })
     }
@@ -2289,8 +2292,17 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) response_prefix: Vec<u8>,
     pub(crate) response_prefix_truncated: bool,
     pub(crate) response_prefix_unsafe: bool,
+    pub(crate) read_events: Vec<RuntimeReadEvent>,
     pub(crate) errno: Option<i32>,
     pub(crate) io_kind: Option<io::ErrorKind>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeReadEvent {
+    pub(crate) offset: usize,
+    pub(crate) requested: usize,
+    pub(crate) received: usize,
+    pub(crate) error_kind: Option<io::ErrorKind>,
 }
 
 fn observation_client_failure(
@@ -2311,6 +2323,7 @@ fn observation_client_failure(
         response_prefix: Vec::new(),
         response_prefix_truncated: false,
         response_prefix_unsafe: false,
+        read_events: Vec::new(),
         errno: error.and_then(io::Error::raw_os_error),
         io_kind: error.map(io::Error::kind),
     }
@@ -2443,6 +2456,7 @@ struct RecordingRuntimeResponse<'a> {
     bytes: usize,
     prefix: &'a mut Vec<u8>,
     prefix_contains_opaque_payload: &'a mut bool,
+    events: &'a mut Vec<RuntimeReadEvent>,
 }
 
 impl<'a> RecordingRuntimeResponse<'a> {
@@ -2450,12 +2464,14 @@ impl<'a> RecordingRuntimeResponse<'a> {
         stream: UnixStream,
         prefix: &'a mut Vec<u8>,
         prefix_contains_opaque_payload: &'a mut bool,
+        events: &'a mut Vec<RuntimeReadEvent>,
     ) -> Self {
         Self {
             stream,
             bytes: 0,
             prefix,
             prefix_contains_opaque_payload,
+            events,
         }
     }
 
@@ -2470,7 +2486,30 @@ impl<'a> RecordingRuntimeResponse<'a> {
 
 impl Read for RecordingRuntimeResponse<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let read = self.stream.read(buffer)?;
+        let offset = self.bytes;
+        let result = self.stream.read(buffer);
+        let (read, error_kind) = match result {
+            Ok(read) => (read, None),
+            Err(error) => {
+                if self.events.len() < 32 {
+                    self.events.push(RuntimeReadEvent {
+                        offset,
+                        requested: buffer.len(),
+                        received: 0,
+                        error_kind: Some(error.kind()),
+                    });
+                }
+                return Err(error);
+            }
+        };
+        if self.events.len() < 32 {
+            self.events.push(RuntimeReadEvent {
+                offset,
+                requested: buffer.len(),
+                received: read,
+                error_kind,
+            });
+        }
         self.bytes += read;
         let remaining = MAX_FAILURE_RESPONSE_PREFIX_BYTES.saturating_sub(self.prefix.len());
         self.prefix
@@ -3073,6 +3112,21 @@ mod tests {
         assert_eq!(detail.response_prefix, vec![0, 0, 5, b'1', b'.']);
         assert!(!detail.response_prefix_truncated);
         assert!(!detail.response_prefix_unsafe);
+        assert_eq!(
+            detail.read_events.first(),
+            Some(&RuntimeReadEvent {
+                offset: 0,
+                requested: 1,
+                received: 1,
+                error_kind: None,
+            })
+        );
+        assert!(
+            detail
+                .read_events
+                .iter()
+                .any(|event| event.offset == 5 && event.received == 0)
+        );
         let mut expected = OBSERVATION_WINDOW_PULL.to_vec();
         expected.extend_from_slice(&1_u16.to_be_bytes());
         expected.extend_from_slice(&1_u64.to_be_bytes());

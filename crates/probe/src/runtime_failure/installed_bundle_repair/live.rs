@@ -777,6 +777,7 @@ mod tests {
             response_prefix: vec![0, 0, 5, b'1', b'.'],
             response_prefix_truncated: false,
             response_prefix_unsafe: false,
+            read_events: Vec::new(),
             errno: None,
             io_kind: Some(std::io::ErrorKind::UnexpectedEof),
         };
