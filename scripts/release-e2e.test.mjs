@@ -4205,6 +4205,20 @@ exit 1
       sanitizeFailureDetail({
         kind: "installed_bundle_failure_repair",
         phase: "cleanup",
+        priorState: "repair_succeeded",
+        priorRepair: {
+          kind: "installed_bundle_failure_repair",
+          phase: "repair",
+          result: { code: 79, stderr: "", stdout: "" },
+          executionTiming: { unavailable: true },
+        },
+        result: { code: 79, stderr: "", stdout: "" },
+      }),
+    ).toMatchObject({ replayReady: false });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
         replayReady: true,
         result: { code: 79, stderr: "failed", stdout: "" },
         untrusted: "omit",

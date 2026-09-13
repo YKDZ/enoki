@@ -8025,11 +8025,10 @@ export function sanitizeFailureDetail(value, secrets = []) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
     if (
       !priorRepair ||
-      (value.phase === "custody" &&
-        (priorRepair.phase !== "repair" ||
-          priorRepair.replayReady === false ||
-          priorRepair.result?.code !== 0 ||
-          priorRepair.executionTiming === undefined))
+      priorRepair.phase !== "repair" ||
+      priorRepair.replayReady === false ||
+      priorRepair.result?.code !== 0 ||
+      priorRepair.executionTiming === undefined
     )
       return unavailableForPhase();
     normalized.priorRepair = priorRepair;
