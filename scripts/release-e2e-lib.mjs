@@ -7925,13 +7925,14 @@ export function sanitizeFailureDetail(value, secrets = []) {
   }
   const unavailableForPhase = () => unavailable(value.phase);
   const result = value.result;
-  if (value.phase !== "custody" && (
-    !result ||
-    typeof result !== "object" ||
-    !Number.isInteger(result.code) ||
-    typeof result.stderr !== "string" ||
-    typeof result.stdout !== "string"
-  )) {
+  if (
+    value.phase !== "custody" &&
+    (!result ||
+      typeof result !== "object" ||
+      !Number.isInteger(result.code) ||
+      typeof result.stderr !== "string" ||
+      typeof result.stdout !== "string")
+  ) {
     return unavailableForPhase();
   }
   const normalized = {
@@ -7939,7 +7940,11 @@ export function sanitizeFailureDetail(value, secrets = []) {
     phase: value.phase,
   };
   if (value.phase !== "custody") {
-    normalized.result = { code: result.code, stderr: result.stderr, stdout: result.stdout };
+    normalized.result = {
+      code: result.code,
+      stderr: result.stderr,
+      stdout: result.stdout,
+    };
   } else if (value.priorState !== "repair_succeeded") {
     return unavailableForPhase();
   }
