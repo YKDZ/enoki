@@ -3412,7 +3412,18 @@ export function createProbeHostHarness({
         runId,
         expectedBundleVersion,
       );
-      await completeRuntimeRecoveryCustody(runId, expectedBundleVersion);
+      try {
+        await completeRuntimeRecoveryCustody(runId, expectedBundleVersion);
+      } catch (error) {
+        if (error?.failureDetail?.phase === "cleanup") {
+          error.failureDetail.priorRepair = {
+            kind: "installed_bundle_failure_repair",
+            phase: "repair",
+            result: result.repairCommand,
+          };
+        }
+        throw error;
+      }
       return {
         failure: result.failure,
         repair: {
@@ -7917,6 +7928,11 @@ export function sanitizeFailureDetail(value, secrets = []) {
     phase: value.phase,
     result: { code: result.code, stderr: result.stderr, stdout: result.stdout },
   };
+  if (value.priorRepair !== undefined) {
+    const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
+    if (!priorRepair) return unavailable();
+    normalized.priorRepair = priorRepair;
+  }
   if (value.executionTiming?.unavailable === true) {
     normalized.executionTiming = { unavailable: true };
   } else if (

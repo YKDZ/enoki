@@ -117,7 +117,11 @@ export function createInstalledBundleFailureRepairHostDriver({
         throw error;
       }
       faultMayBeActive = false;
-      return { failure: { status: "recorded" }, repair };
+      return {
+        failure: { status: "recorded" },
+        repair,
+        repairCommand: repaired,
+      };
     },
   });
 }
