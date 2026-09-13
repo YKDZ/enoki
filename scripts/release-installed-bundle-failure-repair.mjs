@@ -498,11 +498,17 @@ function systemdUnitStateFunctions() {
     if record_count=$(printf '%s' "$record_stdout" | wc -c | tr -d ' '); then
       record_bytes=$record_count
     fi
-    if [ "$record_bytes" != unavailable ] && [ "$record_bytes" -le 3800 ]; then
-      record_hex=$(printf '%s' "$record_stdout" | od -An -tx1 | tr -d ' \\n') || record_hex=unavailable
-    else
-      :
-    fi
+    case "$record_stdout" in
+      *enk_enroll_*|*PRIVATE\\ KEY*|*private\\ key*|*password*|*Password*|*token*|*Token*)
+        ;;
+      *)
+        if [ "$record_bytes" != unavailable ] && [ "$record_bytes" -le 3800 ]; then
+          if record_od=$(printf '%s' "$record_stdout" | od -An -tx1); then
+            record_hex=$(printf '%s' "$record_od" | tr -d ' \\n') || record_hex=unavailable
+          fi
+        fi
+        ;;
+    esac
     ( printf 'enoki.lifecycle.diagnostic role=host phase=runtime_cleanup operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s wait_seconds=%s\\n' "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" "\${state_remaining:-direct}" >&2 ) || :
     return 0
   }

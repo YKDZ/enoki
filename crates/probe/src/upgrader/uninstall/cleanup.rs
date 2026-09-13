@@ -1289,8 +1289,27 @@ fn validate_state_root_directory(
     owner: StateRootOwner<'_>,
     facts: &mut StateRootAdmissionFacts,
 ) -> Result<StateRootCleanupAuthority, ProbeUpgraderRunError> {
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.mode() & 0o7777 != 0o750
-    {
+    let location = if path.ends_with("private/enoki-probe") {
+        "private"
+    } else {
+        "public"
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        facts.first_rejection.get_or_insert(if location == "private" {
+            "private_type"
+        } else {
+            "public_type"
+        });
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    if metadata.mode() & 0o7777 != 0o750 {
+        facts.first_rejection.get_or_insert(if location == "private" {
+            "private_mode"
+        } else {
+            "public_mode"
+        });
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
@@ -2673,6 +2692,7 @@ mod tests {
 
         assert!(result.is_err(), "unsafe state root is rejected");
         assert!(matches!(facts.public_lstat, StateRootRead::Success(_)));
+        assert_eq!(facts.first_rejection, Some("public_mode"));
         assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
         assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
         assert!(matches!(facts.empty_shell, StateRootRead::NotReached));

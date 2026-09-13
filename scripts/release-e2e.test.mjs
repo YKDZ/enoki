@@ -3063,6 +3063,47 @@ read_unit_state enoki-observation-runtime.service
     }
   });
 
+  it("marks generated state-reader secret bytes unavailable before hex encoding", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    await expect(driver.cleanup("run-runtime-secret-output")).rejects.toThrow(
+      /not executed/,
+    );
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-secret-output-"),
+    );
+    try {
+      const systemctl = path.join(fixture, "systemctl");
+      await writeFile(
+        systemctl,
+        "#!/bin/sh\nprintf 'enk_enroll_secret'\nexit 17\n",
+        "utf8",
+      );
+      await chmod(systemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      await expect(
+        execFileAsync("/bin/sh", ["-c", `set -eu
+${cleanupCommand.slice(helperStart, helperEnd)}
+read_unit_state enoki-observation-runtime.service`], {
+          env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+        }),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("stdout_hex=unavailable"),
+      });
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("does not turn a generated state-reader success into a failure when diagnostics cannot write", async () => {
     let cleanupCommand = null;
     const driver = createInstalledBundleFailureRepairHostDriver({
@@ -3869,6 +3910,16 @@ exit 1
       sanitizeFailureDetail({ kind: "unknown", phase: "cleanup" }),
     ).toBeUndefined();
     expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: null, stderr: "", stdout: "" },
+      }),
+    ).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
       sanitizeFailureDetail(
         {
           kind: "installed_bundle_failure_repair",
@@ -3930,6 +3981,9 @@ exit 1
         ],
       });
     }
+    expect(
+      serializedError(new Error("caller-secret"), ["caller-secret"]),
+    ).not.toMatchObject({ message: "caller-secret" });
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {

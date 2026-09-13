@@ -7906,7 +7906,7 @@ export function sanitizeFailureDetail(value, secrets = []) {
   if (
     !result ||
     typeof result !== "object" ||
-    (!Number.isInteger(result.code) && result.code !== null) ||
+    !Number.isInteger(result.code) ||
     typeof result.stderr !== "string" ||
     typeof result.stdout !== "string"
   ) {
@@ -7935,7 +7935,10 @@ export function sanitizeFailureDetail(value, secrets = []) {
 export function serializedError(error, secrets = []) {
   const serialized = {
     code: error?.code ?? "error",
-    message: error instanceof Error ? error.message : String(error),
+    message: redactSensitiveText(
+      error instanceof Error ? error.message : String(error),
+      secrets,
+    ),
   };
   if (error?.installerEvidence) {
     serialized.installerEvidence = error.installerEvidence;
