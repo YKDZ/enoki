@@ -3082,7 +3082,7 @@ read_unit_state enoki-observation-runtime.service
       ).rejects.toMatchObject({
         code: 1,
         stderr: expect.stringContaining(
-          "code=17 stdout_bytes=16 stdout_hex=4c6f616453746174653d6c6f61646564 wait_seconds=direct",
+          "code=17 stdout_bytes=16 stdout_hex=unavailable wait_seconds=direct",
         ),
       });
     } finally {
@@ -3679,6 +3679,7 @@ systemctl is-active --quiet enoki-observation-runtime.service
   it("exhausts the Observation Runtime budget and consumes its durable failure epoch through Repair", async () => {
     const commands = [];
     let inventoryCount = 0;
+    let outerCleanupBoundaryFailure = false;
     const runtimeSha256 = "a".repeat(64);
     const harness = createProbeHostHarness({
       execute: async (command, options) => {
@@ -3711,6 +3712,9 @@ systemctl is-active --quiet enoki-observation-runtime.service
           );
         }
         if (command.includes("# enoki-release-e2e:service-boundary")) {
+          if (outerCleanupBoundaryFailure) {
+            return { code: 79, stderr: "outer boundary failed", stdout: "" };
+          }
           return successfulCommandText(
             "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
           );
@@ -3864,6 +3868,23 @@ systemctl is-active --quiet enoki-observation-runtime.service
     );
     expect(renewed.options).toEqual({ root: true });
     expect(renewed.command).toContain("actual_snapshot=$(fingerprint)");
+    outerCleanupBoundaryFailure = true;
+    const outer = await harness
+      .cleanup("run-runtime-repair")
+      .catch((error) => error);
+    expect(outer).toMatchObject({
+      code: "release_test_host_cleanup_failed",
+      errors: [
+        {
+          failureDetail: {
+            phase: "custody",
+            invocationPhase: "outer_cleanup",
+            priorState: "repair_succeeded",
+            priorRepair: { phase: "repair", result: { code: 0 } },
+          },
+        },
+      ],
+    });
   });
 
   it("keeps the actual cleanup command result when generated cleanup fails", async () => {
@@ -4192,6 +4213,17 @@ exit 1
       sanitizeFailureDetail({ kind: "unknown", phase: "cleanup" }),
     ).toMatchObject({
       phase: "unavailable",
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "custody",
+        priorState: "repair_succeeded",
+      }),
+    ).toMatchObject({
+      phase: "custody",
       replayReady: false,
       unavailable: "unsafe_or_oversize_result",
     });

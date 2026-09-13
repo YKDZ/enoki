@@ -3031,6 +3031,7 @@ export function createProbeHostHarness({
   let runOwnsMutation = false;
   let canonicalRuntimeUnavailableArmed = false;
   let postReplacementFaultArmed = false;
+  let latestSuccessfulRepair = null;
   let readyForReinstallation = false;
   let sharedDependenciesBefore = null;
   if (prepareInstall !== undefined && typeof prepareInstall !== "function") {
@@ -3412,17 +3413,17 @@ export function createProbeHostHarness({
         runId,
         expectedBundleVersion,
       );
+      const priorRepair = {
+        kind: "installed_bundle_failure_repair",
+        phase: "repair",
+        result: result.repairCommand,
+        executionTiming: result.repairCommand?.executionTiming ?? {
+          unavailable: true,
+        },
+      };
       try {
         await completeRuntimeRecoveryCustody(runId, expectedBundleVersion);
       } catch (error) {
-        const priorRepair = {
-          kind: "installed_bundle_failure_repair",
-          phase: "repair",
-          result: result.repairCommand,
-          executionTiming: result.repairCommand?.executionTiming ?? {
-            unavailable: true,
-          },
-        };
         if (error?.failureDetail?.phase === "cleanup") {
           error.failureDetail.priorState = "repair_succeeded";
           error.failureDetail.priorRepair = priorRepair;
@@ -3436,6 +3437,7 @@ export function createProbeHostHarness({
         }
         throw error;
       }
+      latestSuccessfulRepair = { priorRepair, runId };
       return {
         failure: result.failure,
         repair: {
@@ -4157,6 +4159,19 @@ export function createProbeHostHarness({
       try {
         completedCustody = await completeRuntimeRecoveryCustody(runId);
       } catch (error) {
+        if (
+          latestSuccessfulRepair?.runId === runId &&
+          error &&
+          typeof error === "object"
+        ) {
+          error.failureDetail = {
+            kind: "installed_bundle_failure_repair",
+            invocationPhase: "outer_cleanup",
+            phase: "custody",
+            priorRepair: latestSuccessfulRepair.priorRepair,
+            priorState: "repair_succeeded",
+          };
+        }
         errors.push(error);
         const aggregate = new AggregateError(
           errors,
@@ -4286,6 +4301,8 @@ export function createProbeHostHarness({
         aggregate.code = "release_test_host_cleanup_failed";
         throw aggregate;
       }
+      if (latestSuccessfulRepair?.runId === runId)
+        latestSuccessfulRepair = null;
       return { clean: true, removedPartialInstallation };
     },
 
@@ -7910,6 +7927,33 @@ function assertionError(code, message) {
   return error;
 }
 
+function closedUnitStateStdout(value) {
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 3800)
+    return false;
+  const fields = Object.fromEntries(
+    value.split("\n").map((line) => line.split("=", 2)),
+  );
+  if (Object.keys(fields).length !== 3) return false;
+  return new Set([
+    "loaded:active:running",
+    "loaded:active:listening",
+    "loaded:inactive:dead",
+    "loaded:failed:failed",
+  ]).has(`${fields.LoadState}:${fields.ActiveState}:${fields.SubState}`);
+}
+
+function hasOnlyClosedUnitStateHex(stderr, secrets) {
+  const fields = [...String(stderr).matchAll(/\bstdout_hex=([0-9a-f]+)\b/gi)];
+  return fields.every(([, hex]) => {
+    if (hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) return false;
+    const decoded = Buffer.from(hex, "hex").toString("utf8");
+    return (
+      closedUnitStateStdout(decoded) &&
+      redactSensitiveText(decoded, secrets) === decoded
+    );
+  });
+}
+
 export function sanitizeFailureDetail(value, secrets = []) {
   const unavailable = (phase = "unavailable") => ({
     kind: "installed_bundle_failure_repair",
@@ -7952,6 +7996,15 @@ export function sanitizeFailureDetail(value, secrets = []) {
   } else {
     normalized.priorState = "repair_succeeded";
   }
+  if (value.phase === "custody" && value.priorRepair === undefined) {
+    return unavailableForPhase();
+  }
+  if (value.phase === "custody" && value.invocationPhase !== undefined) {
+    if (!["initial_custody", "outer_cleanup"].includes(value.invocationPhase)) {
+      return unavailableForPhase();
+    }
+    normalized.invocationPhase = value.invocationPhase;
+  }
   if (value.priorRepair !== undefined) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
     if (!priorRepair) return unavailableForPhase();
@@ -7980,7 +8033,7 @@ export function sanitizeFailureDetail(value, secrets = []) {
     ) ||
     redactedStderr !== (result?.stderr ?? "") ||
     redactedStdout !== (result?.stdout ?? "") ||
-    /\bstdout_hex=[0-9a-f]*\b/i.test(result?.stderr ?? "") ||
+    !hasOnlyClosedUnitStateHex(result?.stderr ?? "", secrets) ||
     Buffer.byteLength(JSON.stringify(normalized), "utf8") > 8 * 1024
   ) {
     return unavailableForPhase();

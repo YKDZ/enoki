@@ -2044,20 +2044,22 @@ impl UnixObservationRuntimeClient {
                 ));
             }
             let mut version = vec![0; version_len];
-            response.read_exact(&mut version).map_err(|error| {
-                observation_client_failure(
+            let version_offset = response.consumed_bytes();
+            if let Err(error) = response.read_exact(&mut version) {
+                let consumed = response.consumed_bytes() - version_offset;
+                if !closed_runtime_version(&version[..consumed]) {
+                    response.mark_opaque_payload();
+                }
+                return Err(observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "read_version",
                     cadence,
                     sequence_start,
                     response.consumed_bytes(),
                     Some(&error),
-                )
-            })?;
-            if !version
-                .iter()
-                .all(|byte| byte.is_ascii_digit() || *byte == b'.')
-            {
+                ));
+            }
+            if !closed_runtime_version(&version) {
                 response.mark_opaque_payload();
             }
             if String::from_utf8(version).map_err(|_| {
@@ -2396,6 +2398,12 @@ fn encode_window_request(request: ObservationWindowRequest) -> Vec<u8> {
     encoded.extend_from_slice(&request.cadence_seconds.to_be_bytes());
     encoded.extend_from_slice(&request.sequence_start.to_be_bytes());
     encoded
+}
+
+fn closed_runtime_version(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_digit() || *byte == b'.')
 }
 
 fn write_window_success(
@@ -3171,6 +3179,36 @@ mod tests {
         expected.extend_from_slice(&1_u64.to_be_bytes());
         assert_eq!(detail.request_bytes, expected);
         assert_eq!(server.join().expect("Runtime server"), expected);
+    }
+
+    #[test]
+    fn detailed_client_marks_a_partial_unsafe_version_unavailable_before_eof() {
+        let temporary = tempfile::tempdir().expect("Runtime socket root");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            stream
+                .write_all(&[0, 0, 40])
+                .expect("Runtime version header");
+            stream
+                .write_all(b"caller-secret")
+                .expect("partial unsafe version");
+        });
+        let client = UnixObservationRuntimeClient::new(&socket, "1.2.3");
+
+        let detail = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("partial unsafe version remains typed");
+
+        assert_eq!(detail.cause, ObservationClientError::InvalidResponse);
+        assert_eq!(detail.operation, "read_version");
+        assert_eq!(detail.response_bytes, 3 + b"caller-secret".len());
+        assert!(detail.response_prefix_unsafe);
+        assert!(!detail.response_prefix_truncated);
+        server.join().expect("Runtime server");
     }
 
     #[test]

@@ -499,6 +499,16 @@ function systemdUnitStateFunctions() {
   awk '{ printf "%.0f", $1 * 1000 }' /proc/uptime 2>/dev/null
 }
 read_unit_state() {
+  closed_unit_state_stdout() {
+    closed_load=$(printf '%s\n' "$1" | awk -F= '$1 == "LoadState" { print $2 }') || return 1
+    closed_active=$(printf '%s\n' "$1" | awk -F= '$1 == "ActiveState" { print $2 }') || return 1
+    closed_sub=$(printf '%s\n' "$1" | awk -F= '$1 == "SubState" { print $2 }') || return 1
+    [ "$(printf '%s\n' "$1" | awk 'NF { count += 1 } END { print count + 0 }')" -eq 3 ] || return 1
+    case "$closed_load:$closed_active:$closed_sub" in
+      loaded:active:running|loaded:active:listening|loaded:inactive:dead|loaded:failed:failed) return 0 ;;
+    esac
+    return 1
+  }
   record_unit_state() {
     record_target=$1
     record_code=$2
@@ -508,17 +518,11 @@ read_unit_state() {
     if record_count=$(printf '%s' "$record_stdout" | wc -c | tr -d ' '); then
       record_bytes=$record_count
     fi
-    case "$record_stdout" in
-      *enk_enroll_*|*PRIVATE\\ KEY*|*private\\ key*|*password*|*Password*|*token*|*Token*)
-        ;;
-      *)
-        if [ "$record_bytes" != unavailable ] && [ "$record_bytes" -le 3800 ]; then
-          if record_od=$(printf '%s' "$record_stdout" | od -An -tx1); then
-            record_hex=$(printf '%s' "$record_od" | tr -d ' \\n') || record_hex=unavailable
-          fi
-        fi
-        ;;
-    esac
+    if [ "$record_bytes" != unavailable ] && [ "$record_bytes" -le 3800 ] && closed_unit_state_stdout "$record_stdout"; then
+      if record_od=$(printf '%s' "$record_stdout" | od -An -tx1); then
+        record_hex=$(printf '%s' "$record_od" | tr -d ' \\n') || record_hex=unavailable
+      fi
+    fi
     ( printf 'enoki.lifecycle.diagnostic role=host phase=%s operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s wait_seconds=%s elapsed_ms=%s sleep_ms=%s\\n' "\${state_phase:-runtime_cleanup}" "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" "\${state_remaining:-direct}" "\${state_elapsed_ms:-unavailable}" "\${state_sleep_ms:-unavailable}" >&2 ) || :
     return 0
   }
