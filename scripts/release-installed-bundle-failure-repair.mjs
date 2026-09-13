@@ -488,9 +488,27 @@ fi`;
 }
 
 function systemdUnitStateFunctions() {
-  return `read_unit_state() {
+  return `record_unit_state() {
+  record_target=$1
+  record_code=$2
+  record_stdout=$3
+  record_bytes=$(printf '%s' "$record_stdout" | wc -c | tr -d ' ') || return 1
+  if [ "$record_bytes" -le 3800 ]; then
+    record_hex=$(printf '%s' "$record_stdout" | od -An -tx1 | tr -d ' \\n') || return 1
+  else
+    record_hex=unavailable
+  fi
+  printf 'enoki.lifecycle.diagnostic role=host phase=runtime_cleanup operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s\\n' "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" >&2
+}
+read_unit_state() {
   target=$1
-  properties=$(systemctl show "$target" --no-pager --property=LoadState --property=ActiveState --property=SubState) || return 1
+  if properties=$(systemctl show "$target" --no-pager --property=LoadState --property=ActiveState --property=SubState); then
+    record_unit_state "$target" 0 "$properties" || return 1
+  else
+    state_code=$?
+    record_unit_state "$target" "$state_code" '' || return 1
+    return 1
+  fi
   property_count=$(printf '%s\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || return 1
   load_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "LoadState" { count += 1 } END { print count + 0 }') || return 1
   active_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "ActiveState" { count += 1 } END { print count + 0 }') || return 1
@@ -536,6 +554,7 @@ wait_for_unit_state() {
   expected_sub=$3
   state_remaining=20
   while [ "$state_remaining" -gt 0 ]; do
+    state_poll_index=$((20 - state_remaining + 1))
     observed_state=$(read_unit_state "$expected_target") || fail "could not query $expected_target state"
     [ "$observed_state" = "loaded $expected_active $expected_sub" ] && return 0
     sleep 1

@@ -3669,7 +3669,14 @@ systemctl is-active --quiet enoki-observation-runtime.service
       await copyFile(fixture.paths.runtime, fixture.paths.backup);
       await writeFile(
         fixture.paths.fakeSystemctl,
-        "#!/bin/sh\nexit 1\n",
+        `#!/bin/sh
+if [ "$1" = stop ]; then exit 0; fi
+if [ "$1" = show ]; then
+  printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'
+  exit 0
+fi
+exit 1
+`,
         "utf8",
       );
       await chmod(fixture.paths.fakeSystemctl, 0o755);
@@ -3686,7 +3693,9 @@ systemctl is-active --quiet enoki-observation-runtime.service
           phase: "cleanup",
           result: {
             code: 79,
-            stderr: "could not stop enoki-probe.service\n",
+            stderr: expect.stringContaining(
+              "enoki.lifecycle.diagnostic role=host phase=runtime_cleanup",
+            ),
             stdout: "",
           },
         },
