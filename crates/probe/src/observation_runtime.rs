@@ -3079,4 +3079,49 @@ mod tests {
         assert_eq!(detail.request_bytes, expected);
         assert_eq!(server.join().expect("Runtime server"), expected);
     }
+
+    #[test]
+    fn public_and_detailed_clients_share_version_and_sequence_validation() {
+        let temporary = tempfile::tempdir().expect("Runtime socket root");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            for response in [
+                vec![0, 0, 5, b'w', b'r', b'o', b'n', b'g'],
+                vec![
+                    0, 0, 5, b'1', b'.', b'2', b'.', b'3', 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2,
+                ],
+            ] {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().expect("Runtime connection");
+                    let mut request = Vec::new();
+                    stream.read_to_end(&mut request).expect("Runtime request");
+                    stream.write_all(&response).expect("Runtime response");
+                }
+            }
+        });
+        let client = UnixObservationRuntimeClient::new(&socket, "1.2.3");
+
+        assert_eq!(
+            client.request_finalized_window(Duration::from_secs(1), 1),
+            Err(ObservationClientError::BundleIncoherent)
+        );
+        let version = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("wrong version reaches the shared parser");
+        assert_eq!(version.cause, ObservationClientError::BundleIncoherent);
+        assert_eq!(version.operation, "validate_version");
+
+        assert_eq!(
+            client.request_finalized_window(Duration::from_secs(1), 1),
+            Err(ObservationClientError::InvalidResponse)
+        );
+        let sequence = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("wrong sequence reaches the shared parser");
+        assert_eq!(sequence.cause, ObservationClientError::InvalidResponse);
+        assert_eq!(sequence.operation, "validate_sequence");
+        assert_eq!(sequence.response_prefix.len(), sequence.response_bytes);
+        server.join().expect("Runtime server");
+    }
 }
