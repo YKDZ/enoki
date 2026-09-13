@@ -1063,8 +1063,18 @@ enum StateRootRead<T> {
     #[default]
     NotReached,
     NotFound,
-    IoError,
+    IoError {
+        kind: std::io::ErrorKind,
+        errno: Option<i32>,
+    },
     Success(T),
+}
+
+fn state_root_io_error<T>(error: &std::io::Error) -> StateRootRead<T> {
+    StateRootRead::IoError {
+        kind: error.kind(),
+        errno: error.raw_os_error(),
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1173,7 +1183,7 @@ fn trusted_state_root_layout_with_facts(
                     Ok(None)
                 }
                 Err(error) => {
-                    facts.private_lstat = StateRootRead::IoError;
+                    facts.private_lstat = state_root_io_error(&error);
                     facts.first_rejection.get_or_insert("private_lstat");
                     Err(error.into())
                 }
@@ -1192,7 +1202,7 @@ fn trusted_state_root_layout_with_facts(
             };
         }
         Err(error) => {
-            facts.public_lstat = StateRootRead::IoError;
+            facts.public_lstat = state_root_io_error(&error);
             facts.first_rejection.get_or_insert("public_lstat");
             return Err(error.into());
         }
@@ -1219,7 +1229,7 @@ fn trusted_state_root_layout_with_facts(
                 ));
             }
             Err(error) => {
-                facts.private_lstat = StateRootRead::IoError;
+                facts.private_lstat = state_root_io_error(&error);
                 facts.first_rejection.get_or_insert("private_lstat");
                 return Err(error.into());
             }
@@ -1248,7 +1258,7 @@ fn trusted_state_root_layout_with_facts(
             facts.public_readlink = if error.kind() == std::io::ErrorKind::NotFound {
                 StateRootRead::NotFound
             } else {
-                StateRootRead::IoError
+                state_root_io_error(&error)
             };
             facts.first_rejection.get_or_insert("public_readlink");
             return Err(error.into());
@@ -1265,7 +1275,7 @@ fn trusted_state_root_layout_with_facts(
             StateRootCleanupAuthority::ContentAuthorized
         }
         Err(error) => {
-            facts.private_lstat = StateRootRead::IoError;
+            facts.private_lstat = state_root_io_error(&error);
             facts.first_rejection.get_or_insert("private_lstat");
             return Err(error.into());
         }
@@ -1295,21 +1305,25 @@ fn validate_state_root_directory(
         "public"
     };
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        facts.first_rejection.get_or_insert(if location == "private" {
-            "private_type"
-        } else {
-            "public_type"
-        });
+        facts
+            .first_rejection
+            .get_or_insert(if location == "private" {
+                "private_type"
+            } else {
+                "public_type"
+            });
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
     }
     if metadata.mode() & 0o7777 != 0o750 {
-        facts.first_rejection.get_or_insert(if location == "private" {
-            "private_mode"
-        } else {
-            "public_mode"
-        });
+        facts
+            .first_rejection
+            .get_or_insert(if location == "private" {
+                "private_mode"
+            } else {
+                "public_mode"
+            });
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
@@ -1357,7 +1371,7 @@ fn state_root_authority(
                     facts.empty_shell = if error.kind() == std::io::ErrorKind::NotFound {
                         StateRootRead::NotFound
                     } else {
-                        StateRootRead::IoError
+                        state_root_io_error(&error)
                     };
                     facts.first_rejection.get_or_insert("empty_shell");
                     return Err(error.into());
@@ -1372,7 +1386,12 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
     let render = |value: &StateRootRead<StateRootLstatFacts>| match value {
         StateRootRead::NotReached => "not_reached".to_owned(),
         StateRootRead::NotFound => "not_found".to_owned(),
-        StateRootRead::IoError => "io_error".to_owned(),
+        StateRootRead::IoError { kind, errno } => {
+            format!(
+                "io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
         StateRootRead::Success(value) => format!(
             "dir={},link={},uid={},gid={},mode={:o},nlink={}",
             value.directory, value.symlink, value.uid, value.gid, value.mode, value.nlink
@@ -1385,7 +1404,12 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
             .collect::<String>(),
         StateRootRead::NotReached => "not_reached".to_owned(),
         StateRootRead::NotFound => "not_found".to_owned(),
-        StateRootRead::IoError => "io_error".to_owned(),
+        StateRootRead::IoError { kind, errno } => {
+            format!(
+                "io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
     };
     let nss = match facts.nss_owner {
         StateRootNssOwner::NotReached => "not_reached".to_owned(),
@@ -1396,7 +1420,12 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
     let empty = match facts.empty_shell {
         StateRootRead::NotReached => "not_reached".to_owned(),
         StateRootRead::NotFound => "not_found".to_owned(),
-        StateRootRead::IoError => "io_error".to_owned(),
+        StateRootRead::IoError { kind, errno } => {
+            format!(
+                "io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
         StateRootRead::Success(value) => value.to_string(),
     };
     let _ = writeln!(
@@ -2755,7 +2784,13 @@ mod tests {
         let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
 
         assert!(result.is_err(), "NUL path causes the reached lstat to fail");
-        assert!(matches!(facts.public_lstat, StateRootRead::IoError));
+        assert!(matches!(
+            facts.public_lstat,
+            StateRootRead::IoError {
+                kind: std::io::ErrorKind::InvalidInput,
+                errno: None,
+            }
+        ));
         assert_eq!(facts.first_rejection, Some("public_lstat"));
         assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
     }
