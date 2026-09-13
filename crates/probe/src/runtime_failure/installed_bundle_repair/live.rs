@@ -590,13 +590,14 @@ fn runtime_validation_diagnostic(
         .iter()
         .map(|event| {
             format!(
-                "{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}",
                 event.offset,
                 event.requested,
                 event.received,
                 event
                     .error_kind
-                    .map_or("ok".to_owned(), |kind| format!("{kind:?}"))
+                    .map_or("ok".to_owned(), |kind| format!("{kind:?}")),
+                event.elapsed_millis,
             )
         })
         .collect::<Vec<_>>()
@@ -793,7 +794,7 @@ mod tests {
             response_prefix: vec![0, 0, 5, b'1', b'.'],
             response_prefix_truncated: false,
             response_prefix_unsafe: false,
-            read_events: Vec::new(),
+            read_events: Box::default(),
             errno: None,
             io_kind: Some(std::io::ErrorKind::UnexpectedEof),
         };
@@ -1957,11 +1958,11 @@ mod tests {
         for (case, expected) in [
             (
                 "temporary",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 read_events=0:1:1:ok request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             (
                 "canonical",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 read_events=0:1:1:ok request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             ("success", ""),
         ] {

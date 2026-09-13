@@ -1929,6 +1929,7 @@ impl UnixObservationRuntimeClient {
         let mut response_prefix = Vec::new();
         let mut response_prefix_unsafe = false;
         let mut read_events = Vec::new();
+        let started = Instant::now();
         let result = (|| {
             let request_bytes = encoded_request.len();
             let response_bytes = 0;
@@ -1992,6 +1993,7 @@ impl UnixObservationRuntimeClient {
                 &mut response_prefix,
                 &mut response_prefix_unsafe,
                 &mut read_events,
+                started,
             );
             let mut status = [0; 1];
             response.read_exact(&mut status).map_err(|error| {
@@ -2266,7 +2268,7 @@ impl UnixObservationRuntimeClient {
             detail.response_prefix = response_prefix;
             detail.response_prefix_truncated = detail.response_bytes > detail.response_prefix.len();
             detail.response_prefix_unsafe = response_prefix_unsafe;
-            detail.read_events = read_events;
+            detail.read_events = read_events.into_boxed_slice();
             detail
         })
     }
@@ -2292,7 +2294,7 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) response_prefix: Vec<u8>,
     pub(crate) response_prefix_truncated: bool,
     pub(crate) response_prefix_unsafe: bool,
-    pub(crate) read_events: Vec<RuntimeReadEvent>,
+    pub(crate) read_events: Box<[RuntimeReadEvent]>,
     pub(crate) errno: Option<i32>,
     pub(crate) io_kind: Option<io::ErrorKind>,
 }
@@ -2303,6 +2305,7 @@ pub(crate) struct RuntimeReadEvent {
     pub(crate) requested: usize,
     pub(crate) received: usize,
     pub(crate) error_kind: Option<io::ErrorKind>,
+    pub(crate) elapsed_millis: u64,
 }
 
 fn observation_client_failure(
@@ -2323,7 +2326,7 @@ fn observation_client_failure(
         response_prefix: Vec::new(),
         response_prefix_truncated: false,
         response_prefix_unsafe: false,
-        read_events: Vec::new(),
+        read_events: Box::default(),
         errno: error.and_then(io::Error::raw_os_error),
         io_kind: error.map(io::Error::kind),
     }
@@ -2457,6 +2460,7 @@ struct RecordingRuntimeResponse<'a> {
     prefix: &'a mut Vec<u8>,
     prefix_contains_opaque_payload: &'a mut bool,
     events: &'a mut Vec<RuntimeReadEvent>,
+    started: Instant,
 }
 
 impl<'a> RecordingRuntimeResponse<'a> {
@@ -2465,6 +2469,7 @@ impl<'a> RecordingRuntimeResponse<'a> {
         prefix: &'a mut Vec<u8>,
         prefix_contains_opaque_payload: &'a mut bool,
         events: &'a mut Vec<RuntimeReadEvent>,
+        started: Instant,
     ) -> Self {
         Self {
             stream,
@@ -2472,6 +2477,7 @@ impl<'a> RecordingRuntimeResponse<'a> {
             prefix,
             prefix_contains_opaque_payload,
             events,
+            started,
         }
     }
 
@@ -2497,6 +2503,8 @@ impl Read for RecordingRuntimeResponse<'_> {
                         requested: buffer.len(),
                         received: 0,
                         error_kind: Some(error.kind()),
+                        elapsed_millis: self.started.elapsed().as_millis().min(u128::from(u64::MAX))
+                            as u64,
                     });
                 }
                 return Err(error);
@@ -2508,6 +2516,7 @@ impl Read for RecordingRuntimeResponse<'_> {
                 requested: buffer.len(),
                 received: read,
                 error_kind,
+                elapsed_millis: self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             });
         }
         self.bytes += read;
@@ -3112,15 +3121,16 @@ mod tests {
         assert_eq!(detail.response_prefix, vec![0, 0, 5, b'1', b'.']);
         assert!(!detail.response_prefix_truncated);
         assert!(!detail.response_prefix_unsafe);
-        assert_eq!(
+        assert!(matches!(
             detail.read_events.first(),
-            Some(&RuntimeReadEvent {
+            Some(RuntimeReadEvent {
                 offset: 0,
                 requested: 1,
                 received: 1,
                 error_kind: None,
+                ..
             })
-        );
+        ));
         assert!(
             detail
                 .read_events
