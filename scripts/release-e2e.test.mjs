@@ -3705,6 +3705,30 @@ exit 1
     }
   });
 
+  it("omits unsafe cleanup payloads without replacing the primary failure", async () => {
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun(runId) {
+        expect(runId).toBe("run-runtime-secret-detail");
+      },
+      async execute() {
+        return {
+          code: 79,
+          stderr: "ENOKI_ENROLLMENT_TOKEN=enk_enroll_secret-value",
+          stdout: "x".repeat(9 * 1024),
+        };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(driver.cleanup("run-runtime-secret-detail")).rejects.toMatchObject({
+      failureDetail: {
+        phase: "cleanup",
+        replayReady: false,
+        unavailable: "unsafe_or_oversize_result",
+      },
+    });
+  });
+
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
     const commands = [];
     let productState = "fresh";

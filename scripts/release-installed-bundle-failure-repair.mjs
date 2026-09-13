@@ -586,15 +586,20 @@ function boundedCommandResult(phase, result) {
       stdout: typeof result?.stdout === "string" ? result.stdout : "",
     },
   };
-  if (Buffer.byteLength(JSON.stringify(detail), "utf8") <= 8 * 1024) {
-    return detail;
+  const encoded = JSON.stringify(detail);
+  if (
+    /(?:enrollment.?token|password|private.?key|signing.?secret|enk_enroll_)/i.test(
+      `${detail.result.stderr}\n${detail.result.stdout}`,
+    ) || Buffer.byteLength(encoded, "utf8") > 8 * 1024
+  ) {
+    return {
+      kind: detail.kind,
+      phase,
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    };
   }
-  return {
-    kind: detail.kind,
-    phase,
-    replayReady: false,
-    unavailable: "record_exceeds_limit",
-  };
+  return detail;
 }
 
 function shellSingleQuote(value) {
