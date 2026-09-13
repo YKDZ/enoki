@@ -571,8 +571,13 @@ function assertProbeVersion(version) {
 }
 
 function commandResultFailure(message, phase, result) {
-  const error = new Error(message);
-  error.failureDetail = boundedCommandResult(phase, result);
+  const failureDetail = boundedCommandResult(phase, result);
+  const error = new Error(
+    failureDetail.replayReady === false
+      ? `Installed Bundle Failure ${phase} command failed; detail unavailable`
+      : message,
+  );
+  error.failureDetail = failureDetail;
   return error;
 }
 

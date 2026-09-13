@@ -3720,7 +3720,11 @@ exit 1
       ownershipToken: "00000000-0000-4000-8000-000000000001",
     });
 
-    await expect(driver.cleanup("run-runtime-secret-detail")).rejects.toMatchObject({
+    const failure = await driver
+      .cleanup("run-runtime-secret-detail")
+      .catch((error) => error);
+    expect(failure.message).not.toContain("enk_enroll_secret-value");
+    expect(failure).toMatchObject({
       failureDetail: {
         phase: "cleanup",
         replayReady: false,
