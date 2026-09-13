@@ -544,11 +544,41 @@ impl RuntimeValidator for UnixRuntimeValidator {
         &mut self,
         validation: RuntimeValidation,
     ) -> Result<(), LiveInstalledBundleRepairError> {
-        validate_runtime_window(
+        validate_unix_runtime_window(
             &crate::observation_runtime::UnixObservationRuntimeClient::production(),
             validation,
         )
     }
+}
+
+fn validate_unix_runtime_window(
+    client: &crate::observation_runtime::UnixObservationRuntimeClient,
+    validation: RuntimeValidation,
+) -> Result<(), LiveInstalledBundleRepairError> {
+    client
+        .request_finalized_window_detailed(Duration::from_secs(1), 1)
+        .map(|_| ())
+        .map_err(|detail| {
+            let (validation, code) = runtime_validation_code(validation);
+            let errno = detail
+                .errno
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let io_kind = detail
+                .io_kind
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "none".to_owned());
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={}",
+                detail.operation,
+                detail.cause,
+                detail.request_cadence_millis,
+                detail.request_sequence_start,
+                detail.response_bytes,
+            );
+            contract_failure(code)
+        })
 }
 
 fn validate_runtime_window(
@@ -559,20 +589,23 @@ fn validate_runtime_window(
         .request_finalized_window(Duration::from_secs(1), 1)
         .map(|_| ())
         .map_err(|_| {
-            let (validation, code) = match validation {
-                RuntimeValidation::Temporary => {
-                    ("temporary", "probe_repair_runtime_validation_failed")
-                }
-                RuntimeValidation::Canonical => {
-                    ("canonical", "probe_repair_canonical_runtime_validation_failed")
-                }
-            };
+            let (validation, code) = runtime_validation_code(validation);
             let _ = writeln!(
                 std::io::stderr().lock(),
                 "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation={validation} code={code}"
             );
             contract_failure(code)
         })
+}
+
+fn runtime_validation_code(validation: RuntimeValidation) -> (&'static str, &'static str) {
+    match validation {
+        RuntimeValidation::Temporary => ("temporary", "probe_repair_runtime_validation_failed"),
+        RuntimeValidation::Canonical => (
+            "canonical",
+            "probe_repair_canonical_runtime_validation_failed",
+        ),
+    }
 }
 
 const RUNTIME_REPAIR_RUN_DIR: &str = "/run/enoki-probe";
