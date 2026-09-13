@@ -1099,6 +1099,8 @@ struct StateRootAdmissionFacts {
     private_lstat: StateRootRead<StateRootLstatFacts>,
     public_readlink: StateRootRead<Vec<u8>>,
     nss_owner: StateRootNssOwner,
+    expected_root: Option<(u32, u32)>,
+    service_binding: Option<(String, String)>,
     empty_shell: StateRootRead<bool>,
     first_rejection: Option<&'static str>,
 }
@@ -1341,10 +1343,12 @@ fn state_root_authority(
 ) -> Result<Option<StateRootCleanupAuthority>, ProbeUpgraderRunError> {
     let actual = (metadata.uid(), metadata.gid());
     let root = expected_root_owner_for(path);
+    facts.expected_root = Some(root);
     match owner {
         StateRootOwner::Root => Ok(state_root_owner_tuple_matches(actual, root, None)
             .then_some(StateRootCleanupAuthority::ContentAuthorized)),
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
+            facts.service_binding = Some((user.to_owned(), group.to_owned()));
             let service_owner = service_identity_owner(user, group);
             facts.nss_owner = match service_owner {
                 StateRootServiceIdentity::UserUnavailable => StateRootNssOwner::UserUnavailable,
@@ -1398,10 +1402,18 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
         ),
     };
     let readlink = match &facts.public_readlink {
-        StateRootRead::Success(value) => value
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
+        StateRootRead::Success(value)
+            if value.len() <= 3_800
+                && ![b"enk_enroll_".as_slice(), b"PRIVATE KEY".as_slice()]
+                    .iter()
+                    .any(|needle| value.windows(needle.len()).any(|window| window == *needle)) =>
+        {
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        }
+        StateRootRead::Success(_) => "unavailable".to_owned(),
         StateRootRead::NotReached => "not_reached".to_owned(),
         StateRootRead::NotFound => "not_found".to_owned(),
         StateRootRead::IoError { kind, errno } => {
