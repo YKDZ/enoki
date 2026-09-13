@@ -4165,13 +4165,20 @@ export function createProbeHostHarness({
           error &&
           typeof error === "object"
         ) {
-          error.failureDetail = {
-            kind: "installed_bundle_failure_repair",
-            invocationPhase: "outer_cleanup",
-            phase: "custody",
-            priorRepair: latestSuccessfulRepair.priorRepair,
-            priorState: "repair_succeeded",
-          };
+          if (error.failureDetail?.phase === "cleanup") {
+            error.failureDetail.invocationPhase = "outer_cleanup";
+            error.failureDetail.priorRepair =
+              latestSuccessfulRepair.priorRepair;
+            error.failureDetail.priorState = "repair_succeeded";
+          } else {
+            error.failureDetail = {
+              kind: "installed_bundle_failure_repair",
+              invocationPhase: "outer_cleanup",
+              phase: "custody",
+              priorRepair: latestSuccessfulRepair.priorRepair,
+              priorState: "repair_succeeded",
+            };
+          }
         }
         errors.push(error);
         const aggregate = new AggregateError(
@@ -7931,23 +7938,20 @@ function assertionError(code, message) {
 function closedUnitStateStdout(value) {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > 3800)
     return false;
-  const fields = Object.fromEntries(
-    value.split("\n").map((line) => line.split("=", 2)),
-  );
-  if (Object.keys(fields).length !== 3) return false;
   return new Set([
-    "loaded:active:running",
-    "loaded:active:listening",
-    "loaded:inactive:dead",
-    "loaded:failed:failed",
-  ]).has(`${fields.LoadState}:${fields.ActiveState}:${fields.SubState}`);
+    "LoadState=loaded\nActiveState=active\nSubState=running",
+    "LoadState=loaded\nActiveState=active\nSubState=listening",
+    "LoadState=loaded\nActiveState=inactive\nSubState=dead",
+    "LoadState=loaded\nActiveState=failed\nSubState=failed",
+  ]).has(value);
 }
 
 function hasOnlyClosedUnitStateHex(stderr, secrets) {
   const text = String(stderr);
-  if (!text.includes("stdout_hex=")) return true;
-  const fields = [...text.matchAll(/\bstdout_hex=([^\s]+)\b/gi)];
-  if (fields.length === 0) return false;
+  if (!/stdout_hex=/i.test(text)) return true;
+  const fields = [...text.matchAll(/stdout_hex=([^\s]*)/gi)];
+  if (fields.length !== [...text.matchAll(/stdout_hex=/gi)].length)
+    return false;
   return fields.every(([, hex]) => {
     if (hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) return false;
     const decoded = Buffer.from(hex, "hex").toString("utf8");
@@ -8019,7 +8023,15 @@ export function sanitizeFailureDetail(value, secrets = []) {
     normalized.priorState = "repair_succeeded";
   if (value.priorRepair !== undefined) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
-    if (!priorRepair) return unavailableForPhase();
+    if (
+      !priorRepair ||
+      (value.phase === "custody" &&
+        (priorRepair.phase !== "repair" ||
+          priorRepair.replayReady === false ||
+          priorRepair.result?.code !== 0 ||
+          priorRepair.executionTiming === undefined))
+    )
+      return unavailableForPhase();
     normalized.priorRepair = priorRepair;
   }
   if (value.executionTiming?.unavailable === true) {

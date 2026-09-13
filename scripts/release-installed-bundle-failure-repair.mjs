@@ -500,12 +500,16 @@ function systemdUnitStateFunctions() {
 }
 read_unit_state() {
   closed_unit_state_stdout() {
-    closed_load=$(printf '%s\n' "$1" | awk -F= '$1 == "LoadState" { print $2 }') || return 1
-    closed_active=$(printf '%s\n' "$1" | awk -F= '$1 == "ActiveState" { print $2 }') || return 1
-    closed_sub=$(printf '%s\n' "$1" | awk -F= '$1 == "SubState" { print $2 }') || return 1
-    [ "$(printf '%s\n' "$1" | awk 'NF { count += 1 } END { print count + 0 }')" -eq 3 ] || return 1
-    case "$closed_load:$closed_active:$closed_sub" in
-      loaded:active:running|loaded:active:listening|loaded:inactive:dead|loaded:failed:failed) return 0 ;;
+    case "$1" in
+      'LoadState=loaded
+ActiveState=active
+SubState=running'|'LoadState=loaded
+ActiveState=active
+SubState=listening'|'LoadState=loaded
+ActiveState=inactive
+SubState=dead'|'LoadState=loaded
+ActiveState=failed
+SubState=failed') return 0 ;;
     esac
     return 1
   }

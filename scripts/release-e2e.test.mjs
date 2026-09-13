@@ -4182,6 +4182,25 @@ exit 1
   });
 
   it("rebuilds only bounded closed runtime failure detail at serializer boundaries", () => {
+    const safeStateHex = Buffer.from(
+      "LoadState=loaded\nActiveState=active\nSubState=listening",
+    ).toString("hex");
+    const cleanupWith = (stderr) =>
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: 79, stderr, stdout: "" },
+      });
+    expect(cleanupWith(`stdout_hex=${safeStateHex}`)).toMatchObject({
+      result: { stderr: `stdout_hex=${safeStateHex}` },
+    });
+    for (const stderr of [
+      `stdout_hex=${safeStateHex} stdout_hex=`,
+      `stdout_hex=${safeStateHex}-`,
+      "STDOUT_HEX=63616c6c65722d736563726574",
+    ]) {
+      expect(cleanupWith(stderr)).toMatchObject({ replayReady: false });
+    }
     expect(
       sanitizeFailureDetail({
         kind: "installed_bundle_failure_repair",
