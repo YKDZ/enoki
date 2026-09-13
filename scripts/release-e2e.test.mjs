@@ -2847,6 +2847,26 @@ exit "$status"
     ).rejects.toThrow(/recorder did not publish/i);
   });
 
+  it("retains a successful Repair command result when its evidence is invalid", async () => {
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        if (command.includes("# enoki-release-e2e:exhaust-observation-runtime-budget")) {
+          return successfulCommandText("recorded\n");
+        }
+        return successfulCommandText("not repair evidence\n");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(driver.repair("run-runtime-invalid-evidence", "1.2.3")).rejects.toMatchObject({
+      failureDetail: {
+        phase: "repair",
+        result: { code: 0, stdout: "not repair evidence\n", stderr: "" },
+      },
+    });
+  });
+
   it.each(["stop", "query"])(
     "fails closed on a Runtime socket %s error before fault cover or Repair",
     async (failureMode) => {

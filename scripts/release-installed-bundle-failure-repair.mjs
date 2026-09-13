@@ -109,10 +109,13 @@ export function createInstalledBundleFailureRepairHostDriver({
           repaired,
         );
       }
-      const repair = parseRepairEvidence(
-        repaired.stdout,
-        expectedBundleVersion,
-      );
+      let repair;
+      try {
+        repair = parseRepairEvidence(repaired.stdout, expectedBundleVersion);
+      } catch (error) {
+        error.failureDetail = boundedCommandResult("repair", repaired);
+        throw error;
+      }
       faultMayBeActive = false;
       return { failure: { status: "recorded" }, repair };
     },
