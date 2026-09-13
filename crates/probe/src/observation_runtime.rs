@@ -1908,6 +1908,7 @@ impl UnixObservationRuntimeClient {
             .map_err(|detail| detail.cause)
     }
 
+    #[allow(clippy::result_large_err)] // Private failure capture retains the consumed bounded trace.
     pub(crate) fn request_finalized_window_detailed(
         &self,
         cadence: Duration,
