@@ -493,20 +493,25 @@ function systemdUnitStateFunctions() {
     record_target=$1
     record_code=$2
     record_stdout=$3
-    record_bytes=$(printf '%s' "$record_stdout" | wc -c | tr -d ' ') || return 1
-    if [ "$record_bytes" -le 3800 ]; then
-      record_hex=$(printf '%s' "$record_stdout" | od -An -tx1 | tr -d ' \\n') || return 1
-    else
-      record_hex=unavailable
+    record_bytes=unavailable
+    record_hex=unavailable
+    if record_count=$(printf '%s' "$record_stdout" | wc -c | tr -d ' '); then
+      record_bytes=$record_count
     fi
-    printf 'enoki.lifecycle.diagnostic role=host phase=runtime_cleanup operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s\\n' "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" >&2
+    if [ "$record_bytes" != unavailable ] && [ "$record_bytes" -le 3800 ]; then
+      record_hex=$(printf '%s' "$record_stdout" | od -An -tx1 | tr -d ' \\n') || record_hex=unavailable
+    else
+      :
+    fi
+    ( printf 'enoki.lifecycle.diagnostic role=host phase=runtime_cleanup operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s\\n' "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" >&2 ) || :
+    return 0
   }
   target=$1
   if properties=$(systemctl show "$target" --no-pager --property=LoadState --property=ActiveState --property=SubState); then
-    record_unit_state "$target" 0 "$properties" || return 1
+    record_unit_state "$target" 0 "$properties" || :
   else
     state_code=$?
-    record_unit_state "$target" "$state_code" '' || return 1
+    record_unit_state "$target" "$state_code" "$properties" || :
     return 1
   fi
   property_count=$(printf '%s\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || return 1

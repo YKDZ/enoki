@@ -3014,6 +3014,105 @@ printf covered > '${covered}'
     }
   });
 
+  it("retains nonzero systemctl stdout from the generated state reader", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    await expect(driver.cleanup("run-runtime-nonzero-output")).rejects.toThrow(
+      /not executed/,
+    );
+
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-nonzero-output-"),
+    );
+    try {
+      const systemctl = path.join(fixture, "systemctl");
+      await writeFile(
+        systemctl,
+        "#!/bin/sh\nprintf 'LoadState=loaded\\n'\nexit 17\n",
+        "utf8",
+      );
+      await chmod(systemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      const shell = `set -eu
+${cleanupCommand.slice(helperStart, helperEnd)}
+read_unit_state enoki-observation-runtime.service
+`;
+      await expect(
+        execFileAsync("/bin/sh", ["-c", shell], {
+          env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+        }),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining(
+          "code=17 stdout_bytes=16 stdout_hex=4c6f616453746174653d6c6f61646564",
+        ),
+      });
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("does not turn a generated state-reader success into a failure when diagnostics cannot write", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    await expect(
+      driver.cleanup("run-runtime-diagnostic-write"),
+    ).rejects.toThrow(/not executed/);
+
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-diagnostic-write-"),
+    );
+    try {
+      const marker = path.join(fixture, "reader-succeeded");
+      const systemctl = path.join(fixture, "systemctl");
+      await writeFile(
+        systemctl,
+        "#!/bin/sh\nprintf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'\n",
+        "utf8",
+      );
+      await chmod(systemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      const shell = `set -eu
+${cleanupCommand.slice(helperStart, helperEnd)}
+printf() {
+  case "$1" in
+    enoki.lifecycle.diagnostic*) return 1 ;;
+    *) command printf "$@" ;;
+  esac
+}
+if read_unit_state enoki-observation-runtime.service >/dev/null; then
+  printf succeeded > '${marker}'
+else
+  printf failed > '${marker}'
+fi
+`;
+      await expect(
+        execFileAsync("/bin/sh", ["-c", shell], {
+          env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+        }),
+      ).resolves.toMatchObject({ stdout: "" });
+      await expect(readFile(marker, "utf8")).resolves.toBe("succeeded");
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it.each([
     ["active", "active", "running", "0", "0", "", false, false],
     ["activating", "activating", "start", "0", "0", "", false, false],
