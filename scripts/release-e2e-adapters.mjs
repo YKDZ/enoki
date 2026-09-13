@@ -2158,7 +2158,7 @@ function serializeRunError(error, secrets) {
     message: redactText(message, secrets),
     name: error instanceof Error ? error.name : "Error",
   };
-  const failureDetail = sanitizeFailureDetail(error?.failureDetail);
+  const failureDetail = sanitizeFailureDetail(error?.failureDetail, secrets);
   if (failureDetail) serialized.failureDetail = failureDetail;
   return serialized;
 }

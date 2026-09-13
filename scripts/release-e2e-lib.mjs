@@ -7849,7 +7849,7 @@ function assertionError(code, message) {
   return error;
 }
 
-export function sanitizeFailureDetail(value) {
+export function sanitizeFailureDetail(value, secrets = []) {
   if (
     !value ||
     typeof value !== "object" ||
@@ -7879,10 +7879,14 @@ export function sanitizeFailureDetail(value) {
     phase: value.phase,
     result: { code: result.code, stderr: result.stderr, stdout: result.stdout },
   };
+  const redactedStderr = redactSensitiveText(result.stderr, secrets);
+  const redactedStdout = redactSensitiveText(result.stdout, secrets);
   if (
     /(?:enrollment.?token|password|private.?key|signing.?secret|enk_enroll_)/i.test(
       `${result.stderr}\n${result.stdout}`,
     ) ||
+    redactedStderr !== result.stderr ||
+    redactedStdout !== result.stdout ||
     Buffer.byteLength(JSON.stringify(normalized), "utf8") > 8 * 1024
   ) {
     return unavailable();

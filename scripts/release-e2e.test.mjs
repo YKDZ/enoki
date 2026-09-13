@@ -3866,6 +3866,19 @@ exit 1
     expect(
       sanitizeFailureDetail({ kind: "unknown", phase: "cleanup" }),
     ).toBeUndefined();
+    expect(
+      sanitizeFailureDetail(
+        {
+          kind: "installed_bundle_failure_repair",
+          phase: "cleanup",
+          result: { code: 79, stderr: "caller-secret", stdout: "" },
+        },
+        ["caller-secret"],
+      ),
+    ).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
