@@ -1271,11 +1271,22 @@ fn trusted_state_root_layout_with_facts(
             authority,
         }));
     }
-    if !public_metadata.file_type().is_symlink()
-        || (public_metadata.uid(), public_metadata.gid())
-            != expected_root_owner_for(public_state_dir)
-        || public_metadata.nlink() != 1
-    {
+    if !public_metadata.file_type().is_symlink() {
+        facts.first_rejection.get_or_insert("public_type");
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    let expected_root = expected_root_owner_for(public_state_dir);
+    facts.expected_root = Some(expected_root);
+    if (public_metadata.uid(), public_metadata.gid()) != expected_root {
+        facts.first_rejection.get_or_insert("public_owner");
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    if public_metadata.nlink() != 1 {
+        facts.first_rejection.get_or_insert("public_nlink");
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
@@ -1297,6 +1308,9 @@ fn trusted_state_root_layout_with_facts(
         }
     };
     if readlink.as_os_str().as_bytes() != b"private/enoki-probe" {
+        facts
+            .first_rejection
+            .get_or_insert("public_readlink_target");
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
@@ -1442,6 +1456,9 @@ fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
         ),
     };
     let readlink = match &facts.public_readlink {
+        StateRootRead::Success(value) if value.as_slice() == b"private/enoki-probe" => {
+            "707269766174652f656e6f6b692d70726f6265".to_owned()
+        }
         // A rejected link is arbitrary filesystem data.  The admission
         // diagnostic records that it was reached, but never encodes it.
         StateRootRead::Success(_) => "unavailable".to_owned(),
@@ -2966,6 +2983,26 @@ mod tests {
             }
         ));
         assert_eq!(facts.first_rejection, Some("public_lstat"));
+        assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_keep_the_first_public_readlink_target_rejection() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir_all(state.parent().expect("state parent")).expect("state parent");
+        symlink("private/other", &state).expect("unsafe public projection");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
+
+        assert!(result.is_err(), "wrong public target is rejected");
+        assert_eq!(facts.first_rejection, Some("public_readlink_target"));
+        assert_eq!(
+            facts.expected_root,
+            Some((unsafe { libc::geteuid() }, unsafe { libc::getegid() }))
+        );
+        assert!(matches!(facts.public_readlink, StateRootRead::Success(_)));
         assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
     }
 

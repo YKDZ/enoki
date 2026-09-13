@@ -7899,20 +7899,21 @@ function assertionError(code, message) {
 }
 
 export function sanitizeFailureDetail(value, secrets = []) {
+  const unavailable = (phase = "unavailable") => ({
+    kind: "installed_bundle_failure_repair",
+    phase,
+    replayReady: false,
+    unavailable: "unsafe_or_oversize_result",
+  });
   if (
     !value ||
     typeof value !== "object" ||
     value.kind !== "installed_bundle_failure_repair" ||
     !["cleanup", "exhaust", "repair"].includes(value.phase)
   ) {
-    return undefined;
+    return unavailable();
   }
-  const unavailable = () => ({
-    kind: "installed_bundle_failure_repair",
-    phase: value.phase,
-    replayReady: false,
-    unavailable: "unsafe_or_oversize_result",
-  });
+  const unavailableForPhase = () => unavailable(value.phase);
   const result = value.result;
   if (
     !result ||
@@ -7921,7 +7922,7 @@ export function sanitizeFailureDetail(value, secrets = []) {
     typeof result.stderr !== "string" ||
     typeof result.stdout !== "string"
   ) {
-    return unavailable();
+    return unavailableForPhase();
   }
   const normalized = {
     kind: "installed_bundle_failure_repair",
@@ -7930,7 +7931,7 @@ export function sanitizeFailureDetail(value, secrets = []) {
   };
   if (value.priorRepair !== undefined) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
-    if (!priorRepair) return unavailable();
+    if (!priorRepair) return unavailableForPhase();
     normalized.priorRepair = priorRepair;
   }
   if (value.executionTiming?.unavailable === true) {
@@ -7946,7 +7947,7 @@ export function sanitizeFailureDetail(value, secrets = []) {
       timedOut: value.executionTiming.timedOut,
     };
   } else if (value.executionTiming !== undefined) {
-    return unavailable();
+    return unavailableForPhase();
   }
   const redactedStderr = redactSensitiveText(result.stderr, secrets);
   const redactedStdout = redactSensitiveText(result.stdout, secrets);
@@ -7956,9 +7957,10 @@ export function sanitizeFailureDetail(value, secrets = []) {
     ) ||
     redactedStderr !== result.stderr ||
     redactedStdout !== result.stdout ||
+    /\bstdout_hex=[0-9a-f]*\b/i.test(result.stderr) ||
     Buffer.byteLength(JSON.stringify(normalized), "utf8") > 8 * 1024
   ) {
-    return unavailable();
+    return unavailableForPhase();
   }
   return normalized;
 }

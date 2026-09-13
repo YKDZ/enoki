@@ -575,7 +575,6 @@ wait_for_unit_state() {
   expected_sub=$3
   state_phase=runtime_custody_recovery
   state_started_ms=$(state_monotonic_ms) || state_started_ms=unavailable
-  state_sleep_ms=unavailable
   state_remaining=20
   while [ "$state_remaining" -gt 0 ]; do
     state_poll_index=$((20 - state_remaining + 1))
@@ -585,6 +584,7 @@ wait_for_unit_state() {
     else
       state_elapsed_ms=unavailable
     fi
+    state_sleep_ms=unavailable
     observed_state=$(read_unit_state "$expected_target") || fail "could not query $expected_target state"
     [ "$observed_state" = "loaded $expected_active $expected_sub" ] && return 0
     state_sleep_started_ms=$(state_monotonic_ms) || state_sleep_started_ms=unavailable
@@ -595,6 +595,7 @@ wait_for_unit_state() {
     else
       state_sleep_ms=unavailable
     fi
+    ( printf 'enoki.lifecycle.diagnostic role=host phase=%s operation=wait_unit_sleep unit=%s poll=%s sleep_ms=%s\\n' "$state_phase" "$expected_target" "$state_poll_index" "$state_sleep_ms" >&2 ) || :
     state_remaining=$((state_remaining - 1))
   done
   fail "$expected_target did not reach loaded/$expected_active/$expected_sub"

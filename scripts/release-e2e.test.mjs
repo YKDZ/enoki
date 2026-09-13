@@ -4049,7 +4049,11 @@ exit 1
     });
     expect(
       sanitizeFailureDetail({ kind: "unknown", phase: "cleanup" }),
-    ).toBeUndefined();
+    ).toMatchObject({
+      phase: "unavailable",
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
     expect(
       sanitizeFailureDetail({
         kind: "installed_bundle_failure_repair",
