@@ -3427,6 +3427,7 @@ export function createProbeHostHarness({
         if (error?.failureDetail?.phase === "cleanup") {
           error.failureDetail.priorState = "repair_succeeded";
           error.failureDetail.priorRepair = priorRepair;
+          error.failureDetail.invocationPhase = "initial_custody";
         } else if (error && typeof error === "object") {
           error.failureDetail = {
             kind: "installed_bundle_failure_repair",
@@ -7943,7 +7944,10 @@ function closedUnitStateStdout(value) {
 }
 
 function hasOnlyClosedUnitStateHex(stderr, secrets) {
-  const fields = [...String(stderr).matchAll(/\bstdout_hex=([0-9a-f]+)\b/gi)];
+  const text = String(stderr);
+  if (!text.includes("stdout_hex=")) return true;
+  const fields = [...text.matchAll(/\bstdout_hex=([^\s]+)\b/gi)];
+  if (fields.length === 0) return false;
   return fields.every(([, hex]) => {
     if (hex.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(hex)) return false;
     const decoded = Buffer.from(hex, "hex").toString("utf8");
@@ -7999,12 +8003,20 @@ export function sanitizeFailureDetail(value, secrets = []) {
   if (value.phase === "custody" && value.priorRepair === undefined) {
     return unavailableForPhase();
   }
-  if (value.phase === "custody" && value.invocationPhase !== undefined) {
+  if (
+    value.priorRepair !== undefined &&
+    value.priorState !== "repair_succeeded"
+  ) {
+    return unavailableForPhase();
+  }
+  if (value.priorRepair !== undefined && value.invocationPhase !== undefined) {
     if (!["initial_custody", "outer_cleanup"].includes(value.invocationPhase)) {
       return unavailableForPhase();
     }
     normalized.invocationPhase = value.invocationPhase;
   }
+  if (value.priorRepair !== undefined)
+    normalized.priorState = "repair_succeeded";
   if (value.priorRepair !== undefined) {
     const priorRepair = sanitizeFailureDetail(value.priorRepair, secrets);
     if (!priorRepair) return unavailableForPhase();
