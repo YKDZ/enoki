@@ -1058,6 +1058,38 @@ enum StateRootOwner<'a> {
     BoundServiceOrEmptyShell { user: &'a str, group: &'a str },
 }
 
+#[derive(Default)]
+struct StateRootAdmissionFacts {
+    public_lstat: Option<StateRootLstatFacts>,
+    private_lstat: Option<StateRootLstatFacts>,
+    public_readlink: Option<Vec<u8>>,
+    nss_owner: Option<Option<(u32, u32)>>,
+    empty_shell: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct StateRootLstatFacts {
+    directory: bool,
+    symlink: bool,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    nlink: u64,
+}
+
+impl From<&fs::Metadata> for StateRootLstatFacts {
+    fn from(metadata: &fs::Metadata) -> Self {
+        Self {
+            directory: metadata.is_dir(),
+            symlink: metadata.file_type().is_symlink(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: metadata.mode() & 0o7777,
+            nlink: metadata.nlink(),
+        }
+    }
+}
+
 impl TrustedStateRoot {
     fn contents(&self) -> &Path {
         match self {
@@ -1078,6 +1110,19 @@ fn trusted_state_root_layout(
     public_state_dir: &Path,
     ordinary_owner: StateRootOwner<'_>,
 ) -> Result<Option<TrustedStateRootAdmission>, ProbeUpgraderRunError> {
+    let mut facts = StateRootAdmissionFacts::default();
+    let result = trusted_state_root_layout_with_facts(public_state_dir, ordinary_owner, &mut facts);
+    if result.is_err() {
+        emit_state_root_admission_facts(&facts);
+    }
+    result
+}
+
+fn trusted_state_root_layout_with_facts(
+    public_state_dir: &Path,
+    ordinary_owner: StateRootOwner<'_>,
+    facts: &mut StateRootAdmissionFacts,
+) -> Result<Option<TrustedStateRootAdmission>, ProbeUpgraderRunError> {
     if !public_state_dir.ends_with("var/lib/enoki-probe") {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is not the fixed state root",
@@ -1095,8 +1140,9 @@ fn trusted_state_root_layout(
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
                 Ok(metadata) => {
+                    facts.private_lstat = Some((&metadata).into());
                     let authority =
-                        validate_state_root_directory(&private, &metadata, ordinary_owner)?;
+                        validate_state_root_directory(&private, &metadata, ordinary_owner, facts)?;
                     Ok(Some(TrustedStateRootAdmission {
                         layout: TrustedStateRoot::Canonical {
                             public: public_state_dir.to_owned(),
@@ -1108,14 +1154,22 @@ fn trusted_state_root_layout(
             };
         }
         Err(error) => return Err(error.into()),
-        Ok(metadata) => metadata,
+        Ok(metadata) => {
+            facts.public_lstat = Some((&metadata).into());
+            metadata
+        }
     };
     if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
-        let authority =
-            validate_state_root_directory(public_state_dir, &public_metadata, ordinary_owner)?;
+        let authority = validate_state_root_directory(
+            public_state_dir,
+            &public_metadata,
+            ordinary_owner,
+            facts,
+        )?;
         match fs::symlink_metadata(&private) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => {
+            Ok(metadata) => {
+                facts.private_lstat = Some((&metadata).into());
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe state directory has conflicting canonical residue",
                 ));
@@ -1131,8 +1185,14 @@ fn trusted_state_root_layout(
         || (public_metadata.uid(), public_metadata.gid())
             != expected_root_owner_for(public_state_dir)
         || public_metadata.nlink() != 1
-        || fs::read_link(public_state_dir)?.as_os_str().as_bytes() != b"private/enoki-probe"
     {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    let readlink = fs::read_link(public_state_dir)?;
+    facts.public_readlink = Some(readlink.as_os_str().as_bytes().to_vec());
+    if readlink.as_os_str().as_bytes() != b"private/enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
@@ -1142,7 +1202,10 @@ fn trusted_state_root_layout(
             StateRootCleanupAuthority::ContentAuthorized
         }
         Err(error) => return Err(error.into()),
-        Ok(metadata) => validate_state_root_directory(&private, &metadata, ordinary_owner)?,
+        Ok(metadata) => {
+            facts.private_lstat = Some((&metadata).into());
+            validate_state_root_directory(&private, &metadata, ordinary_owner, facts)?
+        }
     };
     Ok(Some(TrustedStateRootAdmission {
         layout: TrustedStateRoot::Canonical {
@@ -1157,6 +1220,7 @@ fn validate_state_root_directory(
     path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
+    facts: &mut StateRootAdmissionFacts,
 ) -> Result<StateRootCleanupAuthority, ProbeUpgraderRunError> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.mode() & 0o7777 != 0o750
     {
@@ -1164,7 +1228,7 @@ fn validate_state_root_directory(
             "Probe state directory is unsafe",
         ));
     }
-    state_root_authority(path, metadata, owner)?.ok_or(
+    state_root_authority(path, metadata, owner, facts)?.ok_or(
         ProbeUpgraderRunError::InvalidInstallMetadata("Probe state directory is unsafe"),
     )
 }
@@ -1173,6 +1237,7 @@ fn state_root_authority(
     path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
+    facts: &mut StateRootAdmissionFacts,
 ) -> Result<Option<StateRootCleanupAuthority>, ProbeUpgraderRunError> {
     let actual = (metadata.uid(), metadata.gid());
     let root = expected_root_owner_for(path);
@@ -1180,19 +1245,53 @@ fn state_root_authority(
         StateRootOwner::Root => Ok(state_root_owner_tuple_matches(actual, root, None)
             .then_some(StateRootCleanupAuthority::ContentAuthorized)),
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
-            if state_root_owner_tuple_matches(
-                actual,
-                root,
-                service_identity_owner(user, group).ok(),
-            ) {
+            let service_owner = service_identity_owner(user, group);
+            facts.nss_owner = Some(service_owner.as_ref().ok().copied());
+            if state_root_owner_tuple_matches(actual, root, service_owner.ok()) {
                 return Ok(Some(StateRootCleanupAuthority::ContentAuthorized));
             }
             if metadata.uid() != metadata.gid() {
                 return Ok(None);
             }
-            Ok(state_root_is_empty(path)?.then_some(StateRootCleanupAuthority::EmptyShellOnly))
+            let empty = state_root_is_empty(path)?;
+            facts.empty_shell = Some(empty);
+            Ok(empty.then_some(StateRootCleanupAuthority::EmptyShellOnly))
         }
     }
+}
+
+fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
+    let render = |value: Option<StateRootLstatFacts>| match value {
+        None => "not_reached".to_owned(),
+        Some(value) => format!(
+            "dir={},link={},uid={},gid={},mode={:o},nlink={}",
+            value.directory, value.symlink, value.uid, value.gid, value.mode, value.nlink
+        ),
+    };
+    let readlink = facts
+        .public_readlink
+        .as_ref()
+        .map(|value| {
+            value
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .unwrap_or_else(|| "not_reached".to_owned());
+    let nss = match facts.nss_owner {
+        None => "not_reached".to_owned(),
+        Some(None) => "unavailable".to_owned(),
+        Some(Some((uid, gid))) => format!("{uid}:{gid}"),
+    };
+    let empty = facts
+        .empty_shell
+        .map_or("not_reached".to_owned(), |value| value.to_string());
+    let _ = writeln!(
+        std::io::stderr(),
+        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=state_root_admission public_lstat={} private_lstat={} public_readlink_hex={readlink} nss_owner={nss} empty_shell={empty}",
+        render(facts.public_lstat),
+        render(facts.private_lstat),
+    );
 }
 
 fn state_root_is_empty(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
@@ -1738,7 +1837,8 @@ mod tests {
         STATE_SHELL_RETIRE_FAILURE, STATE_SHELL_RETIRE_MODE_CHANGE,
     };
     use super::{
-        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
+        ProbeUpgraderSystemdRunner, StateRootAdmissionFacts, StateRootOwner,
+        TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_committed_replacement_cleanup,
@@ -1746,7 +1846,7 @@ mod tests {
         prepare_probe_uninstall_cleanup, remove_lifecycle_companion_binary,
         remove_probe_bootstrap_state, remove_uninstall_local_state_with,
         retire_unbound_installed_bundle_repair_stage_with, state_root_owner_tuple_matches,
-        validate_owned_bootstrap_state,
+        trusted_state_root_layout_with_facts, validate_owned_bootstrap_state,
     };
     use crate::upgrader::{
         ProbeUninstallerRunInput, ProbeUpgraderRunError, observation_stop_services,
@@ -2466,6 +2566,33 @@ mod tests {
             assert!(!calls.iter().any(|path| path == metadata));
             assert_eq!(result.is_err(), verification_fails);
         }
+    }
+
+    #[test]
+    fn state_root_facts_keep_a_short_circuit_rejection_without_extra_reads() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir_all(&state).expect("ordinary state root");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))
+            .expect("unsafe state root mode");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
+
+        assert!(result.is_err(), "unsafe state root is rejected");
+        assert!(facts.public_lstat.is_some(), "actual public lstat is kept");
+        assert!(
+            facts.private_lstat.is_none(),
+            "short circuit does not read private root"
+        );
+        assert!(
+            facts.public_readlink.is_none(),
+            "ordinary root does not readlink"
+        );
+        assert!(
+            facts.empty_shell.is_none(),
+            "rejected mode does not inspect contents"
+        );
     }
 
     #[test]
