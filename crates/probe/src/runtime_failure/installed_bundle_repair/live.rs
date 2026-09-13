@@ -581,6 +581,7 @@ fn validate_unix_runtime_window(
         })
 }
 
+#[cfg(test)]
 fn validate_runtime_window(
     client: &impl crate::observation_runtime::ObservationWindowClient,
     validation: RuntimeValidation,
