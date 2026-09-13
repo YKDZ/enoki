@@ -503,7 +503,7 @@ function systemdUnitStateFunctions() {
     else
       :
     fi
-    ( printf 'enoki.lifecycle.diagnostic role=host phase=runtime_cleanup operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s\\n' "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" >&2 ) || :
+    ( printf 'enoki.lifecycle.diagnostic role=host phase=runtime_cleanup operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s wait_seconds=%s\\n' "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" "\${state_remaining:-direct}" >&2 ) || :
     return 0
   }
   target=$1

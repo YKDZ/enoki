@@ -3055,7 +3055,7 @@ read_unit_state enoki-observation-runtime.service
       ).rejects.toMatchObject({
         code: 1,
         stderr: expect.stringContaining(
-          "code=17 stdout_bytes=16 stdout_hex=4c6f616453746174653d6c6f61646564",
+          "code=17 stdout_bytes=16 stdout_hex=4c6f616453746174653d6c6f61646564 wait_seconds=direct",
         ),
       });
     } finally {
