@@ -7894,7 +7894,7 @@ export function sanitizeFailureDetail(value, secrets = []) {
   return normalized;
 }
 
-function serializedError(error) {
+export function serializedError(error, secrets = []) {
   const serialized = {
     code: error?.code ?? "error",
     message: error instanceof Error ? error.message : String(error),
@@ -7905,12 +7905,14 @@ function serializedError(error) {
   if (error?.resourceRecordingEvidence) {
     serialized.resourceRecordingEvidence = error.resourceRecordingEvidence;
   }
-  const failureDetail = sanitizeFailureDetail(error?.failureDetail);
+  const failureDetail = sanitizeFailureDetail(error?.failureDetail, secrets);
   if (failureDetail) {
     serialized.failureDetail = failureDetail;
   }
   if (error instanceof AggregateError) {
-    serialized.errors = error.errors.map((nested) => serializedError(nested));
+    serialized.errors = error.errors.map((nested) =>
+      serializedError(nested, secrets),
+    );
   }
   return serialized;
 }

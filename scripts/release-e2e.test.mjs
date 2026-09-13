@@ -34,6 +34,7 @@ import {
   createReleaseEnvironment,
   createSshReleaseInfrastructureAdapter,
   parseReleaseE2ECommandLine,
+  serializeRunError,
   writeRunManifest,
 } from "./release-e2e-adapters.mjs";
 import {
@@ -46,6 +47,7 @@ import {
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
   sanitizeFailureDetail,
+  serializedError,
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
 } from "./release-e2e-lib.mjs";
@@ -3879,6 +3881,62 @@ exit 1
       replayReady: false,
       unavailable: "unsafe_or_oversize_result",
     });
+
+    const exactLimit = (size) =>
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: 79, stderr: "x".repeat(size), stdout: "" },
+      });
+    let largestSafe = 0;
+    while (exactLimit(largestSafe + 1)?.unavailable === undefined) {
+      largestSafe += 1;
+    }
+    expect(exactLimit(largestSafe)).not.toHaveProperty("unavailable");
+    expect(exactLimit(largestSafe + 1)).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    for (const fixtureBytes of [64 * 1024, 64 * 1024 + 1]) {
+      expect(exactLimit(fixtureBytes)).toMatchObject({
+        replayReady: false,
+        unavailable: "unsafe_or_oversize_result",
+      });
+    }
+
+    const primary = Object.assign(new Error("primary"), {
+      failureDetail: {
+        kind: "installed_bundle_failure_repair",
+        phase: "repair",
+        replayReady: true,
+        result: { code: 4, stderr: "primary", stdout: "" },
+      },
+    });
+    const cleanup = Object.assign(new Error("cleanup"), {
+      failureDetail: {
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: 5, stderr: "caller-secret", stdout: "" },
+      },
+    });
+    const nested = new AggregateError([primary, cleanup], "both failures");
+    for (const serialize of [
+      (error) => serializedError(error, ["caller-secret"]),
+      (error) => serializeRunError(error, ["caller-secret"]),
+    ]) {
+      expect(serialize(nested)).toMatchObject({
+        errors: [
+          { failureDetail: { phase: "repair", result: { code: 4 } } },
+          {
+            failureDetail: {
+              phase: "cleanup",
+              replayReady: false,
+              unavailable: "unsafe_or_oversize_result",
+            },
+          },
+        ],
+      });
+    }
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {

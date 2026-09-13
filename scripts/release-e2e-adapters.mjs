@@ -2151,7 +2151,7 @@ async function replaceJsonAtomically(destination, value) {
   }
 }
 
-function serializeRunError(error, secrets) {
+export function serializeRunError(error, secrets = []) {
   const message = error instanceof Error ? error.message : String(error);
   const serialized = {
     code: typeof error?.code === "string" ? error.code : "release_e2e_failed",
@@ -2160,6 +2160,11 @@ function serializeRunError(error, secrets) {
   };
   const failureDetail = sanitizeFailureDetail(error?.failureDetail, secrets);
   if (failureDetail) serialized.failureDetail = failureDetail;
+  if (error instanceof AggregateError) {
+    serialized.errors = error.errors.map((nested) =>
+      serializeRunError(nested, secrets),
+    );
+  }
   return serialized;
 }
 
