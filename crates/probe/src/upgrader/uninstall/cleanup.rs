@@ -1131,7 +1131,7 @@ fn trusted_state_root_layout(
     let mut facts = StateRootAdmissionFacts::default();
     let result = trusted_state_root_layout_with_facts(public_state_dir, ordinary_owner, &mut facts);
     if let Err(error) = &result {
-        facts.first_rejection = Some(match error {
+        facts.first_rejection.get_or_insert(match error {
             ProbeUpgraderRunError::InvalidInstallMetadata(point) => point,
             _ => "state_root_io_error",
         });
@@ -1166,6 +1166,7 @@ fn trusted_state_root_layout_with_facts(
                 }
                 Err(error) => {
                     facts.private_lstat = StateRootRead::IoError;
+                    facts.first_rejection.get_or_insert("private_lstat");
                     Err(error.into())
                 }
                 Ok(metadata) => {
@@ -1184,6 +1185,7 @@ fn trusted_state_root_layout_with_facts(
         }
         Err(error) => {
             facts.public_lstat = StateRootRead::IoError;
+            facts.first_rejection.get_or_insert("public_lstat");
             return Err(error.into());
         }
         Ok(metadata) => {
@@ -1199,14 +1201,20 @@ fn trusted_state_root_layout_with_facts(
             facts,
         )?;
         match fs::symlink_metadata(&private) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                facts.private_lstat = StateRootRead::NotFound;
+            }
             Ok(metadata) => {
                 facts.private_lstat = StateRootRead::Success((&metadata).into());
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe state directory has conflicting canonical residue",
                 ));
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                facts.private_lstat = StateRootRead::IoError;
+                facts.first_rejection.get_or_insert("private_lstat");
+                return Err(error.into());
+            }
         }
         return Ok(Some(TrustedStateRootAdmission {
             layout: TrustedStateRoot::Ordinary(public_state_dir.to_owned()),
@@ -1230,6 +1238,7 @@ fn trusted_state_root_layout_with_facts(
         }
         Err(error) => {
             facts.public_readlink = StateRootRead::IoError;
+            facts.first_rejection.get_or_insert("public_readlink");
             return Err(error.into());
         }
     };
@@ -1245,6 +1254,7 @@ fn trusted_state_root_layout_with_facts(
         }
         Err(error) => {
             facts.private_lstat = StateRootRead::IoError;
+            facts.first_rejection.get_or_insert("private_lstat");
             return Err(error.into());
         }
         Ok(metadata) => {
@@ -1308,6 +1318,7 @@ fn state_root_authority(
                 }
                 Err(error) => {
                     facts.empty_shell = StateRootRead::IoError;
+                    facts.first_rejection.get_or_insert("empty_shell");
                     return Err(error);
                 }
             };

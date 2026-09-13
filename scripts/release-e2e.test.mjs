@@ -45,6 +45,7 @@ import {
   renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
+  sanitizeFailureDetail,
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
 } from "./release-e2e-lib.mjs";
@@ -3832,6 +3833,39 @@ exit 1
         unavailable: "unsafe_or_oversize_result",
       },
     });
+  });
+
+  it("rebuilds only bounded closed runtime failure detail at serializer boundaries", () => {
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        replayReady: true,
+        result: { code: 79, stderr: "failed", stdout: "" },
+        untrusted: "omit",
+      }),
+    ).toEqual({
+      kind: "installed_bundle_failure_repair",
+      phase: "cleanup",
+      result: { code: 79, stderr: "failed", stdout: "" },
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: {
+          code: 79,
+          stderr: "ENOKI_ENROLLMENT_TOKEN=enk_enroll_secret-value",
+          stdout: "",
+        },
+      }),
+    ).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
+      sanitizeFailureDetail({ kind: "unknown", phase: "cleanup" }),
+    ).toBeUndefined();
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {

@@ -7849,6 +7849,47 @@ function assertionError(code, message) {
   return error;
 }
 
+export function sanitizeFailureDetail(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    value.kind !== "installed_bundle_failure_repair" ||
+    !["cleanup", "exhaust", "repair"].includes(value.phase)
+  ) {
+    return undefined;
+  }
+  const unavailable = () => ({
+    kind: "installed_bundle_failure_repair",
+    phase: value.phase,
+    replayReady: false,
+    unavailable: "unsafe_or_oversize_result",
+  });
+  const result = value.result;
+  if (
+    !result ||
+    typeof result !== "object" ||
+    (!Number.isInteger(result.code) && result.code !== null) ||
+    typeof result.stderr !== "string" ||
+    typeof result.stdout !== "string"
+  ) {
+    return unavailable();
+  }
+  const normalized = {
+    kind: "installed_bundle_failure_repair",
+    phase: value.phase,
+    result: { code: result.code, stderr: result.stderr, stdout: result.stdout },
+  };
+  if (
+    /(?:enrollment.?token|password|private.?key|signing.?secret|enk_enroll_)/i.test(
+      `${result.stderr}\n${result.stdout}`,
+    ) ||
+    Buffer.byteLength(JSON.stringify(normalized), "utf8") > 8 * 1024
+  ) {
+    return unavailable();
+  }
+  return normalized;
+}
+
 function serializedError(error) {
   const serialized = {
     code: error?.code ?? "error",
@@ -7860,8 +7901,9 @@ function serializedError(error) {
   if (error?.resourceRecordingEvidence) {
     serialized.resourceRecordingEvidence = error.resourceRecordingEvidence;
   }
-  if (error?.failureDetail) {
-    serialized.failureDetail = error.failureDetail;
+  const failureDetail = sanitizeFailureDetail(error?.failureDetail);
+  if (failureDetail) {
+    serialized.failureDetail = failureDetail;
   }
   if (error instanceof AggregateError) {
     serialized.errors = error.errors.map((nested) => serializedError(nested));

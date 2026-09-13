@@ -24,6 +24,7 @@ import {
   createHubLifecycleClient,
   createProbeHostHarness,
   releaseE2EScenarioRegistry,
+  sanitizeFailureDetail,
 } from "./release-e2e-lib.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -2157,7 +2158,8 @@ function serializeRunError(error, secrets) {
     message: redactText(message, secrets),
     name: error instanceof Error ? error.name : "Error",
   };
-  if (error?.failureDetail) serialized.failureDetail = error.failureDetail;
+  const failureDetail = sanitizeFailureDetail(error?.failureDetail);
+  if (failureDetail) serialized.failureDetail = failureDetail;
   return serialized;
 }
 
