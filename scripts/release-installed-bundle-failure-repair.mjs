@@ -595,7 +595,8 @@ function boundedCommandResult(phase, result) {
   if (
     /(?:enrollment.?token|password|private.?key|signing.?secret|enk_enroll_)/i.test(
       `${detail.result.stderr}\n${detail.result.stdout}`,
-    ) || Buffer.byteLength(encoded, "utf8") > 8 * 1024
+    ) ||
+    Buffer.byteLength(encoded, "utf8") > 8 * 1024
   ) {
     return {
       kind: detail.kind,

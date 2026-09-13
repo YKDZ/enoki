@@ -3688,18 +3688,20 @@ exit 1
         ownershipToken: "00000000-0000-4000-8000-000000000001",
       });
 
-      await expect(driver.cleanup("run-runtime-custody")).rejects.toMatchObject({
-        failureDetail: {
-          phase: "cleanup",
-          result: {
-            code: 79,
-            stderr: expect.stringContaining(
-              "enoki.lifecycle.diagnostic role=host phase=runtime_cleanup",
-            ),
-            stdout: "",
+      await expect(driver.cleanup("run-runtime-custody")).rejects.toMatchObject(
+        {
+          failureDetail: {
+            phase: "cleanup",
+            result: {
+              code: 79,
+              stderr: expect.stringContaining(
+                "enoki.lifecycle.diagnostic role=host phase=runtime_cleanup",
+              ),
+              stdout: "",
+            },
           },
         },
-      });
+      );
     } finally {
       await fixture.remove();
     }
