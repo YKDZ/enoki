@@ -2255,6 +2255,7 @@ impl UnixObservationRuntimeClient {
         result.map_err(|mut detail| {
             detail.request_bytes = encoded_request;
             detail.response_prefix = response_prefix;
+            detail.response_prefix_truncated = detail.response_bytes > detail.response_prefix.len();
             detail
         })
     }
@@ -2278,6 +2279,7 @@ pub(crate) struct ObservationClientFailureDetail {
     pub(crate) response_bytes: usize,
     pub(crate) request_bytes: Vec<u8>,
     pub(crate) response_prefix: Vec<u8>,
+    pub(crate) response_prefix_truncated: bool,
     pub(crate) errno: Option<i32>,
     pub(crate) io_kind: Option<io::ErrorKind>,
 }
@@ -2298,6 +2300,7 @@ fn observation_client_failure(
         response_bytes,
         request_bytes: Vec::new(),
         response_prefix: Vec::new(),
+        response_prefix_truncated: false,
         errno: error.and_then(io::Error::raw_os_error),
         io_kind: error.map(io::Error::kind),
     }

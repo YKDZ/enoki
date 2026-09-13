@@ -568,23 +568,35 @@ fn validate_unix_runtime_window(
                 .io_kind
                 .map(|value| format!("{value:?}"))
                 .unwrap_or_else(|| "none".to_owned());
-            let request = runtime_failure_diagnostic_bytes(&detail.request_bytes);
-            let response_prefix = runtime_failure_diagnostic_bytes(&detail.response_prefix);
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix}",
+            let request = runtime_failure_diagnostic_request(&detail.request_bytes);
+            let rendered = format!(
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready=false",
                 detail.operation,
                 detail.cause,
                 detail.request_cadence_millis,
                 detail.request_sequence_start,
                 detail.response_bytes,
+                response_prefix = "unavailable",
             );
+            let rendered = if rendered.len() <= 8 * 1024 {
+                rendered
+            } else {
+                format!(
+                    "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex=unavailable response_prefix_hex=unavailable response_replay_ready=false",
+                    detail.operation,
+                    detail.cause,
+                    detail.request_cadence_millis,
+                    detail.request_sequence_start,
+                    detail.response_bytes,
+                )
+            };
+            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
             contract_failure(code)
         })
 }
 
-fn runtime_failure_diagnostic_bytes(bytes: &[u8]) -> String {
-    if bytes.len() > 8 * 1024
+fn runtime_failure_diagnostic_request(bytes: &[u8]) -> String {
+    if bytes.len() > 128
         || [
             b"password".as_slice(),
             b"private_key",

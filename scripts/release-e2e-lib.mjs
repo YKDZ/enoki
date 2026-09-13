@@ -545,21 +545,28 @@ async function runHubRestoreCompatibilityWindowScenario({
         evidence.migration.operationTimeline = error.timeline;
       }
     }
-    evidence.result = { error: serializedError(error), status: "failed" };
+    evidence.result = {
+      error: serializedError(error, [ownerPassword]),
+      status: "failed",
+    };
     evidence.phase = "failed";
   } finally {
     if (resources?.hub?.collectEvidence) {
       try {
         evidence.hubEvidence = await resources.hub.collectEvidence();
       } catch (error) {
-        evidence.hubEvidence = { error: serializedError(error) };
+        evidence.hubEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     if (resources?.host?.collectEvidence) {
       try {
         evidence.hostEvidence = await resources.host.collectEvidence(runId);
       } catch (error) {
-        evidence.hostEvidence = { error: serializedError(error) };
+        evidence.hostEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     const cleanup = {};
@@ -567,13 +574,13 @@ async function runHubRestoreCompatibilityWindowScenario({
       try {
         cleanup.host = await resources.host.cleanup(runId);
       } catch (error) {
-        cleanup.host = { error: serializedError(error) };
+        cleanup.host = { error: serializedError(error, [ownerPassword]) };
       }
     }
     try {
       cleanup.environment = await environment.cleanup({ resources, runId });
     } catch (error) {
-      cleanup.environment = { error: serializedError(error) };
+      cleanup.environment = { error: serializedError(error, [ownerPassword]) };
     }
     evidence.cleanup = cleanup;
     if (!primaryError && cleanupDidNotSucceed(cleanup)) {
@@ -583,7 +590,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       );
       evidence.failureBoundary = "cleanup";
       evidence.result = {
-        error: serializedError(primaryError),
+        error: serializedError(primaryError, [ownerPassword]),
         status: "failed",
       };
       evidence.phase = "failed";
@@ -612,7 +619,9 @@ async function runHubRestoreCompatibilityWindowScenario({
     failure.code = primaryError.code ?? "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
-      failure.evidenceWriteError = serializedError(evidenceWriteError);
+      failure.evidenceWriteError = serializedError(evidenceWriteError, [
+        ownerPassword,
+      ]);
     }
     throw failure;
   }
@@ -916,21 +925,28 @@ async function runPostReplacementRepairUninstallScenario({
         evidence.operationTimeline = error.timeline;
       }
     }
-    evidence.result = { error: serializedError(error), status: "failed" };
+    evidence.result = {
+      error: serializedError(error, [ownerPassword]),
+      status: "failed",
+    };
     evidence.phase = "failed";
   } finally {
     if (resources?.hub?.collectEvidence) {
       try {
         evidence.hubEvidence = await resources.hub.collectEvidence();
       } catch (error) {
-        evidence.hubEvidence = { error: serializedError(error) };
+        evidence.hubEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     if (resources?.host?.collectEvidence) {
       try {
         evidence.hostEvidence = await resources.host.collectEvidence(runId);
       } catch (error) {
-        evidence.hostEvidence = { error: serializedError(error) };
+        evidence.hostEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     const cleanup = {};
@@ -938,13 +954,13 @@ async function runPostReplacementRepairUninstallScenario({
       try {
         cleanup.host = await resources.host.cleanup(runId);
       } catch (error) {
-        cleanup.host = { error: serializedError(error) };
+        cleanup.host = { error: serializedError(error, [ownerPassword]) };
       }
     }
     try {
       cleanup.environment = await environment.cleanup({ resources, runId });
     } catch (error) {
-      cleanup.environment = { error: serializedError(error) };
+      cleanup.environment = { error: serializedError(error, [ownerPassword]) };
     }
     evidence.cleanup = cleanup;
     evidence.boundaryEvidence = createRepairBoundaryEvidence(evidence);
@@ -956,11 +972,11 @@ async function runPostReplacementRepairUninstallScenario({
         primaryError = error;
         evidence.boundaryEvidenceValidation = {
           boundary: error.boundary ?? null,
-          error: serializedError(error),
+          error: serializedError(error, [ownerPassword]),
           status: "failed",
         };
         evidence.result = {
-          error: serializedError(error),
+          error: serializedError(error, [ownerPassword]),
           status: "failed",
         };
         evidence.phase = "failed";
@@ -995,7 +1011,9 @@ async function runPostReplacementRepairUninstallScenario({
     failure.code = primaryError.code ?? "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
-      failure.evidenceWriteError = serializedError(evidenceWriteError);
+      failure.evidenceWriteError = serializedError(evidenceWriteError, [
+        ownerPassword,
+      ]);
     }
     throw failure;
   }
@@ -2024,21 +2042,28 @@ async function runForwardLifecycleScenario({
         evidence.operationTimeline = error.timeline;
       }
     }
-    evidence.result = { error: serializedError(error), status: "failed" };
+    evidence.result = {
+      error: serializedError(error, [ownerPassword]),
+      status: "failed",
+    };
     evidence.phase = "failed";
   } finally {
     if (resources?.hub?.collectEvidence) {
       try {
         evidence.hubEvidence = await resources.hub.collectEvidence();
       } catch (error) {
-        evidence.hubEvidence = { error: serializedError(error) };
+        evidence.hubEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     if (resources?.host?.collectEvidence) {
       try {
         evidence.hostEvidence = await resources.host.collectEvidence(runId);
       } catch (error) {
-        evidence.hostEvidence = { error: serializedError(error) };
+        evidence.hostEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     const cleanup = {};
@@ -2046,13 +2071,13 @@ async function runForwardLifecycleScenario({
       try {
         cleanup.host = await resources.host.cleanup(runId);
       } catch (error) {
-        cleanup.host = { error: serializedError(error) };
+        cleanup.host = { error: serializedError(error, [ownerPassword]) };
       }
     }
     try {
       cleanup.environment = await environment.cleanup({ resources, runId });
     } catch (error) {
-      cleanup.environment = { error: serializedError(error) };
+      cleanup.environment = { error: serializedError(error, [ownerPassword]) };
     }
     evidence.cleanup = cleanup;
     if (!primaryError && cleanupDidNotSucceed(cleanup)) {
@@ -2061,7 +2086,7 @@ async function runForwardLifecycleScenario({
         "Release E2E cleanup did not remove all run-owned state",
       );
       evidence.result = {
-        error: serializedError(primaryError),
+        error: serializedError(primaryError, [ownerPassword]),
         status: "failed",
       };
       evidence.phase = "failed";
@@ -2090,7 +2115,9 @@ async function runForwardLifecycleScenario({
     failure.code = primaryError.code ?? "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
-      failure.evidenceWriteError = serializedError(evidenceWriteError);
+      failure.evidenceWriteError = serializedError(evidenceWriteError, [
+        ownerPassword,
+      ]);
     }
     throw failure;
   }
@@ -2492,21 +2519,28 @@ async function runFreshInstallUninstallScenario({
     evidence.phase = "succeeded";
   } catch (error) {
     primaryError = error;
-    evidence.result = { error: serializedError(error), status: "failed" };
+    evidence.result = {
+      error: serializedError(error, [ownerPassword]),
+      status: "failed",
+    };
     evidence.phase = "failed";
   } finally {
     if (resources?.hub?.collectEvidence) {
       try {
         evidence.hubEvidence = await resources.hub.collectEvidence();
       } catch (error) {
-        evidence.hubEvidence = { error: serializedError(error) };
+        evidence.hubEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     if (resources?.host?.collectEvidence) {
       try {
         evidence.hostEvidence = await resources.host.collectEvidence(runId);
       } catch (error) {
-        evidence.hostEvidence = { error: serializedError(error) };
+        evidence.hostEvidence = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     if (evidence.diagnostics === null && resources?.host?.collectDiagnostics) {
@@ -2518,7 +2552,9 @@ async function runFreshInstallUninstallScenario({
             : null,
         };
       } catch (error) {
-        evidence.diagnostics = { error: serializedError(error) };
+        evidence.diagnostics = {
+          error: serializedError(error, [ownerPassword]),
+        };
       }
     }
     if (resources?.canonicalReports?.diagnostics) {
@@ -2536,13 +2572,13 @@ async function runFreshInstallUninstallScenario({
       try {
         cleanup.host = await resources.host.cleanup(runId);
       } catch (error) {
-        cleanup.host = { error: serializedError(error) };
+        cleanup.host = { error: serializedError(error, [ownerPassword]) };
       }
     }
     try {
       cleanup.environment = await environment.cleanup({ resources, runId });
     } catch (error) {
-      cleanup.environment = { error: serializedError(error) };
+      cleanup.environment = { error: serializedError(error, [ownerPassword]) };
     }
     evidence.cleanup = cleanup;
     if (!primaryError && cleanupDidNotSucceed(cleanup)) {
@@ -2551,7 +2587,7 @@ async function runFreshInstallUninstallScenario({
         "Release E2E cleanup did not remove all run-owned state",
       );
       evidence.result = {
-        error: serializedError(primaryError),
+        error: serializedError(primaryError, [ownerPassword]),
         status: "failed",
       };
       evidence.phase = "failed";
@@ -2580,7 +2616,9 @@ async function runFreshInstallUninstallScenario({
     failure.code = primaryError.code ?? "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
-      failure.evidenceWriteError = serializedError(evidenceWriteError);
+      failure.evidenceWriteError = serializedError(evidenceWriteError, [
+        ownerPassword,
+      ]);
     }
     throw failure;
   }
