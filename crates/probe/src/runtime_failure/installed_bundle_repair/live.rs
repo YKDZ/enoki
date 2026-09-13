@@ -544,35 +544,127 @@ impl RuntimeValidator for UnixRuntimeValidator {
         &mut self,
         validation: RuntimeValidation,
     ) -> Result<(), LiveInstalledBundleRepairError> {
-        validate_runtime_window(
+        validate_unix_runtime_window(
             &crate::observation_runtime::UnixObservationRuntimeClient::production(),
             validation,
         )
     }
 }
 
-fn validate_runtime_window(
-    client: &impl crate::observation_runtime::ObservationWindowClient,
+fn validate_unix_runtime_window(
+    client: &crate::observation_runtime::UnixObservationRuntimeClient,
     validation: RuntimeValidation,
 ) -> Result<(), LiveInstalledBundleRepairError> {
     client
-        .request_finalized_window(Duration::from_secs(1), 1)
+        .request_finalized_window_detailed(Duration::from_secs(1), 1)
         .map(|_| ())
-        .map_err(|_| {
-            let (validation, code) = match validation {
-                RuntimeValidation::Temporary => {
-                    ("temporary", "probe_repair_runtime_validation_failed")
-                }
-                RuntimeValidation::Canonical => {
-                    ("canonical", "probe_repair_canonical_runtime_validation_failed")
-                }
-            };
-            let _ = writeln!(
-                std::io::stderr().lock(),
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation={validation} code={code}"
-            );
+        .map_err(|detail| {
+            let (validation, code) = runtime_validation_code(validation);
+            let rendered = runtime_validation_diagnostic(&detail, validation, code);
+            let _ = writeln!(std::io::stderr().lock(), "{rendered}");
             contract_failure(code)
         })
+}
+
+fn runtime_validation_diagnostic(
+    detail: &crate::observation_runtime::ObservationClientFailureDetail,
+    validation: &str,
+    code: &str,
+) -> String {
+    let errno = detail
+        .errno
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let io_kind = detail
+        .io_kind
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_else(|| "none".to_owned());
+    let request = runtime_failure_diagnostic_request(&detail.request_bytes);
+    let response_prefix = (!detail.response_prefix_truncated
+        && !detail.response_prefix_unsafe
+        && !detail.read_events_truncated)
+        .then(|| runtime_failure_diagnostic_response(&detail.response_prefix))
+        .filter(|value| value != "unavailable")
+        .unwrap_or_else(|| "unavailable".to_owned());
+    let response_replay_ready = response_prefix != "unavailable";
+    let read_events = detail
+        .read_events
+        .iter()
+        .map(|event| {
+            format!(
+                "{}:{}:{}:{}:{}",
+                event.offset,
+                event.requested,
+                event.received,
+                event
+                    .error_kind
+                    .map_or("ok".to_owned(), |kind| format!("{kind:?}")),
+                event.elapsed_millis,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let rendered = format!(
+        "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} deadline_ms={} elapsed_ms={} read_events_truncated={} read_events={read_events} request_hex={request} response_prefix_hex={response_prefix} response_replay_ready={response_replay_ready}",
+        detail.operation,
+        detail.cause,
+        detail.request_cadence_millis,
+        detail.request_sequence_start,
+        detail.response_bytes,
+        detail.configured_deadline_millis,
+        detail.terminal_elapsed_millis,
+        detail.read_events_truncated,
+    );
+    if rendered.len() <= 8 * 1024 {
+        rendered
+    } else {
+        format!(
+            "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex=unavailable response_prefix_hex=unavailable response_replay_ready=false",
+            detail.operation,
+            detail.cause,
+            detail.request_cadence_millis,
+            detail.request_sequence_start,
+            detail.response_bytes,
+        )
+    }
+}
+
+fn runtime_failure_diagnostic_request(bytes: &[u8]) -> String {
+    if bytes.len() > 128
+        || [
+            b"password".as_slice(),
+            b"private_key",
+            b"private key",
+            b"signing_secret",
+            b"enk_enroll_",
+        ]
+        .iter()
+        .any(|secret| {
+            bytes
+                .windows(secret.len())
+                .any(|window| window.eq_ignore_ascii_case(secret))
+        })
+    {
+        return "unavailable".to_owned();
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn runtime_failure_diagnostic_response(bytes: &[u8]) -> String {
+    if bytes.len() > 512 {
+        return "unavailable".to_owned();
+    }
+    runtime_failure_diagnostic_request(bytes)
+}
+
+fn runtime_validation_code(validation: RuntimeValidation) -> (&'static str, &'static str) {
+    match validation {
+        RuntimeValidation::Temporary => ("temporary", "probe_repair_runtime_validation_failed"),
+        RuntimeValidation::Canonical => (
+            "canonical",
+            "probe_repair_canonical_runtime_validation_failed",
+        ),
+    }
 }
 
 const RUNTIME_REPAIR_RUN_DIR: &str = "/run/enoki-probe";
@@ -697,6 +789,98 @@ mod tests {
     };
 
     #[test]
+    fn runtime_validation_diagnostic_keeps_a_safe_early_response_prefix() {
+        let detail = crate::observation_runtime::ObservationClientFailureDetail {
+            cause: crate::observation_runtime::ObservationClientError::InvalidResponse,
+            operation: "read_version",
+            request_cadence_millis: 1_000,
+            request_sequence_start: 1,
+            response_bytes: 5,
+            request_bytes: vec![1, 2, 3],
+            response_prefix: vec![0, 0, 5, b'1', b'.'],
+            response_prefix_truncated: false,
+            response_prefix_unsafe: false,
+            read_events: Box::default(),
+            read_events_truncated: false,
+            configured_deadline_millis: 0,
+            terminal_elapsed_millis: 0,
+            errno: None,
+            io_kind: Some(std::io::ErrorKind::UnexpectedEof),
+        };
+
+        let diagnostic = runtime_validation_diagnostic(
+            &detail,
+            "temporary",
+            "probe_repair_runtime_validation_failed",
+        );
+
+        assert!(diagnostic.contains("response_prefix_hex=000005312e"));
+        assert!(diagnostic.contains("response_replay_ready=true"));
+        assert!(diagnostic.len() <= 8 * 1024);
+    }
+
+    #[test]
+    fn runtime_validation_diagnostic_omits_opaque_or_truncated_runtime_reads() {
+        let root = tempfile::tempdir().expect("Runtime socket root");
+        let socket = root.path().join("opaque-runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            let version = b"-----BEGIN PRIVATE KEY-----";
+            stream.write_all(&[0]).expect("Runtime status");
+            stream
+                .write_all(&(version.len() as u16).to_be_bytes())
+                .expect("Runtime version length");
+            stream.write_all(version).expect("Runtime version");
+        });
+        let client = crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+        let opaque = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("opaque version must be rejected");
+        server.join().expect("Runtime server");
+        let opaque_diagnostic = runtime_validation_diagnostic(
+            &opaque,
+            "temporary",
+            "probe_repair_runtime_validation_failed",
+        );
+        assert!(opaque_diagnostic.contains("response_prefix_hex=unavailable"));
+        assert!(opaque_diagnostic.contains("response_replay_ready=false"));
+
+        let root = tempfile::tempdir().expect("Runtime socket root");
+        let socket = root.path().join("fragmented-runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("Runtime listener");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Runtime connection");
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).expect("Runtime request");
+            stream
+                .write_all(&[0, 0, 40])
+                .expect("Runtime response prefix");
+            stream.flush().expect("flush Runtime response prefix");
+            for _ in 0..40 {
+                stream.write_all(b"1").expect("Runtime version fragment");
+                stream.flush().expect("flush Runtime version fragment");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let client = crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+        let truncated = client
+            .request_finalized_window_detailed(Duration::from_secs(1), 1)
+            .expect_err("fragmented response must retain an event limit");
+        server.join().expect("Runtime server");
+        let truncated_diagnostic = runtime_validation_diagnostic(
+            &truncated,
+            "temporary",
+            "probe_repair_runtime_validation_failed",
+        );
+        assert!(truncated_diagnostic.contains("read_events_truncated=true"));
+        assert!(truncated_diagnostic.contains("response_prefix_hex=unavailable"));
+        assert!(truncated_diagnostic.contains("response_replay_ready=false"));
+    }
+
+    #[test]
     fn process_result_reports_closed_action_and_numeric_status_without_child_output() {
         const CHILD: &str = "ENOKI_REPAIR_PROCESS_DIAGNOSTIC_CHILD";
         if std::env::var_os(CHILD).is_some() {
@@ -815,13 +999,13 @@ mod tests {
         );
 
         assert_eq!(
-            validate_runtime_window(&client, RuntimeValidation::Temporary)
+            validate_unix_runtime_window(&client, RuntimeValidation::Temporary)
                 .expect_err("closed peer must remain a validation failure")
                 .code(),
             "probe_repair_runtime_validation_failed"
         );
         assert_eq!(
-            validate_runtime_window(&client, RuntimeValidation::Canonical)
+            validate_unix_runtime_window(&client, RuntimeValidation::Canonical)
                 .expect_err("closed peer must remain a validation failure")
                 .code(),
             "probe_repair_canonical_runtime_validation_failed"
@@ -838,6 +1022,48 @@ mod tests {
             );
         }
         server.join().expect("Runtime receiver");
+    }
+
+    #[test]
+    fn production_runtime_validator_keeps_the_closed_client_causes() {
+        for (label, response) in [
+            ("wrong version", vec![0, 0, 5, b'w', b'r', b'o', b'n', b'g']),
+            (
+                "wrong sequence",
+                vec![
+                    0, 0, 5, b'1', b'.', b'2', b'.', b'3', 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2,
+                ],
+            ),
+            ("partial version", vec![0, 0, 5, b'1', b'.']),
+        ] {
+            let root = tempfile::tempdir().expect("Runtime socket root");
+            let socket = root.path().join("runtime.sock");
+            let listener = UnixListener::bind(&socket).expect("Runtime listener");
+            let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().expect("Runtime connection");
+                    let mut request = Vec::new();
+                    stream.read_to_end(&mut request).expect("Runtime request");
+                    stream.write_all(&response).expect("Runtime response");
+                }
+            });
+            let client =
+                crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
+
+            assert_eq!(
+                validate_unix_runtime_window(&client, RuntimeValidation::Temporary)
+                    .expect_err(label)
+                    .code(),
+                "probe_repair_runtime_validation_failed",
+            );
+            assert_eq!(
+                validate_unix_runtime_window(&client, RuntimeValidation::Canonical)
+                    .expect_err(label)
+                    .code(),
+                "probe_repair_canonical_runtime_validation_failed",
+            );
+            server.join().expect("Runtime server");
+        }
     }
 
     #[test]
@@ -1092,7 +1318,7 @@ mod tests {
                 });
                 let client =
                     crate::observation_runtime::UnixObservationRuntimeClient::new(socket, "1.2.3");
-                let result = validate_runtime_window(&client, validation);
+                let result = validate_unix_runtime_window(&client, validation);
                 server.join().unwrap();
                 return result;
             }
@@ -1802,11 +2028,11 @@ mod tests {
         for (case, expected) in [
             (
                 "temporary",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation=temporary code=probe_repair_runtime_validation_failed",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms=0 read_events_truncated=false read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             (
                 "canonical",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_runtime_window validation=canonical code=probe_repair_canonical_runtime_validation_failed",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms=0 read_events_truncated=false read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             ("success", ""),
         ] {

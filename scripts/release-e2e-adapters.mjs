@@ -24,6 +24,7 @@ import {
   createHubLifecycleClient,
   createProbeHostHarness,
   releaseE2EScenarioRegistry,
+  sanitizeFailureDetail,
 } from "./release-e2e-lib.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -2150,17 +2151,26 @@ async function replaceJsonAtomically(destination, value) {
   }
 }
 
-function serializeRunError(error, secrets) {
+export function serializeRunError(error, secrets = []) {
   const message = error instanceof Error ? error.message : String(error);
-  return {
+  const serialized = {
     code: typeof error?.code === "string" ? error.code : "release_e2e_failed",
     message: redactText(message, secrets),
     name: error instanceof Error ? error.name : "Error",
   };
+  const failureDetail = sanitizeFailureDetail(error?.failureDetail, secrets);
+  if (failureDetail) serialized.failureDetail = failureDetail;
+  if (error instanceof AggregateError) {
+    serialized.errors = error.errors.map((nested) =>
+      serializeRunError(nested, secrets),
+    );
+  }
+  return serialized;
 }
 
 function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {
   return new Promise((resolve, reject) => {
+    const startedAt = process.hrtime.bigint();
     const usesProcessGroup = process.platform !== "win32";
     const child = spawn(command, arguments_, {
       detached: usesProcessGroup,
@@ -2209,6 +2219,11 @@ function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {
         code: code ?? 1,
         stderr: Buffer.concat(stderr).toString("utf8"),
         stdout: Buffer.concat(stdout).toString("utf8"),
+        executionTiming: {
+          elapsedMs: Number((process.hrtime.bigint() - startedAt) / 1_000_000n),
+          timeoutMs,
+          timedOut,
+        },
       };
       if (signal) {
         result.stderr += `\nprocess terminated by ${signal}`;

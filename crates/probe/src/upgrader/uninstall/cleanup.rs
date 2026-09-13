@@ -1058,6 +1058,106 @@ enum StateRootOwner<'a> {
     BoundServiceOrEmptyShell { user: &'a str, group: &'a str },
 }
 
+#[derive(Clone, Copy, Default)]
+enum StateRootRead<T> {
+    #[default]
+    NotReached,
+    NotFound,
+    IoError {
+        kind: std::io::ErrorKind,
+        errno: Option<i32>,
+    },
+    Success(T),
+}
+
+fn state_root_io_error<T>(error: &std::io::Error) -> StateRootRead<T> {
+    StateRootRead::IoError {
+        kind: error.kind(),
+        errno: error.raw_os_error(),
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct StateRootNssOwner {
+    user: StateRootNssUser,
+    group: StateRootNssGroup,
+}
+
+#[derive(Clone, Copy, Default)]
+enum StateRootNssUser {
+    #[default]
+    NotReached,
+    Unavailable,
+    Success {
+        uid: u32,
+        gid: u32,
+    },
+}
+
+#[derive(Clone, Copy, Default)]
+enum StateRootNssGroup {
+    #[default]
+    NotReached,
+    Unavailable,
+    Success {
+        gid: u32,
+    },
+    Mismatch {
+        gid: u32,
+    },
+}
+
+#[derive(Default)]
+enum StateRootEmptyShell {
+    #[default]
+    NotReached,
+    NotFound,
+    OpenIoError {
+        kind: std::io::ErrorKind,
+        errno: Option<i32>,
+    },
+    FirstEntryIoError {
+        kind: std::io::ErrorKind,
+        errno: Option<i32>,
+    },
+    Success(bool),
+}
+
+#[derive(Default)]
+struct StateRootAdmissionFacts {
+    public_lstat: StateRootRead<StateRootLstatFacts>,
+    private_lstat: StateRootRead<StateRootLstatFacts>,
+    public_readlink: StateRootRead<Vec<u8>>,
+    nss_owner: StateRootNssOwner,
+    expected_root: Option<(u32, u32)>,
+    service_binding: Option<(String, String)>,
+    empty_shell: StateRootEmptyShell,
+    first_rejection: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+struct StateRootLstatFacts {
+    directory: bool,
+    symlink: bool,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    nlink: u64,
+}
+
+impl From<&fs::Metadata> for StateRootLstatFacts {
+    fn from(metadata: &fs::Metadata) -> Self {
+        Self {
+            directory: metadata.is_dir(),
+            symlink: metadata.file_type().is_symlink(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            mode: metadata.mode() & 0o7777,
+            nlink: metadata.nlink(),
+        }
+    }
+}
+
 impl TrustedStateRoot {
     fn contents(&self) -> &Path {
         match self {
@@ -1078,6 +1178,23 @@ fn trusted_state_root_layout(
     public_state_dir: &Path,
     ordinary_owner: StateRootOwner<'_>,
 ) -> Result<Option<TrustedStateRootAdmission>, ProbeUpgraderRunError> {
+    let mut facts = StateRootAdmissionFacts::default();
+    let result = trusted_state_root_layout_with_facts(public_state_dir, ordinary_owner, &mut facts);
+    if let Err(error) = &result {
+        facts.first_rejection.get_or_insert(match error {
+            ProbeUpgraderRunError::InvalidInstallMetadata(point) => point,
+            _ => "state_root_io_error",
+        });
+        emit_state_root_admission_facts(&facts);
+    }
+    result
+}
+
+fn trusted_state_root_layout_with_facts(
+    public_state_dir: &Path,
+    ordinary_owner: StateRootOwner<'_>,
+    facts: &mut StateRootAdmissionFacts,
+) -> Result<Option<TrustedStateRootAdmission>, ProbeUpgraderRunError> {
     if !public_state_dir.ends_with("var/lib/enoki-probe") {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is not the fixed state root",
@@ -1091,12 +1208,21 @@ fn trusted_state_root_layout(
         .join("private/enoki-probe");
     let public_metadata = match fs::symlink_metadata(public_state_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            facts.public_lstat = StateRootRead::NotFound;
             return match fs::symlink_metadata(&private) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    facts.private_lstat = StateRootRead::NotFound;
+                    Ok(None)
+                }
+                Err(error) => {
+                    facts.private_lstat = state_root_io_error(&error);
+                    facts.first_rejection.get_or_insert("private_lstat");
+                    Err(error.into())
+                }
                 Ok(metadata) => {
+                    facts.private_lstat = StateRootRead::Success((&metadata).into());
                     let authority =
-                        validate_state_root_directory(&private, &metadata, ordinary_owner)?;
+                        validate_state_root_directory(&private, &metadata, ordinary_owner, facts)?;
                     Ok(Some(TrustedStateRootAdmission {
                         layout: TrustedStateRoot::Canonical {
                             public: public_state_dir.to_owned(),
@@ -1107,42 +1233,102 @@ fn trusted_state_root_layout(
                 }
             };
         }
-        Err(error) => return Err(error.into()),
-        Ok(metadata) => metadata,
+        Err(error) => {
+            facts.public_lstat = state_root_io_error(&error);
+            facts.first_rejection.get_or_insert("public_lstat");
+            return Err(error.into());
+        }
+        Ok(metadata) => {
+            facts.public_lstat = StateRootRead::Success((&metadata).into());
+            metadata
+        }
     };
     if public_metadata.is_dir() && !public_metadata.file_type().is_symlink() {
-        let authority =
-            validate_state_root_directory(public_state_dir, &public_metadata, ordinary_owner)?;
+        let authority = validate_state_root_directory(
+            public_state_dir,
+            &public_metadata,
+            ordinary_owner,
+            facts,
+        )?;
         match fs::symlink_metadata(&private) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                facts.private_lstat = StateRootRead::NotFound;
+            }
+            Ok(metadata) => {
+                facts.private_lstat = StateRootRead::Success((&metadata).into());
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe state directory has conflicting canonical residue",
                 ));
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                facts.private_lstat = state_root_io_error(&error);
+                facts.first_rejection.get_or_insert("private_lstat");
+                return Err(error.into());
+            }
         }
         return Ok(Some(TrustedStateRootAdmission {
             layout: TrustedStateRoot::Ordinary(public_state_dir.to_owned()),
             authority,
         }));
     }
-    if !public_metadata.file_type().is_symlink()
-        || (public_metadata.uid(), public_metadata.gid())
-            != expected_root_owner_for(public_state_dir)
-        || public_metadata.nlink() != 1
-        || fs::read_link(public_state_dir)?.as_os_str().as_bytes() != b"private/enoki-probe"
-    {
+    if !public_metadata.file_type().is_symlink() {
+        facts.first_rejection.get_or_insert("public_type");
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    let expected_root = expected_root_owner_for(public_state_dir);
+    facts.expected_root = Some(expected_root);
+    if (public_metadata.uid(), public_metadata.gid()) != expected_root {
+        facts.first_rejection.get_or_insert("public_owner");
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    if public_metadata.nlink() != 1 {
+        facts.first_rejection.get_or_insert("public_nlink");
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    let readlink = match fs::read_link(public_state_dir) {
+        Ok(readlink) => {
+            facts.public_readlink =
+                StateRootRead::Success(readlink.as_os_str().as_bytes().to_vec());
+            readlink
+        }
+        Err(error) => {
+            facts.public_readlink = if error.kind() == std::io::ErrorKind::NotFound {
+                StateRootRead::NotFound
+            } else {
+                state_root_io_error(&error)
+            };
+            facts.first_rejection.get_or_insert("public_readlink");
+            return Err(error.into());
+        }
+    };
+    if readlink.as_os_str().as_bytes() != b"private/enoki-probe" {
+        facts
+            .first_rejection
+            .get_or_insert("public_readlink_target");
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
     }
     let authority = match fs::symlink_metadata(&private) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            facts.private_lstat = StateRootRead::NotFound;
             StateRootCleanupAuthority::ContentAuthorized
         }
-        Err(error) => return Err(error.into()),
-        Ok(metadata) => validate_state_root_directory(&private, &metadata, ordinary_owner)?,
+        Err(error) => {
+            facts.private_lstat = state_root_io_error(&error);
+            facts.first_rejection.get_or_insert("private_lstat");
+            return Err(error.into());
+        }
+        Ok(metadata) => {
+            facts.private_lstat = StateRootRead::Success((&metadata).into());
+            validate_state_root_directory(&private, &metadata, ordinary_owner, facts)?
+        }
     };
     Ok(Some(TrustedStateRootAdmission {
         layout: TrustedStateRoot::Canonical {
@@ -1157,14 +1343,38 @@ fn validate_state_root_directory(
     path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
+    facts: &mut StateRootAdmissionFacts,
 ) -> Result<StateRootCleanupAuthority, ProbeUpgraderRunError> {
-    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.mode() & 0o7777 != 0o750
-    {
+    let location = if path.ends_with("private/enoki-probe") {
+        "private"
+    } else {
+        "public"
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        facts
+            .first_rejection
+            .get_or_insert(if location == "private" {
+                "private_type"
+            } else {
+                "public_type"
+            });
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "Probe state directory is unsafe",
         ));
     }
-    state_root_authority(path, metadata, owner)?.ok_or(
+    if metadata.mode() & 0o7777 != 0o750 {
+        facts
+            .first_rejection
+            .get_or_insert(if location == "private" {
+                "private_mode"
+            } else {
+                "public_mode"
+            });
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe state directory is unsafe",
+        ));
+    }
+    state_root_authority(path, metadata, owner, facts)?.ok_or(
         ProbeUpgraderRunError::InvalidInstallMetadata("Probe state directory is unsafe"),
     )
 }
@@ -1173,31 +1383,189 @@ fn state_root_authority(
     path: &Path,
     metadata: &fs::Metadata,
     owner: StateRootOwner<'_>,
+    facts: &mut StateRootAdmissionFacts,
 ) -> Result<Option<StateRootCleanupAuthority>, ProbeUpgraderRunError> {
     let actual = (metadata.uid(), metadata.gid());
     let root = expected_root_owner_for(path);
+    facts.expected_root = Some(root);
     match owner {
-        StateRootOwner::Root => Ok(state_root_owner_tuple_matches(actual, root, None)
-            .then_some(StateRootCleanupAuthority::ContentAuthorized)),
+        StateRootOwner::Root => {
+            if state_root_owner_tuple_matches(actual, root, None) {
+                Ok(Some(StateRootCleanupAuthority::ContentAuthorized))
+            } else {
+                facts
+                    .first_rejection
+                    .get_or_insert(if path.ends_with("private/enoki-probe") {
+                        "private_owner"
+                    } else {
+                        "public_owner"
+                    });
+                Ok(None)
+            }
+        }
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
-            if state_root_owner_tuple_matches(
-                actual,
-                root,
-                service_identity_owner(user, group).ok(),
-            ) {
+            facts.service_binding = Some((user.to_owned(), group.to_owned()));
+            let service_owner = service_identity_owner(user, group);
+            facts.nss_owner = service_owner;
+            let service_owner = service_owner.owner();
+            if state_root_owner_tuple_matches(actual, root, service_owner) {
                 return Ok(Some(StateRootCleanupAuthority::ContentAuthorized));
             }
             if metadata.uid() != metadata.gid() {
+                facts
+                    .first_rejection
+                    .get_or_insert(if path.ends_with("private/enoki-probe") {
+                        "private_owner"
+                    } else {
+                        "public_owner"
+                    });
                 return Ok(None);
             }
-            Ok(state_root_is_empty(path)?.then_some(StateRootCleanupAuthority::EmptyShellOnly))
+            let empty = match state_root_is_empty(path) {
+                Ok(empty) => {
+                    facts.empty_shell = StateRootEmptyShell::Success(empty);
+                    empty
+                }
+                Err(error) => {
+                    facts.empty_shell = StateRootEmptyShell::from(&error);
+                    facts.first_rejection.get_or_insert(error.rejection_point());
+                    return Err(error.into_io().into());
+                }
+            };
+            if !empty {
+                facts.first_rejection.get_or_insert("empty_shell");
+            }
+            Ok(empty.then_some(StateRootCleanupAuthority::EmptyShellOnly))
         }
     }
 }
 
-fn state_root_is_empty(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
-    let mut entries = fs::read_dir(path)?;
-    Ok(entries.next().transpose()?.is_none())
+fn emit_state_root_admission_facts(facts: &StateRootAdmissionFacts) {
+    let render = |value: &StateRootRead<StateRootLstatFacts>| match value {
+        StateRootRead::NotReached => "not_reached".to_owned(),
+        StateRootRead::NotFound => "not_found".to_owned(),
+        StateRootRead::IoError { kind, errno } => {
+            format!(
+                "io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
+        StateRootRead::Success(value) => format!(
+            "dir={},link={},uid={},gid={},mode={:o},nlink={}",
+            value.directory, value.symlink, value.uid, value.gid, value.mode, value.nlink
+        ),
+    };
+    let readlink = match &facts.public_readlink {
+        StateRootRead::Success(value) if value.as_slice() == b"private/enoki-probe" => {
+            "707269766174652f656e6f6b692d70726f6265".to_owned()
+        }
+        // A rejected link is arbitrary filesystem data.  The admission
+        // diagnostic records that it was reached, but never encodes it.
+        StateRootRead::Success(_) => "unavailable".to_owned(),
+        StateRootRead::NotReached => "not_reached".to_owned(),
+        StateRootRead::NotFound => "not_found".to_owned(),
+        StateRootRead::IoError { kind, errno } => {
+            format!(
+                "io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
+    };
+    let nss = facts.nss_owner.render();
+    let empty = match facts.empty_shell {
+        StateRootEmptyShell::NotReached => "not_reached".to_owned(),
+        StateRootEmptyShell::NotFound => "not_found".to_owned(),
+        StateRootEmptyShell::OpenIoError { kind, errno } => {
+            format!(
+                "open_io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
+        StateRootEmptyShell::FirstEntryIoError { kind, errno } => {
+            format!(
+                "first_entry_io_error(kind={kind:?},errno={})",
+                errno.map_or_else(|| "none".to_owned(), |value| value.to_string())
+            )
+        }
+        StateRootEmptyShell::Success(value) => value.to_string(),
+    };
+    let expected_root = facts.expected_root.map_or_else(
+        || "not_reached".to_owned(),
+        |(uid, gid)| format!("{uid}:{gid}"),
+    );
+    let service_binding = facts.service_binding.as_ref().map_or_else(
+        || "not_reached".to_owned(),
+        |(user, group)| {
+            if user.len() <= 128
+                && group.len() <= 128
+                && user
+                    .bytes()
+                    .chain(group.bytes())
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                format!("{user}:{group}")
+            } else {
+                "unavailable".to_owned()
+            }
+        },
+    );
+    let _ = writeln!(
+        std::io::stderr(),
+        "enoki.lifecycle.diagnostic role=companion phase=uninstall_failure outcome=failed operation=state_root_admission rejection={} public_lstat={} private_lstat={} public_readlink_hex={readlink} expected_root={expected_root} service_binding={service_binding} nss_owner={nss} empty_shell={empty}",
+        facts.first_rejection.unwrap_or("unknown"),
+        render(&facts.public_lstat),
+        render(&facts.private_lstat),
+    );
+}
+
+enum StateRootEmptyShellError {
+    Open(std::io::Error),
+    FirstEntry(std::io::Error),
+}
+
+impl StateRootEmptyShellError {
+    fn rejection_point(&self) -> &'static str {
+        match self {
+            Self::Open(_) => "empty_shell_open",
+            Self::FirstEntry(_) => "empty_shell_first_entry",
+        }
+    }
+
+    fn into_io(self) -> std::io::Error {
+        match self {
+            Self::Open(error) | Self::FirstEntry(error) => error,
+        }
+    }
+}
+
+impl From<&StateRootEmptyShellError> for StateRootEmptyShell {
+    fn from(error: &StateRootEmptyShellError) -> Self {
+        let error = match error {
+            StateRootEmptyShellError::Open(error) => {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    return Self::NotFound;
+                }
+                return Self::OpenIoError {
+                    kind: error.kind(),
+                    errno: error.raw_os_error(),
+                };
+            }
+            StateRootEmptyShellError::FirstEntry(error) => error,
+        };
+        Self::FirstEntryIoError {
+            kind: error.kind(),
+            errno: error.raw_os_error(),
+        }
+    }
+}
+
+fn state_root_is_empty(path: &Path) -> Result<bool, StateRootEmptyShellError> {
+    let mut entries = fs::read_dir(path).map_err(StateRootEmptyShellError::Open)?;
+    entries
+        .next()
+        .transpose()
+        .map(|entry| entry.is_none())
+        .map_err(StateRootEmptyShellError::FirstEntry)
 }
 
 fn state_root_owner_tuple_matches(
@@ -1208,32 +1576,80 @@ fn state_root_owner_tuple_matches(
     actual == root || service == Some(actual)
 }
 
-fn service_identity_owner(
-    service_user: &str,
-    service_group: &str,
-) -> Result<(u32, u32), ProbeUpgraderRunError> {
-    let service_user = CString::new(service_user).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata("service account name is unsafe")
-    })?;
-    let service_group = CString::new(service_group).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata("service group name is unsafe")
-    })?;
+impl StateRootNssOwner {
+    fn owner(self) -> Option<(u32, u32)> {
+        match (self.user, self.group) {
+            (StateRootNssUser::Success { uid, .. }, StateRootNssGroup::Success { gid }) => {
+                Some((uid, gid))
+            }
+            _ => None,
+        }
+    }
+
+    fn render(self) -> String {
+        let user = match self.user {
+            StateRootNssUser::NotReached => "not_reached".to_owned(),
+            StateRootNssUser::Unavailable => "unavailable".to_owned(),
+            StateRootNssUser::Success { uid, gid } => format!("{uid}:{gid}"),
+        };
+        let group = match self.group {
+            StateRootNssGroup::NotReached => "not_reached".to_owned(),
+            StateRootNssGroup::Unavailable => "unavailable".to_owned(),
+            StateRootNssGroup::Success { gid } => format!("{gid}"),
+            StateRootNssGroup::Mismatch { gid } => format!("mismatch:{gid}"),
+        };
+        format!("user={user},group={group}")
+    }
+}
+
+fn service_identity_owner(service_user: &str, service_group: &str) -> StateRootNssOwner {
+    let Ok(service_user) = CString::new(service_user) else {
+        return StateRootNssOwner {
+            user: StateRootNssUser::Unavailable,
+            group: StateRootNssGroup::NotReached,
+        };
+    };
     // SAFETY: this copies the numeric fields while the NUL-terminated name
     // and the libc passwd result remain valid.
     let account = unsafe { libc::getpwnam(service_user.as_ptr()) };
     if account.is_null() {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "service account owner is unavailable",
-        ));
+        return StateRootNssOwner {
+            user: StateRootNssUser::Unavailable,
+            group: StateRootNssGroup::NotReached,
+        };
     }
     let (uid, account_gid) = unsafe { ((*account).pw_uid, (*account).pw_gid) };
+    let Ok(service_group) = CString::new(service_group) else {
+        return StateRootNssOwner {
+            user: StateRootNssUser::Success {
+                uid,
+                gid: account_gid,
+            },
+            group: StateRootNssGroup::Unavailable,
+        };
+    };
     let group = unsafe { libc::getgrnam(service_group.as_ptr()) };
-    if group.is_null() || account_gid != unsafe { (*group).gr_gid } {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "service account and group ownership is unavailable",
-        ));
+    if group.is_null() {
+        return StateRootNssOwner {
+            user: StateRootNssUser::Success {
+                uid,
+                gid: account_gid,
+            },
+            group: StateRootNssGroup::Unavailable,
+        };
     }
-    Ok((uid, unsafe { (*group).gr_gid }))
+    let gid = unsafe { (*group).gr_gid };
+    StateRootNssOwner {
+        user: StateRootNssUser::Success {
+            uid,
+            gid: account_gid,
+        },
+        group: if account_gid == gid {
+            StateRootNssGroup::Success { gid }
+        } else {
+            StateRootNssGroup::Mismatch { gid }
+        },
+    }
 }
 
 fn expected_root_owner_for(_path: &Path) -> (u32, u32) {
@@ -1738,7 +2154,9 @@ mod tests {
         STATE_SHELL_RETIRE_FAILURE, STATE_SHELL_RETIRE_MODE_CHANGE,
     };
     use super::{
-        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
+        ProbeUpgraderSystemdRunner, StateRootAdmissionFacts, StateRootEmptyShell,
+        StateRootNssGroup, StateRootNssOwner, StateRootNssUser, StateRootOwner, StateRootRead,
+        TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_committed_replacement_cleanup,
@@ -1746,7 +2164,7 @@ mod tests {
         prepare_probe_uninstall_cleanup, remove_lifecycle_companion_binary,
         remove_probe_bootstrap_state, remove_uninstall_local_state_with,
         retire_unbound_installed_bundle_repair_stage_with, state_root_owner_tuple_matches,
-        validate_owned_bootstrap_state,
+        trusted_state_root_layout_with_facts, validate_owned_bootstrap_state,
     };
     use crate::upgrader::{
         ProbeUninstallerRunInput, ProbeUpgraderRunError, observation_stop_services,
@@ -1755,8 +2173,12 @@ mod tests {
         ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     };
     use std::{
+        ffi::OsString,
         fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        os::unix::{
+            ffi::OsStringExt,
+            fs::{MetadataExt, PermissionsExt, symlink},
+        },
         path::{Path, PathBuf},
         sync::mpsc::{self, RecvTimeoutError},
         thread,
@@ -2466,6 +2888,122 @@ mod tests {
             assert!(!calls.iter().any(|path| path == metadata));
             assert_eq!(result.is_err(), verification_fails);
         }
+    }
+
+    #[test]
+    fn state_root_facts_keep_a_short_circuit_rejection_without_extra_reads() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir_all(&state).expect("ordinary state root");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700))
+            .expect("unsafe state root mode");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
+
+        assert!(result.is_err(), "unsafe state root is rejected");
+        assert!(matches!(facts.public_lstat, StateRootRead::Success(_)));
+        assert_eq!(facts.first_rejection, Some("public_mode"));
+        assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
+        assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
+        assert!(matches!(facts.empty_shell, StateRootEmptyShell::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_distinguish_a_missing_public_root_from_a_reached_private_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        let private = temporary.path().join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private).expect("private state root");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750))
+            .expect("private state root mode");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let admission =
+            trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts)
+                .expect("missing public canonical projection admits the private root");
+
+        assert!(admission.is_some());
+        assert!(matches!(facts.public_lstat, StateRootRead::NotFound));
+        assert!(matches!(facts.private_lstat, StateRootRead::Success(_)));
+        assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
+        assert!(matches!(
+            facts.nss_owner,
+            StateRootNssOwner {
+                user: StateRootNssUser::NotReached,
+                group: StateRootNssGroup::NotReached,
+            }
+        ));
+        assert!(matches!(facts.empty_shell, StateRootEmptyShell::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_keep_a_user_lookup_failure_distinct_from_group_lookup() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir_all(&state).expect("ordinary state root");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).expect("state root mode");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        trusted_state_root_layout_with_facts(
+            &state,
+            StateRootOwner::BoundServiceOrEmptyShell {
+                user: "invalid\0account",
+                group: "root",
+            },
+            &mut facts,
+        )
+        .expect("root-owned state remains admitted");
+
+        assert!(matches!(
+            facts.nss_owner,
+            StateRootNssOwner {
+                user: StateRootNssUser::Unavailable,
+                group: StateRootNssGroup::NotReached,
+            }
+        ));
+        assert!(matches!(facts.empty_shell, StateRootEmptyShell::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_keep_the_public_lstat_io_rejection_point() {
+        let state = PathBuf::from(OsString::from_vec(
+            b"/tmp/enoki\0/var/lib/enoki-probe".to_vec(),
+        ));
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
+
+        assert!(result.is_err(), "NUL path causes the reached lstat to fail");
+        assert!(matches!(
+            facts.public_lstat,
+            StateRootRead::IoError {
+                kind: std::io::ErrorKind::InvalidInput,
+                errno: None,
+            }
+        ));
+        assert_eq!(facts.first_rejection, Some("public_lstat"));
+        assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_keep_the_first_public_readlink_target_rejection() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        fs::create_dir_all(state.parent().expect("state parent")).expect("state parent");
+        symlink("private/other", &state).expect("unsafe public projection");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let result = trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts);
+
+        assert!(result.is_err(), "wrong public target is rejected");
+        assert_eq!(facts.first_rejection, Some("public_readlink_target"));
+        assert_eq!(
+            facts.expected_root,
+            Some((unsafe { libc::geteuid() }, unsafe { libc::getegid() }))
+        );
+        assert!(matches!(facts.public_readlink, StateRootRead::Success(_)));
+        assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
     }
 
     #[test]

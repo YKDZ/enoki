@@ -34,6 +34,7 @@ import {
   createReleaseEnvironment,
   createSshReleaseInfrastructureAdapter,
   parseReleaseE2ECommandLine,
+  serializeRunError,
   writeRunManifest,
 } from "./release-e2e-adapters.mjs";
 import {
@@ -45,6 +46,8 @@ import {
   renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
+  sanitizeFailureDetail,
+  serializedError,
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
 } from "./release-e2e-lib.mjs";
@@ -372,6 +375,7 @@ exit 1
       backup: path.join(claim, "observation-runtime-original"),
       backupTemp: path.join(claim, "observation-runtime-original.next"),
       claim,
+      fakeSystemctl: path.join(fakeBin, "systemctl"),
       restoreTemp: path.join(
         runtimeDirectory,
         ".enoki-observation-runtime.release-e2e.restore",
@@ -2843,6 +2847,33 @@ exit "$status"
     ).rejects.toThrow(/recorder did not publish/i);
   });
 
+  it("retains a successful Repair command result when its evidence is invalid", async () => {
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText("recorded\n");
+        }
+        return successfulCommandText("not repair evidence\n");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(
+      driver.repair("run-runtime-invalid-evidence", "1.2.3"),
+    ).rejects.toMatchObject({
+      failureDetail: {
+        phase: "repair",
+        result: { code: 0, stdout: "not repair evidence\n", stderr: "" },
+        executionTiming: { unavailable: true },
+      },
+    });
+  });
+
   it.each(["stop", "query"])(
     "fails closed on a Runtime socket %s error before fault cover or Repair",
     async (failureMode) => {
@@ -3005,9 +3036,184 @@ printf covered > '${covered}'
             PATH: `${fixture}:/usr/bin:/bin`,
           },
         }),
-      ).resolves.toMatchObject({ stderr: "", stdout: "" });
+      ).resolves.toMatchObject({ stdout: "" });
       await expect(readFile(resetMarker, "utf8")).resolves.toBe("reset\n");
       await expect(readFile(covered, "utf8")).resolves.toBe("covered");
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("retains nonzero systemctl stdout from the generated state reader", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    await expect(driver.cleanup("run-runtime-nonzero-output")).rejects.toThrow(
+      /not executed/,
+    );
+
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-nonzero-output-"),
+    );
+    try {
+      const systemctl = path.join(fixture, "systemctl");
+      await writeFile(
+        systemctl,
+        "#!/bin/sh\nprintf 'LoadState=loaded\\n'\nexit 17\n",
+        "utf8",
+      );
+      await chmod(systemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      const shell = `set -eu
+${cleanupCommand.slice(helperStart, helperEnd)}
+read_unit_state enoki-observation-runtime.service
+`;
+      await expect(
+        execFileAsync("/bin/sh", ["-c", shell], {
+          env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+        }),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining(
+          "code=17 stdout_bytes=16 stdout_hex=unavailable wait_seconds=direct",
+        ),
+      });
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("attributes the final unsuccessful custody sleep to poll twenty", async () => {
+    const cleanupCommand = await captureRuntimeFailureCommand(
+      "cleanup-observation-runtime-failure",
+    );
+    const helperStart = cleanupCommand.indexOf("state_monotonic_ms() {");
+    const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+    const shell = `set -eu
+fail() { printf '%s\\n' "$1" >&2; exit 79; }
+${cleanupCommand.slice(helperStart, helperEnd)}
+state_monotonic_ms() { printf 7; }
+sleep() { :; }
+systemctl() {
+  [ "$1" = show ] || exit 1
+  printf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'
+}
+wait_for_unit_state enoki-observation-runtime.service active running
+`;
+
+    await expect(execFileAsync("/bin/sh", ["-c", shell])).rejects.toMatchObject(
+      {
+        code: 79,
+        stderr: expect.stringContaining(
+          "operation=wait_unit_sleep unit=enoki-observation-runtime.service poll=20 sleep_ms=0",
+        ),
+      },
+    );
+  });
+
+  it("marks generated state-reader secret bytes unavailable before hex encoding", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    await expect(driver.cleanup("run-runtime-secret-output")).rejects.toThrow(
+      /not executed/,
+    );
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-secret-output-"),
+    );
+    try {
+      const systemctl = path.join(fixture, "systemctl");
+      await writeFile(
+        systemctl,
+        "#!/bin/sh\nprintf 'enk_enroll_secret'\nexit 17\n",
+        "utf8",
+      );
+      await chmod(systemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      await expect(
+        execFileAsync(
+          "/bin/sh",
+          [
+            "-c",
+            `set -eu
+${cleanupCommand.slice(helperStart, helperEnd)}
+read_unit_state enoki-observation-runtime.service`,
+          ],
+          {
+            env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 1,
+        stderr: expect.stringContaining("stdout_hex=unavailable"),
+      });
+    } finally {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("does not turn a generated state-reader success into a failure when diagnostics cannot write", async () => {
+    let cleanupCommand = null;
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun() {},
+      async execute(command) {
+        cleanupCommand = command;
+        return { code: 79, stderr: "not executed", stdout: "" };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    await expect(
+      driver.cleanup("run-runtime-diagnostic-write"),
+    ).rejects.toThrow(/not executed/);
+
+    const fixture = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-runtime-diagnostic-write-"),
+    );
+    try {
+      const marker = path.join(fixture, "reader-succeeded");
+      const systemctl = path.join(fixture, "systemctl");
+      await writeFile(
+        systemctl,
+        "#!/bin/sh\nprintf 'LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\n'\n",
+        "utf8",
+      );
+      await chmod(systemctl, 0o755);
+      const helperStart = cleanupCommand.indexOf("read_unit_state() {");
+      const helperEnd = cleanupCommand.indexOf("recovered_bundle_version=");
+      const shell = `set -eu
+${cleanupCommand.slice(helperStart, helperEnd)}
+printf() {
+  case "$1" in
+    enoki.lifecycle.diagnostic*) return 1 ;;
+    *) command printf "$@" ;;
+  esac
+}
+if read_unit_state enoki-observation-runtime.service >/dev/null; then
+  printf succeeded > '${marker}'
+else
+  printf failed > '${marker}'
+fi
+`;
+      await expect(
+        execFileAsync("/bin/sh", ["-c", shell], {
+          env: { ...process.env, PATH: `${fixture}:/usr/bin:/bin` },
+        }),
+      ).resolves.toMatchObject({ stdout: "" });
+      await expect(readFile(marker, "utf8")).resolves.toBe("succeeded");
     } finally {
       await rm(fixture, { force: true, recursive: true });
     }
@@ -3473,6 +3679,7 @@ systemctl is-active --quiet enoki-observation-runtime.service
   it("exhausts the Observation Runtime budget and consumes its durable failure epoch through Repair", async () => {
     const commands = [];
     let inventoryCount = 0;
+    let outerCleanupBoundaryFailure = false;
     const runtimeSha256 = "a".repeat(64);
     const harness = createProbeHostHarness({
       execute: async (command, options) => {
@@ -3505,6 +3712,9 @@ systemctl is-active --quiet enoki-observation-runtime.service
           );
         }
         if (command.includes("# enoki-release-e2e:service-boundary")) {
+          if (outerCleanupBoundaryFailure) {
+            return { code: 79, stderr: "outer boundary failed", stdout: "" };
+          }
           return successfulCommandText(
             "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
           );
@@ -3658,6 +3868,493 @@ systemctl is-active --quiet enoki-observation-runtime.service
     );
     expect(renewed.options).toEqual({ root: true });
     expect(renewed.command).toContain("actual_snapshot=$(fingerprint)");
+    outerCleanupBoundaryFailure = true;
+    const outer = await harness
+      .cleanup("run-runtime-repair")
+      .catch((error) => error);
+    expect(outer).toMatchObject({
+      code: "release_test_host_cleanup_failed",
+      errors: [
+        {
+          failureDetail: {
+            phase: "custody",
+            invocationPhase: "outer_cleanup",
+            priorState: "repair_succeeded",
+            priorRepair: { phase: "repair", result: { code: 0 } },
+          },
+        },
+      ],
+    });
+  });
+
+  it("keeps the actual cleanup command result when generated cleanup fails", async () => {
+    const fixture = await createRuntimeFailureCustodyFixture(
+      "enoki-runtime-cleanup-detail-",
+    );
+    try {
+      await copyFile(fixture.paths.runtime, fixture.paths.backup);
+      await writeFile(
+        fixture.paths.fakeSystemctl,
+        `#!/bin/sh
+if [ "$1" = stop ]; then exit 0; fi
+if [ "$1" = show ]; then
+  printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n'
+  exit 0
+fi
+exit 1
+`,
+        "utf8",
+      );
+      await chmod(fixture.paths.fakeSystemctl, 0o755);
+      const driver = createInstalledBundleFailureRepairHostDriver({
+        assertOwnedRun(runId) {
+          expect(runId).toBe("run-runtime-custody");
+        },
+        execute: (command) => fixture.runHostScript(command),
+        ownershipToken: "00000000-0000-4000-8000-000000000001",
+      });
+
+      await expect(driver.cleanup("run-runtime-custody")).rejects.toMatchObject(
+        {
+          failureDetail: {
+            phase: "cleanup",
+            result: {
+              code: 79,
+              stderr: expect.stringContaining(
+                "enoki.lifecycle.diagnostic role=host phase=runtime_cleanup",
+              ),
+              stdout: "",
+            },
+          },
+        },
+      );
+    } finally {
+      await fixture.remove();
+    }
+  });
+
+  it("retains a successful Repair result when Runtime custody cleanup fails", async () => {
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      async execute(command) {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
+              : {
+                  accounts: { group: true, user: true },
+                  files: [
+                    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                    "/var/lib/enoki-probe-bootstrap",
+                    "/etc/enoki/probe-install.toml",
+                    "/etc/systemd/system/enoki-probe.service",
+                    "/usr/local/bin/enoki-probe",
+                    "/var/lib/enoki-probe",
+                  ],
+                  units: ["enoki-probe.service"],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(
+            '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+          );
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
+          return successfulCommandText("");
+        }
+        if (command.includes("# enoki-release-e2e:binary-version")) {
+          return successfulCommandText("enoki-probe 1.2.3\n");
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
+          return successfulCommandText("1\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText(
+            [
+              "bundleVersion=1.2.3",
+              "faultBackupExists=1",
+              "repairOutput=本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准",
+              `runtimeSha256=${"a".repeat(64)}`,
+              "unit=enoki-observation-runtime.service",
+              "",
+            ].join("\n"),
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return { code: 79, stderr: "custody cleanup failed", stdout: "" };
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-custody-failure");
+    await harness.install(officialEnrollment(), "run-runtime-custody-failure");
+    const error = await harness
+      .repairInstalledBundleFailure("run-runtime-custody-failure", "1.2.3")
+      .catch((error) => error);
+    expect(error).toMatchObject({
+      failureDetail: {
+        phase: "cleanup",
+        result: { code: 79, stderr: "custody cleanup failed", stdout: "" },
+        priorRepair: {
+          phase: "repair",
+          result: { code: 0 },
+        },
+      },
+    });
+    expect(serializeRunError(error)).toMatchObject({
+      failureDetail: {
+        phase: "cleanup",
+        priorRepair: { phase: "repair", result: { code: 0 } },
+      },
+    });
+  });
+
+  it("keeps a successful Repair result attached to an ordinary custody error", async () => {
+    let inventoryCount = 0;
+    let repairSucceeded = false;
+    const harness = createProbeHostHarness({
+      async execute(command) {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
+              : {
+                  accounts: { group: true, user: true },
+                  files: [
+                    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                    "/var/lib/enoki-probe-bootstrap",
+                    "/etc/enoki/probe-install.toml",
+                    "/etc/systemd/system/enoki-probe.service",
+                    "/usr/local/bin/enoki-probe",
+                    "/var/lib/enoki-probe",
+                  ],
+                  units: ["enoki-probe.service"],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:service-boundary")) {
+          return repairSucceeded
+            ? { code: 79, stderr: "custody boundary failed", stdout: "" }
+            : successfulCommandText(
+                "LoadState=loaded\nActiveState=active\nSubState=running\nUser=enoki-probe\nGroup=enoki-probe\nFragmentPath=/etc/systemd/system/enoki-probe.service\n",
+              );
+        }
+        if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
+          return successfulCommandText("");
+        }
+        if (command.includes("# enoki-release-e2e:binary-version")) {
+          return successfulCommandText("enoki-probe 1.2.3\n");
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
+          return successfulCommandText("1\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          repairSucceeded = true;
+          return successfulCommandText(
+            [
+              "bundleVersion=1.2.3",
+              "faultBackupExists=1",
+              "repairOutput=本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准",
+              `runtimeSha256=${"a".repeat(64)}`,
+              "unit=enoki-observation-runtime.service",
+              "",
+            ].join("\n"),
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("recovered=1.2.3\n");
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-custody-boundary");
+    await harness.install(officialEnrollment(), "run-runtime-custody-boundary");
+    const error = await harness
+      .repairInstalledBundleFailure("run-runtime-custody-boundary", "1.2.3")
+      .catch((error) => error);
+
+    expect(error).toMatchObject({
+      message: "Probe service inspection failed: custody boundary failed",
+      failureDetail: {
+        phase: "custody",
+        priorState: "repair_succeeded",
+        priorRepair: {
+          phase: "repair",
+          result: { code: 0 },
+          executionTiming: { unavailable: true },
+        },
+      },
+    });
+    expect(serializeRunError(error)).toMatchObject({
+      failureDetail: {
+        phase: "custody",
+        priorState: "repair_succeeded",
+        priorRepair: { phase: "repair", result: { code: 0 } },
+      },
+    });
+  });
+
+  it("omits unsafe cleanup payloads without replacing the primary failure", async () => {
+    const driver = createInstalledBundleFailureRepairHostDriver({
+      assertOwnedRun(runId) {
+        expect(runId).toBe("run-runtime-secret-detail");
+      },
+      async execute() {
+        return {
+          code: 79,
+          stderr: "ENOKI_ENROLLMENT_TOKEN=enk_enroll_secret-value",
+          stdout: "x".repeat(9 * 1024),
+        };
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    const failure = await driver
+      .cleanup("run-runtime-secret-detail")
+      .catch((error) => error);
+    expect(failure.message).not.toContain("enk_enroll_secret-value");
+    expect(failure).toMatchObject({
+      failureDetail: {
+        phase: "cleanup",
+        replayReady: false,
+        unavailable: "unsafe_or_oversize_result",
+      },
+    });
+  });
+
+  it("rebuilds only bounded closed runtime failure detail at serializer boundaries", () => {
+    const safeStateHex = Buffer.from(
+      "LoadState=loaded\nActiveState=active\nSubState=listening",
+    ).toString("hex");
+    const cleanupWith = (stderr) =>
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: 79, stderr, stdout: "" },
+      });
+    expect(cleanupWith(`stdout_hex=${safeStateHex}`)).toMatchObject({
+      result: { stderr: `stdout_hex=${safeStateHex}` },
+    });
+    for (const stderr of [
+      `stdout_hex=${safeStateHex} stdout_hex=`,
+      `stdout_hex=${safeStateHex}-`,
+      "STDOUT_HEX=63616c6c65722d736563726574",
+    ]) {
+      expect(cleanupWith(stderr)).toMatchObject({ replayReady: false });
+    }
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        priorState: "repair_succeeded",
+        priorRepair: {
+          kind: "installed_bundle_failure_repair",
+          phase: "repair",
+          result: { code: 79, stderr: "", stdout: "" },
+          executionTiming: { unavailable: true },
+        },
+        result: { code: 79, stderr: "", stdout: "" },
+      }),
+    ).toMatchObject({ replayReady: false });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        replayReady: true,
+        result: { code: 79, stderr: "failed", stdout: "" },
+        untrusted: "omit",
+      }),
+    ).toEqual({
+      kind: "installed_bundle_failure_repair",
+      phase: "cleanup",
+      result: { code: 79, stderr: "failed", stdout: "" },
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: {
+          code: 79,
+          stderr: "ENOKI_ENROLLMENT_TOKEN=enk_enroll_secret-value",
+          stdout: "",
+        },
+      }),
+    ).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
+      sanitizeFailureDetail({ kind: "unknown", phase: "cleanup" }),
+    ).toMatchObject({
+      phase: "unavailable",
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "custody",
+        priorState: "repair_succeeded",
+      }),
+    ).toMatchObject({
+      phase: "custody",
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "custody",
+        priorState: "repair_succeeded",
+        priorRepair: {
+          kind: "installed_bundle_failure_repair",
+          phase: "repair",
+          result: { code: 0, stderr: "", stdout: "repaired" },
+          executionTiming: { elapsedMs: 7, timeoutMs: 50, timedOut: false },
+        },
+      }),
+    ).toMatchObject({
+      phase: "custody",
+      priorRepair: {
+        phase: "repair",
+        result: { code: 0 },
+        executionTiming: { elapsedMs: 7, timeoutMs: 50, timedOut: false },
+      },
+    });
+    expect(
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: null, stderr: "", stdout: "" },
+      }),
+    ).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    expect(
+      sanitizeFailureDetail(
+        {
+          kind: "installed_bundle_failure_repair",
+          phase: "cleanup",
+          result: { code: 79, stderr: "caller-secret", stdout: "" },
+        },
+        ["caller-secret"],
+      ),
+    ).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+
+    const exactLimit = (size) =>
+      sanitizeFailureDetail({
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: 79, stderr: "x".repeat(size), stdout: "" },
+      });
+    let largestSafe = 0;
+    while (exactLimit(largestSafe + 1)?.unavailable === undefined) {
+      largestSafe += 1;
+    }
+    expect(exactLimit(largestSafe)).not.toHaveProperty("unavailable");
+    expect(exactLimit(largestSafe + 1)).toMatchObject({
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    });
+    const primary = Object.assign(new Error("primary"), {
+      failureDetail: {
+        kind: "installed_bundle_failure_repair",
+        phase: "repair",
+        replayReady: true,
+        result: { code: 4, stderr: "primary", stdout: "" },
+      },
+    });
+    const cleanup = Object.assign(new Error("cleanup"), {
+      failureDetail: {
+        kind: "installed_bundle_failure_repair",
+        phase: "cleanup",
+        result: { code: 5, stderr: "caller-secret", stdout: "" },
+      },
+    });
+    const nested = new AggregateError([primary, cleanup], "both failures");
+    for (const serialize of [
+      (error) => serializedError(error, ["caller-secret"]),
+      (error) => serializeRunError(error, ["caller-secret"]),
+    ]) {
+      expect(serialize(nested)).toMatchObject({
+        errors: [
+          { failureDetail: { phase: "repair", result: { code: 4 } } },
+          {
+            failureDetail: {
+              phase: "cleanup",
+              replayReady: false,
+              unavailable: "unsafe_or_oversize_result",
+            },
+          },
+        ],
+      });
+    }
+    expect(
+      serializedError(new Error("caller-secret"), ["caller-secret"]),
+    ).not.toMatchObject({ message: "caller-secret" });
   });
 
   it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
@@ -9813,6 +10510,11 @@ describe("Release E2E command", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/terminated by SIGKILL|timed out/i);
+    expect(result.executionTiming).toMatchObject({
+      elapsedMs: expect.any(Number),
+      timeoutMs: 50,
+      timedOut: true,
+    });
   });
 
   it("retains failed Bootstrap staging ownership when deletion cannot be verified", async () => {

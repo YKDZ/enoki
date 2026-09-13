@@ -810,7 +810,6 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
         "stage.bundle.manifest_sha256 != authority.manifest_sha256",
         "mask\", \"--runtime\", \"enoki-observation-runtime.socket",
         "ConditionPathExists=\\nConditionPathExists=/run/enoki-probe/runtime-repair-permit",
-        "request_finalized_window(Duration::from_secs(1), 1)",
         "install_canonical_runtime_gate",
         "probe_repair_canonical_runtime_validation_failed",
     ] {

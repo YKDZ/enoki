@@ -53,8 +53,10 @@ export function createInstalledBundleFailureRepairHostDriver({
       if (result.code !== 0 || result.stdout.trim() !== "cleaned") {
         const recovered = result.stdout.trim().match(/^recovered=(.+)$/);
         if (result.code !== 0 || !recovered) {
-          throw new Error(
+          throw commandResultFailure(
             `Observation Runtime failure cleanup failed: ${result.stderr || result.stdout}`,
+            "cleanup",
+            result,
           );
         }
         assertProbeVersion(recovered[1]);
@@ -81,8 +83,10 @@ export function createInstalledBundleFailureRepairHostDriver({
         { root: true },
       );
       if (exhausted.code !== 0) {
-        throw new Error(
+        throw commandResultFailure(
           `Installed Bundle Failure lacks durable Observation Runtime failure eligibility: ${exhausted.stderr || exhausted.stdout}`,
+          "exhaust",
+          exhausted,
         );
       }
       if (exhausted.stdout.trim() !== "recorded") {
@@ -99,16 +103,25 @@ export function createInstalledBundleFailureRepairHostDriver({
         { root: true },
       );
       if (repaired.code !== 0) {
-        throw new Error(
+        throw commandResultFailure(
           `Installed Bundle Failure Repair failed (${repaired.code}): ${repaired.stderr || repaired.stdout}`,
+          "repair",
+          repaired,
         );
       }
-      const repair = parseRepairEvidence(
-        repaired.stdout,
-        expectedBundleVersion,
-      );
+      let repair;
+      try {
+        repair = parseRepairEvidence(repaired.stdout, expectedBundleVersion);
+      } catch (error) {
+        error.failureDetail = boundedCommandResult("repair", repaired);
+        throw error;
+      }
       faultMayBeActive = false;
-      return { failure: { status: "recorded" }, repair };
+      return {
+        failure: { status: "recorded" },
+        repair,
+        repairCommand: repaired,
+      };
     },
   });
 }
@@ -482,9 +495,49 @@ fi`;
 }
 
 function systemdUnitStateFunctions() {
-  return `read_unit_state() {
+  return `state_monotonic_ms() {
+  awk '{ printf "%.0f", $1 * 1000 }' /proc/uptime 2>/dev/null
+}
+read_unit_state() {
+  closed_unit_state_stdout() {
+    case "$1" in
+      'LoadState=loaded
+ActiveState=active
+SubState=running'|'LoadState=loaded
+ActiveState=active
+SubState=listening'|'LoadState=loaded
+ActiveState=inactive
+SubState=dead'|'LoadState=loaded
+ActiveState=failed
+SubState=failed') return 0 ;;
+    esac
+    return 1
+  }
+  record_unit_state() {
+    record_target=$1
+    record_code=$2
+    record_stdout=$3
+    record_bytes=unavailable
+    record_hex=unavailable
+    if record_count=$(printf '%s' "$record_stdout" | wc -c | tr -d ' '); then
+      record_bytes=$record_count
+    fi
+    if [ "$record_bytes" != unavailable ] && [ "$record_bytes" -le 3800 ] && closed_unit_state_stdout "$record_stdout"; then
+      if record_od=$(printf '%s' "$record_stdout" | od -An -tx1); then
+        record_hex=$(printf '%s' "$record_od" | tr -d ' \\n') || record_hex=unavailable
+      fi
+    fi
+    ( printf 'enoki.lifecycle.diagnostic role=host phase=%s operation=read_unit_state unit=%s poll=%s code=%s stdout_bytes=%s stdout_hex=%s wait_seconds=%s elapsed_ms=%s sleep_ms=%s\\n' "\${state_phase:-runtime_cleanup}" "$record_target" "\${state_poll_index:-direct}" "$record_code" "$record_bytes" "$record_hex" "\${state_remaining:-direct}" "\${state_elapsed_ms:-unavailable}" "\${state_sleep_ms:-unavailable}" >&2 ) || :
+    return 0
+  }
   target=$1
-  properties=$(systemctl show "$target" --no-pager --property=LoadState --property=ActiveState --property=SubState) || return 1
+  if properties=$(systemctl show "$target" --no-pager --property=LoadState --property=ActiveState --property=SubState); then
+    record_unit_state "$target" 0 "$properties" || :
+  else
+    state_code=$?
+    record_unit_state "$target" "$state_code" "$properties" || :
+    return 1
+  fi
   property_count=$(printf '%s\n' "$properties" | awk 'NF { count += 1 } END { print count + 0 }') || return 1
   load_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "LoadState" { count += 1 } END { print count + 0 }') || return 1
   active_count=$(printf '%s\n' "$properties" | awk -F= '$1 == "ActiveState" { count += 1 } END { print count + 0 }') || return 1
@@ -528,11 +581,29 @@ wait_for_unit_state() {
   expected_target=$1
   expected_active=$2
   expected_sub=$3
+  state_phase=runtime_custody_recovery
+  state_started_ms=$(state_monotonic_ms) || state_started_ms=unavailable
   state_remaining=20
   while [ "$state_remaining" -gt 0 ]; do
+    state_poll_index=$((20 - state_remaining + 1))
+    state_now_ms=$(state_monotonic_ms) || state_now_ms=unavailable
+    if [ "$state_started_ms" != unavailable ] && [ "$state_now_ms" != unavailable ]; then
+      state_elapsed_ms=$((state_now_ms - state_started_ms))
+    else
+      state_elapsed_ms=unavailable
+    fi
+    state_sleep_ms=unavailable
     observed_state=$(read_unit_state "$expected_target") || fail "could not query $expected_target state"
     [ "$observed_state" = "loaded $expected_active $expected_sub" ] && return 0
+    state_sleep_started_ms=$(state_monotonic_ms) || state_sleep_started_ms=unavailable
     sleep 1
+    state_sleep_finished_ms=$(state_monotonic_ms) || state_sleep_finished_ms=unavailable
+    if [ "$state_sleep_started_ms" != unavailable ] && [ "$state_sleep_finished_ms" != unavailable ]; then
+      state_sleep_ms=$((state_sleep_finished_ms - state_sleep_started_ms))
+    else
+      state_sleep_ms=unavailable
+    fi
+    ( printf 'enoki.lifecycle.diagnostic role=host phase=%s operation=wait_unit_sleep unit=%s poll=%s sleep_ms=%s\\n' "$state_phase" "$expected_target" "$state_poll_index" "$state_sleep_ms" >&2 ) || :
     state_remaining=$((state_remaining - 1))
   done
   fail "$expected_target did not reach loaded/$expected_active/$expected_sub"
@@ -543,6 +614,54 @@ function assertProbeVersion(version) {
   if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version ?? "")) {
     throw new Error("Installed Bundle Failure Repair version is invalid");
   }
+}
+
+function commandResultFailure(message, phase, result) {
+  const failureDetail = boundedCommandResult(phase, result);
+  const error = new Error(
+    failureDetail.replayReady === false
+      ? `Installed Bundle Failure ${phase} command failed; detail unavailable`
+      : message,
+  );
+  error.failureDetail = failureDetail;
+  return error;
+}
+
+function boundedCommandResult(phase, result) {
+  const detail = {
+    kind: "installed_bundle_failure_repair",
+    phase,
+    result: {
+      code: Number.isInteger(result?.code) ? result.code : null,
+      stderr: typeof result?.stderr === "string" ? result.stderr : "",
+      stdout: typeof result?.stdout === "string" ? result.stdout : "",
+    },
+    executionTiming:
+      Number.isSafeInteger(result?.executionTiming?.elapsedMs) &&
+      Number.isSafeInteger(result?.executionTiming?.timeoutMs) &&
+      typeof result?.executionTiming?.timedOut === "boolean"
+        ? {
+            elapsedMs: result.executionTiming.elapsedMs,
+            timeoutMs: result.executionTiming.timeoutMs,
+            timedOut: result.executionTiming.timedOut,
+          }
+        : { unavailable: true },
+  };
+  const encoded = JSON.stringify(detail);
+  if (
+    /(?:enrollment.?token|password|private.?key|signing.?secret|enk_enroll_)/i.test(
+      `${detail.result.stderr}\n${detail.result.stdout}`,
+    ) ||
+    Buffer.byteLength(encoded, "utf8") > 8 * 1024
+  ) {
+    return {
+      kind: detail.kind,
+      phase,
+      replayReady: false,
+      unavailable: "unsafe_or_oversize_result",
+    };
+  }
+  return detail;
 }
 
 function shellSingleQuote(value) {
