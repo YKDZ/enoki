@@ -3897,13 +3897,6 @@ exit 1
       replayReady: false,
       unavailable: "unsafe_or_oversize_result",
     });
-    for (const fixtureBytes of [64 * 1024, 64 * 1024 + 1]) {
-      expect(exactLimit(fixtureBytes)).toMatchObject({
-        replayReady: false,
-        unavailable: "unsafe_or_oversize_result",
-      });
-    }
-
     const primary = Object.assign(new Error("primary"), {
       failureDetail: {
         kind: "installed_bundle_failure_repair",

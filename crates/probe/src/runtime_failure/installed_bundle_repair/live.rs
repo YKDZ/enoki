@@ -568,9 +568,11 @@ fn validate_unix_runtime_window(
                 .io_kind
                 .map(|value| format!("{value:?}"))
                 .unwrap_or_else(|| "none".to_owned());
+            let request = runtime_failure_diagnostic_bytes(&detail.request_bytes);
+            let response_prefix = runtime_failure_diagnostic_bytes(&detail.response_prefix);
             let _ = writeln!(
                 std::io::stderr().lock(),
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={}",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation={} validation={validation} code={code} cause={:?} errno={errno} io_kind={io_kind} cadence_ms={} sequence_start={} response_bytes={} request_hex={request} response_prefix_hex={response_prefix}",
                 detail.operation,
                 detail.cause,
                 detail.request_cadence_millis,
@@ -579,6 +581,26 @@ fn validate_unix_runtime_window(
             );
             contract_failure(code)
         })
+}
+
+fn runtime_failure_diagnostic_bytes(bytes: &[u8]) -> String {
+    if bytes.len() > 8 * 1024
+        || [
+            b"password".as_slice(),
+            b"private_key",
+            b"signing_secret",
+            b"enk_enroll_",
+        ]
+        .iter()
+        .any(|secret| {
+            bytes
+                .windows(secret.len())
+                .any(|window| window.eq_ignore_ascii_case(secret))
+        })
+    {
+        return "unavailable".to_owned();
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn runtime_validation_code(validation: RuntimeValidation) -> (&'static str, &'static str) {

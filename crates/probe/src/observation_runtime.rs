@@ -1929,7 +1929,7 @@ impl UnixObservationRuntimeClient {
         let mut response_prefix = Vec::new();
         let result = (|| {
             let request_bytes = encoded_request.len();
-            let mut response_bytes = 0;
+            let response_bytes = 0;
             let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::Unavailable,
@@ -1985,41 +1985,38 @@ impl UnixObservationRuntimeClient {
                         Some(&error),
                     )
                 })?;
+            let mut response = RecordingRuntimeResponse::new(stream, &mut response_prefix);
             let mut status = [0; 1];
-            stream.read_exact(&mut status).map_err(|error| {
+            response.read_exact(&mut status).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::Unavailable,
                     "read_status",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     Some(&error),
                 )
             })?;
-            response_bytes += status.len();
-            record_response_prefix(&mut response_prefix, &status);
             if status[0] != 0 {
                 return Err(observation_client_failure(
                     ObservationClientError::WindowFailed,
                     "validate_status",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     None,
                 ));
             }
-            let version_len = read_u16(&mut stream).map_err(|error| {
+            let version_len = read_u16(&mut response).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "read_version_length",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     Some(&error),
                 )
             })?;
-            response_bytes += 2;
-            record_response_prefix(&mut response_prefix, &version_len.to_be_bytes());
             let version_len = version_len as usize;
             if version_len == 0 || version_len > 128 {
                 return Err(observation_client_failure(
@@ -2027,24 +2024,18 @@ impl UnixObservationRuntimeClient {
                     "validate_version_length",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     None,
                 ));
             }
             let mut version = vec![0; version_len];
-            read_exact_with_response_progress(
-                &mut stream,
-                &mut version,
-                &mut response_bytes,
-                &mut response_prefix,
-            )
-            .map_err(|error| {
+            response.read_exact(&mut version).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "read_version",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     Some(&error),
                 )
             })?;
@@ -2054,7 +2045,7 @@ impl UnixObservationRuntimeClient {
                     "decode_version",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     None,
                 )
             })? != self.expected_bundle_version
@@ -2064,21 +2055,20 @@ impl UnixObservationRuntimeClient {
                     "validate_version",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     None,
                 ));
             }
-            let host_profile_len = read_u32(&mut stream).map_err(|error| {
+            let host_profile_len = read_u32(&mut response).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "read_profile_length",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     Some(&error),
                 )
             })? as usize;
-            response_bytes += 4;
             let host_profile = if host_profile_len == 0 {
                 None
             } else {
@@ -2088,22 +2078,21 @@ impl UnixObservationRuntimeClient {
                         "validate_profile_length",
                         cadence,
                         sequence_start,
-                        response_bytes,
+                        response.consumed_bytes(),
                         None,
                     ));
                 }
                 let mut encoded = vec![0; host_profile_len];
-                stream.read_exact(&mut encoded).map_err(|error| {
+                response.read_exact(&mut encoded).map_err(|error| {
                     observation_client_failure(
                         ObservationClientError::InvalidResponse,
                         "read_profile",
                         cadence,
                         sequence_start,
-                        response_bytes,
+                        response.consumed_bytes(),
                         Some(&error),
                     )
                 })?;
-                response_bytes += encoded.len();
                 Some(
                     HostProfileSnapshot::decode(encoded.as_slice()).map_err(|_| {
                         observation_client_failure(
@@ -2111,68 +2100,65 @@ impl UnixObservationRuntimeClient {
                             "decode_profile",
                             cadence,
                             sequence_start,
-                            response_bytes,
+                            response.consumed_bytes(),
                             None,
                         )
                     })?,
                 )
             };
-            let attempt_count = read_u16(&mut stream).map_err(|error| {
+            let attempt_count = read_u16(&mut response).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "read_attempt_count",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     Some(&error),
                 )
             })?;
-            response_bytes += 2;
             if attempt_count as usize != CPU_SAMPLES_PER_WINDOW {
                 return Err(observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "validate_attempt_count",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     None,
                 ));
             }
             let mut attempts = Vec::with_capacity(attempt_count as usize);
             for offset in 0..attempt_count {
-                let sequence = read_u64(&mut stream).map_err(|error| {
+                let sequence = read_u64(&mut response).map_err(|error| {
                     observation_client_failure(
                         ObservationClientError::InvalidResponse,
                         "read_sequence",
                         cadence,
                         sequence_start,
-                        response_bytes,
+                        response.consumed_bytes(),
                         Some(&error),
                     )
                 })?;
-                response_bytes += 8;
                 if sequence != sequence_start + u64::from(offset) {
                     return Err(observation_client_failure(
                         ObservationClientError::InvalidResponse,
                         "validate_sequence",
                         cadence,
                         sequence_start,
-                        response_bytes,
+                        response.consumed_bytes(),
                         None,
                     ));
                 }
                 let mut outcome = [0; 1];
-                stream.read_exact(&mut outcome).map_err(|error| {
+                response.read_exact(&mut outcome).map_err(|error| {
                     observation_client_failure(
                         ObservationClientError::InvalidResponse,
                         "read_outcome",
                         cadence,
                         sequence_start,
-                        response_bytes,
+                        response.consumed_bytes(),
                         Some(&error),
                     )
                 })?;
-                response_bytes += 1;
                 let cpu_resource_outcome = match outcome[0] {
                     0 => None,
                     1 => Some(SystemStateResourceAcquisitionFailure::Unavailable),
@@ -2184,52 +2170,50 @@ impl UnixObservationRuntimeClient {
                             "validate_outcome",
                             cadence,
                             sequence_start,
-                            response_bytes,
+                            response.consumed_bytes(),
                             None,
                         ));
                     }
                 };
                 let sample = if cpu_resource_outcome.is_none() {
-                    let encoded_len = read_u32(&mut stream).map_err(|error| {
+                    let encoded_len = read_u32(&mut response).map_err(|error| {
                         observation_client_failure(
                             ObservationClientError::InvalidResponse,
                             "read_sample_length",
                             cadence,
                             sequence_start,
-                            response_bytes,
+                            response.consumed_bytes(),
                             Some(&error),
                         )
                     })? as usize;
-                    response_bytes += 4;
                     if encoded_len == 0 || encoded_len > MAX_RUNTIME_RESPONSE_BYTES {
                         return Err(observation_client_failure(
                             ObservationClientError::InvalidResponse,
                             "validate_sample_length",
                             cadence,
                             sequence_start,
-                            response_bytes,
+                            response.consumed_bytes(),
                             None,
                         ));
                     }
                     let mut encoded = vec![0; encoded_len];
-                    stream.read_exact(&mut encoded).map_err(|error| {
+                    response.read_exact(&mut encoded).map_err(|error| {
                         observation_client_failure(
                             ObservationClientError::InvalidResponse,
                             "read_sample",
                             cadence,
                             sequence_start,
-                            response_bytes,
+                            response.consumed_bytes(),
                             Some(&error),
                         )
                     })?;
-                    response_bytes += encoded.len();
                     Some(MetricSample::decode(encoded.as_slice()).map_err(|_| {
                         observation_client_failure(
                             ObservationClientError::InvalidResponse,
                             "decode_sample",
                             cadence,
                             sequence_start,
-                            response_bytes,
+                            response.consumed_bytes(),
                             None,
                         )
                     })?)
@@ -2242,13 +2226,13 @@ impl UnixObservationRuntimeClient {
                     cpu_resource_outcome,
                 });
             }
-            let eof = stream.read(&mut [0; 1]).map_err(|error| {
+            let eof = response.read(&mut [0; 1]).map_err(|error| {
                 observation_client_failure(
                     ObservationClientError::InvalidResponse,
                     "read_eof",
                     cadence,
                     sequence_start,
-                    response_bytes,
+                    response.consumed_bytes(),
                     Some(&error),
                 )
             })?;
@@ -2258,7 +2242,7 @@ impl UnixObservationRuntimeClient {
                     "validate_eof",
                     cadence,
                     sequence_start,
-                    response_bytes + eof,
+                    response.consumed_bytes(),
                     None,
                 ));
             }
@@ -2320,33 +2304,6 @@ fn observation_client_failure(
 }
 
 const MAX_FAILURE_RESPONSE_PREFIX_BYTES: usize = 8 * 1024;
-
-fn record_response_prefix(prefix: &mut Vec<u8>, bytes: &[u8]) {
-    let remaining = MAX_FAILURE_RESPONSE_PREFIX_BYTES.saturating_sub(prefix.len());
-    prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-}
-
-fn read_exact_with_response_progress(
-    stream: &mut UnixStream,
-    buffer: &mut [u8],
-    response_bytes: &mut usize,
-    response_prefix: &mut Vec<u8>,
-) -> io::Result<()> {
-    let mut offset = 0;
-    while offset < buffer.len() {
-        let read = stream.read(&mut buffer[offset..])?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "runtime response ended before a complete field",
-            ));
-        }
-        record_response_prefix(response_prefix, &buffer[offset..offset + read]);
-        *response_bytes += read;
-        offset += read;
-    }
-    Ok(())
-}
 
 fn configure_deadline(stream: &UnixStream, deadline: Duration) -> io::Result<()> {
     stream.set_read_timeout(Some(deadline))?;
@@ -2468,19 +2425,50 @@ fn write_window_failure(stream: &mut UnixStream) -> io::Result<()> {
     stream.flush()
 }
 
-fn read_u16(stream: &mut UnixStream) -> io::Result<u16> {
+struct RecordingRuntimeResponse<'a> {
+    stream: UnixStream,
+    bytes: usize,
+    prefix: &'a mut Vec<u8>,
+}
+
+impl<'a> RecordingRuntimeResponse<'a> {
+    fn new(stream: UnixStream, prefix: &'a mut Vec<u8>) -> Self {
+        Self {
+            stream,
+            bytes: 0,
+            prefix,
+        }
+    }
+
+    fn consumed_bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+impl Read for RecordingRuntimeResponse<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.stream.read(buffer)?;
+        self.bytes += read;
+        let remaining = MAX_FAILURE_RESPONSE_PREFIX_BYTES.saturating_sub(self.prefix.len());
+        self.prefix
+            .extend_from_slice(&buffer[..read.min(remaining)]);
+        Ok(read)
+    }
+}
+
+fn read_u16(stream: &mut impl Read) -> io::Result<u16> {
     let mut bytes = [0; 2];
     stream.read_exact(&mut bytes)?;
     Ok(u16::from_be_bytes(bytes))
 }
 
-fn read_u32(stream: &mut UnixStream) -> io::Result<u32> {
+fn read_u32(stream: &mut impl Read) -> io::Result<u32> {
     let mut bytes = [0; 4];
     stream.read_exact(&mut bytes)?;
     Ok(u32::from_be_bytes(bytes))
 }
 
-fn read_u64(stream: &mut UnixStream) -> io::Result<u64> {
+fn read_u64(stream: &mut impl Read) -> io::Result<u64> {
     let mut bytes = [0; 8];
     stream.read_exact(&mut bytes)?;
     Ok(u64::from_be_bytes(bytes))

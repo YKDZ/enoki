@@ -1909,8 +1909,8 @@ mod tests {
         STATE_SHELL_RETIRE_FAILURE, STATE_SHELL_RETIRE_MODE_CHANGE,
     };
     use super::{
-        ProbeUpgraderSystemdRunner, StateRootAdmissionFacts, StateRootOwner, StateRootRead,
-        TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
+        ProbeUpgraderSystemdRunner, StateRootAdmissionFacts, StateRootNssOwner, StateRootOwner,
+        StateRootRead, TrustedProbeInstallMetadata, classify_uninstall_repair_stage,
         commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_committed_replacement_cleanup,
@@ -2655,6 +2655,28 @@ mod tests {
         assert!(matches!(facts.public_lstat, StateRootRead::Success(_)));
         assert!(matches!(facts.private_lstat, StateRootRead::NotReached));
         assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
+        assert!(matches!(facts.empty_shell, StateRootRead::NotReached));
+    }
+
+    #[test]
+    fn state_root_facts_distinguish_a_missing_public_root_from_a_reached_private_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        let private = temporary.path().join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private).expect("private state root");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750))
+            .expect("private state root mode");
+        let mut facts = StateRootAdmissionFacts::default();
+
+        let admission =
+            trusted_state_root_layout_with_facts(&state, StateRootOwner::Root, &mut facts)
+                .expect("missing public canonical projection admits the private root");
+
+        assert!(admission.is_some());
+        assert!(matches!(facts.public_lstat, StateRootRead::NotFound));
+        assert!(matches!(facts.private_lstat, StateRootRead::Success(_)));
+        assert!(matches!(facts.public_readlink, StateRootRead::NotReached));
+        assert!(matches!(facts.nss_owner, StateRootNssOwner::NotReached));
         assert!(matches!(facts.empty_shell, StateRootRead::NotReached));
     }
 
