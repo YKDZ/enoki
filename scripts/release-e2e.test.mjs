@@ -5536,7 +5536,7 @@ exit 0
     });
   });
 
-  it("collects successful post-Uninstall systemd, journald, privilege, and filesystem observations", async () => {
+  it("collects a bounded temporary Runtime failure snapshot before Host cleanup", async () => {
     const commands = [];
     const harness = createProbeHostHarness({
       execute: async (command, options) => {
@@ -5555,6 +5555,15 @@ exit 0
         if (command.includes("# enoki-release-e2e:systemd-evidence")) {
           return successfulCommandText(
             "stage=post-uninstall\nLoadState=not-found\nActiveState=inactive\nunitCount=0\nfailedUnitCount=0\n",
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:temporary-runtime-failure-snapshot",
+          )
+        ) {
+          return successfulCommandText(
+            "temporary_diagnostic=true\nservice.LoadState=loaded\nservice.ActiveState=failed\nservice.SubState=failed\nservice.Result=exit-code\nservice.ExecMainStatus=1\nservice.ConditionResult=no\nservice.DropInPaths=/run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf\nsocket.LoadState=loaded\nsocket.ActiveState=active\nsocket.SubState=listening\nsocket.Result=success\nsocket.ExecMainStatus=0\nsocket.ConditionResult=no\nsocket.DropInPaths=\npermit.source.path=/run/enoki-probe/runtime-repair-permit\npermit.source.type=regular file\npermit.source.uid=0\npermit.source.gid=0\npermit.source.mode=600\npermit.source.nlink=1\npermit.alias.path=/run/enoki-runtime-repair-permit\npermit.alias.state=absent\njournal=2026-09-14T21:00:00Z runtime exited\n",
           );
         }
         if (
@@ -5578,7 +5587,11 @@ exit 0
       },
     });
 
-    await expect(harness.collectEvidence("run-evidence")).resolves.toEqual({
+    await expect(
+      harness.collectEvidence("run-evidence", {
+        temporaryRuntimeFailureSnapshot: true,
+      }),
+    ).resolves.toEqual({
       lifecycleCompanion: {
         code: 0,
         stderr: "",
@@ -5611,6 +5624,12 @@ exit 0
         stdout:
           "stage=post-uninstall\nLoadState=not-found\nActiveState=inactive\nunitCount=0\nfailedUnitCount=0\n",
       },
+      temporaryRuntimeFailureSnapshot: {
+        code: 0,
+        stderr: "",
+        stdout:
+          "temporary_diagnostic=true\nservice.LoadState=loaded\nservice.ActiveState=failed\nservice.SubState=failed\nservice.Result=exit-code\nservice.ExecMainStatus=1\nservice.ConditionResult=no\nservice.DropInPaths=/run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf\nsocket.LoadState=loaded\nsocket.ActiveState=active\nsocket.SubState=listening\nsocket.Result=success\nsocket.ExecMainStatus=0\nsocket.ConditionResult=no\nsocket.DropInPaths=\npermit.source.path=/run/enoki-probe/runtime-repair-permit\npermit.source.type=regular file\npermit.source.uid=0\npermit.source.gid=0\npermit.source.mode=600\npermit.source.nlink=1\npermit.alias.path=/run/enoki-runtime-repair-permit\npermit.alias.state=absent\njournal=2026-09-14T21:00:00Z runtime exited\n",
+      },
     });
     const inventory = commands.find(({ command }) =>
       command.includes("# enoki-release-e2e:inventory"),
@@ -5622,6 +5641,21 @@ exit 0
     expect(systemd.command).toContain("set -eu");
     expect(systemd.command).toContain("stage=post-uninstall");
     expect(systemd.command).not.toContain("|| true");
+    const runtimeSnapshot = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:temporary-runtime-failure-snapshot",
+      ),
+    );
+    expect(runtimeSnapshot.command).toContain("ConditionResult");
+    expect(runtimeSnapshot.command).toContain("DropInPaths");
+    expect(runtimeSnapshot.command).toContain(
+      "/run/enoki-probe/runtime-repair-permit",
+    );
+    expect(runtimeSnapshot.command).toContain(
+      "/run/enoki-runtime-repair-permit",
+    );
+    expect(runtimeSnapshot.command).toContain("--lines=200");
+    expect(runtimeSnapshot.command).not.toContain("cat --");
     const sudoers = commands.find(({ command }) =>
       command.includes("# enoki-release-e2e:sudoers-evidence"),
     );
