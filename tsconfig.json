@@ -12,6 +12,7 @@
     "oxlint.config.ts",
     "playwright.candidate.config.ts",
     "playwright.config.ts",
+    "scripts/standard-ci-evidence.ts",
     "tests/e2e/**/*.ts"
   ]
 }

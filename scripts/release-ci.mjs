@@ -2,6 +2,12 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 
+import {
+  isSelectedStandardCiRun,
+  isStandardCiEvidence,
+  selectStandardCiRun,
+} from "./standard-ci-evidence.ts";
+
 const commitPattern = /^[0-9a-f]{40}$/;
 
 function parseOptions(tokens) {
@@ -37,13 +43,43 @@ function assertObject(value, description) {
   }
 }
 
+async function select(options) {
+  const allowed = new Set(["--commit", "--output", "--workflow-runs"]);
+  for (const name of options.keys()) {
+    if (!allowed.has(name)) {
+      throw new Error(`unknown option for select: ${name}`);
+    }
+  }
+
+  const commit = required(options, "--commit");
+  if (!commitPattern.test(commit)) {
+    throw new Error("commit must be a full lowercase 40-character object ID");
+  }
+  const runsDocument = await readJson(
+    required(options, "--workflow-runs"),
+    "standard CI workflow runs",
+  );
+  assertObject(runsDocument, "standard CI workflow runs");
+  if (!Array.isArray(runsDocument.workflow_runs)) {
+    throw new Error("standard CI workflow runs must contain workflow_runs");
+  }
+  const run = selectStandardCiRun(runsDocument.workflow_runs, commit);
+  if (!run) {
+    throw new Error(`standard CI has no run for candidate commit ${commit}`);
+  }
+  if (!isSelectedStandardCiRun(run, commit)) {
+    throw new Error(
+      "selected standard CI run is not a successful current attempt",
+    );
+  }
+  await writeFile(
+    required(options, "--output"),
+    `${JSON.stringify(run, null, 2)}\n`,
+  );
+}
+
 async function verify(options) {
-  const allowed = new Set([
-    "--commit",
-    "--jobs",
-    "--output",
-    "--workflow-runs",
-  ]);
+  const allowed = new Set(["--commit", "--jobs", "--output", "--selected-run"]);
   for (const name of options.keys()) {
     if (!allowed.has(name))
       throw new Error(`unknown option for verify: ${name}`);
@@ -54,33 +90,14 @@ async function verify(options) {
     throw new Error("commit must be a full lowercase 40-character object ID");
   }
 
-  const runsDocument = await readJson(
-    required(options, "--workflow-runs"),
-    "standard CI workflow runs",
+  const run = await readJson(
+    required(options, "--selected-run"),
+    "selected standard CI run",
   );
-  assertObject(runsDocument, "standard CI workflow runs");
-  if (!Array.isArray(runsDocument.workflow_runs)) {
-    throw new Error("standard CI workflow runs must contain workflow_runs");
-  }
-  const matchingRuns = runsDocument.workflow_runs.filter(
-    (run) =>
-      run?.event === "push" &&
-      run?.head_branch === "main" &&
-      run?.head_sha === commit,
-  );
-  const run = matchingRuns.sort((left, right) => right.id - left.id)[0];
-  if (!run) {
+  if (!isSelectedStandardCiRun(run, commit)) {
     throw new Error(
-      `standard CI has no push run for candidate commit ${commit}`,
+      "selected standard CI run is not a successful current attempt",
     );
-  }
-  if (run.status !== "completed" || run.conclusion !== "success") {
-    throw new Error(
-      `standard CI run ${run.html_url ?? run.id} is ${run.status}/${run.conclusion}`,
-    );
-  }
-  if (!Number.isSafeInteger(run.id) || run.id < 1 || !run.html_url) {
-    throw new Error("standard CI run identity is malformed");
   }
 
   const jobsDocument = await readJson(
@@ -88,13 +105,13 @@ async function verify(options) {
     "standard CI jobs",
   );
   assertObject(jobsDocument, "standard CI jobs");
-  if (!Array.isArray(jobsDocument.jobs) || jobsDocument.jobs.length === 0) {
+  if (!Array.isArray(jobsDocument.jobs)) {
     throw new Error("standard CI run must contain jobs");
   }
   const jobs = jobsDocument.jobs.map((job) => {
-    if (!job?.name || job.conclusion !== "success") {
+    if (!job?.name) {
       throw new Error(
-        `standard CI job ${job?.name ?? "<unnamed>"} did not succeed`,
+        `standard CI job ${job?.name ?? "<unnamed>"} is malformed`,
       );
     }
     return { conclusion: job.conclusion, name: job.name };
@@ -102,12 +119,17 @@ async function verify(options) {
 
   const evidence = {
     candidateCommit: commit,
+    event: run.event,
     jobs,
     kind: "enoki-standard-ci-evidence",
+    runAttempt: run.run_attempt,
     runId: run.id,
     runUrl: run.html_url,
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
+  if (!isStandardCiEvidence(evidence, commit)) {
+    throw new Error("standard CI evidence is incomplete or invalid");
+  }
   await writeFile(
     required(options, "--output"),
     `${JSON.stringify(evidence, null, 2)}\n`,
@@ -116,8 +138,14 @@ async function verify(options) {
 
 try {
   const [command, ...tokens] = process.argv.slice(2);
-  if (command !== "verify") throw new Error(`unknown command: ${command}`);
-  await verify(parseOptions(tokens));
+  const options = parseOptions(tokens);
+  if (command === "select") {
+    await select(options);
+  } else if (command === "verify") {
+    await verify(options);
+  } else {
+    throw new Error(`unknown command: ${command}`);
+  }
 } catch (error) {
   process.stderr.write(
     `release-ci: ${error instanceof Error ? error.message : String(error)}\n`,

@@ -326,6 +326,30 @@ describe("verify-only release workflow", () => {
       "https://github.com/YKDZ/enoki/actions/runs/12345/artifacts/9000",
     );
 
+    for (const invalidStandardCi of [
+      { ...validSummaryInput.standardCi, schemaVersion: 1 },
+      (({ event: _event, ...evidence }) => evidence)(
+        validSummaryInput.standardCi,
+      ),
+      {
+        ...validSummaryInput.standardCi,
+        candidateCommit: "0".repeat(40),
+      },
+      { ...validSummaryInput.standardCi, event: "repository_dispatch" },
+      { ...validSummaryInput.standardCi, runAttempt: 0 },
+      {
+        ...validSummaryInput.standardCi,
+        jobs: validSummaryInput.standardCi.jobs.slice(1),
+      },
+    ]) {
+      const failedSummary = createReleaseVerificationSummary({
+        ...validSummaryInput,
+        standardCi: invalidStandardCi,
+      });
+      expect(failedSummary.verified).toBe(false);
+      expect(failedSummary.missingIdentities).toContain("standard-ci-evidence");
+    }
+
     const workDir = await mkdtemp(
       path.join(tmpdir(), "enoki-schema4-verification-summary-"),
     );
@@ -2111,11 +2135,33 @@ function trustEpochMigrationCandidateManifest() {
 function standardCiEvidence(candidate) {
   return {
     candidateCommit: candidate.commit,
-    jobs: [{ conclusion: "success", name: "Node checks / Node checks" }],
+    event: "push",
+    jobs: [
+      { conclusion: "success", name: "Node checks / Node checks" },
+      { conclusion: "success", name: "Rust checks / Rust checks" },
+      { conclusion: "success", name: "Hub Docker image / Hub Docker image" },
+      {
+        conclusion: "success",
+        name: "Probe binaries / Probe binary (aarch64-unknown-linux-gnu)",
+      },
+      {
+        conclusion: "success",
+        name: "Probe binaries / Probe binary (aarch64-unknown-linux-musl)",
+      },
+      {
+        conclusion: "success",
+        name: "Probe binaries / Probe binary (x86_64-unknown-linux-gnu)",
+      },
+      {
+        conclusion: "success",
+        name: "Probe binaries / Probe binary (x86_64-unknown-linux-musl)",
+      },
+    ],
     kind: "enoki-standard-ci-evidence",
+    runAttempt: 1,
     runId: 42,
     runUrl: "https://github.com/YKDZ/enoki/actions/runs/42",
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
 }
 
