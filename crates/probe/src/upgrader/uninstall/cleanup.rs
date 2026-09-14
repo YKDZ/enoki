@@ -180,6 +180,7 @@ pub(super) struct ProbeUninstallCleanupPlan<'a> {
     pub(super) install_metadata: &'a TrustedProbeInstallMetadata,
     pub(super) install_metadata_path: &'a Path,
     unbound_repair_stage: Option<(Option<String>, u32)>,
+    state_owner: StateRootOwner<'a>,
 }
 
 /// 在 systemd 或文件系统变更前确定全部本机删除目标。
@@ -190,8 +191,12 @@ pub(super) fn plan_probe_uninstall_cleanup<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    plan.unbound_repair_stage =
-        validate_unbound_installed_bundle_repair_stage(Path::new("/var/lib/enoki-probe"), false)?;
+    plan.state_owner = uninstall_state_owner(install_metadata)?;
+    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage(
+        Path::new("/var/lib/enoki-probe"),
+        false,
+        plan.state_owner,
+    )?;
     validate_owned_bootstrap_assets_for_cleanup_with_repair(
         install_metadata,
         plan.unbound_repair_stage.is_some(),
@@ -205,8 +210,12 @@ pub(super) fn plan_probe_uninstall_recovery<'a>(
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
-    plan.unbound_repair_stage =
-        validate_unbound_installed_bundle_repair_stage(&install_metadata.state_dir, true)?;
+    plan.state_owner = uninstall_state_owner(install_metadata)?;
+    plan.unbound_repair_stage = validate_unbound_installed_bundle_repair_stage(
+        &install_metadata.state_dir,
+        true,
+        plan.state_owner,
+    )?;
     validate_owned_bootstrap_assets_for_recovery_with_repair(
         install_metadata,
         plan.unbound_repair_stage.is_some(),
@@ -294,6 +303,7 @@ pub(super) fn plan_probe_uninstall_paths<'a>(
         install_metadata,
         install_metadata_path,
         unbound_repair_stage: None,
+        state_owner: StateRootOwner::Root,
     })
 }
 
@@ -334,12 +344,14 @@ fn validate_owned_bootstrap_assets_for_recovery_with_repair(
 fn validate_unbound_installed_bundle_repair_stage(
     public_state_dir: &Path,
     retained_uninstall_capsule: bool,
+    owner: StateRootOwner<'_>,
 ) -> Result<Option<(Option<String>, u32)>, ProbeUpgraderRunError> {
     // State root 不存在即可只读证明 intent 不存在。保留的 Uninstall capsule
     // 已授权本次 cleanup；它在同一无删除 effect pair lock 下证明 intent 缺席后，
     // 可以继续收敛残余 root，而不能要求已退休的 identity 重走 Repair loader。
     // 没有 capsule 的首次 Uninstall 对任何非空 root 仍走原严格 loader。
-    let empty_or_absent = trusted_state_root_is_empty_or_absent_under_pair_lock(public_state_dir)?;
+    let empty_or_absent =
+        trusted_state_root_is_empty_or_absent_under_pair_lock(public_state_dir, owner)?;
     let persisted_repair = if empty_or_absent || retained_uninstall_capsule {
         Ok(false)
     } else {
@@ -813,7 +825,7 @@ pub(super) fn remove_uninstall_local_state_with(
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let state_cleanup =
-        prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir, StateRootOwner::Root)?;
+        prepare_trusted_state_root_cleanup(&plan.install_metadata.state_dir, plan.state_owner)?;
     remove(plan.install_metadata_path)?;
     remove(&plan.input.bootstrap_config_path)?;
     clear_prepared_state_root_contents_with(state_cleanup, &mut remove).map(|_| ())
@@ -1052,10 +1064,33 @@ enum TrustedStateRoot {
     Canonical { public: PathBuf, private: PathBuf },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum StateRootOwner<'a> {
     Root,
     BoundServiceOrEmptyShell { user: &'a str, group: &'a str },
+    CapturedService((u32, u32)),
+    RootOrEmptyShell,
+}
+
+fn uninstall_state_owner(
+    metadata: &TrustedProbeInstallMetadata,
+) -> Result<StateRootOwner<'_>, ProbeUpgraderRunError> {
+    if fs::symlink_metadata(&metadata.state_dir).is_ok_and(|state| state.file_type().is_symlink()) {
+        match enoki_probe_bootstrap::secure_file::systemd_probe_state_owner_for_cleanup(
+            &metadata.state_dir,
+            expected_root_owner_for(&metadata.state_dir),
+        ) {
+            Ok(owner) => return Ok(StateRootOwner::CapturedService(owner)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if let Some(owner) =
+        service_identity_owner(&metadata.service_user, &metadata.service_group).owner()
+    {
+        return Ok(StateRootOwner::CapturedService(owner));
+    }
+    Ok(StateRootOwner::RootOrEmptyShell)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1402,6 +1437,18 @@ fn state_root_authority(
                     });
                 Ok(None)
             }
+        }
+        StateRootOwner::CapturedService(service) => {
+            Ok(state_root_owner_tuple_matches(actual, root, Some(service))
+                .then_some(StateRootCleanupAuthority::ContentAuthorized))
+        }
+        StateRootOwner::RootOrEmptyShell => {
+            if actual == root {
+                return Ok(Some(StateRootCleanupAuthority::ContentAuthorized));
+            }
+            Ok((metadata.uid() == metadata.gid()
+                && state_root_is_empty(path).map_err(|error| error.into_io())?)
+            .then_some(StateRootCleanupAuthority::EmptyShellOnly))
         }
         StateRootOwner::BoundServiceOrEmptyShell { user, group } => {
             facts.service_binding = Some((user.to_owned(), group.to_owned()));
@@ -1751,14 +1798,14 @@ pub(super) fn verify_uninstall_local_state_absent(
     ] {
         verify_path_absent(path, code, action)?;
     }
-    verify_uninstall_state_shell_harmless(&plan.install_metadata.state_dir)?;
+    verify_trusted_state_root_empty_or_absent(&plan.install_metadata.state_dir, plan.state_owner)?;
     Ok(())
 }
 
 pub(super) fn verify_uninstall_state_shell_harmless(
     public_state_dir: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
-    match trusted_state_root_layout(public_state_dir, StateRootOwner::Root)? {
+    match trusted_state_root_layout(public_state_dir, StateRootOwner::RootOrEmptyShell)? {
         None => Ok(()),
         Some(admission) => verify_state_root_empty(&admission.layout),
     }
@@ -1769,13 +1816,14 @@ pub(super) fn verify_uninstall_state_shell_harmless(
 /// shell cannot race a newly published Repair intent into the no-intent path.
 fn trusted_state_root_is_empty_or_absent_under_pair_lock(
     public_state_dir: &Path,
+    owner: StateRootOwner<'_>,
 ) -> Result<bool, ProbeUpgraderRunError> {
     let _lock = crate::runtime_failure::acquire_runtime_failure_pair_lock_for_state(
         public_state_dir,
         unsafe { libc::geteuid() },
     )
     .map_err(ProbeUpgraderRunError::Io)?;
-    let layout = trusted_state_root_layout(public_state_dir, StateRootOwner::Root)?;
+    let layout = trusted_state_root_layout(public_state_dir, owner)?;
     match layout {
         None => Ok(true),
         Some(admission) => {
@@ -2306,6 +2354,119 @@ mod tests {
         }
         fs::write(path, b"fixture").expect("write fixture");
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("fixture mode");
+    }
+
+    #[test]
+    fn ordinary_uninstall_clears_canonical_service_owned_state() {
+        for retain_empty_shell in [false, true] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let mut metadata = metadata(temporary.path(), 1);
+            metadata.service_user = "enoki-test-stopped-dynamic-user".to_owned();
+            metadata.service_group = "enoki-test-stopped-dynamic-user".to_owned();
+            let private = temporary.path().join("var/lib/private/enoki-probe");
+            fs::create_dir_all(&private).expect("canonical private state");
+            fs::set_permissions(
+                private.parent().expect("private parent"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .expect("private parent custody");
+            fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).expect("state mode");
+            symlink("private/enoki-probe", &metadata.state_dir).expect("public state projection");
+            for path in [
+                &metadata.identity_path,
+                &metadata.install_path,
+                &metadata.operation_status_path,
+                &metadata.service_unit_path,
+            ] {
+                create_file(path, 0o600);
+            }
+            fs::set_permissions(
+                metadata.identity_path.parent().expect("identity directory"),
+                fs::Permissions::from_mode(0o700),
+            )
+            .expect("identity directory mode");
+            let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+            create_file(&install_metadata_path, 0o600);
+            let input = ProbeUninstallerRunInput {
+                bootstrap_config_path: metadata.identity_path.clone(),
+            };
+            // Map the service account to this fixture's actual owner, distinct from root custody.
+            EXPECTED_CANONICAL_PRIVATE_ROOT_OWNER
+                .with(|owner| owner.set(Some((u32::MAX, u32::MAX))));
+            STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(retain_empty_shell));
+            let result = (|| {
+                let plan =
+                    plan_probe_uninstall_recovery(&input, &metadata, &install_metadata_path)?;
+                let mut systemd = TestSystemd::default();
+                prepare_probe_uninstall_cleanup(&plan, &mut systemd)?;
+                finalize_recoverable_uninstall_cleanup(&plan, &mut systemd)
+            })();
+            STATE_SHELL_RETIRE_FAILURE.with(|failure| failure.set(false));
+            super::verify_uninstall_state_shell_harmless(&metadata.state_dir)
+                .expect("final local state is harmless");
+            EXPECTED_CANONICAL_PRIVATE_ROOT_OWNER.with(|owner| owner.set(None));
+            result.expect("ordinary uninstall clears the currently installed service-owned state");
+            assert_eq!(private.exists(), retain_empty_shell);
+            assert_eq!(
+                fs::symlink_metadata(&metadata.state_dir).is_ok(),
+                retain_empty_shell
+            );
+            assert!(!install_metadata_path.exists());
+            assert!(!metadata.identity_path.exists());
+        }
+    }
+
+    #[test]
+    fn ordinary_uninstall_recovers_canonical_state_after_interrupted_content_removal() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 1);
+        metadata.service_user = "enoki-test-stopped-dynamic-user".to_owned();
+        metadata.service_group = "enoki-test-stopped-dynamic-user".to_owned();
+        let private = temporary.path().join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private).expect("private state");
+        fs::set_permissions(private.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).unwrap();
+        symlink("private/enoki-probe", &metadata.state_dir).unwrap();
+        create_file(&metadata.identity_path, 0o600);
+        fs::set_permissions(
+            metadata.identity_path.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        create_file(&metadata.operation_status_path, 0o600);
+        let install_metadata_path = temporary.path().join("etc/enoki/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        EXPECTED_CANONICAL_PRIVATE_ROOT_OWNER.with(|owner| owner.set(Some((u32::MAX, u32::MAX))));
+        let result = (|| {
+            let plan = plan_probe_uninstall_recovery(&input, &metadata, &install_metadata_path)?;
+            let interrupted = remove_uninstall_local_state_with(&plan, |path| {
+                if path.file_name() == metadata.operation_status_path.file_name() {
+                    return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                        "interrupted content deletion",
+                    )));
+                }
+                crate::upgrader::remove_path_if_exists(path)
+            });
+            assert!(
+                interrupted.is_err(),
+                "actual data retention must not count as completion"
+            );
+            assert!(metadata.operation_status_path.exists());
+            assert!(super::verify_uninstall_state_shell_harmless(&metadata.state_dir).is_err());
+            drop(plan);
+            // Another child deletion may already have completed before the interruption.
+            crate::upgrader::remove_path_if_exists(metadata.identity_path.parent().unwrap())?;
+            // A new plan has no in-memory owner and cannot resolve the stopped DynamicUser.
+            let recovered =
+                plan_probe_uninstall_recovery(&input, &metadata, &install_metadata_path)?;
+            remove_uninstall_local_state_with(&recovered, crate::upgrader::remove_path_if_exists)
+        })();
+        EXPECTED_CANONICAL_PRIVATE_ROOT_OWNER.with(|owner| owner.set(None));
+        result.expect("retained canonical state remains recoverable without NSS");
+        assert!(!private.exists());
     }
 
     #[test]
