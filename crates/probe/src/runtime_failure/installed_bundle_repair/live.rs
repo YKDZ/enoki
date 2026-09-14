@@ -1291,6 +1291,7 @@ mod tests {
         fault: SharedFault,
         state: SharedSystemState,
         fail_on: Option<RuntimeValidation>,
+        delay_response: bool,
     }
 
     impl RuntimeValidator for TestRuntime {
@@ -1308,10 +1309,14 @@ mod tests {
                 let root = tempfile::tempdir().unwrap();
                 let socket = root.path().join("runtime.sock");
                 let listener = UnixListener::bind(&socket).unwrap();
+                let delay_response = self.delay_response;
                 let server = std::thread::spawn(move || {
                     let (mut stream, _) = listener.accept().unwrap();
                     let mut request = Vec::new();
                     stream.read_to_end(&mut request).unwrap();
+                    if delay_response {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
                     stream
                         .write_all(b"secret-runtime-response-sentinel")
                         .unwrap();
@@ -1483,6 +1488,7 @@ mod tests {
                     fault: fault.clone(),
                     state: state.clone(),
                     fail_on: None,
+                    delay_response: false,
                 },
                 state,
                 removed: Rc::new(RefCell::new(0)),
@@ -1997,6 +2003,7 @@ mod tests {
                 "success" => None,
                 _ => panic!("unknown validation test case"),
             };
+            fixture.runtime.delay_response = case == "temporary";
             let result =
                 drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
             if case == "success" {
@@ -2028,11 +2035,11 @@ mod tests {
         for (case, expected) in [
             (
                 "temporary",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms=0 read_events_truncated=false read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=temporary code=probe_repair_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms={elapsed} read_events_truncated=false read_events=0:1:1:ok:{read_elapsed} request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             (
                 "canonical",
-                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms=0 read_events_truncated=false read_events=0:1:1:ok:0 request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
+                "enoki.lifecycle.diagnostic role=companion phase=repair_failure outcome=failed operation=validate_status validation=canonical code=probe_repair_canonical_runtime_validation_failed cause=WindowFailed errno=unknown io_kind=none cadence_ms=1000 sequence_start=1 response_bytes=1 deadline_ms=23000 elapsed_ms={elapsed} read_events_truncated=false read_events=0:1:1:ok:{read_elapsed} request_hex=656e6f6b692e6f62736572766174696f6e2d77696e646f772e76320a00010000000000000001 response_prefix_hex=73 response_replay_ready=true",
             ),
             ("success", ""),
         ] {
@@ -2051,8 +2058,38 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             let stderr = String::from_utf8(output.stderr).unwrap();
-            assert_eq!(stderr.trim_end(), expected, "{case}");
             assert!(!stderr.contains("secret-"));
+            if case == "success" {
+                assert_eq!(stderr.trim_end(), "");
+                continue;
+            }
+            let [terminal_elapsed, read_elapsed] =
+                ["elapsed_ms=", "read_events=0:1:1:ok:"].map(|prefix| {
+                    stderr
+                        .split_once(prefix)
+                        .expect("elapsed field")
+                        .1
+                        .split_once(' ')
+                        .expect("elapsed terminator")
+                        .0
+                        .parse::<u64>()
+                        .expect("elapsed value")
+                });
+            assert!(read_elapsed <= terminal_elapsed, "{case}");
+            assert!(terminal_elapsed <= 23_000, "{case}");
+            let normalized = stderr
+                .trim_end()
+                .replacen(
+                    &format!("elapsed_ms={terminal_elapsed}"),
+                    "elapsed_ms={elapsed}",
+                    1,
+                )
+                .replacen(
+                    &format!("read_events=0:1:1:ok:{read_elapsed}"),
+                    "read_events=0:1:1:ok:{read_elapsed}",
+                    1,
+                );
+            assert_eq!(normalized, expected, "{case}");
         }
     }
 
