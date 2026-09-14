@@ -5,6 +5,7 @@ import {
   isSupportedReleaseTestHostVirtualization,
   isCandidateHostReady,
 } from "./release-e2e-lib.mjs";
+import { isStandardCiEvidence } from "./standard-ci-evidence.ts";
 
 const requiredComponentNames = Object.freeze([
   "inputValidation",
@@ -1906,19 +1907,7 @@ export function createReleaseVerificationSummary({
     };
   });
   const uiOutcome = uiGate?.outcome ?? "missing";
-  const standardCiIsValid =
-    standardCi?.kind === "enoki-standard-ci-evidence" &&
-    standardCi?.schemaVersion === 1 &&
-    standardCi?.candidateCommit === request.commit &&
-    Number.isSafeInteger(standardCi?.runId) &&
-    standardCi.runId > 0 &&
-    typeof standardCi?.runUrl === "string" &&
-    standardCi.runUrl.length > 0 &&
-    Array.isArray(standardCi?.jobs) &&
-    standardCi.jobs.length > 0 &&
-    standardCi.jobs.every(
-      (job) => job?.conclusion === "success" && typeof job?.name === "string",
-    );
+  const standardCiIsValid = isStandardCiEvidence(standardCi, request.commit);
   const verified =
     candidateIsAvailable &&
     sameCandidate(request, candidateManifest.candidate) &&
