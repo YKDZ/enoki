@@ -291,6 +291,39 @@ describe("Trust Epoch release transition", () => {
     ).toEqual(signed.contract);
   });
 
+  it("accepts an expected target asset closure with a different object key order", async () => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
+    const contract = structuredClone(signed.contract);
+    contract.target.assetClosure = contract.target.assetClosure.map(
+      ({ bundleManifestSha256, file, sha256, size, target }) => ({
+        target,
+        file,
+        size,
+        sha256,
+        bundleManifestSha256,
+      }),
+    );
+    const contractBytes = Buffer.from(`${JSON.stringify(contract)}\n`);
+
+    expect(
+      verifyReleaseTransitionContract({
+        authorizationBytes: fixture.createInput.authorizationBytes,
+        authorizationSignature: fixture.createInput.authorizationSignature,
+        contractBytes,
+        contractSignature: sign(
+          "RSA-SHA256",
+          releaseTransitionContractSigningInput(contractBytes),
+          fixture.root.privateKey,
+        ),
+        expected: {
+          ...fixture.expected,
+          targetAssetClosure: signed.contract.target.assetClosure,
+        },
+        rootPublicKeyPem: fixture.root.publicKey,
+      }),
+    ).toEqual(contract);
+  });
+
   it("reports that a different ordinary candidate does not match", async () => {
     const signed = await createReleaseTransitionContract(fixture.createInput);
 
