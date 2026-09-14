@@ -2176,6 +2176,7 @@ async function runFreshInstallUninstallScenario({
   };
   let resources = null;
   let primaryError = null;
+  let installedBundleFailureRepairFailed = false;
   let evidenceWriteError = null;
   let finalEvidence = evidence;
 
@@ -2244,30 +2245,35 @@ async function runFreshInstallUninstallScenario({
       poll,
     });
 
-    evidence.installedBundleFailureRepair =
-      await proveInstalledBundleFailureRepair({
-        expectedBundleVersion: candidateManifest.probeAssetSet.version,
-        host,
-        hostId,
-        identityBefore: initialIdentity,
-        observeReadyHost: async () =>
-          compactHostEvidence(
-            await waitForObservation({
-              code: "installed_bundle_repair_reporting_timeout",
-              label:
-                "Candidate Probe reporting after Installed Bundle Failure Repair",
-              observe: () => hub.getHost(hostId),
-              poll,
-              ready: (value) =>
-                value?.id === hostId &&
-                isCandidateHostReady(
-                  value,
-                  candidateManifest.probeAssetSet.version,
-                ),
-            }),
-          ),
-        runId,
-      });
+    try {
+      evidence.installedBundleFailureRepair =
+        await proveInstalledBundleFailureRepair({
+          expectedBundleVersion: candidateManifest.probeAssetSet.version,
+          host,
+          hostId,
+          identityBefore: initialIdentity,
+          observeReadyHost: async () =>
+            compactHostEvidence(
+              await waitForObservation({
+                code: "installed_bundle_repair_reporting_timeout",
+                label:
+                  "Candidate Probe reporting after Installed Bundle Failure Repair",
+                observe: () => hub.getHost(hostId),
+                poll,
+                ready: (value) =>
+                  value?.id === hostId &&
+                  isCandidateHostReady(
+                    value,
+                    candidateManifest.probeAssetSet.version,
+                  ),
+              }),
+            ),
+          runId,
+        });
+    } catch (error) {
+      installedBundleFailureRepairFailed = true;
+      throw error;
+    }
 
     const repeatedEnrollment = await hub.createEnrollment(newHostTarget);
     assertCreatedEnrollment(repeatedEnrollment, newHostTarget);
@@ -2536,7 +2542,9 @@ async function runFreshInstallUninstallScenario({
     }
     if (resources?.host?.collectEvidence) {
       try {
-        evidence.hostEvidence = await resources.host.collectEvidence(runId);
+        evidence.hostEvidence = await resources.host.collectEvidence(runId, {
+          temporaryRuntimeFailureSnapshot: installedBundleFailureRepairFailed,
+        });
       } catch (error) {
         evidence.hostEvidence = {
           error: serializedError(error, [ownerPassword]),
@@ -4314,17 +4322,29 @@ export function createProbeHostHarness({
       return { clean: true, removedPartialInstallation };
     },
 
-    async collectEvidence(runId) {
+    async collectEvidence(
+      runId,
+      { temporaryRuntimeFailureSnapshot = false } = {},
+    ) {
       assertRunId(runId);
-      const [inventoryResult, lifecycleCompanion, service, journald, sudoers] =
-        await Promise.all([
-          execute(hostInventoryScript(), { root: true }),
-          execute(lifecycleCompanionDiagnosticsScript(), { root: true }),
-          execute(systemdEvidenceScript()),
-          execute(journaldEvidenceScript(), { root: true }),
-          execute(sudoersEvidenceScript(), { root: true }),
-        ]);
-      return {
+      const [
+        inventoryResult,
+        lifecycleCompanion,
+        service,
+        journald,
+        sudoers,
+        temporaryRuntimeFailureSnapshotResult,
+      ] = await Promise.all([
+        execute(hostInventoryScript(), { root: true }),
+        execute(lifecycleCompanionDiagnosticsScript(), { root: true }),
+        execute(systemdEvidenceScript()),
+        execute(journaldEvidenceScript(), { root: true }),
+        execute(sudoersEvidenceScript(), { root: true }),
+        temporaryRuntimeFailureSnapshot
+          ? execute(temporaryRuntimeFailureSnapshotScript(), { root: true })
+          : Promise.resolve(null),
+      ]);
+      const evidence = {
         inventory:
           inventoryResult.code === 0
             ? parseJson(inventoryResult.stdout, "Release Test Host inventory")
@@ -4335,6 +4355,14 @@ export function createProbeHostHarness({
         sudoers: commandEvidence(sudoers),
         systemd: commandEvidence(service),
       };
+      // 临时 Fresh Repair 诊断：仅在该失败发生后、Host cleanup 前保留，
+      // 后续根因修复必须连同调用点和测试一起硬删除。
+      if (temporaryRuntimeFailureSnapshot) {
+        evidence.temporaryRuntimeFailureSnapshot = commandEvidence(
+          temporaryRuntimeFailureSnapshotResult,
+        );
+      }
+      return evidence;
     },
 
     async verifyUninstallCompletion(runId) {
@@ -5007,6 +5035,46 @@ function journaldEvidenceScript() {
   return String.raw`# enoki-release-e2e:journald
 set -eu
 journalctl --unit=enoki-probe.service --no-pager --lines=200 --output=short-iso
+`;
+}
+
+function temporaryRuntimeFailureSnapshotScript() {
+  return String.raw`# enoki-release-e2e:temporary-runtime-failure-snapshot
+set -eu
+runtime_service=enoki-observation-runtime.service
+runtime_socket=enoki-observation-runtime.socket
+capture_unit() {
+  label="$1"
+  unit="$2"
+  for property in LoadState ActiveState SubState Result ExecMainStatus ConditionResult DropInPaths; do
+    value=$(systemctl show "$unit" --no-pager --property="$property" --value 2>/dev/null || printf 'unavailable')
+    printf '%s.%s=%s\n' "$label" "$property" "$value"
+  done
+}
+capture_permit_path() {
+  label="$1"
+  path="$2"
+  printf 'permit.%s.path=%s\n' "$label" "$path"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    printf 'permit.%s.type=%s\n' "$label" "$(stat -c %F -- "$path")"
+    printf 'permit.%s.uid=%s\n' "$label" "$(stat -c %u -- "$path")"
+    printf 'permit.%s.gid=%s\n' "$label" "$(stat -c %g -- "$path")"
+    printf 'permit.%s.mode=%s\n' "$label" "$(stat -c %a -- "$path")"
+    printf 'permit.%s.nlink=%s\n' "$label" "$(stat -c %h -- "$path")"
+  else
+    printf 'permit.%s.state=absent\n' "$label"
+  fi
+}
+printf 'temporary_diagnostic=true\n'
+capture_unit service "$runtime_service"
+capture_unit socket "$runtime_socket"
+capture_permit_path source /run/enoki-probe/runtime-repair-permit
+capture_permit_path alias /run/enoki-runtime-repair-permit
+printf 'journal.begin\n'
+if ! journalctl --unit="$runtime_service" --no-pager --lines=200 --output=short-iso; then
+  printf 'journal unavailable\n'
+fi
+printf 'journal.end\n'
 `;
 }
 
