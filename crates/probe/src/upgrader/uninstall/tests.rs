@@ -1702,6 +1702,11 @@ fn schema_five_uninstall_clears_the_exact_canonical_root_without_following_neste
     let public = fixture.metadata.state_dir.clone();
     let private = temporary.path().join("var/lib/private/enoki-probe");
     fs::create_dir_all(private.parent().expect("private parent")).expect("private parent");
+    fs::set_permissions(
+        private.parent().expect("private parent"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("systemd private parent custody");
     fs::rename(&public, &private).expect("move trusted state to canonical private root");
     symlink("private/enoki-probe", &public).expect("exact canonical public link");
     let outside = temporary.path().join("outside-state");

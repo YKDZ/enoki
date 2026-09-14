@@ -534,6 +534,27 @@ impl SystemdProbeStateProjection {
     }
 }
 
+/// 复用既有 root finalizer 投影，供卸载在停止 DynamicUser 前取得并在恢复时重建 owner。
+pub fn systemd_probe_state_owner_for_cleanup(
+    state_directory: &Path,
+    authority_owner: (u32, u32),
+) -> io::Result<(u32, u32)> {
+    if (unsafe { libc::geteuid() }, unsafe { libc::getegid() }) != authority_owner {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "systemd StateDirectory finalizer authority 不匹配",
+        ));
+    }
+    // 卸载恢复时 identity child 可能已删除；状态投影的 root 保管证明仍然有效。
+    open_systemd_probe_state_directory(
+        state_directory,
+        authority_owner,
+        None,
+        SystemdProbeStateView::HostJournal,
+    )
+    .map(|(_, owner)| owner)
+}
+
 pub(crate) fn open_systemd_probe_state_projection_for_finalization(
     state_directory: &Path,
     authority_owner: (u32, u32),
@@ -728,6 +749,23 @@ fn open_systemd_probe_state_projection(
     expected_service_owner: Option<(u32, u32)>,
     view: SystemdProbeStateView,
 ) -> io::Result<SystemdProbeStateProjection> {
+    let (state, service_owner) =
+        open_systemd_probe_state_directory(path, authority_owner, expected_service_owner, view)?;
+    let identity = state.open_child(OsStr::new("identity"))?;
+    verify_owned_directory(identity.raw(), 0o700, service_owner, 2)?;
+    Ok(SystemdProbeStateProjection {
+        state,
+        identity,
+        owner: service_owner,
+    })
+}
+
+fn open_systemd_probe_state_directory(
+    path: &Path,
+    authority_owner: (u32, u32),
+    expected_service_owner: Option<(u32, u32)>,
+    view: SystemdProbeStateView,
+) -> io::Result<(DirectoryFd, (u32, u32))> {
     let (public_parent, public_name) = open_parent(path)?;
     verify_owned_directory(public_parent.raw(), 0o755, authority_owner, 1)?;
     let public = stat_at(public_parent.raw(), &public_name)?;
@@ -773,8 +811,6 @@ fn open_systemd_probe_state_projection(
         ));
     }
     verify_owned_directory(state.raw(), 0o750, service_owner, 2)?;
-    let identity = state.open_child(OsStr::new("identity"))?;
-    verify_owned_directory(identity.raw(), 0o700, service_owner, 2)?;
     let followed = stat_following_at(public_parent.raw(), &public_name)?;
     let opened = stat_fd(state.raw())?;
     if followed.st_dev != opened.st_dev || followed.st_ino != opened.st_ino {
@@ -783,11 +819,7 @@ fn open_systemd_probe_state_projection(
             "systemd StateDirectory 在打开期间发生变化",
         ));
     }
-    Ok(SystemdProbeStateProjection {
-        state,
-        identity,
-        owner: service_owner,
-    })
+    Ok((state, service_owner))
 }
 
 #[cfg(any(test, feature = "deterministic-test-seams"))]
