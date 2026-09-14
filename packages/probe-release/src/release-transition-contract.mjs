@@ -7,6 +7,7 @@ import {
 } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
 import {
@@ -349,9 +350,7 @@ function matchesExpectedContract(contract, expected) {
   return comparisons.every(([name, actual]) => {
     if (expected[name] === undefined) return true;
     if (actual === undefined) return false;
-    return typeof actual === "object"
-      ? JSON.stringify(expected[name]) === JSON.stringify(actual)
-      : expected[name] === actual;
+    return isDeepStrictEqual(expected[name], actual);
   });
 }
 
