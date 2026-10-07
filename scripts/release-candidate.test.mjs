@@ -1132,18 +1132,41 @@ with open(os.devnull, "rb") as input_stream:
       },
       /candidate does not match/,
     ],
+    [
+      "an Asset Set manifest version that is a single-element array",
+      (contract) => {
+        contract.target.version = "1.2.3";
+      },
+      /candidate does not match/,
+      async ({ privateKey, probeAssetSetDir }) => {
+        const manifestPath = path.join(probeAssetSetDir, "manifest.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        manifest.version = ["1.2.3"];
+        await writeFile(
+          manifestPath,
+          Buffer.from(`${JSON.stringify(manifest)}\n`),
+        );
+        await writeFile(
+          path.join(probeAssetSetDir, "manifest.json.sig"),
+          signBytes("RSA-SHA256", await readFile(manifestPath), privateKey),
+        );
+      },
+    ],
   ])(
     "keeps rejecting an ordinary transition contract with %s",
-    async (_label, mutate, expected) => {
+    async (_label, mutate, expected, mutateManifest) => {
       const workDir = await mkdtemp(
         path.join(tmpdir(), "enoki-candidate-transition-expectation-"),
       );
       try {
-        const { outputDir, root } = await createProbeAssetSetFixture(workDir);
+        const { outputDir, privateKey, root } =
+          await createProbeAssetSetFixture(workDir);
         await writeOrdinaryTransitionContract({
           candidateCommit: checkedOutCommit,
           mutate,
+          mutateManifest,
           probeAssetSetDir: outputDir,
+          privateKey,
           root,
         });
 
@@ -2742,9 +2765,12 @@ async function createCandidateFixture(
 async function writeOrdinaryTransitionContract({
   candidateCommit,
   mutate,
+  mutateManifest,
   probeAssetSetDir,
+  privateKey,
   root,
 }) {
+  await mutateManifest?.({ privateKey, probeAssetSetDir });
   const manifestBytes = await readFile(
     path.join(probeAssetSetDir, "manifest.json"),
   );
