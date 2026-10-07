@@ -18,6 +18,9 @@ use enoki_probe_bootstrap::replacement::{
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
+use std::cell::Cell;
+
+#[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
     input: &ProbeUninstallerRunInput,
     install_metadata: &TrustedProbeInstallMetadata,
@@ -564,9 +567,86 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     remove_probe_bootstrap_state(plan)?;
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
-    remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
-    remove_empty_parent_dir(&plan.input.bootstrap_config_path)?;
+    remove_uninstall_local_state_with(plan, |path| {
+        if path == plan.install_metadata.state_dir {
+            retire_uninstall_state_root(path)
+        } else {
+            remove_path_if_exists(path)
+        }
+    })?;
+    remove_empty_parent_dir(&plan.input.bootstrap_config_path);
     verify_uninstall_residue_absent(plan, systemd)
+}
+
+/// 尽力退休可信 state 根。只有删除失败且内容已清空、只剩本安装的 root 拥有空根时，
+/// 才按 ADR-0098 保留无害空壳；否则如实上抛原始删除错误，不吞掉实际数据失败。
+fn retire_uninstall_state_root(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let removal_error = match remove_state_root(path) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if state_root_is_retired(path)? {
+        Ok(())
+    } else {
+        Err(removal_error)
+    }
+}
+
+fn remove_state_root(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    #[cfg(test)]
+    if let Some(fault) = STATE_ROOT_REMOVAL_FAULT.with(Cell::get) {
+        if matches!(fault, StateRootRemovalFault::ContentsCleared) {
+            clear_state_root_contents(path)?;
+        }
+        return Err(ProbeUpgraderRunError::Io(
+            std::io::Error::from_raw_os_error(libc::EPERM),
+        ));
+    }
+    remove_path_if_exists(path)
+}
+
+/// state 根已退休：根不存在，或已证明是不跟随链接、root 拥有且枚举后没有任何 child 的空目录。
+/// 任何 child（含在用锁文件）或不可确认的归属与形态都不算退休。
+pub(super) fn state_root_is_retired(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
+    let entry = match fs::symlink_metadata(path) {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
+    };
+    if entry.file_type().is_symlink() || !entry.is_dir() || entry.uid() != 0 {
+        return Ok(false);
+    }
+    fs::read_dir(path)
+        .map_err(ProbeUpgraderRunError::Io)
+        .map(|mut children| children.next().is_none())
+}
+
+#[cfg(test)]
+fn clear_state_root_contents(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
+        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
+        remove_path_if_exists(&entry.path())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum StateRootRemovalFault {
+    /// 实际数据已清空，只剩空壳无法删除。
+    ContentsCleared,
+    /// 实际安装数据仍在且删除失败。
+    ContentsRetained,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STATE_ROOT_REMOVAL_FAULT: Cell<Option<StateRootRemovalFault>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn inject_state_root_removal_fault(fault: Option<StateRootRemovalFault>) {
+    STATE_ROOT_REMOVAL_FAULT.with(|injected| injected.set(fault));
 }
 
 #[cfg(test)]
@@ -624,7 +704,7 @@ pub(super) fn verify_uninstall_residue_absent(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
     verify_common_cleanup_residue_absent(plan, systemd)?;
-    verify_uninstall_local_state_absent(plan)?;
+    verify_uninstall_local_state_retired(plan)?;
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
         verify_path_absent(
             path,
@@ -662,7 +742,7 @@ pub(super) fn verify_replacement_residue_absent(
     verify_lifecycle_companion_binary_absent(plan)
 }
 
-pub(super) fn verify_uninstall_local_state_absent(
+pub(super) fn verify_uninstall_local_state_retired(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     for (path, code, action) in [
@@ -681,15 +761,21 @@ pub(super) fn verify_uninstall_local_state_absent(
             "probe_uninstall_metadata_residue",
             "verifying install metadata is absent",
         ),
-        (
-            plan.install_metadata.state_dir.as_path(),
-            "probe_uninstall_state_residue",
-            "verifying Probe state is absent",
-        ),
     ] {
         verify_path_absent(path, code, action)?;
     }
-    Ok(())
+    verify_state_root_retired(&plan.install_metadata.state_dir)
+}
+
+fn verify_state_root_retired(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    if state_root_is_retired(path)? {
+        return Ok(());
+    }
+    verify_path_absent(
+        path,
+        "probe_uninstall_state_residue",
+        "verifying Probe state is retired",
+    )
 }
 
 pub(super) fn verify_lifecycle_companion_binary_absent(

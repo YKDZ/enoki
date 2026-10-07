@@ -28,6 +28,7 @@ pub(super) use cleanup::commit_replacement_and_cleanup_install_with_systemd;
 use cleanup::{
     ProbeUninstallCleanupPlan, finalize_recoverable_uninstall_cleanup,
     plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
+    state_root_is_retired,
 };
 #[cfg(test)]
 mod tests;
@@ -60,7 +61,7 @@ struct CompanionBinaryFacts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PostCommitSelfFinalizeFacts {
     install_metadata_absent: bool,
-    install_state_absent: bool,
+    install_state_retired: bool,
     companion_binary: CompanionBinaryFacts,
 }
 
@@ -528,11 +529,11 @@ fn read_post_commit_self_finalize_facts(
     companion_binary_path: &Path,
 ) -> Result<PostCommitSelfFinalizeFacts, ProbeUpgraderRunError> {
     let install_metadata_absent = path_absence_fact(install_metadata_path)?;
-    let install_state_absent = path_absence_fact(install_state_dir)?;
+    let install_state_retired = state_root_is_retired(install_state_dir)?;
     let binary = fs::symlink_metadata(companion_binary_path).map_err(ProbeUpgraderRunError::Io)?;
     Ok(PostCommitSelfFinalizeFacts {
         install_metadata_absent,
-        install_state_absent,
+        install_state_retired,
         companion_binary: CompanionBinaryFacts {
             regular_file: binary.file_type().is_file(),
             link_count: binary.nlink(),
@@ -554,7 +555,7 @@ fn post_commit_self_finalize_policy(
     facts: PostCommitSelfFinalizeFacts,
 ) -> Result<ResumeDecision, ()> {
     (facts.install_metadata_absent
-        && facts.install_state_absent
+        && facts.install_state_retired
         && facts.companion_binary.regular_file
         && facts.companion_binary.link_count == 1
         && facts.companion_binary.owner_uid == 0

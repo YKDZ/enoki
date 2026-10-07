@@ -2695,26 +2695,16 @@ fn verify_path_absent(
     }
 }
 
-fn remove_empty_parent_dir(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+/// 父目录是共享目录且不属于卸载清单；尽力移除，任何文件系统结果都不阻断卸载完成。
+fn remove_empty_parent_dir(path: &Path) {
     let Some(parent) = path.parent() else {
-        return Ok(());
+        return;
     };
     if parent == Path::new("/") {
-        return Ok(());
+        return;
     }
 
-    match fs::remove_dir(parent) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-            ) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
-    }
+    let _ = fs::remove_dir(parent);
 }
 
 fn ensure_absolute_path(path: &Path) -> Result<(), ProbeUpgraderRunError> {

@@ -1,3 +1,4 @@
+use super::cleanup::{StateRootRemovalFault, inject_state_root_removal_fault};
 use super::{
     CompanionBinaryFacts, PostCommitSelfFinalizeFacts, ResumeDecision, UninstallCapsulePhase,
     adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
@@ -17,7 +18,7 @@ use enoki_probe_bootstrap::lifecycle::{LifecycleRequest, LifecycleResponse};
 use std::{
     collections::HashMap,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -334,7 +335,7 @@ fn lifecycle_commit_deletes_only_the_capsule_before_process_self_finalization() 
 fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
     let trusted = PostCommitSelfFinalizeFacts {
         install_metadata_absent: true,
-        install_state_absent: true,
+        install_state_retired: true,
         companion_binary: CompanionBinaryFacts {
             regular_file: true,
             link_count: 1,
@@ -353,7 +354,7 @@ fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
             ..trusted
         },
         PostCommitSelfFinalizeFacts {
-            install_state_absent: false,
+            install_state_retired: false,
             ..trusted
         },
         PostCommitSelfFinalizeFacts {
@@ -1368,4 +1369,276 @@ fn hub_uninstall_adapter_rejects_bootstrap_hub_url_mismatch_before_token_validat
     assert_eq!(transport.url, "");
     assert_eq!(transport.status_url, "");
     assert!(transport.downloads.is_empty());
+}
+
+fn assert_state_shell_retained(state_dir: &Path) {
+    let shell = fs::symlink_metadata(state_dir).expect("harmless state shell");
+    assert!(shell.is_dir() && !shell.file_type().is_symlink());
+    assert_eq!(
+        fs::read_dir(state_dir)
+            .expect("enumerate state shell")
+            .count(),
+        0,
+        "retained root must hold no child"
+    );
+}
+
+#[test]
+fn production_uninstall_entries_complete_around_a_harmless_empty_state_shell() {
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    inject_state_root_removal_fault(Some(StateRootRemovalFault::ContentsCleared));
+
+    let local_temporary = tempfile::tempdir().expect("local temporary directory");
+    let local_fixture = uninstall_coordinator_fixture(local_temporary.path());
+    let local_capsule =
+        uninstall_capsule_path(&local_fixture.metadata_path).expect("local capsule");
+    let local_request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+    let mut local_transport = RecordingValidationTransport::default();
+    let mut local_systemd = RecordingSystemdRunner::default();
+    let local = run_uninstall_lifecycle_adapter(
+        &local_request,
+        &local_fixture.metadata,
+        &identity,
+        &local_fixture.metadata_path,
+        &mut local_transport,
+        &mut local_systemd,
+    );
+
+    assert_eq!(local, LifecycleResponse::succeeded());
+    assert!(local_transport.url.is_empty());
+    assert!(local_transport.status_url.is_empty());
+    assert_state_shell_retained(&local_fixture.metadata.state_dir);
+    for path in [
+        &local_fixture.metadata_path,
+        &local_fixture.identity_path,
+        &local_capsule,
+    ] {
+        assert!(
+            !path.exists(),
+            "necessary resource residue: {}",
+            path.display()
+        );
+    }
+
+    let hub_temporary = tempfile::tempdir().expect("hub temporary directory");
+    let hub_fixture = uninstall_coordinator_fixture(hub_temporary.path());
+    let hub_capsule = uninstall_capsule_path(&hub_fixture.metadata_path).expect("hub capsule");
+    let hub_request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        "operation-token",
+        &"b".repeat(64),
+        &"c".repeat(64),
+        "1.2.3",
+    )
+    .expect("bound Hub uninstall request");
+    let mut hub_transport = RecordingValidationTransport::default();
+    let mut hub_systemd = RecordingSystemdRunner::default();
+    let hub = run_uninstall_lifecycle_adapter(
+        &hub_request,
+        &hub_fixture.metadata,
+        &identity,
+        &hub_fixture.metadata_path,
+        &mut hub_transport,
+        &mut hub_systemd,
+    );
+    inject_state_root_removal_fault(None);
+
+    assert_eq!(hub, LifecycleResponse::succeeded());
+    assert!(
+        hub_transport.url.contains("operation_42"),
+        "Hub authority is still validated"
+    );
+    assert!(
+        hub_transport
+            .status_body
+            .contains("\"status\":\"succeeded\"")
+    );
+    assert_state_shell_retained(&hub_fixture.metadata.state_dir);
+    for path in [
+        &hub_fixture.metadata_path,
+        &hub_fixture.identity_path,
+        &hub_capsule,
+    ] {
+        assert!(
+            !path.exists(),
+            "necessary resource residue: {}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        hub_systemd.calls, local_systemd.calls,
+        "两个授权入口共享同一必要资源退休边界"
+    );
+}
+
+#[test]
+fn hub_uninstall_success_does_not_mask_a_state_root_that_still_holds_install_data() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    let capsule_path = uninstall_capsule_path(&fixture.metadata_path).expect("capsule path");
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        "operation-token",
+        &"b".repeat(64),
+        &"c".repeat(64),
+        "1.2.3",
+    )
+    .expect("bound Hub uninstall request");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    inject_state_root_removal_fault(Some(StateRootRemovalFault::ContentsRetained));
+    let response = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    );
+    inject_state_root_removal_fault(None);
+
+    assert_eq!(response, LifecycleResponse::recovery_pending());
+    assert!(
+        transport.status_body.contains("\"status\":\"succeeded\""),
+        "Hub 已被上报成功，但本机退休未成立"
+    );
+    assert!(capsule_path.exists(), "未完成必须保留精确恢复事实");
+    assert!(
+        fs::read_dir(&fixture.metadata.state_dir)
+            .expect("enumerate state root")
+            .count()
+            > 0,
+        "无法证明无害的根内容不被吞掉"
+    );
+}
+
+#[test]
+fn a_proven_harmless_state_shell_does_not_keep_recovery_pending_forever() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let fixture = uninstall_coordinator_fixture(temporary.path());
+    let capsule_path = uninstall_capsule_path(&fixture.metadata_path).expect("capsule path");
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        "operation-token",
+        &"b".repeat(64),
+        &"c".repeat(64),
+        "1.2.3",
+    )
+    .expect("bound Hub uninstall request");
+    let mut systemd = RecordingSystemdRunner::default();
+    let mut interrupted_transport = RecordingValidationTransport {
+        status_failure: true,
+        ..RecordingValidationTransport::default()
+    };
+    inject_state_root_removal_fault(Some(StateRootRemovalFault::ContentsCleared));
+    let interrupted = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut interrupted_transport,
+        &mut systemd,
+    );
+
+    assert_eq!(
+        interrupted,
+        LifecycleResponse::failed("probe_uninstall_failed")
+    );
+    assert!(capsule_path.exists(), "中断保留既有恢复事实");
+
+    let mut retry_transport = RecordingValidationTransport::default();
+    let retry = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut retry_transport,
+        &mut systemd,
+    );
+    inject_state_root_removal_fault(None);
+
+    assert_eq!(retry, LifecycleResponse::succeeded());
+    assert!(!capsule_path.exists());
+    assert_state_shell_retained(&fixture.metadata.state_dir);
+}
+
+#[test]
+fn committed_resume_accepts_a_retained_shell_and_refuses_unproven_state_roots() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let metadata_path = root.join("etc/enoki/probe-install.toml");
+    let state_dir = root.join("var/lib/enoki-probe");
+    let binary = root.join("usr/local/bin/enoki-probe-lifecycle-companion");
+    fs::create_dir_all(&state_dir).expect("state shell");
+    fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary parent directory");
+    fs::write(&binary, "companion").expect("companion binary");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("companion mode");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+
+    assert_eq!(
+        resume_lifecycle_companion_at(
+            &metadata_path,
+            &state_dir,
+            &binary,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::succeeded()
+    );
+    assert!(transport.url.is_empty());
+    assert!(systemd.calls.is_empty());
+
+    let data_child = state_dir.join("audit");
+    fs::create_dir_all(&data_child).expect("retained install data");
+    assert_eq!(
+        resume_lifecycle_companion_at(
+            &metadata_path,
+            &state_dir,
+            &binary,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(data_child.exists(), "只读入口不删除未确认对象");
+    fs::remove_dir(&data_child).expect("remove data child");
+
+    fs::remove_dir(&state_dir).expect("remove empty shell");
+    let external_root = root.join("var/lib/private/enoki-probe");
+    fs::create_dir_all(&external_root).expect("external root");
+    fs::write(external_root.join("payload"), "install data").expect("external payload");
+    symlink(Path::new("../../private/enoki-probe"), &state_dir).expect("state root symlink");
+    assert_eq!(
+        resume_lifecycle_companion_at(
+            &metadata_path,
+            &state_dir,
+            &binary,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(state_dir.is_symlink());
+    assert!(
+        external_root.join("payload").exists(),
+        "归属不可确认的 symlink 不被跟随删除"
+    );
+    assert!(systemd.calls.is_empty());
 }
