@@ -88,6 +88,7 @@ export async function writeSignedProbeAssetSet(
     trustEpoch?.contract ??
     createGenericReleaseTransitionContractFixture({
       authority,
+      candidateCommit: "a".repeat(40),
       manifest,
       sourceVersion: input.sourceVersion,
       transition: input.transition,

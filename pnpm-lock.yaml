@@ -223,6 +223,9 @@ importers:
       '@enoki/api-client':
         specifier: workspace:*
         version: file:packages/api-client(typescript@6.0.3)
+      '@enoki/probe-release':
+        specifier: workspace:*
+        version: file:packages/probe-release
       '@enoki/proto':
         specifier: workspace:*
         version: file:packages/proto
@@ -248,9 +251,6 @@ importers:
         specifier: ^8.21.0
         version: 8.21.1
     devDependencies:
-      '@enoki/probe-release':
-        specifier: workspace:*
-        version: file:packages/probe-release
       '@tsconfig/node24':
         specifier: ^24.0.4
         version: 24.0.4

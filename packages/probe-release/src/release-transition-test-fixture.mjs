@@ -95,6 +95,7 @@ export async function createSignedLegacyProbeAssetSetFixture({
 
 export function createGenericReleaseTransitionContractFixture({
   authority,
+  candidateCommit,
   manifest,
   sourceVersion,
   transition,
@@ -109,6 +110,7 @@ export function createGenericReleaseTransitionContractFixture({
   );
   const bytes = Buffer.from(
     `${JSON.stringify({
+      candidateCommit,
       distribution: "enoki",
       kind: "enoki-release-transition-contract",
       rootKeyId: sha256(rootPublicKey),
