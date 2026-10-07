@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import { standardCiJobNames } from "./release-ci-evidence.ts";
-import { createProbeHostHarness } from "./release-e2e-lib.mjs";
+import { createProbeHostHarness } from "./release-e2e-orchestration.ts";
 import {
   createMatrixGateResult as createMatrixGateResultFromManifest,
   createReleaseVerificationSummary,

@@ -27,7 +27,7 @@ import {
   createSshReleaseInfrastructureAdapter,
   parseReleaseE2ECommandLine,
   writeRunManifest,
-} from "./release-e2e-adapters.mjs";
+} from "./release-e2e-environment.ts";
 import {
   createHubLifecycleClient,
   createProbeHostHarness,
@@ -37,7 +37,7 @@ import {
   runReleaseE2EScenario,
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
-} from "./release-e2e-lib.mjs";
+} from "./release-e2e-orchestration.ts";
 import {
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
@@ -5849,7 +5849,7 @@ describe("Release E2E command", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-release-run-"));
     const evidenceDir = path.join(root, "evidence");
     const matrixPath = path.join(root, "release-e2e-matrix.json");
-    const script = fileURLToPath(new URL("./release-e2e.mjs", import.meta.url));
+    const script = fileURLToPath(new URL("./release-e2e.ts", import.meta.url));
     await writeFile(matrixPath, '{"schemaVersion":999}', "utf8");
     try {
       await expect(
@@ -5902,7 +5902,7 @@ describe("Release E2E command", () => {
 
   it("creates no artifacts when candidate verification or the Host adapter fails preflight", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-release-run-"));
-    const script = fileURLToPath(new URL("./release-e2e.mjs", import.meta.url));
+    const script = fileURLToPath(new URL("./release-e2e.ts", import.meta.url));
     const matrixPath = fileURLToPath(
       new URL("./release-e2e-matrix.json", import.meta.url),
     );

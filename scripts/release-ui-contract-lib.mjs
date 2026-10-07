@@ -6,7 +6,7 @@ import path from "node:path";
 import {
   createDockerHubController,
   loadValidatedCandidate,
-} from "./release-e2e-adapters.mjs";
+} from "./release-e2e-environment.ts";
 
 const optionDefinitions = Object.freeze({
   "--candidate-manifest": { required: true },

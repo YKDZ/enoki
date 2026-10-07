@@ -49,8 +49,8 @@ import {
 import {
   loadValidatedCandidate,
   verifyActiveHubBootstrapRecipeProvenance,
-} from "./release-e2e-adapters.mjs";
-import { createProbeHostHarness } from "./release-e2e-lib.mjs";
+} from "./release-e2e-environment.ts";
+import { createProbeHostHarness } from "./release-e2e-orchestration.ts";
 
 const execFileAsync = promisify(execFile);
 const candidateCli = "scripts/release-candidate.mjs";

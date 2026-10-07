@@ -2,12 +2,15 @@ import { createHash } from "node:crypto";
 
 import { probeTargets } from "@enoki/probe-release";
 
-import { validateReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
+import { validateReleaseCatalogSnapshot } from "./release-baseline-verification.ts";
+import type { ReleaseCatalogSnapshot } from "./release-baseline-verification.ts";
+import type { CanonicalReportEvidence } from "./release-canonical-report-evidence.ts";
 import {
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
   isPortableMetricSample,
 } from "./release-evidence-judgments.ts";
+import type { PortableMetricSample } from "./release-evidence-judgments.ts";
 import {
   assertEnrollmentInstallContract,
   assertExactObjectKeys,
@@ -24,12 +27,421 @@ import {
   renderReleaseE2EResourceFingerprint,
   serializedError,
 } from "./release-host-harness.ts";
+import type {
+  CommandEvidence,
+  Enrollment,
+  ProbeOperation,
+  ProbeOperationExpectation,
+  ProbeOperationState,
+  SerializedError,
+} from "./release-host-harness.ts";
 import { proveInstalledBundleFailureRepair } from "./release-installed-bundle-failure-repair.ts";
-import { isPositiveSafeInteger } from "./release-json-guards.ts";
+import {
+  isPositiveSafeInteger,
+  isSafeInteger,
+  isUnknownArray,
+  isUnknownRecord,
+  objectView,
+  regexInput,
+} from "./release-json-guards.ts";
+import type { UnknownRecord } from "./release-json-guards.ts";
 
 export { createProbeHostHarness, renderReleaseE2EResourceFingerprint };
 
-const terminalProbeOperationStates = new Set([
+type ProbeHost = ReturnType<typeof createProbeHostHarness>;
+type HubLifecycleClient = ReturnType<typeof createHubLifecycleClient>;
+type ReleaseTestHostEvidence = Awaited<
+  ReturnType<ProbeHost["assertReleaseTestHost"]>
+>;
+
+type SleepFunction = (milliseconds: number) => Promise<void>;
+
+type ReleaseScenarioTiming = {
+  canonicalReportTimeoutMs?: number;
+  intervalMs?: number;
+  offlineTimeoutMs?: number;
+  sleep?: SleepFunction;
+  timeoutMs?: number;
+};
+
+type PollTiming = {
+  intervalMs: number;
+  sleep: SleepFunction;
+  timeoutMs: number;
+};
+
+type EvidenceSink = {
+  write(evidence: unknown): unknown;
+};
+
+type CandidateFileEntry = { file: string; sha256: string; size: number };
+type LegacyCandidateFileEntry = { name: string; sha256: string; size: number };
+
+type BaselineHubDescriptor = {
+  archive: string;
+  archiveSha256: string;
+  digest: string;
+  image: string;
+  imageDigest: string;
+  mediaType: string;
+  platform: { architecture: string; os: string };
+  size: number;
+  sourceManifest: string;
+  sourceManifestSha256: string;
+  sourceManifestSize: number;
+};
+
+type BaselineGithubReleaseDescriptor = {
+  id: number;
+  peeledCommitSha: string;
+  repository: string;
+  tagRefSha: string;
+  targetCommitish: string;
+};
+
+type BaselineSigningIdentityDescriptor = {
+  algorithm: string;
+  publicKeyFile: string;
+  publicKeySha256: string;
+};
+
+type OrdinaryReleaseBaselineDescriptor = {
+  catalogSnapshot: ReleaseCatalogSnapshot;
+  githubRelease: BaselineGithubReleaseDescriptor;
+  hub: BaselineHubDescriptor;
+  kind: "enoki-release-baseline";
+  probeAssetSet: {
+    directory: string;
+    files: CandidateFileEntry[];
+    signingIdentity: BaselineSigningIdentityDescriptor;
+    trustRoot: { publicKeySha256: string };
+    version: string;
+  };
+  schemaVersion: number;
+  tag: string;
+};
+
+type MigrationReleaseBaselineDescriptor = {
+  authorization: {
+    file: string;
+    legacyReleaseSha256: string;
+    sha256: string;
+    signatureFile: string;
+    signatureSha256: string;
+  };
+  catalogSnapshot: ReleaseCatalogSnapshot;
+  githubRelease: BaselineGithubReleaseDescriptor;
+  hub: BaselineHubDescriptor;
+  kind: "enoki-trust-epoch-migration-baseline";
+  legacyProbeAssets: { directory: string; files: LegacyCandidateFileEntry[] };
+  schemaVersion: number;
+  tag: string;
+  transition: string;
+};
+
+type ReleaseBaselineDescriptor =
+  | OrdinaryReleaseBaselineDescriptor
+  | MigrationReleaseBaselineDescriptor;
+
+type CandidateManifestHubDescriptor = {
+  archive: string;
+  archiveSha256: string;
+  digest: string;
+  embeddedProbeVersion: string;
+  size: number;
+};
+
+type BootstrapRecipeDescriptor = {
+  bundleVersion: string;
+  distribution: string;
+  file: string;
+  kind: string;
+  recordFile: string;
+  recordSha256: string;
+  recordSize: number;
+  rootFingerprint: string;
+  schemaVersion: number;
+  sha256: string;
+  size: number;
+  targets: unknown;
+  version: string;
+};
+
+export type ReleaseE2ECandidateManifest = {
+  bootstrapRecipe: BootstrapRecipeDescriptor;
+  candidate: { commit: string; version: string };
+  hub: CandidateManifestHubDescriptor;
+  kind: string;
+  probeAssetSet: {
+    directory: string;
+    files: CandidateFileEntry[];
+    signingIdentity: BaselineSigningIdentityDescriptor;
+    version: string;
+  };
+  releaseBaseline: ReleaseBaselineDescriptor;
+  schemaVersion: number;
+};
+
+type HubHostProfile = {
+  architecture: string;
+  collectorCapabilities?: unknown;
+  cpuCacheL3Bytes?: number | null;
+  cpuCount?: number;
+  cpuModel?: string | null;
+  cpuPhysicalCount?: number | null;
+  cpuSocketCount?: number | null;
+  filesystems: {
+    availableBytes?: number;
+    filesystemType: string;
+    mountPoint: string;
+    totalBytes: number;
+  }[];
+  hostname: string;
+  kernel: string;
+  memoryTotalBytes: number;
+  networkInterfaces: { addresses?: string[]; name: string }[];
+  os: string;
+  probeVersion: string;
+};
+
+type HubHostSummary = {
+  hostMetadata?: UnknownRecord;
+  hostProfile: HubHostProfile;
+  id: number;
+  probeUpgradeStatus?: unknown;
+  reportedProbeConfigurationVersion?: string | null;
+  status?: string;
+  warnings?: { code?: string }[];
+};
+
+type HubMetricsWindow = "10m" | "1h" | "1m" | "24h" | "3d" | "6h" | "7d";
+
+type HubApiErrorDetails = {
+  body: unknown;
+  method: string;
+  pathname: string;
+  response: Response;
+};
+
+type HubEnrollmentTarget = {
+  hostId?: number;
+  kind: string;
+};
+
+type HubEnrollmentStatus =
+  | "expired"
+  | "pending"
+  | "ready"
+  | "rejected"
+  | "verifying";
+
+type HubEnrollmentEvidence = {
+  bootstrapRecipe?: unknown;
+  enrollmentId?: string;
+  enrollmentToken?: string;
+  hostId?: number | null;
+  hubUrl?: string;
+  installCommand?: string;
+  rejection?: { code: string; message: string | null } | null;
+  status?: HubEnrollmentStatus;
+  target?: HubEnrollmentTarget;
+};
+
+type HubDeletedHostEvidence = {
+  deletedAtMs: number;
+  id: number;
+};
+
+type HubProbeConfiguration = {
+  configuration: {
+    enabledCollectorIds: unknown[];
+    metricsCollectionIntervalSeconds: number;
+    version: string;
+  };
+  mode: "inherit" | "override";
+};
+
+type HubProbeConfigurationUpdate = {
+  configuration: {
+    enabledCollectorIds: unknown[];
+    metricsCollectionIntervalSeconds: number;
+  };
+  mode: string;
+};
+
+type HubEnrollmentTrackingRecord = {
+  enrollmentId: string;
+  hostId?: unknown;
+  readError?: SerializedError | null;
+  rejection?: unknown;
+  status?: unknown;
+  target?: unknown;
+};
+
+type HubApiRequestTimelineEntry = {
+  error: unknown;
+  method: string;
+  pathname: string;
+  status: number;
+};
+
+type HubCollectedEvidence = {
+  apiTimeline: HubApiRequestTimelineEntry[];
+  enrollments: HubEnrollmentTrackingRecord[];
+};
+
+const candidateManifestKeys = [
+  "bootstrapRecipe",
+  "candidate",
+  "hub",
+  "kind",
+  "probeAssetSet",
+  "releaseBaseline",
+  "schemaVersion",
+] as const;
+
+function isReleaseE2ECandidateManifest(
+  value: unknown,
+): value is ReleaseE2ECandidateManifest {
+  return (
+    isUnknownRecord(value) &&
+    JSON.stringify(Object.keys(value).sort()) ===
+      JSON.stringify([...candidateManifestKeys].sort())
+  );
+}
+
+export type HubStateSnapshotRoot = {
+  id: string;
+  included?: boolean;
+  path: string;
+};
+
+export type HubStateSnapshotEvidence = {
+  baselineImageDigest: string;
+  baselineVersion: string;
+  hotDataFileCount: number;
+  hotDataFiles: string[];
+  manifestDigest: string;
+  recoveryTime: string;
+  roots: HubStateSnapshotRoot[];
+  tool: string;
+  version: string;
+};
+
+export type HubStateRestoreEvidence = {
+  image: {
+    activeManifestDigest: string;
+    expectedManifestDigest: string;
+  };
+  restore: { manifestDigest: string; status: string };
+  verify: { manifestDigest: string; status: string };
+};
+
+type CanonicalReportEvidenceTransport = {
+  arm(input: { expectedProbeId: string }): void;
+  diagnostics(): unknown;
+  waitForEvidence(input: {
+    timeoutMs: number;
+  }): Promise<CanonicalReportEvidence>;
+};
+
+type ScenarioHub = HubLifecycleClient & {
+  captureBaselineStateSnapshot(input: {
+    baselineImageDigest: string;
+    baselineVersion: string;
+  }): Promise<HubStateSnapshotEvidence>;
+  restoreBaselineStateSnapshot(input: {
+    baselineImageDigest: string;
+    baselineVersion: string;
+    expectedManifestDigest: string;
+    recoveryTime: string;
+  }): Promise<HubStateRestoreEvidence>;
+  switchToCandidate(): Promise<{ activeHub: string }>;
+};
+
+type ReleaseScenarioContext = {
+  canonicalReports?: CanonicalReportEvidenceTransport | null;
+  host: ProbeHost;
+  hub: ScenarioHub;
+  infrastructure: unknown;
+  releaseTestHost: ReleaseTestHostEvidence | null;
+};
+
+// Environment Seam 的公开 Module Interface：start 返回的参与者形状即本模块数据 Interface，
+// 运行时仍由下方各 assert*ScenarioParticipants 逐场景复核方法清单，失败文本保持原实现。
+type ReleaseScenarioEnvironment = {
+  cleanup(input: {
+    resources: ReleaseScenarioContext | null;
+    runId: string;
+  }): Promise<unknown>;
+  start(input: {
+    candidateManifest: ReleaseE2ECandidateManifest;
+    hubMode?: string;
+    runId: string;
+    scenario?: string;
+  }): Promise<ReleaseScenarioContext>;
+};
+
+type ReleaseScenarioOptions = {
+  candidateManifest: unknown;
+  environment: ReleaseScenarioEnvironment;
+  evidenceSink: EvidenceSink;
+  ownerPassword: string;
+  runId: string;
+  scenario: string;
+  timing?: ReleaseScenarioTiming;
+};
+
+type UpgradeTransitionClassification = "compatible" | "replacement-required";
+
+type ForwardLifecycleScenarioOptions = ReleaseScenarioOptions & {
+  transitionClassification: UpgradeTransitionClassification;
+};
+
+type ScenarioError = Error & { code?: string };
+type ScenarioFailureError = ScenarioError & {
+  evidence?: unknown;
+  evidenceWriteError?: SerializedError;
+};
+type TimelineCarryingError = ScenarioError & { timeline: ProbeOperation[] };
+type OperationObservationError = ScenarioError & { timeline?: unknown[] };
+type ObservationTimeoutError = ScenarioError & { lastValue?: unknown };
+
+// 边界判据：抛出的观察错误携带 timeline 时，原实现只做 Array.isArray 结构复核。
+// 这里沿用同一判据，元素类型取自本模块统一的 ProbeOperation 数据 Interface。
+function isTimelineCarryingError(
+  value: unknown,
+): value is TimelineCarryingError {
+  return isUnknownRecord(value) && Array.isArray(value.timeline);
+}
+
+type MetricHistoryAnchor = ReturnType<typeof compactMetricAnchor>;
+
+type ProbeUpgradeTimelineOperation = ProbeOperation;
+
+type AuditLogEvent = {
+  action: string;
+  actor?: string;
+  details?: {
+    code?: string;
+    hostId?: number;
+    mode?: string;
+    newProbeId?: string;
+    oldProbeId?: string;
+    probeOperationId?: number;
+    sourceProbeSha256?: unknown;
+    target?: { hostId?: number; kind?: string };
+    targetAssetSetDigest?: unknown;
+    targetProbeVersion?: unknown;
+  };
+  id: number;
+  occurredAtMs: number;
+  outcome?: string;
+  subjectId: string;
+  subjectType: string;
+};
+
+const terminalProbeOperationStates = new Set<ProbeOperationState>([
   "succeeded",
   "failed",
   "superseded",
@@ -49,16 +461,352 @@ export const releaseE2EScenarioRegistry = Object.freeze({
   "post-replacement-repair-uninstall":
     runPostReplacementRepairUninstallScenario,
   "replacement-migration-uninstall": runReplacementMigrationUninstallScenario,
-});
+} satisfies Record<
+  string,
+  (options: ReleaseScenarioOptions) => Promise<unknown>
+>);
 
-export async function runReleaseE2EScenario(options) {
+export async function runReleaseE2EScenario(
+  options: ReleaseScenarioOptions,
+): Promise<unknown> {
   const scenario = options?.scenario;
-  const runner = releaseE2EScenarioRegistry[scenario];
+  const runner = Object.entries(releaseE2EScenarioRegistry).find(
+    ([name]) => name === scenario,
+  )?.[1];
   if (!runner) {
     throw new Error(`unsupported Release E2E scenario: ${scenario}`);
   }
   return runner(options);
 }
+
+type ProbeIdentity = Awaited<ReturnType<ProbeHost["readProbeIdentity"]>>;
+type HostProfileProjection = ReturnType<typeof stableHostProfileEvidence>;
+type UninstallCompletionEvidence = Awaited<
+  ReturnType<ProbeHost["verifyUninstallCompletion"]>
+>;
+type InstalledBundleRepairEvidence = Awaited<
+  ReturnType<typeof proveInstalledBundleFailureRepair>
+>;
+
+type ScenarioResultEvidence = {
+  error?: SerializedError;
+  status: string;
+};
+
+type ScenarioCleanupEvidence = {
+  environment?: unknown;
+  host?: unknown;
+};
+
+type SerializedScenarioError = { error: SerializedError };
+
+type ProbeConfigurationRoundTripEvidence = Awaited<
+  ReturnType<typeof proveProbeConfigurationRoundTrip>
+>;
+
+type HubRestoreScenarioEvidence = {
+  auditLog: unknown;
+  baselineInstall: Awaited<ReturnType<ProbeHost["install"]>> | null;
+  candidate: ReleaseE2ECandidateManifest["candidate"];
+  cleanup: ScenarioCleanupEvidence | null;
+  failureBoundary: unknown;
+  hostEvidence:
+    | Awaited<ReturnType<ProbeHost["collectEvidence"]>>
+    | SerializedScenarioError
+    | null;
+  hubEvidence:
+    | Awaited<ReturnType<HubLifecycleClient["collectEvidence"]>>
+    | SerializedScenarioError
+    | null;
+  hostProfileContinuity: {
+    allowedChanges: string[];
+    candidateBeforeRestore: HostProfileProjection | null;
+    restoredBaseline: HostProfileProjection | null;
+  };
+  identity: {
+    afterRestore: ProbeIdentity | null;
+    afterUpgrade: ProbeIdentity | null;
+    beforeUpgrade: ProbeIdentity;
+    hostId: number;
+  } | null;
+  image: {
+    candidateDigest: string;
+    expectedBaselineDigest: string;
+    restoredBaselineDigest: string | null;
+    snapshotVerify: HubStateRestoreEvidence["verify"] | null;
+    stateRestore: HubStateRestoreEvidence["restore"] | null;
+  };
+  infrastructure: unknown;
+  migration: {
+    candidateProbeVersion: string;
+    operationTimeline: ProbeOperation[];
+    status: string;
+  };
+  migrationRetention: unknown;
+  phase: string;
+  protocol: {
+    baselineProbeToCandidateHub: string;
+    candidateProbeToBaselineHub: string;
+  };
+  probeConfiguration: { beforeReplacement: unknown; retained: unknown };
+  releaseBaseline: ReturnType<typeof releaseBaselineEvidence>;
+  releaseTestHost: ReleaseTestHostEvidence | null;
+  reporting: {
+    candidateHub: unknown;
+    postReplacementCandidateHub: unknown;
+    restoredBaselineHub: unknown;
+  };
+  result: ScenarioResultEvidence;
+  runId: string;
+  scenario: string;
+  schemaVersion: number;
+  snapshot: HubStateSnapshotEvidence | null;
+  uninstall: {
+    hostCompletion: UninstallCompletionEvidence | null;
+    hubSoftDeleted: boolean;
+    operationTimeline: ProbeOperation[];
+    status: string;
+  };
+};
+
+type RepairRunEvidence = Awaited<ReturnType<ProbeHost["repair"]>>;
+type InstalledBundleBoundaryEvidence = Awaited<
+  ReturnType<ProbeHost["assertInstalled"]>
+>;
+
+// post-replacement 失败边界载荷由 Host Harness 观察到的 JSON 提供，字段全部可选；
+// 只有观察判据逐项复核通过才结束等待，hubFailureCode 稍后由失败 Upgrade 操作补写。
+// post-replacement 失败观察载荷直接来自 Harness 输出的 JSON，字段判据只由边界校验器负责。
+type PostReplacementUpgradeFailureEvidence = UnknownRecord;
+
+type ProbeIdentityContinuityEvidence = {
+  after: ProbeIdentity;
+  before: ProbeIdentity;
+  hostId: number;
+};
+
+type HubRuntimeHistoryEntry = {
+  configDigest?: string;
+  hub?: string;
+  manifestDigest?: string;
+  volume?: string;
+};
+
+type HubRuntimeEvidence = {
+  activeHub?: string;
+  activeManifestDigest?: string;
+  baselineManifestDigest?: string;
+  candidateManifestDigest?: string;
+  containerConfigDigest?: string;
+  containerInspect?: string;
+  identityVerified?: boolean;
+  imageInspect?: string;
+  runtimeHistory?: HubRuntimeHistoryEntry[];
+};
+
+// 采集类证据字段：正常路径写入 Harness / Hub Client 的采集结果，采集失败时只写入序列化错误。
+type HostEvidenceField = Partial<
+  Awaited<ReturnType<ProbeHost["collectEvidence"]>>
+> & { error?: SerializedError };
+
+type HubEvidenceField = Partial<
+  Awaited<ReturnType<HubLifecycleClient["collectEvidence"]>>
+> & { error?: SerializedError; runtime?: HubRuntimeEvidence };
+
+type BoundaryEvidenceValidation = {
+  boundary?: unknown;
+  error?: SerializedError;
+  status: string;
+};
+
+// 边界校验器要求命令成功完成时证据必须满足的形状。
+type SuccessfulCommandEvidence = {
+  code: number;
+  stderr: string;
+  stdout: string;
+};
+
+type RepairBoundaryError = Error & {
+  boundary?: string;
+  cause?: unknown;
+  code: string;
+};
+
+// Repair 边界校验器读取的证据载荷来自 Hub 与 Harness，属于外部输入。
+type RepairBoundaryValidator = (
+  source: UnknownRecord,
+  candidateManifest: ReleaseE2ECandidateManifest,
+) => void;
+
+type PostReplacementRepairScenarioEvidence = {
+  auditLog: AuditLogEvent[] | null;
+  baselineInstall: Awaited<ReturnType<ProbeHost["install"]>> | null;
+  boundaryEvidence?: ReturnType<typeof createRepairBoundaryEvidence>;
+  boundaryEvidenceValidation: BoundaryEvidenceValidation | null;
+  candidate: ReleaseE2ECandidateManifest["candidate"];
+  cleanup: ScenarioCleanupEvidence | null;
+  failureBoundary: PostReplacementUpgradeFailureEvidence | null;
+  hostEvidence: HostEvidenceField | null;
+  hubEvidence: HubEvidenceField | null;
+  identityContinuity: ProbeIdentityContinuityEvidence | null;
+  infrastructure: unknown;
+  metrics: {
+    afterRepair: ReturnType<typeof compactMetricsEvidence> | null;
+    beforeUpgrade: ReturnType<typeof compactMetricsEvidence> | null;
+  };
+  operationTimeline: ProbeOperation[];
+  phase: string;
+  probeConfiguration: {
+    afterRepair: ProbeConfigurationRoundTripEvidence | null;
+    beforeUpgrade: ProbeConfigurationRoundTripEvidence | null;
+  };
+  releaseBaseline: ReturnType<typeof releaseBaselineEvidence>;
+  releaseTestHost: ReleaseTestHostEvidence | null;
+  repair: RepairRunEvidence | null;
+  repairHostBoundary: InstalledBundleBoundaryEvidence | null;
+  repairedHost: ReturnType<typeof compactHostEvidence> | null;
+  result: ScenarioResultEvidence;
+  runId: string;
+  scenario: string;
+  schemaVersion: number;
+  uninstall: {
+    hostCompletion: UninstallCompletionEvidence | null;
+    hubSoftDeleted: boolean;
+    operationTimeline: ProbeOperation[];
+    status: string;
+  };
+  uninstallCompletion: UninstallCompletionEvidence | null;
+  uninstallOperationTimeline: ProbeOperation[];
+};
+
+type ForwardLifecycleScenarioEvidence = {
+  auditLog: AuditLogEvent[] | null;
+  baselineInstall: Awaited<ReturnType<ProbeHost["install"]>> | null;
+  candidate: ReleaseE2ECandidateManifest["candidate"];
+  candidateHost: ReturnType<typeof compactHostEvidence> | null;
+  cleanup: ScenarioCleanupEvidence | null;
+  compatibility: {
+    host: ReturnType<typeof compactHostEvidence>;
+    status: string;
+  } | null;
+  hostBoundary: Awaited<ReturnType<ProbeHost["assertInstalled"]>> | null;
+  hostEvidence: HostEvidenceField | null;
+  hubEvidence: HubEvidenceField | null;
+  identityContinuity: ProbeIdentityContinuityEvidence | null;
+  infrastructure: unknown;
+  manualRecovery: unknown;
+  metrics: {
+    afterUpgrade: ReturnType<typeof compactMetricsEvidence> | null;
+    beforeUpgrade: ReturnType<typeof compactMetricsEvidence> | null;
+  };
+  migrationRetention: {
+    configuration: unknown;
+    hostAfter: unknown;
+    hostBefore: unknown;
+    metricHistory: unknown;
+    postMetricHistory: unknown;
+  } | null;
+  operationTimeline: ProbeOperation[];
+  phase: string;
+  probeConfiguration: {
+    afterUpgrade: ProbeConfigurationRoundTripEvidence | null;
+    beforeUpgrade: ProbeConfigurationRoundTripEvidence | null;
+  };
+  releaseBaseline: ReturnType<typeof releaseBaselineEvidence>;
+  releaseTestHost: ReleaseTestHostEvidence | null;
+  result: ScenarioResultEvidence;
+  runId: string;
+  scenario: string;
+  schemaVersion: number;
+  uninstall: {
+    hostCompletion: UninstallCompletionEvidence | null;
+    hubSoftDeleted: boolean;
+    operationTimeline: ProbeOperation[];
+    status: string;
+  };
+  upgradeOperationTimeline: ProbeOperation[];
+};
+
+type FreshInstallScenarioEvidence = {
+  auditLog: AuditLogEvent[] | null;
+  candidate: ReleaseE2ECandidateManifest["candidate"];
+  candidateIdentities: {
+    hubDigest: string;
+    probeAssetSetVersion: string;
+  };
+  canonicalRuntimeUnavailableReporting: {
+    host:
+      | Awaited<
+          ReturnType<
+            ProbeHost["restartCanonicalProbeWithoutObservationRuntime"]
+          >
+        >
+      | undefined;
+    ownerProjection: {
+      host: ReturnType<typeof compactHostEvidence>;
+      metricsUnchanged: boolean;
+      reportedProbeConfigurationVersion?: string | null;
+    };
+    reporting: CanonicalReportEvidence | undefined;
+  } | null;
+  cleanup: ScenarioCleanupEvidence | null;
+  diagnostics: UnknownRecord | null;
+  finalLocalUninstall: Awaited<ReturnType<ProbeHost["localUninstall"]>> | null;
+  host: ReturnType<typeof compactHostEvidence> | null;
+  hostBoundary: Awaited<ReturnType<ProbeHost["assertInstalled"]>> | null;
+  hostEvidence: HostEvidenceField | null;
+  hubEvidence: HubEvidenceField | null;
+  hubOnlyDeletion: {
+    deletedHost: HubDeletedHostEvidence;
+    permanentReportRejection: Awaited<
+      ReturnType<ProbeHost["awaitPermanentReportRejection"]>
+    >;
+  } | null;
+  initialInstall: Awaited<ReturnType<ProbeHost["install"]>> | null;
+  infrastructure: unknown;
+  installedBundleFailureRepair: Awaited<
+    ReturnType<typeof proveInstalledBundleFailureRepair>
+  > | null;
+  localUninstall: {
+    activeHost: ReturnType<typeof compactHostEvidence>;
+    completion: Awaited<ReturnType<ProbeHost["localUninstall"]>>["completion"];
+    offlineHost: ReturnType<typeof compactHostEvidence>;
+    output: Awaited<ReturnType<ProbeHost["localUninstall"]>>["output"];
+  } | null;
+  metrics: ReturnType<typeof compactMetricsEvidence> | null;
+  metricsHistory: ReturnType<typeof metricsHistoryEvidence> | null;
+  phase: string;
+  probeConfiguration: ProbeConfigurationRoundTripEvidence | null;
+  reEnrollment: {
+    enrollment: ReturnType<typeof compactEnrollmentEvidence>;
+    host: ReturnType<typeof compactHostEvidence>;
+    hostBoundary: Awaited<ReturnType<ProbeHost["assertInstalled"]>>;
+    hostId: number;
+    identity: {
+      after: ProbeIdentity;
+      before: ProbeIdentity;
+    };
+    installer: Awaited<ReturnType<ProbeHost["install"]>>;
+    metrics: ReturnType<typeof compactMetricsEvidence>;
+    metricsHistory: ReturnType<typeof metricsHistoryEvidence>;
+    probeConfiguration: HubProbeConfiguration;
+  } | null;
+  repeatedAdd: {
+    enrollment: ReturnType<typeof compactEnrollmentEvidence>;
+    enrollmentStatus: ReturnType<typeof compactEnrollmentStatusEvidence>;
+    hostAfter: ReturnType<typeof stableHubHostProjection>;
+    hostBefore: ReturnType<typeof stableHubHostProjection>;
+    rejection: Awaited<ReturnType<ProbeHost["rejectRepeatedInstall"]>>;
+    stateAfter: Awaited<ReturnType<ProbeHost["captureInstallationState"]>>;
+    stateBefore: Awaited<ReturnType<ProbeHost["captureInstallationState"]>>;
+  } | null;
+  releaseBaseline: ReturnType<typeof releaseBaselineEvidence>;
+  releaseTestHost: ReleaseTestHostEvidence | null;
+  result: ScenarioResultEvidence;
+  runId: string;
+  scenario: string;
+  schemaVersion: number;
+};
 
 async function runHubRestoreCompatibilityWindowScenario({
   candidateManifest,
@@ -68,7 +816,7 @@ async function runHubRestoreCompatibilityWindowScenario({
   runId,
   scenario,
   timing = {},
-}) {
+}: ReleaseScenarioOptions) {
   assertRunId(runId);
   assertCandidateManifest(candidateManifest);
   if (!environment?.start || !environment?.cleanup || !evidenceSink?.write) {
@@ -77,7 +825,7 @@ async function runHubRestoreCompatibilityWindowScenario({
   const baseline = candidateManifest.releaseBaseline;
 
   const poll = normalizedPollTiming(timing);
-  const evidence = {
+  const evidence: HubRestoreScenarioEvidence = {
     auditLog: null,
     baselineInstall: null,
     candidate: candidateManifest.candidate,
@@ -138,10 +886,10 @@ async function runHubRestoreCompatibilityWindowScenario({
     },
   };
   let activeBoundary = "infrastructure";
-  let resources = null;
-  let primaryError = null;
-  let evidenceWriteError = null;
-  let finalEvidence = evidence;
+  let resources: ReleaseScenarioContext | null = null;
+  let primaryError: unknown = null;
+  let evidenceWriteError: unknown = null;
+  let finalEvidence: unknown = evidence;
 
   try {
     resources = await environment.start({
@@ -150,10 +898,10 @@ async function runHubRestoreCompatibilityWindowScenario({
       runId,
       scenario,
     });
-    const { host, hub } = resources ?? {};
+    const { host, hub } = resources;
     assertHubRestoreScenarioParticipants(host, hub);
-    evidence.infrastructure = resources?.infrastructure ?? null;
-    evidence.releaseTestHost = resources?.releaseTestHost ?? null;
+    evidence.infrastructure = resources.infrastructure ?? null;
+    evidence.releaseTestHost = resources.releaseTestHost ?? null;
 
     await host.assertDisposable(runId);
     await hub.authenticate(ownerPassword);
@@ -181,7 +929,11 @@ async function runHubRestoreCompatibilityWindowScenario({
         return Array.isArray(hosts) && hosts.length === 1 ? hosts[0] : null;
       },
       poll,
-      ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
+      ready: (value) =>
+        value !== null &&
+        value !== undefined &&
+        Number.isSafeInteger(value.id) &&
+        value.id > 0,
     });
     const hostId = hostSummary.id;
     const baselineIdentity = await host.readProbeIdentity(runId);
@@ -244,16 +996,25 @@ async function runHubRestoreCompatibilityWindowScenario({
     }
     evidence.migration.operationTimeline = [requestedUpgrade];
     await host.bindUpgradeOwnershipTransition(runId, requestedUpgrade);
-    evidence.migration.operationTimeline = await hub.waitForProbeOperation(
+    const restoredUpgradeTimeline = await hub.waitForProbeOperation(
       requestedUpgrade,
       { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
     );
+    evidence.migration.operationTimeline = restoredUpgradeTimeline;
     validateSuccessfulProbeUpgradeTimeline(
       evidence.migration.operationTimeline,
     );
+    // 上一条判定已保证 timeline 至少含 request 与 terminal 两项，这里只是把该事实交给类型系统。
+    const restoredTerminalUpgrade = restoredUpgradeTimeline.at(-1);
+    if (!restoredTerminalUpgrade) {
+      throw assertionError(
+        "probe_upgrade_timeline_incomplete",
+        "Probe Upgrade did not record its request and terminal operation evidence",
+      );
+    }
     await host.completeUpgradeOwnershipTransition(
       runId,
-      evidence.migration.operationTimeline.at(-1),
+      restoredTerminalUpgrade,
     );
     await host.assertInstalled(runId, probeBeforeRestoreVersion);
     activeBoundary = "identity";
@@ -350,6 +1111,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       poll,
       ready: (samples) =>
         hasAdvancingPortableMetrics(samples) &&
+        isUnknownArray(samples) &&
         metricsAdvanceBeyond(samples, metricCheckpoint),
     });
     evidence.protocol.candidateProbeToBaselineHub = "succeeded";
@@ -408,7 +1170,7 @@ async function runHubRestoreCompatibilityWindowScenario({
   } catch (error) {
     primaryError = error;
     evidence.failureBoundary = activeBoundary;
-    if (Array.isArray(error?.timeline)) {
+    if (isTimelineCarryingError(error)) {
       if (error.timeline[0]?.kind === "probe_uninstall") {
         evidence.uninstall.operationTimeline = error.timeline;
       } else {
@@ -432,7 +1194,7 @@ async function runHubRestoreCompatibilityWindowScenario({
         evidence.hostEvidence = { error: serializedError(error) };
       }
     }
-    const cleanup = {};
+    const cleanup: ScenarioCleanupEvidence = {};
     if (resources?.host?.cleanup) {
       try {
         cleanup.host = await resources.host.cleanup(runId);
@@ -469,17 +1231,19 @@ async function runHubRestoreCompatibilityWindowScenario({
       if (!primaryError) {
         primaryError = assertionError(
           "release_e2e_evidence_write_failed",
-          `Release E2E evidence could not be written: ${error.message}`,
+          `Release E2E evidence could not be written: ${String(objectView(error).message)}`,
         );
       }
     }
   }
 
   if (primaryError) {
-    const failure = new Error(
-      `Release E2E ${scenario} failed at ${evidence.failureBoundary}: ${redactSensitiveText(primaryError.message, [ownerPassword])}`,
+    const failure: ScenarioFailureError = new Error(
+      `Release E2E ${scenario} failed at ${evidence.failureBoundary}: ${redactSensitiveText(objectView(primaryError).message, [ownerPassword])}`,
     );
-    failure.code = primaryError.code ?? "release_e2e_failed";
+    const primaryCode = objectView(primaryError).code;
+    failure.code =
+      typeof primaryCode === "string" ? primaryCode : "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
       failure.evidenceWriteError = serializedError(evidenceWriteError);
@@ -497,7 +1261,7 @@ async function runPostReplacementRepairUninstallScenario({
   runId,
   scenario,
   timing = {},
-}) {
+}: ReleaseScenarioOptions) {
   assertRunId(runId);
   assertCandidateManifest(candidateManifest);
   if (!environment?.start || !environment?.cleanup || !evidenceSink?.write) {
@@ -506,7 +1270,7 @@ async function runPostReplacementRepairUninstallScenario({
   const baseline = candidateManifest.releaseBaseline;
 
   const poll = normalizedPollTiming(timing);
-  const evidence = {
+  const evidence: PostReplacementRepairScenarioEvidence = {
     auditLog: null,
     baselineInstall: null,
     boundaryEvidenceValidation: null,
@@ -539,10 +1303,10 @@ async function runPostReplacementRepairUninstallScenario({
       status: "pending",
     },
   };
-  let resources = null;
-  let primaryError = null;
-  let evidenceWriteError = null;
-  let finalEvidence = evidence;
+  let resources: ReleaseScenarioContext | null = null;
+  let primaryError: unknown = null;
+  let evidenceWriteError: unknown = null;
+  let finalEvidence: unknown = evidence;
 
   try {
     resources = await environment.start({
@@ -551,10 +1315,10 @@ async function runPostReplacementRepairUninstallScenario({
       runId,
       scenario,
     });
-    const { host, hub } = resources ?? {};
+    const { host, hub } = resources;
     assertRepairScenarioParticipants(host, hub);
-    evidence.infrastructure = resources?.infrastructure ?? null;
-    evidence.releaseTestHost = resources?.releaseTestHost ?? null;
+    evidence.infrastructure = resources.infrastructure ?? null;
+    evidence.releaseTestHost = resources.releaseTestHost ?? null;
 
     await host.assertDisposable(runId);
     await hub.authenticate(ownerPassword);
@@ -582,7 +1346,11 @@ async function runPostReplacementRepairUninstallScenario({
         return Array.isArray(hosts) && hosts.length === 1 ? hosts[0] : null;
       },
       poll,
-      ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
+      ready: (value) =>
+        value !== null &&
+        value !== undefined &&
+        Number.isSafeInteger(value.id) &&
+        value.id > 0,
     });
     const hostId = hostSummary.id;
     const baselineIdentity = await host.readProbeIdentity(runId);
@@ -643,11 +1411,13 @@ async function runPostReplacementRepairUninstallScenario({
     evidence.failureBoundary = await waitForObservation({
       code: "post_replacement_upgrade_failure_timeout",
       label: "local post-replacement Upgrade failure before Repair",
-      observe: () =>
-        host.assertPostReplacementUpgradeFailure(
-          runId,
-          requestedUpgrade,
-          candidateProbeVersion,
+      observe: async () =>
+        objectView(
+          await host.assertPostReplacementUpgradeFailure(
+            runId,
+            requestedUpgrade,
+            candidateProbeVersion,
+          ),
         ),
       poll,
       ready: (value) =>
@@ -722,6 +1492,7 @@ async function runPostReplacementRepairUninstallScenario({
         poll,
         ready: (samples) =>
           hasAdvancingPortableMetrics(samples) &&
+          isUnknownArray(samples) &&
           metricsAdvanceBeyond(samples, metricCheckpoint),
       }),
     );
@@ -774,7 +1545,7 @@ async function runPostReplacementRepairUninstallScenario({
     evidence.phase = "succeeded";
   } catch (error) {
     primaryError = error;
-    if (Array.isArray(error?.timeline)) {
+    if (isTimelineCarryingError(error)) {
       if (
         error.timeline.some(
           (operation) => operation?.kind === "probe_uninstall",
@@ -803,7 +1574,7 @@ async function runPostReplacementRepairUninstallScenario({
         evidence.hostEvidence = { error: serializedError(error) };
       }
     }
-    const cleanup = {};
+    const cleanup: ScenarioCleanupEvidence = {};
     if (resources?.host?.cleanup) {
       try {
         cleanup.host = await resources.host.cleanup(runId);
@@ -825,7 +1596,7 @@ async function runPostReplacementRepairUninstallScenario({
       } catch (error) {
         primaryError = error;
         evidence.boundaryEvidenceValidation = {
-          boundary: error.boundary ?? null,
+          boundary: objectView(error).boundary ?? null,
           error: serializedError(error),
           status: "failed",
         };
@@ -852,17 +1623,19 @@ async function runPostReplacementRepairUninstallScenario({
       if (!primaryError) {
         primaryError = assertionError(
           "release_e2e_evidence_write_failed",
-          `Release E2E evidence could not be written: ${error.message}`,
+          `Release E2E evidence could not be written: ${String(objectView(error).message)}`,
         );
       }
     }
   }
 
   if (primaryError) {
-    const failure = new Error(
-      `Release E2E ${scenario} failed: ${redactSensitiveText(primaryError.message, [ownerPassword])}`,
+    const failure: ScenarioFailureError = new Error(
+      `Release E2E ${scenario} failed: ${redactSensitiveText(objectView(primaryError).message, [ownerPassword])}`,
     );
-    failure.code = primaryError.code ?? "release_e2e_failed";
+    const primaryCode = objectView(primaryError).code;
+    failure.code =
+      typeof primaryCode === "string" ? primaryCode : "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
       failure.evidenceWriteError = serializedError(evidenceWriteError);
@@ -872,51 +1645,63 @@ async function runPostReplacementRepairUninstallScenario({
   return evidence.result;
 }
 
-function createRepairBoundaryEvidence(evidence) {
+// 未信任证据中的列表读取：非数组按空列表处理，与原 optional chain 取下标得到 undefined 一致。
+function observationList(value: unknown): readonly unknown[] {
+  return isUnknownArray(value) ? value : [];
+}
+
+function createRepairBoundaryEvidence(evidence: unknown) {
+  const source = objectView(evidence);
+  const hostEvidence = objectView(source.hostEvidence);
+  const hubEvidence = objectView(source.hubEvidence);
+  const repairHostBoundary = objectView(source.repairHostBoundary);
   return {
     cleanup: {
-      orchestrator: evidence.cleanup ?? null,
-      uninstallCompletion: evidence.uninstallCompletion ?? null,
+      orchestrator: source.cleanup ?? null,
+      uninstallCompletion: source.uninstallCompletion ?? null,
     },
     filesystem: {
-      afterRepair: evidence.repairHostBoundary?.inventory ?? null,
-      postUninstall: evidence.hostEvidence?.inventory ?? null,
+      afterRepair: repairHostBoundary.inventory ?? null,
+      postUninstall: hostEvidence.inventory ?? null,
     },
     hubApi: {
-      apiTimeline: evidence.hubEvidence?.apiTimeline ?? null,
-      auditLog: evidence.auditLog ?? null,
-      repairedHost: evidence.repairedHost ?? null,
-      runtime: evidence.hubEvidence?.runtime ?? null,
+      apiTimeline: hubEvidence.apiTimeline ?? null,
+      auditLog: source.auditLog ?? null,
+      repairedHost: source.repairedHost ?? null,
+      runtime: hubEvidence.runtime ?? null,
     },
-    identity: evidence.identityContinuity ?? null,
+    identity: source.identityContinuity ?? null,
     privilege: {
-      afterRepair: evidence.repairHostBoundary?.sudoers ?? null,
-      postUninstall: evidence.hostEvidence?.sudoers ?? null,
+      afterRepair: repairHostBoundary.sudoers ?? null,
+      postUninstall: hostEvidence.sudoers ?? null,
     },
     probeOperation: {
-      uninstall: evidence.uninstallOperationTimeline ?? [],
-      upgrade: evidence.operationTimeline ?? [],
+      uninstall: source.uninstallOperationTimeline ?? [],
+      upgrade: source.operationTimeline ?? [],
     },
     systemd: {
-      afterRepair: evidence.repairHostBoundary?.service ?? null,
-      journald: evidence.hostEvidence?.journald ?? null,
-      postUninstall: evidence.hostEvidence?.systemd ?? null,
+      afterRepair: repairHostBoundary.service ?? null,
+      journald: hostEvidence.journald ?? null,
+      postUninstall: hostEvidence.systemd ?? null,
     },
   };
 }
 
 export function validateSuccessfulRepairBoundaryEvidence(
-  evidence,
-  candidateManifest,
-) {
+  evidence: unknown,
+  candidateManifest: unknown,
+): unknown {
   assertCandidateManifest(candidateManifest);
-  if (evidence?.hostEvidence?.error) {
+  if (objectView(objectView(evidence).hostEvidence).error) {
     throw repairBoundaryEvidenceError(
       "filesystem",
       new Error("Host evidence collection failed"),
     );
   }
-  const validators = [
+  const validators: readonly [
+    boundary: string,
+    validate: RepairBoundaryValidator,
+  ][] = [
     ["hub-api", validateRepairHubApiEvidence],
     ["probe-operation", validateRepairOperationEvidence],
     ["systemd", validateRepairSystemdEvidence],
@@ -925,9 +1710,10 @@ export function validateSuccessfulRepairBoundaryEvidence(
     ["identity", validateRepairIdentityEvidence],
     ["cleanup", validateRepairCleanupEvidence],
   ];
+  const source = objectView(evidence);
   for (const [boundary, validate] of validators) {
     try {
-      validate(evidence, candidateManifest);
+      validate(source, candidateManifest);
     } catch (cause) {
       throw repairBoundaryEvidenceError(boundary, cause);
     }
@@ -935,85 +1721,115 @@ export function validateSuccessfulRepairBoundaryEvidence(
   return evidence;
 }
 
-function repairBoundaryEvidenceError(boundary, cause) {
-  const error = assertionError(
+function repairBoundaryEvidenceError(
+  boundary: string,
+  cause: unknown,
+): RepairBoundaryError {
+  const error: RepairBoundaryError = assertionError(
     "repair_boundary_evidence_invalid",
-    `Probe Repair ${boundary} evidence is invalid: ${cause.message}`,
+    `Probe Repair ${boundary} evidence is invalid: ${String(objectView(cause).message)}`,
   );
   error.boundary = boundary;
   error.cause = cause;
   return error;
 }
 
-function validateRepairHubApiEvidence(evidence, candidateManifest) {
-  if (evidence?.hubEvidence?.error) {
+function validateRepairHubApiEvidence(
+  source: UnknownRecord,
+  candidateManifest: ReleaseE2ECandidateManifest,
+): void {
+  const hostEvidence = objectView(source.hostEvidence);
+  if (hostEvidence.error) {
     throw new Error("Hub evidence collection failed");
   }
-  const hostId = evidence?.identityContinuity?.hostId;
-  const upgrade = evidence?.operationTimeline?.[0];
-  const uninstall = evidence?.uninstallOperationTimeline?.[0];
+  const hubEvidence = objectView(source.hubEvidence);
+  const identityContinuity = objectView(source.identityContinuity);
+  const hostId = identityContinuity.hostId;
   assertPositiveInteger(hostId, "Repair Host ID");
+  const upgrade = objectView(observationList(source.operationTimeline)[0]);
+  const uninstall = objectView(
+    observationList(source.uninstallOperationTimeline)[0],
+  );
+  const upgradeOperationId = upgrade.id;
+  const uninstallOperationId = uninstall.id;
+  assertPositiveInteger(upgradeOperationId, "Probe Upgrade operation ID");
+  assertPositiveInteger(uninstallOperationId, "Probe Uninstall operation ID");
+  if (!isAuditLogEventList(source.auditLog)) {
+    throw new Error("Hub Audit Log evidence is not a list");
+  }
   assertBaselineUpgradeAuditLog(
-    evidence.auditLog,
+    source.auditLog,
     hostId,
-    upgrade?.id,
-    uninstall?.id,
+    upgradeOperationId,
+    uninstallOperationId,
     candidateManifest.probeAssetSet.version,
   );
 
-  const apiTimeline = evidence.hubEvidence?.apiTimeline;
+  const apiTimelineValue = hubEvidence.apiTimeline;
   if (
-    !Array.isArray(apiTimeline) ||
-    apiTimeline.length === 0 ||
-    apiTimeline.some((entry) => {
+    !isUnknownArray(apiTimelineValue) ||
+    apiTimelineValue.length === 0 ||
+    apiTimelineValue.some((value) => {
+      const entry = objectView(value);
       const expectedDeletedHostObservation =
-        entry?.method === "GET" &&
+        entry.method === "GET" &&
         entry.pathname === `/api/web/hosts/${hostId}` &&
         entry.status === 404 &&
         typeof entry.error === "string" &&
         entry.error.length > 0;
+      const status = entry.status;
       return (
-        !entry ||
-        !/^(?:DELETE|GET|POST|PUT)$/.test(entry.method ?? "") ||
+        !isUnknownRecord(value) ||
+        !/^(?:DELETE|GET|POST|PUT)$/.test(regexInput(entry.method)) ||
         typeof entry.pathname !== "string" ||
         !entry.pathname.startsWith("/api/") ||
-        !Number.isInteger(entry.status) ||
+        !Number.isInteger(status) ||
         (!expectedDeletedHostObservation &&
-          (entry.status < 200 || entry.status >= 300 || entry.error !== null))
+          ((typeof status === "number" && status < 200) ||
+            (typeof status === "number" && status >= 300) ||
+            entry.error !== null))
       );
     })
   ) {
     throw new Error("Hub API timeline is missing or contains a failed request");
   }
-  for (const expected of [
+  const apiTimeline = apiTimelineValue;
+  const expectedRequests: readonly [
+    method: string,
+    pathname: string,
+    status?: number,
+  ][] = [
     ["POST", "/api/web/auth/login"],
     ["POST", `/api/web/hosts/${hostId}/probe-upgrade-requests`],
     ["DELETE", `/api/web/hosts/${hostId}`],
     ["GET", `/api/web/hosts/${hostId}`, 404],
     ["GET", "/api/web/audit-log?limit=200"],
-  ]) {
+  ];
+  for (const expected of expectedRequests) {
     if (
-      !apiTimeline.some(
-        (entry) =>
+      !apiTimeline.some((value) => {
+        const entry = objectView(value);
+        return (
           entry.method === expected[0] &&
           entry.pathname === expected[1] &&
-          (expected[2] === undefined || entry.status === expected[2]),
-      )
+          (expected[2] === undefined || entry.status === expected[2])
+        );
+      })
     ) {
       throw new Error(`Hub API timeline is missing ${expected.join(" ")}`);
     }
   }
 
-  const runtime = evidence.hubEvidence?.runtime;
+  const runtime = objectView(hubEvidence.runtime);
   const baselineDigest = candidateManifest.releaseBaseline.hub.imageDigest;
   const candidateDigest = candidateManifest.hub.digest;
   if (
-    runtime?.identityVerified !== true ||
+    runtime.identityVerified !== true ||
     runtime.activeHub !== "candidate" ||
     runtime.activeManifestDigest !== candidateDigest ||
     runtime.candidateManifestDigest !== candidateDigest ||
     runtime.baselineManifestDigest !== baselineDigest ||
-    !/^sha256:[0-9a-f]{64}$/.test(runtime.containerConfigDigest ?? "") ||
+    !/^sha256:[0-9a-f]{64}$/.test(regexInput(runtime.containerConfigDigest)) ||
     typeof runtime.containerInspect !== "string" ||
     runtime.containerInspect.trim().length === 0 ||
     typeof runtime.imageInspect !== "string" ||
@@ -1024,68 +1840,85 @@ function validateRepairHubApiEvidence(evidence, candidateManifest) {
     );
   }
   const runtimeHistory = runtime.runtimeHistory;
-  if (!Array.isArray(runtimeHistory) || runtimeHistory.length < 2) {
+  if (!isUnknownArray(runtimeHistory) || runtimeHistory.length < 2) {
     throw new Error("Hub runtime history does not prove Baseline to Candidate");
   }
-  const baseline = runtimeHistory.find(
-    (entry) =>
-      entry?.hub === "baseline" && entry.manifestDigest === baselineDigest,
-  );
-  const candidate = runtimeHistory.find(
-    (entry) =>
-      entry?.hub === "candidate" && entry.manifestDigest === candidateDigest,
-  );
+  const baselineEntry = runtimeHistory.find((value) => {
+    const entry = objectView(value);
+    return entry.hub === "baseline" && entry.manifestDigest === baselineDigest;
+  });
+  const candidateEntry = runtimeHistory.find((value) => {
+    const entry = objectView(value);
+    return (
+      entry.hub === "candidate" && entry.manifestDigest === candidateDigest
+    );
+  });
+  const baseline = objectView(baselineEntry);
+  const candidate = objectView(candidateEntry);
   if (
-    !baseline ||
-    !candidate ||
+    !isUnknownRecord(baselineEntry) ||
+    !isUnknownRecord(candidateEntry) ||
     typeof baseline.volume !== "string" ||
     baseline.volume.length === 0 ||
     candidate.volume !== baseline.volume ||
-    !/^sha256:[0-9a-f]{64}$/.test(baseline.configDigest ?? "") ||
-    !/^sha256:[0-9a-f]{64}$/.test(candidate.configDigest ?? "")
+    !/^sha256:[0-9a-f]{64}$/.test(regexInput(baseline.configDigest)) ||
+    !/^sha256:[0-9a-f]{64}$/.test(regexInput(candidate.configDigest))
   ) {
     throw new Error("Hub runtime history identities are incomplete");
   }
+  const repairedHost = source.repairedHost;
+  const probeConfiguration = objectView(source.probeConfiguration);
+  const afterRepairConfiguration = objectView(probeConfiguration.afterRepair);
   if (
-    evidence.repairedHost?.id !== hostId ||
+    objectView(repairedHost).id !== hostId ||
     !isCandidateHostReady(
-      evidence.repairedHost,
+      repairedHost,
       candidateManifest.probeAssetSet.version,
     ) ||
-    !hasAdvancingPortableMetrics(evidence.metrics?.afterRepair) ||
-    evidence.probeConfiguration?.afterRepair?.mode !== "override" ||
-    typeof evidence.probeConfiguration.afterRepair.version !== "string" ||
-    evidence.probeConfiguration.afterRepair.reportedVersion !==
-      evidence.probeConfiguration.afterRepair.version
+    !hasAdvancingPortableMetrics(objectView(source.metrics).afterRepair) ||
+    afterRepairConfiguration.mode !== "override" ||
+    typeof afterRepairConfiguration.version !== "string" ||
+    afterRepairConfiguration.reportedVersion !==
+      afterRepairConfiguration.version
   ) {
     throw new Error("Candidate Probe core reporting evidence is incomplete");
   }
 }
 
-function validateRepairOperationEvidence(evidence, candidateManifest) {
-  const hostId = evidence?.identityContinuity?.hostId;
+function validateRepairOperationEvidence(
+  source: UnknownRecord,
+  candidateManifest: ReleaseE2ECandidateManifest,
+): void {
+  const hostId = objectView(source.identityContinuity).hostId;
+  // hub-api 边界已对同一个 hostId 做过同样断言，这里只是把已成立的事实交给类型系统。
+  assertPositiveInteger(hostId, "Repair Host ID");
   const targetProbeVersion = candidateManifest.probeAssetSet.version;
-  validateTerminalRepairOperationTimeline(evidence?.operationTimeline, {
-    hostId,
-    kind: "probe_upgrade",
-    state: "failed",
-    targetProbeVersion,
-  });
   validateTerminalRepairOperationTimeline(
-    evidence?.uninstallOperationTimeline,
+    observationList(source.operationTimeline),
+    {
+      hostId,
+      kind: "probe_upgrade",
+      state: "failed",
+      targetProbeVersion,
+    },
+  );
+  validateTerminalRepairOperationTimeline(
+    observationList(source.uninstallOperationTimeline),
     {
       hostId,
       kind: "probe_uninstall",
       state: "succeeded",
     },
   );
-  const failedUpgrade = evidence.operationTimeline.at(-1);
+  const failedUpgrade = objectView(
+    observationList(source.operationTimeline).at(-1),
+  );
+  const failureBoundary = objectView(source.failureBoundary);
   if (
-    evidence.failureBoundary?.operationId !== failedUpgrade.id ||
-    evidence.failureBoundary?.probeVersion !== targetProbeVersion ||
-    evidence.failureBoundary?.hubFailureCode !== failedUpgrade.failure?.code ||
-    evidence.failureBoundary?.localFailureCode !==
-      "post_replacement_restart_failure"
+    failureBoundary.operationId !== failedUpgrade.id ||
+    failureBoundary.probeVersion !== targetProbeVersion ||
+    failureBoundary.hubFailureCode !== objectView(failedUpgrade.failure).code ||
+    failureBoundary.localFailureCode !== "post_replacement_restart_failure"
   ) {
     throw new Error(
       "post-replacement failure evidence is not bound to the failed Upgrade",
@@ -1093,29 +1926,42 @@ function validateRepairOperationEvidence(evidence, candidateManifest) {
   }
 }
 
-function validateTerminalRepairOperationTimeline(timeline, expected) {
-  if (!Array.isArray(timeline) || timeline.length < 3) {
+function validateTerminalRepairOperationTimeline(
+  timeline: readonly unknown[],
+  expected: {
+    hostId: number;
+    kind: string;
+    state: ProbeOperationState;
+    targetProbeVersion?: string;
+  },
+): void {
+  if (timeline.length < 3) {
     throw new Error(`${expected.kind} timeline is incomplete`);
   }
-  const requested = timeline[0];
+  const requested = objectView(timeline[0]);
+  const requestedId = requested.id;
   if (
-    requested?.state !== "pending" ||
+    requested.state !== "pending" ||
     requested.acceptedAtMs !== null ||
     requested.runningAtMs !== null ||
     requested.completedAtMs !== null ||
-    !Number.isSafeInteger(requested.id) ||
-    requested.id <= 0
+    !isSafeInteger(requestedId) ||
+    requestedId <= 0
   ) {
     throw new Error(
       `${expected.kind} request identity or timestamps are invalid`,
     );
   }
-  let previous = null;
-  let terminal = null;
-  for (const operation of timeline) {
+  let previous: ProbeOperation | null = null;
+  let terminal: ProbeOperation | null = null;
+  for (const value of timeline) {
+    if (!isHubProbeOperation(value)) {
+      throw new Error("Hub returned an invalid Probe Operation");
+    }
+    const operation = value;
     assertProbeOperation(operation, {
       hostId: expected.hostId,
-      id: requested.id,
+      id: requestedId,
       kind: expected.kind,
       ...(expected.targetProbeVersion
         ? { targetProbeVersion: expected.targetProbeVersion }
@@ -1128,14 +1974,24 @@ function validateTerminalRepairOperationTimeline(timeline, expected) {
     }
     previous = operation;
   }
-  const final = timeline.at(-1);
-  const preceding = timeline.at(-2);
+  const finalValue = timeline.at(-1);
+  const precedingValue = timeline.at(-2);
   if (
-    final?.state !== expected.state ||
+    !isHubProbeOperation(finalValue) ||
+    !isHubProbeOperation(precedingValue)
+  ) {
+    throw new Error(
+      `${expected.kind} does not retain confirmed ${expected.state} terminal timestamps`,
+    );
+  }
+  const final = finalValue;
+  const preceding = precedingValue;
+  if (
+    final.state !== expected.state ||
     final.acceptedAtMs === null ||
     final.runningAtMs === null ||
     final.completedAtMs === null ||
-    preceding?.state !== expected.state
+    preceding.state !== expected.state
   ) {
     throw new Error(
       `${expected.kind} does not retain confirmed ${expected.state} terminal timestamps`,
@@ -1154,9 +2010,11 @@ function validateTerminalRepairOperationTimeline(timeline, expected) {
   }
 }
 
-function validateRepairSystemdEvidence(evidence) {
-  assertSuccessfulCommandEvidence(evidence?.hostEvidence?.systemd, "systemd");
-  const service = parseKeyValues(evidence.hostEvidence.systemd.stdout);
+function validateRepairSystemdEvidence(source: UnknownRecord): void {
+  const hostEvidence = objectView(source.hostEvidence);
+  const systemd = hostEvidence.systemd;
+  assertSuccessfulCommandEvidence(systemd, "systemd");
+  const service = parseKeyValues(systemd.stdout);
   if (
     service.stage !== "post-uninstall" ||
     service.LoadState !== "not-found" ||
@@ -1166,14 +2024,17 @@ function validateRepairSystemdEvidence(evidence) {
   ) {
     throw new Error("systemd state does not prove post-Uninstall absence");
   }
-  assertSuccessfulCommandEvidence(evidence.hostEvidence.journald, "journald");
-  const journal = evidence.hostEvidence.journald.stdout.trim();
+  const journald = hostEvidence.journald;
+  assertSuccessfulCommandEvidence(journald, "journald");
+  const journal = journald.stdout.trim();
   if (!journal || journal.includes("-- No entries --")) {
     throw new Error("journald history was not retained");
   }
-  const repairedService = evidence?.repairHostBoundary?.service;
+  const repairedService = objectView(
+    objectView(source.repairHostBoundary).service,
+  );
   if (
-    repairedService?.LoadState !== "loaded" ||
+    repairedService.LoadState !== "loaded" ||
     repairedService.ActiveState !== "active" ||
     repairedService.SubState !== "running" ||
     repairedService.User !== "enoki-probe" ||
@@ -1184,34 +2045,39 @@ function validateRepairSystemdEvidence(evidence) {
   }
 }
 
-function validateRepairPrivilegeEvidence(evidence) {
-  assertSuccessfulCommandEvidence(evidence?.hostEvidence?.sudoers, "sudoers");
-  const sudoers = parseKeyValues(evidence.hostEvidence.sudoers.stdout);
+function validateRepairPrivilegeEvidence(source: UnknownRecord): void {
+  const sudoers = objectView(source.hostEvidence).sudoers;
+  assertSuccessfulCommandEvidence(sudoers, "sudoers");
+  const privilegeState = parseKeyValues(sudoers.stdout);
   if (
-    sudoers.stage !== "post-uninstall" ||
-    sudoers.managedSudoersCount !== "0"
+    privilegeState.stage !== "post-uninstall" ||
+    privilegeState.managedSudoersCount !== "0"
   ) {
     throw new Error("post-Uninstall sudoers observation is invalid");
   }
-  const repairedSudoers = evidence?.repairHostBoundary?.sudoers;
+  const repairedSudoers = objectView(source.repairHostBoundary).sudoers;
   if (repairedSudoers !== "") {
     throw new Error("Repair did not capture the authorized privilege boundary");
   }
 }
 
-function validateRepairFilesystemEvidence(evidence, candidateManifest) {
-  if (evidence?.hostEvidence?.error) {
+function validateRepairFilesystemEvidence(
+  source: UnknownRecord,
+  candidateManifest: ReleaseE2ECandidateManifest,
+): void {
+  const hostEvidence = objectView(source.hostEvidence);
+  if (hostEvidence.error) {
     throw new Error("Host evidence collection failed");
   }
-  if (evidence?.hostEvidence?.runClaimed !== true) {
+  if (hostEvidence.runClaimed !== true) {
     throw new Error("Host evidence was not collected from the run-owned state");
   }
-  assertHostInventoryEvidence(evidence?.hostEvidence?.inventory);
-  if (inventoryResidue(evidence.hostEvidence.inventory).length > 0) {
+  assertHostInventoryEvidence(hostEvidence.inventory);
+  if (inventoryResidue(hostEvidence.inventory).length > 0) {
     throw new Error("post-Uninstall filesystem inventory contains residue");
   }
-  const installed = evidence?.repairHostBoundary;
-  assertHostInventoryEvidence(installed?.inventory);
+  const installed = objectView(source.repairHostBoundary);
+  assertHostInventoryEvidence(installed.inventory);
   const installedResidue = inventoryResidue(installed.inventory);
   const required = [
     "user:enoki-probe",
@@ -1225,7 +2091,7 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
     "enoki-probe.service",
   ];
   if (
-    installed?.probeVersion !== candidateManifest.probeAssetSet.version ||
+    installed.probeVersion !== candidateManifest.probeAssetSet.version ||
     installedResidue.some((entry) =>
       entry.startsWith("/etc/sudoers.d/enoki-probe"),
     ) ||
@@ -1235,34 +2101,42 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
   }
 }
 
-function validateRepairIdentityEvidence(evidence, candidateManifest) {
-  const continuity = evidence?.identityContinuity;
-  assertPositiveInteger(continuity?.hostId, "Repair Host ID");
-  for (const identity of [continuity?.before, continuity?.after]) {
+function validateRepairIdentityEvidence(
+  source: UnknownRecord,
+  candidateManifest: ReleaseE2ECandidateManifest,
+): void {
+  const continuity = objectView(source.identityContinuity);
+  assertPositiveInteger(continuity.hostId, "Repair Host ID");
+  for (const value of [continuity.before, continuity.after]) {
+    const identity = objectView(value);
     if (
-      !identity ||
+      !isUnknownRecord(value) ||
       Object.keys(identity).sort().join(",") !== "identitySha256,probeId" ||
-      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(identity.probeId ?? "") ||
-      !/^[0-9a-f]{64}$/.test(identity.identitySha256 ?? "")
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(
+        regexInput(identity.probeId),
+      ) ||
+      !/^[0-9a-f]{64}$/.test(regexInput(identity.identitySha256))
     ) {
       throw new Error("Probe Identity evidence is incomplete");
     }
   }
+  const before = objectView(continuity.before);
+  const after = objectView(continuity.after);
+  const repair = objectView(source.repair);
   if (
-    continuity.before.probeId !== continuity.after.probeId ||
-    continuity.before.identitySha256 !== continuity.after.identitySha256 ||
-    evidence?.repair?.probeId !== continuity.before.probeId ||
-    evidence?.repair?.repairedVersion !==
-      candidateManifest.probeAssetSet.version ||
-    evidence?.repairedHost?.id !== continuity.hostId
+    before.probeId !== after.probeId ||
+    before.identitySha256 !== after.identitySha256 ||
+    repair.probeId !== before.probeId ||
+    repair.repairedVersion !== candidateManifest.probeAssetSet.version ||
+    objectView(source.repairedHost).id !== continuity.hostId
   ) {
     throw new Error("Probe Identity is inconsistent across Repair boundaries");
   }
 }
 
-function validateRepairCleanupEvidence(evidence) {
-  const completion = evidence?.uninstallCompletion;
-  assertHostInventoryEvidence(completion?.inventory);
+function validateRepairCleanupEvidence(source: UnknownRecord): void {
+  const completion = objectView(source.uninstallCompletion);
+  assertHostInventoryEvidence(completion.inventory);
   if (
     completion.clean !== true ||
     completion.journaldRetained !== true ||
@@ -1275,38 +2149,43 @@ function validateRepairCleanupEvidence(evidence) {
   ) {
     throw new Error("Probe Uninstall Completion evidence is invalid");
   }
-  if (cleanupDidNotSucceed(evidence?.cleanup ?? {})) {
+  const cleanup = objectView(source.cleanup);
+  if (cleanupDidNotSucceed(cleanup)) {
     throw new Error("scenario cleanup did not complete cleanly");
   }
-  if (!evidence.cleanup?.host || !evidence.cleanup?.environment) {
+  if (!cleanup.host || !cleanup.environment) {
     throw new Error("scenario cleanup observations are incomplete");
   }
-  assertCleanEvidenceTree(evidence.cleanup.host, "Host cleanup");
-  assertCleanEvidenceTree(evidence.cleanup.environment, "environment cleanup");
+  assertCleanEvidenceTree(cleanup.host, "Host cleanup");
+  assertCleanEvidenceTree(cleanup.environment, "environment cleanup");
 }
 
-function assertSuccessfulCommandEvidence(value, label) {
+function assertSuccessfulCommandEvidence(
+  value: unknown,
+  label: string,
+): asserts value is SuccessfulCommandEvidence {
   if (
     !value ||
-    value.error ||
-    value.code !== 0 ||
-    typeof value.stdout !== "string" ||
-    typeof value.stderr !== "string"
+    objectView(value).error ||
+    objectView(value).code !== 0 ||
+    typeof objectView(value).stdout !== "string" ||
+    typeof objectView(value).stderr !== "string"
   ) {
     throw new Error(`${label} evidence command did not complete successfully`);
   }
 }
 
-function assertCleanEvidenceTree(value, label) {
+function assertCleanEvidenceTree(value: unknown, label: string): void {
+  const view = objectView(value);
   if (
     !value ||
     typeof value !== "object" ||
-    value.error ||
-    value.clean !== true
+    view.error ||
+    view.clean !== true
   ) {
     throw new Error(`${label} did not report clean completion`);
   }
-  for (const [key, nested] of Object.entries(value)) {
+  for (const [key, nested] of Object.entries(view)) {
     if (key === "clean" || key === "skipped" || typeof nested !== "object") {
       continue;
     }
@@ -1314,14 +2193,18 @@ function assertCleanEvidenceTree(value, label) {
   }
 }
 
-async function runCompatibleUpgradeUninstallScenario(options) {
+async function runCompatibleUpgradeUninstallScenario(
+  options: ReleaseScenarioOptions,
+) {
   return runForwardLifecycleScenario({
     ...options,
     transitionClassification: "compatible",
   });
 }
 
-async function runReplacementMigrationUninstallScenario(options) {
+async function runReplacementMigrationUninstallScenario(
+  options: ReleaseScenarioOptions,
+) {
   return runForwardLifecycleScenario({
     ...options,
     transitionClassification: "replacement-required",
@@ -1337,7 +2220,7 @@ async function runForwardLifecycleScenario({
   scenario,
   timing = {},
   transitionClassification,
-}) {
+}: ForwardLifecycleScenarioOptions) {
   assertRunId(runId);
   assertCandidateManifest(candidateManifest);
   if (!environment?.start || !environment?.cleanup || !evidenceSink?.write) {
@@ -1347,7 +2230,7 @@ async function runForwardLifecycleScenario({
   const baseline = candidateManifest.releaseBaseline;
 
   const poll = normalizedPollTiming(timing);
-  const evidence = {
+  const evidence: ForwardLifecycleScenarioEvidence = {
     auditLog: null,
     baselineInstall: null,
     candidate: candidateManifest.candidate,
@@ -1379,10 +2262,10 @@ async function runForwardLifecycleScenario({
     },
     upgradeOperationTimeline: [],
   };
-  let resources = null;
-  let primaryError = null;
-  let evidenceWriteError = null;
-  let finalEvidence = evidence;
+  let resources: ReleaseScenarioContext | null = null;
+  let primaryError: unknown = null;
+  let evidenceWriteError: unknown = null;
+  let finalEvidence: unknown = evidence;
 
   try {
     resources = await environment.start({
@@ -1390,10 +2273,10 @@ async function runForwardLifecycleScenario({
       hubMode: "baseline",
       runId,
     });
-    const { host, hub } = resources ?? {};
+    const { host, hub } = resources;
     assertBaselineScenarioParticipants(host, hub, transitionClassification);
-    evidence.infrastructure = resources?.infrastructure ?? null;
-    evidence.releaseTestHost = resources?.releaseTestHost ?? null;
+    evidence.infrastructure = resources.infrastructure ?? null;
+    evidence.releaseTestHost = resources.releaseTestHost ?? null;
 
     await host.assertDisposable(runId);
     await hub.authenticate(ownerPassword);
@@ -1422,7 +2305,11 @@ async function runForwardLifecycleScenario({
         return Array.isArray(hosts) && hosts.length === 1 ? hosts[0] : null;
       },
       poll,
-      ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
+      ready: (value) =>
+        value !== null &&
+        value !== undefined &&
+        Number.isSafeInteger(value.id) &&
+        value.id > 0,
     });
     const hostId = hostSummary.id;
     const baselineIdentity = await host.readProbeIdentity(runId);
@@ -1471,8 +2358,12 @@ async function runForwardLifecycleScenario({
       ready: hasAdvancingPortableMetrics,
     });
     evidence.metrics.beforeUpgrade = compactMetricsEvidence(beforeMetrics);
-    evidence.probeConfiguration.beforeUpgrade =
-      await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
+    const beforeUpgradeConfiguration = await proveProbeConfigurationRoundTrip({
+      hostId,
+      hub,
+      poll,
+    });
+    evidence.probeConfiguration.beforeUpgrade = beforeUpgradeConfiguration;
     const configuredCompatibleHost = await waitForObservation({
       code: "baseline_probe_configuration_projection_timeout",
       label: "Release Baseline Probe Configuration reporting projection",
@@ -1482,7 +2373,7 @@ async function runForwardLifecycleScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, releaseBaselineProbeVersion(baseline)) &&
         value.reportedProbeConfigurationVersion ===
-          evidence.probeConfiguration.beforeUpgrade.reportedVersion,
+          beforeUpgradeConfiguration.reportedVersion,
     });
     const baselineHostProjection = stableHubHostProjection(
       configuredCompatibleHost,
@@ -1495,8 +2386,8 @@ async function runForwardLifecycleScenario({
 
     const replacementRequired =
       transitionClassification === "replacement-required";
-    let requestedUpgrade = null;
-    let finalUpgrade = null;
+    let requestedUpgrade: ProbeOperation | null = null;
+    let finalUpgrade: ProbeOperation | undefined;
     if (replacementRequired) {
       const replacementEnrollment =
         await hub.createManualReinstallEnrollment(hostId);
@@ -1563,7 +2454,7 @@ async function runForwardLifecycleScenario({
         isCandidateHostReady(value, candidateManifest.probeAssetSet.version) &&
         (!replacementRequired ||
           (value.reportedProbeConfigurationVersion ===
-            evidence.probeConfiguration.beforeUpgrade.reportedVersion &&
+            beforeUpgradeConfiguration.reportedVersion &&
             !value.warnings?.some(
               (warning) => warning.code === "probe_configuration_error",
             ))),
@@ -1593,12 +2484,14 @@ async function runForwardLifecycleScenario({
       before: baselineIdentity,
       hostId,
     };
+    let migrationRetention: ForwardLifecycleScenarioEvidence["migrationRetention"] =
+      null;
     if (replacementRequired) {
       const retainedConfiguration = await hub.getHostProbeConfiguration(hostId);
       if (
         !sameEffectiveProbeConfiguration(
           retainedConfiguration,
-          evidence.probeConfiguration.beforeUpgrade,
+          beforeUpgradeConfiguration,
         )
       ) {
         throw assertionError(
@@ -1617,7 +2510,7 @@ async function runForwardLifecycleScenario({
           "Trust Epoch manual reinstall did not retain Host identity and metadata",
         );
       }
-      evidence.migrationRetention = {
+      migrationRetention = {
         configuration: effectiveProbeConfigurationEvidence(
           retainedConfiguration,
         ),
@@ -1626,8 +2519,9 @@ async function runForwardLifecycleScenario({
         metricHistory: baselineMetricHistory,
         postMetricHistory: null,
       };
+      evidence.migrationRetention = migrationRetention;
     }
-    if (!replacementRequired) {
+    if (!replacementRequired && finalUpgrade) {
       await host.completeUpgradeOwnershipTransition(runId, finalUpgrade);
     }
 
@@ -1647,6 +2541,7 @@ async function runForwardLifecycleScenario({
       poll,
       ready: (samples) =>
         hasAdvancingPortableMetrics(samples) &&
+        isUnknownArray(samples) &&
         metricsAdvanceBeyond(samples, candidateMetricCheckpoint),
     });
     evidence.metrics.afterUpgrade = compactMetricsEvidence(afterMetrics);
@@ -1659,8 +2554,8 @@ async function runForwardLifecycleScenario({
         "Trust Epoch manual reinstall did not retain pre-replacement Metrics history",
       );
     }
-    if (replacementRequired) {
-      evidence.migrationRetention.postMetricHistory = metricsHistoryEvidence(
+    if (replacementRequired && migrationRetention) {
+      migrationRetention.postMetricHistory = metricsHistoryEvidence(
         afterMetrics,
         { retain: baselineMetricHistory.anchors },
       );
@@ -1690,20 +2585,22 @@ async function runForwardLifecycleScenario({
       );
     }
     const auditLog = await hub.getAuditLog();
-    evidence.auditLog = replacementRequired
-      ? assertMigrationLifecycleAuditLog(
-          auditLog,
-          hostId,
-          requestedUninstall.id,
-          baselineIdentity,
-          candidateIdentity,
-        )
-      : assertBaselineUpgradeAuditLog(
+    // requestedUpgrade 只在 compatible 分支赋值，与原 replacementRequired 判据在此处互补，
+    // 用它分支可让类型收窄成立且保持两侧结果不变。
+    evidence.auditLog = requestedUpgrade
+      ? assertBaselineUpgradeAuditLog(
           auditLog,
           hostId,
           requestedUpgrade.id,
           requestedUninstall.id,
           candidateManifest.probeAssetSet.version,
+        )
+      : assertMigrationLifecycleAuditLog(
+          auditLog,
+          hostId,
+          requestedUninstall.id,
+          baselineIdentity,
+          candidateIdentity,
         );
     const completion = await host.verifyUninstallCompletion(runId);
     evidence.uninstall.hostCompletion = completion;
@@ -1722,7 +2619,7 @@ async function runForwardLifecycleScenario({
     evidence.phase = "succeeded";
   } catch (error) {
     primaryError = error;
-    if (Array.isArray(error?.timeline)) {
+    if (isTimelineCarryingError(error)) {
       if (error.timeline[0]?.kind === "probe_upgrade") {
         evidence.upgradeOperationTimeline = error.timeline;
       } else {
@@ -1746,7 +2643,7 @@ async function runForwardLifecycleScenario({
         evidence.hostEvidence = { error: serializedError(error) };
       }
     }
-    const cleanup = {};
+    const cleanup: ScenarioCleanupEvidence = {};
     if (resources?.host?.cleanup) {
       try {
         cleanup.host = await resources.host.cleanup(runId);
@@ -1782,17 +2679,19 @@ async function runForwardLifecycleScenario({
       if (!primaryError) {
         primaryError = assertionError(
           "release_e2e_evidence_write_failed",
-          `Release E2E evidence could not be written: ${error.message}`,
+          `Release E2E evidence could not be written: ${String(objectView(error).message)}`,
         );
       }
     }
   }
 
   if (primaryError) {
-    const failure = new Error(
-      `Release E2E ${scenario} failed: ${redactSensitiveText(primaryError.message, [ownerPassword])}`,
+    const failure: ScenarioFailureError = new Error(
+      `Release E2E ${scenario} failed: ${redactSensitiveText(objectView(primaryError).message, [ownerPassword])}`,
     );
-    failure.code = primaryError.code ?? "release_e2e_failed";
+    const primaryCode = objectView(primaryError).code;
+    failure.code =
+      typeof primaryCode === "string" ? primaryCode : "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
       failure.evidenceWriteError = serializedError(evidenceWriteError);
@@ -1810,7 +2709,7 @@ async function runFreshInstallUninstallScenario({
   runId,
   scenario,
   timing = {},
-}) {
+}: ReleaseScenarioOptions) {
   assertRunId(runId);
   assertCandidateManifest(candidateManifest);
   if (!environment?.start || !environment?.cleanup || !evidenceSink?.write) {
@@ -1819,7 +2718,7 @@ async function runFreshInstallUninstallScenario({
 
   const poll = normalizedPollTiming(timing);
   const offlinePoll = localUninstallOfflineObservationPoll(timing, poll);
-  const evidence = {
+  const evidence: FreshInstallScenarioEvidence = {
     auditLog: null,
     candidate: candidateManifest.candidate,
     candidateIdentities: {
@@ -1852,17 +2751,17 @@ async function runFreshInstallUninstallScenario({
     scenario,
     schemaVersion: 2,
   };
-  let resources = null;
-  let primaryError = null;
-  let evidenceWriteError = null;
-  let finalEvidence = evidence;
+  let resources: ReleaseScenarioContext | null = null;
+  let primaryError: unknown = null;
+  let evidenceWriteError: unknown = null;
+  let finalEvidence: unknown = evidence;
 
   try {
     resources = await environment.start({ candidateManifest, runId });
-    const { host, hub } = resources ?? {};
+    const { host, hub } = resources;
     assertFreshInstallScenarioParticipants(host, hub);
-    evidence.infrastructure = resources?.infrastructure ?? null;
-    evidence.releaseTestHost = resources?.releaseTestHost ?? null;
+    evidence.infrastructure = resources.infrastructure ?? null;
+    evidence.releaseTestHost = resources.releaseTestHost ?? null;
 
     await host.assertDisposable(runId);
     await hub.authenticate(ownerPassword);
@@ -1892,7 +2791,11 @@ async function runFreshInstallUninstallScenario({
         return Array.isArray(hosts) && hosts.length === 1 ? hosts[0] : null;
       },
       poll,
-      ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
+      ready: (value) =>
+        value !== null &&
+        value !== undefined &&
+        Number.isSafeInteger(value.id) &&
+        value.id > 0,
     });
     const hostId = hostSummary.id;
     const ready = await waitForObservation({
@@ -1914,13 +2817,15 @@ async function runFreshInstallUninstallScenario({
       ready: hasAdvancingPortableMetrics,
     });
     evidence.metrics = compactMetricsEvidence(samples);
-    evidence.metricsHistory = metricsHistoryEvidence(samples);
+    const metricsHistory = metricsHistoryEvidence(samples);
+    evidence.metricsHistory = metricsHistory;
 
-    evidence.probeConfiguration = await proveProbeConfigurationRoundTrip({
+    const probeConfiguration = await proveProbeConfigurationRoundTrip({
       hostId,
       hub,
       poll,
     });
+    evidence.probeConfiguration = probeConfiguration;
 
     evidence.installedBundleFailureRepair =
       await proveInstalledBundleFailureRepair({
@@ -2060,14 +2965,15 @@ async function runFreshInstallUninstallScenario({
         hasAdvancingPortableMetrics(value) &&
         hasPortableMetricsAfter(value, samples) &&
         retainsInitialMetricSample(value, samples) &&
-        retainsMetricHistoryAnchors(value, evidence.metricsHistory.anchors),
+        isUnknownArray(value) &&
+        retainsMetricHistoryAnchors(value, metricsHistory.anchors),
     });
     const reEnrollmentConfiguration =
       await hub.getHostProbeConfiguration(hostId);
     if (
       !sameEffectiveProbeConfiguration(
         reEnrollmentConfiguration,
-        evidence.probeConfiguration,
+        probeConfiguration,
       )
     ) {
       throw assertionError(
@@ -2084,16 +2990,17 @@ async function runFreshInstallUninstallScenario({
       installer: reEnrollmentInstall,
       metrics: compactMetricsEvidence(reEnrollmentMetrics),
       metricsHistory: metricsHistoryEvidence(reEnrollmentMetrics, {
-        retain: evidence.metricsHistory.anchors,
+        retain: metricsHistory.anchors,
       }),
       probeConfiguration: reEnrollmentConfiguration,
     };
 
     const canonicalReports = resources?.canonicalReports;
     if (
-      typeof canonicalReports?.arm !== "function" ||
-      typeof canonicalReports?.waitForEvidence !== "function" ||
-      typeof canonicalReports?.diagnostics !== "function" ||
+      !canonicalReports ||
+      typeof canonicalReports.arm !== "function" ||
+      typeof canonicalReports.waitForEvidence !== "function" ||
+      typeof canonicalReports.diagnostics !== "function" ||
       typeof host.restartCanonicalProbeWithoutObservationRuntime !==
         "function" ||
       typeof host.restoreObservationRuntime !== "function"
@@ -2104,10 +3011,16 @@ async function runFreshInstallUninstallScenario({
       );
     }
     canonicalReports.arm({ expectedProbeId: reEnrollmentIdentity.probeId });
-    let canonicalHostEvidence;
-    let canonicalReporting;
-    let metricsAfterCanonicalFailure;
-    let restoreError = null;
+    let canonicalHostEvidence:
+      | Awaited<
+          ReturnType<
+            ProbeHost["restartCanonicalProbeWithoutObservationRuntime"]
+          >
+        >
+      | undefined;
+    let canonicalReporting: CanonicalReportEvidence | undefined;
+    let metricsAfterCanonicalFailure: readonly unknown[] | undefined;
+    let restoreError: unknown = null;
     try {
       canonicalHostEvidence =
         await host.restartCanonicalProbeWithoutObservationRuntime(
@@ -2138,6 +3051,8 @@ async function runFreshInstallUninstallScenario({
       }
     }
     if (restoreError) throw restoreError;
+    // try/finally 正常完成后 reporting 必然已赋值；用只读局部保留同一对象供回调读取。
+    const acceptedCanonicalReporting = canonicalReporting;
     const canonicalOwnerHost = await waitForObservation({
       code: "canonical_runtime_unavailable_owner_projection_timeout",
       label: "canonical Probe online after accepted Runtime-unavailable report",
@@ -2147,7 +3062,7 @@ async function runFreshInstallUninstallScenario({
         value?.id === hostId &&
         value?.status === "online" &&
         value?.reportedProbeConfigurationVersion ===
-          canonicalReporting.bootReport.reconciliation
+          acceptedCanonicalReporting.bootReport.reconciliation
             .currentProbeConfigurationVersion,
     });
     evidence.canonicalRuntimeUnavailableReporting = {
@@ -2236,7 +3151,7 @@ async function runFreshInstallUninstallScenario({
       };
     }
 
-    const cleanup = {};
+    const cleanup: ScenarioCleanupEvidence = {};
     if (resources?.host?.cleanup) {
       try {
         cleanup.host = await resources.host.cleanup(runId);
@@ -2272,17 +3187,19 @@ async function runFreshInstallUninstallScenario({
       if (!primaryError) {
         primaryError = assertionError(
           "release_e2e_evidence_write_failed",
-          `Release E2E evidence could not be written: ${error.message}`,
+          `Release E2E evidence could not be written: ${String(objectView(error).message)}`,
         );
       }
     }
   }
 
   if (primaryError) {
-    const failure = new Error(
-      `Release E2E ${scenario} failed: ${redactSensitiveText(primaryError.message, [ownerPassword])}`,
+    const failure: ScenarioFailureError = new Error(
+      `Release E2E ${scenario} failed: ${redactSensitiveText(objectView(primaryError).message, [ownerPassword])}`,
     );
-    failure.code = primaryError.code ?? "release_e2e_failed";
+    const primaryCode = objectView(primaryError).code;
+    failure.code =
+      typeof primaryCode === "string" ? primaryCode : "release_e2e_failed";
     failure.evidence = finalEvidence;
     if (evidenceWriteError) {
       failure.evidenceWriteError = serializedError(evidenceWriteError);
@@ -2296,13 +3213,21 @@ export function createHubLifecycleClient({
   baseUrl,
   fetch: fetch_ = globalThis.fetch,
   sleep = defaultSleep,
+}: {
+  baseUrl: string;
+  fetch?: typeof globalThis.fetch;
+  sleep?: SleepFunction;
 }) {
   const normalizedBaseUrl = new URL(baseUrl);
-  const apiTimeline = [];
-  const enrollments = new Map();
+  const apiTimeline: HubApiRequestTimelineEntry[] = [];
+  const enrollments = new Map<string, HubEnrollmentTrackingRecord>();
   let ownerCookie = "";
 
-  async function request(pathname, init = {}, allowedStatuses = []) {
+  async function request(
+    pathname: string,
+    init: RequestInit = {},
+    allowedStatuses: readonly number[] = [],
+  ) {
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     if (ownerCookie) headers.set("cookie", ownerCookie);
@@ -2315,7 +3240,7 @@ export function createHubLifecycleClient({
     const text = await response.text();
     const body = text ? parseJson(text, `Hub response for ${pathname}`) : null;
     apiTimeline.push({
-      error: body?.error ?? null,
+      error: objectView(body).error ?? null,
       method: init.method ?? "GET",
       pathname,
       status: response.status,
@@ -2331,14 +3256,14 @@ export function createHubLifecycleClient({
     return { body, response };
   }
 
-  async function readTrackedEnrollment(enrollmentId) {
+  async function readTrackedEnrollment(enrollmentId: string) {
     const { body } = await request(`/api/web/enrollments/${enrollmentId}`);
     assertEnrollmentStatus(body, enrollmentId);
     recordEnrollmentEvidence(enrollments, body);
     return body;
   }
 
-  async function refreshTrackedEnrollment(enrollmentId) {
+  async function refreshTrackedEnrollment(enrollmentId: string) {
     try {
       await readTrackedEnrollment(enrollmentId);
     } catch (error) {
@@ -2352,13 +3277,13 @@ export function createHubLifecycleClient({
   }
 
   return {
-    async authenticate(password) {
+    async authenticate(password: string) {
       if (!password) throw new Error("Owner password is required");
       const { body, response } = await request("/api/web/auth/login", {
         body: JSON.stringify({ password }),
         method: "POST",
       });
-      if (body?.authenticated !== true) {
+      if (objectView(body).authenticated !== true) {
         throw new Error("Hub did not authenticate the Owner");
       }
       const setCookie = response.headers.get("set-cookie");
@@ -2366,7 +3291,7 @@ export function createHubLifecycleClient({
       return body;
     },
 
-    async collectEvidence() {
+    async collectEvidence(): Promise<HubCollectedEvidence> {
       await Promise.all(
         [...enrollments.keys()].map((enrollmentId) =>
           refreshTrackedEnrollment(enrollmentId),
@@ -2378,16 +3303,13 @@ export function createHubLifecycleClient({
       };
     },
 
-    async createEnrollment(target) {
+    async createEnrollment(target?: unknown): Promise<HubEnrollmentEvidence> {
       if (target !== undefined) assertEnrollmentTarget(target);
       const { body } = await request("/api/web/enrollments", {
         ...(target === undefined ? {} : { body: JSON.stringify({ target }) }),
         method: "POST",
       });
-      if (
-        typeof body?.enrollmentToken !== "string" ||
-        typeof body?.installCommand !== "string"
-      ) {
+      if (!isHubEnrollmentEvidence(body)) {
         throw new Error("Hub returned an invalid Enrollment response");
       }
       assertEnrollmentInstallContract(body);
@@ -2395,25 +3317,25 @@ export function createHubLifecycleClient({
       return body;
     },
 
-    async createManualReinstallEnrollment(hostId) {
+    async createManualReinstallEnrollment(
+      hostId: number,
+    ): Promise<HubEnrollmentEvidence> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(
         `/api/web/enrollments/manual-reinstall/${hostId}`,
         { method: "POST" },
       );
-      if (
-        typeof body?.enrollmentToken !== "string" ||
-        typeof body?.installCommand !== "string"
-      ) {
+      if (!isHubEnrollmentEvidence(body)) {
         throw new Error(
           "Hub returned an invalid manual Probe reinstall Enrollment response",
         );
       }
       assertEnrollmentInstallContract(body);
-      assertEnrollmentTarget(body.target);
+      const reinstallTarget = body.target;
+      assertEnrollmentTarget(reinstallTarget);
       if (
-        body.target.kind !== "manual_reinstall" ||
-        body.target.hostId !== hostId
+        reinstallTarget.kind !== "manual_reinstall" ||
+        reinstallTarget.hostId !== hostId
       ) {
         throw new Error("Hub manual Probe reinstall Enrollment target changed");
       }
@@ -2421,57 +3343,67 @@ export function createHubLifecycleClient({
       return body;
     },
 
-    async deleteHostHubOnly(hostId) {
+    async deleteHostHubOnly(hostId: number): Promise<HubDeletedHostEvidence> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(`/api/web/hosts/${hostId}?mode=hub-only`, {
         method: "DELETE",
       });
-      const deleted = body?.deletedHost;
+      const deleted = objectView(body).deletedHost;
+      const deletedAtMs = objectView(deleted).deletedAtMs;
       if (
-        deleted?.id !== hostId ||
-        !Number.isSafeInteger(deleted?.deletedAtMs) ||
-        deleted.deletedAtMs < 0
+        !isHubDeletedHostEvidence(deleted) ||
+        deleted.id !== hostId ||
+        !isSafeInteger(deletedAtMs) ||
+        deletedAtMs < 0
       ) {
         throw new Error("Hub returned an invalid Hub-only Host deletion");
       }
       return deleted;
     },
 
-    async getHost(hostId) {
+    async getHost(hostId: number): Promise<HubHostSummary> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(`/api/web/hosts/${hostId}`);
-      if (!body?.host || body.host.id !== hostId) {
+      const host = objectView(body).host;
+      if (!isHubHostSummary(host) || host.id !== hostId) {
         throw new Error("Hub returned an invalid Host detail response");
       }
-      return body.host;
+      return host;
     },
 
-    async getAuditLog() {
+    async getAuditLog(): Promise<AuditLogEvent[]> {
       const { body } = await request("/api/web/audit-log?limit=200");
-      if (!Array.isArray(body?.auditLog)) {
+      const auditLog = objectView(body).auditLog;
+      if (!isAuditLogEventList(auditLog)) {
         throw new Error("Hub returned an invalid Audit Log response");
       }
-      return body.auditLog;
+      return auditLog;
     },
 
-    async getEnrollment(enrollmentId) {
+    async getEnrollment(enrollmentId: string) {
       assertEnrollmentId(enrollmentId);
       return readTrackedEnrollment(enrollmentId);
     },
 
-    async getHostMetrics(hostId, { window = "1m" } = {}) {
+    async getHostMetrics(
+      hostId: number,
+      { window = "1m" }: { window?: HubMetricsWindow } = {},
+    ): Promise<readonly unknown[]> {
       assertPositiveInteger(hostId, "Host ID");
       assertMetricsWindow(window);
       const { body } = await request(
         `/api/web/hosts/${hostId}/metrics?window=${window}`,
       );
-      if (!Array.isArray(body?.metrics?.samples)) {
+      const samples = objectView(objectView(body).metrics).samples;
+      if (!isUnknownArray(samples)) {
         throw new Error("Hub returned an invalid Metrics response");
       }
-      return body.metrics.samples;
+      return samples;
     },
 
-    async getHostProbeConfiguration(hostId) {
+    async getHostProbeConfiguration(
+      hostId: number,
+    ): Promise<HubProbeConfiguration> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(
         `/api/web/hosts/${hostId}/probe-configuration`,
@@ -2480,7 +3412,9 @@ export function createHubLifecycleClient({
       return body;
     },
 
-    async getProbeOperation(expectedOperation) {
+    async getProbeOperation(
+      expectedOperation: ProbeOperation,
+    ): Promise<ProbeOperation> {
       assertProbeOperation(expectedOperation, {
         hostId: expectedOperation?.hostId,
         id: expectedOperation?.id,
@@ -2490,7 +3424,10 @@ export function createHubLifecycleClient({
       const { body } = await request(
         `/api/web/probe-operations/${expectedOperation.id}`,
       );
-      const operation = body?.probeOperation;
+      const operation = objectView(body).probeOperation;
+      if (!isHubProbeOperation(operation)) {
+        throw new Error("Hub returned an invalid Probe Operation");
+      }
       assertProbeOperation(operation, {
         hostId: expectedOperation.hostId,
         id: expectedOperation.id,
@@ -2500,7 +3437,7 @@ export function createHubLifecycleClient({
       return operation;
     },
 
-    async isHostSoftDeleted(hostId) {
+    async isHostSoftDeleted(hostId: number) {
       assertPositiveInteger(hostId, "Host ID");
       const hosts = await this.listHosts();
       const { response } = await request(`/api/web/hosts/${hostId}`, {}, [404]);
@@ -2509,20 +3446,24 @@ export function createHubLifecycleClient({
       );
     },
 
-    async listHosts() {
+    async listHosts(): Promise<HubHostSummary[]> {
       const { body } = await request("/api/web/hosts");
-      if (!Array.isArray(body?.hosts)) {
+      const hosts = objectView(body).hosts;
+      if (!isHubHostSummaryList(hosts)) {
         throw new Error("Hub returned an invalid Host list response");
       }
-      return body.hosts;
+      return hosts;
     },
 
-    async requestProbeUninstall(hostId) {
+    async requestProbeUninstall(hostId: number): Promise<ProbeOperation> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(`/api/web/hosts/${hostId}`, {
         method: "DELETE",
       });
-      const operation = body?.probeUninstallRequest;
+      const operation = objectView(body).probeUninstallRequest;
+      if (!isHubProbeOperation(operation)) {
+        throw new Error("Hub returned an invalid Probe Operation");
+      }
       const boundOperation = {
         ...normalizeProbeUninstallOperation(operation),
         hostId,
@@ -2535,13 +3476,16 @@ export function createHubLifecycleClient({
       return boundOperation;
     },
 
-    async requestProbeUpgrade(hostId) {
+    async requestProbeUpgrade(hostId: number): Promise<ProbeOperation> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(
         `/api/web/hosts/${hostId}/probe-upgrade-requests`,
         { method: "POST" },
       );
-      const operation = body?.probeUpgradeRequest;
+      const operation = objectView(body).probeUpgradeRequest;
+      if (!isHubProbeOperation(operation)) {
+        throw new Error("Hub returned an invalid Probe Operation");
+      }
       const boundOperation = {
         ...operation,
         hostId,
@@ -2561,7 +3505,10 @@ export function createHubLifecycleClient({
       return boundOperation;
     },
 
-    async updateHostProbeConfiguration(hostId, configuration) {
+    async updateHostProbeConfiguration(
+      hostId: number,
+      configuration: HubProbeConfigurationUpdate,
+    ): Promise<HubProbeConfiguration> {
       assertPositiveInteger(hostId, "Host ID");
       const { body } = await request(
         `/api/web/hosts/${hostId}/probe-configuration`,
@@ -2571,7 +3518,10 @@ export function createHubLifecycleClient({
       return body;
     },
 
-    async waitForProbeOperation(expectedOperation, options) {
+    async waitForProbeOperation(
+      expectedOperation: ProbeOperation,
+      options?: { intervalMs?: number; timeoutMs?: number },
+    ): Promise<ProbeOperation[]> {
       assertProbeOperation(expectedOperation, {
         hostId: expectedOperation?.hostId,
         id: expectedOperation?.id,
@@ -2584,17 +3534,21 @@ export function createHubLifecycleClient({
       const maximumObservations = Math.floor(timeoutMs / intervalMs) + 1;
       const timeline = [{ ...expectedOperation }];
       let previous = expectedOperation;
-      let terminalObservation = null;
+      let terminalObservation: ProbeOperation | null = null;
 
       for (let attempt = 0; attempt < maximumObservations; attempt += 1) {
         try {
           const { body } = await request(
             `/api/web/probe-operations/${operationId}`,
           );
+          const payload = objectView(body).probeOperation;
+          if (!isHubProbeOperation(payload)) {
+            throw new Error("Hub returned an invalid Probe Operation");
+          }
           const operation =
             expectedOperation.kind === "probe_uninstall"
-              ? normalizeProbeUninstallOperation(body?.probeOperation)
-              : body?.probeOperation;
+              ? normalizeProbeUninstallOperation(payload)
+              : payload;
           assertProbeOperation(operation, {
             hostId: expectedOperation.hostId,
             id: operationId,
@@ -2614,12 +3568,12 @@ export function createHubLifecycleClient({
           }
           previous = operation;
         } catch (error) {
-          error.timeline = timeline;
+          attachObservationTimeline(error, timeline);
           throw error;
         }
       }
 
-      const error = new Error(
+      const error: OperationObservationError = new Error(
         `Probe Operation ${operationId} did not complete within ${timeoutMs}ms`,
       );
       error.code = "probe_operation_timeout";
@@ -2630,30 +3584,104 @@ export function createHubLifecycleClient({
 }
 
 class HubApiError extends Error {
-  constructor({ body, method, pathname, response }) {
+  body: unknown;
+  code: unknown;
+  status: number;
+
+  constructor({ body, method, pathname, response }: HubApiErrorDetails) {
     super(
-      `Hub API ${method} ${pathname} failed with ${response.status}: ${body?.error ?? response.statusText}`,
+      `Hub API ${method} ${pathname} failed with ${response.status}: ${
+        objectView(body).error ?? response.statusText
+      }`,
     );
     this.body = body;
-    this.code = body?.error ?? "hub_api_error";
+    this.code = objectView(body).error ?? "hub_api_error";
     this.status = response.status;
   }
 }
 
-function normalizeProbeUninstallOperation(operation) {
+function normalizeProbeUninstallOperation(
+  operation: ProbeOperation,
+): ProbeOperation {
   return {
     ...operation,
-    targetProbeVersion: operation?.targetProbeVersion ?? "",
+    targetProbeVersion: operation.targetProbeVersion ?? "",
   };
 }
 
-function assertProbeOperationProgress(previous, operation) {
+// 边界判据：Hub JSON 载荷的字段形状由本模块数据 Interface 声明，这里只复核原实现已有的
+// 结构性判据（对象或数组；Enrollment 额外复核 token 与 installCommand 两个字符串字段），
+// 不新增校验。判据不成立时抛出的错误文本与原实现一致，完整校验仍由 H 与本地断言执行。
+function isAuditLogEventList(value: unknown): value is AuditLogEvent[] {
+  return isUnknownArray(value);
+}
+
+function isHubDeletedHostEvidence(
+  value: unknown,
+): value is HubDeletedHostEvidence {
+  return isUnknownRecord(value);
+}
+
+function isHubEnrollmentEvidence(
+  value: unknown,
+): value is HubEnrollmentEvidence {
+  return (
+    isUnknownRecord(value) &&
+    typeof value.enrollmentToken === "string" &&
+    typeof value.installCommand === "string"
+  );
+}
+
+function isHubHostSummary(value: unknown): value is HubHostSummary {
+  return isUnknownRecord(value);
+}
+
+function isHubHostSummaryList(value: unknown): value is HubHostSummary[] {
+  return isUnknownArray(value);
+}
+
+function isHubProbeOperation(value: unknown): value is ProbeOperation {
+  return isUnknownRecord(value);
+}
+
+function isHubProbeConfiguration(
+  value: unknown,
+): value is HubProbeConfiguration {
+  const mode = objectView(value).mode;
+  const configuration = objectView(objectView(value).configuration);
+  return (
+    isUnknownRecord(value) &&
+    (mode === "inherit" || mode === "override") &&
+    isUnknownArray(configuration.enabledCollectorIds) &&
+    isSafeInteger(configuration.metricsCollectionIntervalSeconds) &&
+    typeof configuration.version === "string"
+  );
+}
+
+function isEnrollmentStatus(value: unknown): value is HubEnrollmentStatus {
+  return (
+    typeof value === "string" &&
+    ["expired", "pending", "ready", "rejected", "verifying"].includes(value)
+  );
+}
+
+function attachObservationTimeline(
+  error: unknown,
+  timeline: readonly ProbeOperation[],
+): void {
+  if (isUnknownRecord(error)) error.timeline = timeline;
+}
+
+function assertProbeOperationProgress(
+  previous: ProbeOperation,
+  operation: ProbeOperation,
+): void {
   for (const field of [
     "createdAtMs",
     "acceptedAtMs",
     "runningAtMs",
     "completedAtMs",
-  ]) {
+  ] as const) {
     if (
       (field === "createdAtMs" && operation[field] !== previous[field]) ||
       (previous[field] !== null && operation[field] !== previous[field])
@@ -2665,7 +3693,9 @@ function assertProbeOperationProgress(previous, operation) {
     }
   }
   if (terminalProbeOperationStates.has(previous.state)) return;
-  const allowedAfter = {
+  const allowedAfter: Partial<
+    Record<ProbeOperationState, ReadonlySet<string>>
+  > = {
     accepted: new Set(["accepted", "failed", "running", "succeeded"]),
     pending: new Set(Object.keys(probeOperationStateRank)),
     running: new Set(["failed", "running", "succeeded"]),
@@ -2681,7 +3711,10 @@ function assertProbeOperationProgress(previous, operation) {
   }
 }
 
-function assertStableTerminalOperation(previous, operation) {
+function assertStableTerminalOperation(
+  previous: ProbeOperation,
+  operation: ProbeOperation,
+): void {
   if (
     previous.state !== operation.state ||
     JSON.stringify(previous.failure) !== JSON.stringify(operation.failure)
@@ -2693,92 +3726,98 @@ function assertStableTerminalOperation(previous, operation) {
   }
 }
 
-function assertHostProbeConfiguration(value) {
-  if (
-    !value ||
-    (value.mode !== "inherit" && value.mode !== "override") ||
-    !Array.isArray(value.configuration?.enabledCollectorIds) ||
-    !Number.isSafeInteger(
-      value.configuration.metricsCollectionIntervalSeconds,
-    ) ||
-    typeof value.configuration.version !== "string"
-  ) {
+function assertHostProbeConfiguration(
+  value: unknown,
+): asserts value is HubProbeConfiguration {
+  if (!isHubProbeConfiguration(value)) {
     throw new Error("Hub returned an invalid Host Probe Configuration");
   }
 }
 
-function assertPositiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
+function assertPositiveInteger(
+  value: unknown,
+  label: string,
+): asserts value is number {
+  if (!isSafeInteger(value) || value <= 0) {
     throw new Error(`${label} must be a positive integer`);
   }
 }
 
-function assertEnrollmentTarget(target) {
-  if (target?.kind === "new_host" && Object.keys(target).length === 1) {
+function assertEnrollmentTarget(
+  target: unknown,
+): asserts target is HubEnrollmentTarget {
+  const view = objectView(target);
+  if (view.kind === "new_host" && Object.keys(view).length === 1) {
     return;
   }
+  const hostId = view.hostId;
   if (
-    (target?.kind === "existing_host" || target?.kind === "manual_reinstall") &&
-    Object.keys(target).sort().join(",") === "hostId,kind" &&
-    Number.isSafeInteger(target.hostId) &&
-    target.hostId > 0
+    (view.kind === "existing_host" || view.kind === "manual_reinstall") &&
+    Object.keys(view).sort().join(",") === "hostId,kind" &&
+    isSafeInteger(hostId) &&
+    hostId > 0
   ) {
     return;
   }
   throw new Error("Enrollment target is invalid");
 }
 
-function assertEnrollmentId(value) {
-  if (!/^enr_[A-Za-z0-9_-]{16,}$/.test(value ?? "")) {
+function assertEnrollmentId(value: unknown): void {
+  if (!/^enr_[A-Za-z0-9_-]{16,}$/.test(regexInput(value))) {
     throw new Error("Enrollment ID is invalid");
   }
 }
 
-function assertEnrollmentStatus(value, enrollmentId) {
+function assertEnrollmentStatus(
+  value: unknown,
+  enrollmentId: string,
+): asserts value is HubEnrollmentEvidence {
+  const view = objectView(value);
+  const rejection = view.rejection;
+  const rejectionFields = objectView(rejection);
+  const code = rejectionFields.code;
+  const message = rejectionFields.message;
   const validRejection =
-    value?.rejection === null ||
-    (typeof value?.rejection?.code === "string" &&
-      value.rejection.code.length > 0 &&
-      value.rejection.code.length <= 64 &&
-      (value.rejection.message === null ||
-        (typeof value.rejection.message === "string" &&
-          value.rejection.message.length > 0 &&
-          value.rejection.message.length <= 512)));
+    rejection === null ||
+    (typeof code === "string" &&
+      code.length > 0 &&
+      code.length <= 64 &&
+      (message === null ||
+        (typeof message === "string" &&
+          message.length > 0 &&
+          message.length <= 512)));
+  const hostId = view.hostId;
   if (
-    value?.enrollmentId !== enrollmentId ||
-    !["pending", "verifying", "ready", "rejected", "expired"].includes(
-      value?.status,
-    ) ||
-    (value.hostId !== null &&
-      (!Number.isSafeInteger(value.hostId) || value.hostId < 1)) ||
+    view.enrollmentId !== enrollmentId ||
+    !isEnrollmentStatus(view.status) ||
+    (hostId !== null && (!isSafeInteger(hostId) || hostId < 1)) ||
     !validRejection
   ) {
     throw new Error("Hub returned an invalid Enrollment status");
   }
-  assertEnrollmentTarget(value.target);
+  assertEnrollmentTarget(view.target);
 }
 
-function positiveDuration(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) {
+function positiveDuration(value: unknown, label: string): number {
+  if (!isSafeInteger(value) || value <= 0) {
     throw new Error(`${label} must be a positive integer`);
   }
   return value;
 }
 
-function defaultSleep(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function defaultSleep(milliseconds: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function assertCandidateManifest(manifest) {
-  assertExactObjectKeys(manifest, [
-    "bootstrapRecipe",
-    "candidate",
-    "hub",
-    "kind",
-    "probeAssetSet",
-    "releaseBaseline",
-    "schemaVersion",
-  ]);
+export function assertCandidateManifest(
+  manifest: unknown,
+): asserts manifest is ReleaseE2ECandidateManifest {
+  assertExactObjectKeys(manifest, candidateManifestKeys);
+  // 边界判据：上面的断言已保证这是含这七个字段的对象，这里按同一条件把载荷提升到本模块
+  // 数据 Interface，随后的逐项校验与原实现完全一致。
+  if (!isReleaseE2ECandidateManifest(manifest)) {
+    throw new Error("Candidate Manifest is invalid or internally inconsistent");
+  }
   assertExactObjectKeys(manifest.candidate, ["commit", "version"]);
   assertExactObjectKeys(manifest.hub, [
     "archive",
@@ -2859,9 +3898,11 @@ function assertCandidateManifest(manifest) {
   }
 }
 
-function assertReleaseBaselineDescriptor(baseline) {
-  const ordinary = baseline?.kind === "enoki-release-baseline";
-  const migration = baseline?.kind === "enoki-trust-epoch-migration-baseline";
+function assertReleaseBaselineDescriptor(
+  baseline: ReleaseBaselineDescriptor,
+): ReleaseBaselineDescriptor {
+  const ordinary = baseline.kind === "enoki-release-baseline";
+  const migration = baseline.kind === "enoki-trust-epoch-migration-baseline";
   assertExactObjectKeys(
     baseline,
     ordinary
@@ -3014,18 +4055,22 @@ function assertReleaseBaselineDescriptor(baseline) {
   return baseline;
 }
 
-function isTrustEpochMigrationBaseline(baseline) {
-  return baseline?.kind === "enoki-trust-epoch-migration-baseline";
+function isTrustEpochMigrationBaseline(
+  baseline: ReleaseBaselineDescriptor,
+): baseline is MigrationReleaseBaselineDescriptor {
+  return baseline.kind === "enoki-trust-epoch-migration-baseline";
 }
 
-function releaseBaselineProbeVersion(baseline) {
+function releaseBaselineProbeVersion(
+  baseline: ReleaseBaselineDescriptor,
+): string {
   assertReleaseBaselineDescriptor(baseline);
   return isTrustEpochMigrationBaseline(baseline)
     ? baseline.tag.slice(1)
     : baseline.probeAssetSet.version;
 }
 
-function releaseBaselineEvidence(baseline) {
+function releaseBaselineEvidence(baseline: ReleaseBaselineDescriptor) {
   assertReleaseBaselineDescriptor(baseline);
   const migration = isTrustEpochMigrationBaseline(baseline);
   return {
@@ -3054,9 +4099,23 @@ function releaseBaselineEvidence(baseline) {
   };
 }
 
-function isCandidateFileList(files) {
+// 边界判据：assertExactObjectKeys 已经保证条目是含这三个字段的对象，这里按同一条件把它
+// 提升到本模块数据 Interface；判据不成立时沿用原实现在该处的结果（该条目不算合法清单）。
+function isCandidateFileEntryShape(
+  value: unknown,
+): value is CandidateFileEntry {
+  return isUnknownRecord(value);
+}
+
+function isLegacyCandidateFileEntryShape(
+  value: unknown,
+): value is LegacyCandidateFileEntry {
+  return isUnknownRecord(value);
+}
+
+function isCandidateFileList(files: unknown): boolean {
   return (
-    Array.isArray(files) &&
+    isUnknownArray(files) &&
     files.length > 0 &&
     files.every((file) => {
       try {
@@ -3064,6 +4123,7 @@ function isCandidateFileList(files) {
       } catch {
         return false;
       }
+      if (!isCandidateFileEntryShape(file)) return false;
       return (
         /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(file.file ?? "") &&
         !file.file.includes("..") &&
@@ -3074,9 +4134,9 @@ function isCandidateFileList(files) {
   );
 }
 
-function isLegacyCandidateFileList(files) {
+function isLegacyCandidateFileList(files: unknown): boolean {
   return (
-    Array.isArray(files) &&
+    isUnknownArray(files) &&
     files.length > 0 &&
     files.every((file) => {
       try {
@@ -3084,6 +4144,7 @@ function isLegacyCandidateFileList(files) {
       } catch {
         return false;
       }
+      if (!isLegacyCandidateFileEntryShape(file)) return false;
       return (
         /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(file.name ?? "") &&
         !file.name.includes("..") &&
@@ -3094,7 +4155,14 @@ function isLegacyCandidateFileList(files) {
   );
 }
 
-function assertScenarioParticipants(host, hub) {
+// 边界判据：与原实现一致，只复核参与者对象上这些方法存在；非对象或数组载荷经 objectView
+// 得到空对象，判据同样不成立，失败文本保持原样。
+function hasAllMethods(value: unknown, methods: readonly string[]): boolean {
+  const view = objectView(value);
+  return methods.every((method) => typeof view[method] === "function");
+}
+
+function assertScenarioParticipants(host: unknown, hub: unknown): void {
   const hostMethods = [
     "assertDisposable",
     "assertInstalled",
@@ -3113,15 +4181,15 @@ function assertScenarioParticipants(host, hub) {
     "requestProbeUninstall",
     "waitForProbeOperation",
   ];
-  if (
-    hostMethods.some((method) => typeof host?.[method] !== "function") ||
-    hubMethods.some((method) => typeof hub?.[method] !== "function")
-  ) {
+  if (!hasAllMethods(host, hostMethods) || !hasAllMethods(hub, hubMethods)) {
     throw new Error("Release E2E environment returned invalid participants");
   }
 }
 
-function assertFreshInstallScenarioParticipants(host, hub) {
+function assertFreshInstallScenarioParticipants(
+  host: unknown,
+  hub: unknown,
+): void {
   const hostMethods = [
     "assertDisposable",
     "assertInstalled",
@@ -3150,17 +4218,17 @@ function assertFreshInstallScenarioParticipants(host, hub) {
     "listHosts",
     "updateHostProbeConfiguration",
   ];
-  if (
-    hostMethods.some((method) => typeof host?.[method] !== "function") ||
-    hubMethods.some((method) => typeof hub?.[method] !== "function")
-  ) {
+  if (!hasAllMethods(host, hostMethods) || !hasAllMethods(hub, hubMethods)) {
     throw new Error(
       "Release E2E environment returned invalid fresh-install participants",
     );
   }
 }
 
-function assertCreatedEnrollment(enrollment, expectedTarget) {
+function assertCreatedEnrollment(
+  enrollment: HubEnrollmentEvidence,
+  expectedTarget: unknown,
+): asserts enrollment is HubEnrollmentEvidence & { enrollmentId: string } {
   if (
     !enrollment?.installCommand ||
     enrollment?.status !== "pending" ||
@@ -3175,7 +4243,11 @@ function assertCreatedEnrollment(enrollment, expectedTarget) {
   assertInstallCommand(enrollment.installCommand);
 }
 
-function compactEnrollmentEvidence(enrollment) {
+function compactEnrollmentEvidence(enrollment: HubEnrollmentEvidence): {
+  enrollmentId?: string;
+  status?: HubEnrollmentStatus;
+  target?: HubEnrollmentTarget;
+} {
   return {
     enrollmentId: enrollment.enrollmentId,
     status: enrollment.status,
@@ -3183,7 +4255,13 @@ function compactEnrollmentEvidence(enrollment) {
   };
 }
 
-function compactEnrollmentStatusEvidence(enrollment) {
+function compactEnrollmentStatusEvidence(enrollment: HubEnrollmentEvidence): {
+  enrollmentId?: string;
+  hostId?: number | null;
+  rejection?: { code: string; message: string | null } | null;
+  status?: HubEnrollmentStatus;
+  target?: HubEnrollmentTarget;
+} {
   return {
     enrollmentId: enrollment.enrollmentId,
     hostId: enrollment.hostId,
@@ -3193,37 +4271,48 @@ function compactEnrollmentStatusEvidence(enrollment) {
   };
 }
 
-function recordEnrollmentEvidence(enrollments, enrollment) {
-  if (typeof enrollment?.enrollmentId !== "string") return;
-  enrollments.set(enrollment.enrollmentId, {
-    enrollmentId: enrollment.enrollmentId,
-    hostId: enrollment.hostId ?? null,
-    rejection: enrollment.rejection ?? null,
+function recordEnrollmentEvidence(
+  enrollments: Map<string, HubEnrollmentTrackingRecord>,
+  enrollment: unknown,
+): void {
+  const view = objectView(enrollment);
+  if (typeof view.enrollmentId !== "string") return;
+  enrollments.set(view.enrollmentId, {
+    enrollmentId: view.enrollmentId,
+    hostId: view.hostId ?? null,
+    rejection: view.rejection ?? null,
     readError: null,
-    status: enrollment.status ?? null,
-    target: enrollment.target ?? null,
+    status: view.status ?? null,
+    target: view.target ?? null,
   });
 }
 
-function assertMetricsWindow(window) {
-  if (!new Set(["1m", "10m", "1h", "6h", "24h", "3d", "7d"]).has(window)) {
+function assertMetricsWindow(
+  window: unknown,
+): asserts window is HubMetricsWindow {
+  if (
+    !new Set(["1m", "10m", "1h", "6h", "24h", "3d", "7d"]).has(
+      regexInput(window),
+    )
+  ) {
     throw new Error("Hub Metrics window is invalid");
   }
 }
 
-function assertLocalUninstallCompletion(completion) {
+function assertLocalUninstallCompletion(completion: unknown): void {
+  const view = objectView(completion);
   if (
-    completion?.clean !== true ||
-    completion?.journaldRetained !== true ||
-    completion?.sharedDependenciesRetained !== true
+    view.clean !== true ||
+    view.journaldRetained !== true ||
+    view.sharedDependenciesRetained !== true
   ) {
     throw assertionError(
       "local_probe_uninstall_residue",
       "Local Probe Uninstall did not satisfy the shared no-residue boundary",
     );
   }
-  assertHostInventoryEvidence(completion.inventory);
-  if (inventoryResidue(completion.inventory).length > 0) {
+  assertHostInventoryEvidence(view.inventory);
+  if (inventoryResidue(view.inventory).length > 0) {
     throw assertionError(
       "local_probe_uninstall_residue",
       "Local Probe Uninstall left Enoki-managed residue",
@@ -3231,34 +4320,37 @@ function assertLocalUninstallCompletion(completion) {
   }
 }
 
-function hasPortableMetricsAfter(samples, previousSamples) {
+function hasPortableMetricsAfter(
+  samples: readonly unknown[] | null | undefined,
+  previousSamples: readonly unknown[],
+): boolean {
   const previous = latestPortableMetric(previousSamples);
-  return (
-    Boolean(previous) &&
-    Array.isArray(samples) &&
-    samples.some(
-      (sample) =>
-        isPortableMetricSample(sample) &&
-        sample.collectedAtMs > previous.collectedAtMs,
-    )
+  if (!previous || !isUnknownArray(samples)) return false;
+  return samples.some(
+    (sample) =>
+      isPortableMetricSample(sample) &&
+      sample.collectedAtMs > previous.collectedAtMs,
   );
 }
 
-function retainsInitialMetricSample(samples, initialSamples) {
+function retainsInitialMetricSample(
+  samples: readonly unknown[] | null | undefined,
+  initialSamples: readonly unknown[],
+): boolean {
   const initial = compactMetricsEvidence(initialSamples)[0];
-  return (
-    Boolean(initial) &&
-    Array.isArray(samples) &&
-    samples.some(
-      (sample) =>
-        isPortableMetricSample(sample) &&
-        sample.sequence === initial.sequence &&
-        sample.collectedAtMs === initial.collectedAtMs,
-    )
+  if (!initial || !isUnknownArray(samples)) return false;
+  return samples.some(
+    (sample) =>
+      isPortableMetricSample(sample) &&
+      sample.sequence === initial.sequence &&
+      sample.collectedAtMs === initial.collectedAtMs,
   );
 }
 
-function retainsMetricHistoryAnchors(samples, anchors) {
+function retainsMetricHistoryAnchors(
+  samples: readonly unknown[],
+  anchors: readonly MetricHistoryAnchor[],
+): boolean {
   return (
     Array.isArray(anchors) &&
     anchors.length > 0 &&
@@ -3273,8 +4365,14 @@ function retainsMetricHistoryAnchors(samples, anchors) {
   );
 }
 
-function assertFreshLifecycleAuditLog(auditLog, hostId) {
-  const required = [
+function assertFreshLifecycleAuditLog(
+  auditLog: AuditLogEvent[],
+  hostId: number,
+): AuditLogEvent[] {
+  const required: {
+    action: string;
+    matches: (event: AuditLogEvent) => boolean;
+  }[] = [
     {
       action: "enrollment_token.create",
       matches: (event) =>
@@ -3332,14 +4430,16 @@ function assertFreshLifecycleAuditLog(auditLog, hostId) {
       `Hub Audit Log is missing fresh lifecycle evidence: ${missing.join(", ")}`,
     );
   }
-  return selected;
+  return selected.filter(
+    (event): event is AuditLogEvent => event !== undefined,
+  );
 }
 
 function assertBaselineScenarioParticipants(
-  host,
-  hub,
-  transitionClassification,
-) {
+  host: unknown,
+  hub: unknown,
+  transitionClassification: UpgradeTransitionClassification,
+): void {
   assertScenarioParticipants(host, hub);
   const hostMethods = ["readProbeIdentity"];
   const hubMethods = ["switchToCandidate"];
@@ -3359,17 +4459,17 @@ function assertBaselineScenarioParticipants(
     );
     hubMethods.push("requestProbeUpgrade");
   }
-  if (
-    hostMethods.some((method) => typeof host?.[method] !== "function") ||
-    hubMethods.some((method) => typeof hub?.[method] !== "function")
-  ) {
+  if (!hasAllMethods(host, hostMethods) || !hasAllMethods(hub, hubMethods)) {
     throw new Error(
       "Release E2E environment returned invalid baseline-upgrade participants",
     );
   }
 }
 
-function assertHubRestoreScenarioParticipants(host, hub) {
+function assertHubRestoreScenarioParticipants(
+  host: unknown,
+  hub: unknown,
+): void {
   const hostMethods = [
     "assertDisposable",
     "assertInstalled",
@@ -3398,17 +4498,17 @@ function assertHubRestoreScenarioParticipants(host, hub) {
     "completeUpgradeOwnershipTransition",
   );
   hubMethods.push("requestProbeUpgrade");
-  if (
-    hostMethods.some((method) => typeof host?.[method] !== "function") ||
-    hubMethods.some((method) => typeof hub?.[method] !== "function")
-  ) {
+  if (!hasAllMethods(host, hostMethods) || !hasAllMethods(hub, hubMethods)) {
     throw new Error(
       "Release E2E environment returned invalid Hub Restore participants",
     );
   }
 }
 
-function assertLiveHubStateSnapshotEvidence(snapshot, baseline) {
+function assertLiveHubStateSnapshotEvidence(
+  snapshot: HubStateSnapshotEvidence | null | undefined,
+  baseline: ReleaseBaselineDescriptor,
+): void {
   if (
     snapshot?.tool !== "enoki-hub-state" ||
     snapshot.version !== "v1" ||
@@ -3439,10 +4539,10 @@ function assertLiveHubStateSnapshotEvidence(snapshot, baseline) {
 }
 
 function assertLiveHubRestoreEvidence(
-  restored,
-  expectedManifestDigest,
-  expectedBaselineImageDigest,
-) {
+  restored: HubStateRestoreEvidence | null | undefined,
+  expectedManifestDigest: string,
+  expectedBaselineImageDigest: string,
+): void {
   if (
     restored?.verify?.status !== "succeeded" ||
     restored.verify.manifestDigest !== expectedManifestDigest ||
@@ -3458,7 +4558,11 @@ function assertLiveHubRestoreEvidence(
   }
 }
 
-function assertSameProbeIdentity(before, after, boundary) {
+function assertSameProbeIdentity(
+  before: ProbeIdentity | null | undefined,
+  after: ProbeIdentity | null | undefined,
+  boundary: string,
+): void {
   if (
     !before ||
     !after ||
@@ -3472,7 +4576,7 @@ function assertSameProbeIdentity(before, after, boundary) {
   }
 }
 
-function assertRepairScenarioParticipants(host, hub) {
+function assertRepairScenarioParticipants(host: unknown, hub: unknown): void {
   assertBaselineScenarioParticipants(host, hub, "compatible");
   const hostMethods = [
     "armPostReplacementRestartFault",
@@ -3482,8 +4586,8 @@ function assertRepairScenarioParticipants(host, hub) {
     "repair",
   ];
   if (
-    hostMethods.some((method) => typeof host?.[method] !== "function") ||
-    typeof hub?.getProbeOperation !== "function"
+    !hasAllMethods(host, hostMethods) ||
+    typeof objectView(hub).getProbeOperation !== "function"
   ) {
     throw new Error(
       "Release E2E environment returned invalid post-replacement Repair participants",
@@ -3491,8 +4595,15 @@ function assertRepairScenarioParticipants(host, hub) {
   }
 }
 
-function assertLifecycleAuditLog(auditLog, hostId, operationId) {
-  const required = [
+function assertLifecycleAuditLog(
+  auditLog: readonly AuditLogEvent[],
+  hostId: number,
+  operationId: number,
+): AuditLogEvent[] {
+  const required: {
+    action: string;
+    matches: (event: AuditLogEvent) => boolean;
+  }[] = [
     {
       action: "enrollment_token.create",
       matches: (event) =>
@@ -3511,14 +4622,18 @@ function assertLifecycleAuditLog(auditLog, hostId, operationId) {
     },
     {
       action: "host.delete",
-      matches: (event) =>
-        isValidLifecycleAuditEvent(event) &&
-        event.actor === "owner" &&
-        event.outcome === "success" &&
-        event.subjectId === String(hostId) &&
-        event.subjectType === "host" &&
-        event.details?.hostId === hostId &&
-        event.details?.probeOperationId === operationId,
+      matches: (event) => {
+        const details = event.details;
+        return (
+          isValidLifecycleAuditEvent(event) &&
+          event.actor === "owner" &&
+          event.outcome === "success" &&
+          event.subjectId === String(hostId) &&
+          event.subjectType === "host" &&
+          details?.hostId === hostId &&
+          details?.probeOperationId === operationId
+        );
+      },
     },
   ];
   const selected = required.map(({ action, matches }) =>
@@ -3533,16 +4648,19 @@ function assertLifecycleAuditLog(auditLog, hostId, operationId) {
       `Hub Audit Log is missing lifecycle evidence: ${missing.join(", ")}`,
     );
   }
-  return selected;
+  // 上一项判定已保证每个 action 都命中，这里只是把该事实交给类型系统。
+  return selected.filter(
+    (event): event is AuditLogEvent => event !== undefined,
+  );
 }
 
 function assertMigrationLifecycleAuditLog(
-  auditLog,
-  hostId,
-  operationId,
-  oldIdentity,
-  newIdentity,
-) {
+  auditLog: readonly AuditLogEvent[],
+  hostId: number,
+  operationId: number,
+  oldIdentity: ProbeIdentity,
+  newIdentity: ProbeIdentity,
+): AuditLogEvent[] {
   const selected = assertLifecycleAuditLog(auditLog, hostId, operationId);
   return [
     ...selected,
@@ -3556,28 +4674,31 @@ function assertMigrationLifecycleAuditLog(
 }
 
 function assertManualReinstallAuditEvent(
-  auditLog,
-  hostId,
-  oldIdentity,
-  newIdentity,
-) {
-  const replacement = auditLog.find(
-    (event) =>
+  auditLog: readonly AuditLogEvent[],
+  hostId: number,
+  oldIdentity: ProbeIdentity,
+  newIdentity: ProbeIdentity,
+): AuditLogEvent[] {
+  const replacement = auditLog.find((event) => {
+    const details = event?.details;
+    const sourceProbeSha256 = details?.sourceProbeSha256;
+    return (
       event?.action === "probe.manual_reinstall_identity_replaced" &&
       isValidLifecycleAuditEvent(event) &&
       event.actor === "system" &&
       event.outcome === "success" &&
       event.subjectId === String(hostId) &&
       event.subjectType === "host" &&
-      event.details?.oldProbeId === oldIdentity.probeId &&
-      event.details?.newProbeId === newIdentity.probeId &&
-      Array.isArray(event.details?.sourceProbeSha256) &&
-      event.details.sourceProbeSha256.length > 0 &&
-      /^sha256:[0-9a-f]{64}$/.test(event.details?.targetAssetSetDigest ?? "") &&
+      details?.oldProbeId === oldIdentity.probeId &&
+      details?.newProbeId === newIdentity.probeId &&
+      Array.isArray(sourceProbeSha256) &&
+      sourceProbeSha256.length > 0 &&
+      /^sha256:[0-9a-f]{64}$/.test(regexInput(details?.targetAssetSetDigest)) &&
       /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-        event.details?.targetProbeVersion ?? "",
-      ),
-  );
+        regexInput(details?.targetProbeVersion),
+      )
+    );
+  });
   if (!replacement) {
     throw assertionError(
       "manual_reinstall_audit_log_missing",
@@ -3588,12 +4709,12 @@ function assertManualReinstallAuditEvent(
 }
 
 function assertBaselineUpgradeAuditLog(
-  auditLog,
-  hostId,
-  upgradeOperationId,
-  uninstallOperationId,
-  targetProbeVersion,
-) {
+  auditLog: readonly AuditLogEvent[],
+  hostId: number,
+  upgradeOperationId: number,
+  uninstallOperationId: number,
+  targetProbeVersion: string,
+): AuditLogEvent[] {
   const lifecycle = assertLifecycleAuditLog(
     auditLog,
     hostId,
@@ -3619,22 +4740,32 @@ function assertBaselineUpgradeAuditLog(
   return [...lifecycle, upgrade];
 }
 
-function isValidLifecycleAuditEvent(event) {
+function isValidLifecycleAuditEvent(event: unknown): boolean {
+  const view = objectView(event);
+  const id = view.id;
+  const occurredAtMs = view.occurredAtMs;
+  const action = view.action;
+  const subjectId = view.subjectId;
+  const subjectType = view.subjectType;
   return (
-    Number.isSafeInteger(event?.id) &&
-    event.id > 0 &&
-    Number.isSafeInteger(event.occurredAtMs) &&
-    event.occurredAtMs > 0 &&
-    typeof event.action === "string" &&
-    event.action.length > 0 &&
-    typeof event.subjectId === "string" &&
-    event.subjectId.length > 0 &&
-    typeof event.subjectType === "string" &&
-    event.subjectType.length > 0
+    typeof id === "number" &&
+    Number.isSafeInteger(id) &&
+    id > 0 &&
+    typeof occurredAtMs === "number" &&
+    Number.isSafeInteger(occurredAtMs) &&
+    occurredAtMs > 0 &&
+    typeof action === "string" &&
+    action.length > 0 &&
+    typeof subjectId === "string" &&
+    subjectId.length > 0 &&
+    typeof subjectType === "string" &&
+    subjectType.length > 0
   );
 }
 
-export function validateSuccessfulProbeUpgradeTimeline(timeline) {
+export function validateSuccessfulProbeUpgradeTimeline(
+  timeline: readonly ProbeOperation[],
+): void {
   if (!Array.isArray(timeline) || timeline.length < 2) {
     throw assertionError(
       "probe_upgrade_timeline_incomplete",
@@ -3653,8 +4784,8 @@ export function validateSuccessfulProbeUpgradeTimeline(timeline) {
       "Probe Upgrade request did not begin as a pending operation",
     );
   }
-  let previous = null;
-  let terminal = null;
+  let previous: ProbeOperation | null = null;
+  let terminal: ProbeOperation | null = null;
   for (const operation of timeline) {
     assertProbeOperation(operation, {
       hostId: requested.hostId,
@@ -3687,7 +4818,9 @@ export function validateSuccessfulProbeUpgradeTimeline(timeline) {
   }
 }
 
-function validateInsufficientPrivilegeProbeUpgradeTimeline(timeline) {
+function validateInsufficientPrivilegeProbeUpgradeTimeline(
+  timeline: readonly ProbeOperation[],
+): void {
   if (!Array.isArray(timeline) || timeline.length < 3) {
     throw assertionError(
       "probe_upgrade_timeline_incomplete",
@@ -3695,7 +4828,7 @@ function validateInsufficientPrivilegeProbeUpgradeTimeline(timeline) {
     );
   }
   const requested = timeline[0];
-  let previous = null;
+  let previous: ProbeOperation | null = null;
   for (const operation of timeline) {
     assertProbeOperation(operation, {
       hostId: requested?.hostId,
@@ -3723,10 +4856,25 @@ function validateInsufficientPrivilegeProbeUpgradeTimeline(timeline) {
       `Probe Upgrade did not preserve a terminal insufficient-privilege failure: ${JSON.stringify(timeline)}`,
     );
   }
+  // 顶部长度判定已保证 timeline 至少三项，这里只是把该事实交给类型系统。
+  if (!confirmedOperation) {
+    throw assertionError(
+      "probe_upgrade_timeline_incomplete",
+      "Probe Upgrade permission failure did not retain bounded terminal evidence",
+    );
+  }
   assertStableTerminalOperation(confirmedOperation, finalOperation);
 }
 
-async function proveProbeConfigurationRoundTrip({ hostId, hub, poll }) {
+async function proveProbeConfigurationRoundTrip({
+  hostId,
+  hub,
+  poll,
+}: {
+  hostId: number;
+  hub: ScenarioHub;
+  poll: PollTiming;
+}) {
   const existing = await hub.getHostProbeConfiguration(hostId);
   const values = existing?.configuration;
   if (
@@ -3761,11 +4909,15 @@ async function proveProbeConfigurationRoundTrip({ hostId, hub, poll }) {
     label: `Probe Configuration ${version}`,
     observe: () => hub.getHost(hostId),
     poll,
-    ready: (value) =>
-      value?.reportedProbeConfigurationVersion === version &&
-      !value.warnings?.some(
-        (warning) => warning.code === "probe_configuration_error",
-      ),
+    ready: (value) => {
+      if (value === null || value === undefined) return false;
+      return (
+        value.reportedProbeConfigurationVersion === version &&
+        !value.warnings?.some(
+          (warning) => warning.code === "probe_configuration_error",
+        )
+      );
+    },
   });
   return {
     configuration: canonicalSemanticValue(updated.configuration),
@@ -3775,31 +4927,49 @@ async function proveProbeConfigurationRoundTrip({ hostId, hub, poll }) {
   };
 }
 
-function sameEffectiveProbeConfiguration(current, expected) {
+function sameEffectiveProbeConfiguration(
+  current: unknown,
+  expected: unknown,
+): boolean {
+  const currentView = objectView(current);
+  const expectedView = objectView(expected);
   return (
-    current?.mode === expected?.mode &&
-    JSON.stringify(canonicalSemanticValue(current?.configuration)) ===
-      JSON.stringify(expected?.configuration)
+    currentView.mode === expectedView.mode &&
+    JSON.stringify(canonicalSemanticValue(currentView.configuration)) ===
+      JSON.stringify(expectedView.configuration)
   );
 }
 
-function effectiveProbeConfigurationEvidence(value) {
+function effectiveProbeConfigurationEvidence(value: unknown) {
+  const view = objectView(value);
   return {
-    configuration: canonicalSemanticValue(value?.configuration),
-    mode: value?.mode,
+    configuration: canonicalSemanticValue(view.configuration),
+    mode: view.mode,
   };
 }
 
-function metricsAdvanceBeyond(samples, previous) {
+function metricsAdvanceBeyond(
+  samples: readonly unknown[],
+  previous: PortableMetricSample | null,
+): boolean {
   const compact = compactMetricsEvidence(samples);
   const latest = compact.at(-1);
+  const latestSequence = latest?.sequence;
+  const latestCollectedAtMs = latest?.collectedAtMs;
+  const previousSequence = previous?.sequence;
+  const previousCollectedAtMs = previous?.collectedAtMs;
+  // 原实现依赖 NaN 比较恒为 false 的语义；这里的 typeof 判定只把同一事实交给类型系统。
   return (
-    latest?.sequence > previous?.sequence &&
-    latest?.collectedAtMs > previous?.collectedAtMs
+    typeof latestSequence === "number" &&
+    typeof previousSequence === "number" &&
+    latestSequence > previousSequence &&
+    typeof latestCollectedAtMs === "number" &&
+    typeof previousCollectedAtMs === "number" &&
+    latestCollectedAtMs > previousCollectedAtMs
   );
 }
 
-function normalizedPollTiming(timing) {
+function normalizedPollTiming(timing: ReleaseScenarioTiming): PollTiming {
   return {
     intervalMs: timing.intervalMs ?? 2_000,
     sleep: timing.sleep ?? defaultSleep,
@@ -3807,7 +4977,10 @@ function normalizedPollTiming(timing) {
   };
 }
 
-function localUninstallOfflineObservationPoll(timing, poll) {
+function localUninstallOfflineObservationPoll(
+  timing: ReleaseScenarioTiming,
+  poll: PollTiming,
+): PollTiming {
   return {
     ...poll,
     timeoutMs: Math.max(
@@ -3817,35 +4990,50 @@ function localUninstallOfflineObservationPoll(timing, poll) {
   };
 }
 
-async function waitForObservation({ code, label, observe, poll, ready }) {
+async function waitForObservation<T>({
+  code,
+  label,
+  observe,
+  poll,
+  ready,
+}: {
+  code: string;
+  label: string;
+  observe: () => Promise<T | null | undefined>;
+  poll: PollTiming;
+  ready: (value: T | null | undefined) => boolean;
+}): Promise<NonNullable<T>> {
   const intervalMs = positiveDuration(poll.intervalMs, "poll interval");
   const timeoutMs = positiveDuration(poll.timeoutMs, "poll timeout");
   const maximumObservations = Math.floor(timeoutMs / intervalMs) + 1;
-  let lastValue = null;
-  let lastError = null;
+  let lastValue: T | null | undefined = null;
+  let lastError: unknown = null;
 
   for (let attempt = 0; attempt < maximumObservations; attempt += 1) {
     try {
       lastValue = await observe();
       lastError = null;
-      if (ready(lastValue)) return lastValue;
+      // 判据为真的载荷必然存在，这里只是把该事实交给类型系统。
+      if (ready(lastValue) && lastValue !== null && lastValue !== undefined) {
+        return lastValue;
+      }
     } catch (error) {
       lastError = error;
     }
     if (attempt + 1 < maximumObservations) await poll.sleep(intervalMs);
   }
 
-  const error = assertionError(
+  const error: ObservationTimeoutError = assertionError(
     code,
     `${label} was not observed within ${timeoutMs}ms${
-      lastError ? `: ${lastError.message}` : ""
+      lastError ? `: ${String(objectView(lastError).message)}` : ""
     }`,
   );
   error.lastValue = lastValue;
   throw error;
 }
 
-function stableHostProfileEvidence(profile) {
+function stableHostProfileEvidence(profile: HubHostProfile) {
   const projection = {
     architecture: profile.architecture,
     collectorCapabilities: canonicalSemanticValue(
@@ -3891,7 +5079,9 @@ function stableHostProfileEvidence(profile) {
   };
 }
 
-function isStableHostNetworkInterface(networkInterface) {
+function isStableHostNetworkInterface(
+  networkInterface: HubHostProfile["networkInterfaces"][number],
+): boolean {
   return (
     typeof networkInterface?.name === "string" &&
     networkInterface.name.length > 0 &&
@@ -3899,7 +5089,10 @@ function isStableHostNetworkInterface(networkInterface) {
   );
 }
 
-function assertStableHostProfileContinuity(candidate, restored) {
+function assertStableHostProfileContinuity(
+  candidate: HostProfileProjection | null | undefined,
+  restored: HostProfileProjection | null | undefined,
+): void {
   if (
     !candidate ||
     !restored ||
@@ -3913,8 +5106,8 @@ function assertStableHostProfileContinuity(candidate, restored) {
   }
 }
 
-function canonicalSemanticValue(value) {
-  if (Array.isArray(value)) {
+function canonicalSemanticValue(value: unknown): unknown {
+  if (isUnknownArray(value)) {
     return value.map(canonicalSemanticValue);
   }
   if (value && typeof value === "object") {
@@ -3928,7 +5121,7 @@ function canonicalSemanticValue(value) {
   return value;
 }
 
-function compactHostEvidence(host) {
+function compactHostEvidence(host: HubHostSummary) {
   return {
     hostProfile: host.hostProfile,
     id: host.id,
@@ -3936,40 +5129,42 @@ function compactHostEvidence(host) {
   };
 }
 
-function stableHubHostProjection(host) {
+function stableHubHostProjection(host: unknown) {
+  const view = objectView(host);
   return {
-    hostMetadata: canonicalHostMetadata(host?.hostMetadata),
-    hostProfile: canonicalSemanticValue(host?.hostProfile),
-    id: host?.id,
+    hostMetadata: canonicalHostMetadata(view.hostMetadata),
+    hostProfile: canonicalSemanticValue(view.hostProfile),
+    id: view.id,
     reportedProbeConfigurationVersion:
-      host?.reportedProbeConfigurationVersion ?? null,
+      view.reportedProbeConfigurationVersion ?? null,
   };
 }
 
-function canonicalHostMetadata(metadata) {
+function canonicalHostMetadata(metadata: unknown) {
+  const view = objectView(metadata);
   return {
-    connectAddress: metadata?.connectAddress ?? null,
-    description: metadata?.description ?? null,
-    displayName: metadata?.displayName ?? null,
-    observedIp: metadata?.observedIp ?? null,
+    connectAddress: view.connectAddress ?? null,
+    description: view.description ?? null,
+    displayName: view.displayName ?? null,
+    observedIp: view.observedIp ?? null,
   };
 }
 
-function compactMetricsEvidence(samples) {
+function compactMetricsEvidence(samples: readonly unknown[]) {
   const ordered = samples
     .filter(isPortableMetricSample)
     .sort((a, b) => a.sequence - b.sequence);
   return [ordered[0], ordered.at(-1)].map((sample) => ({
-    collectedAtMs: sample.collectedAtMs,
-    cpuPercent: sample.cpuPercent,
-    memoryTotalBytes: sample.memoryTotalBytes,
-    memoryUsedBytes: sample.memoryUsedBytes,
-    sequence: sample.sequence,
-    uptimeSeconds: sample.uptimeSeconds,
+    collectedAtMs: sample?.collectedAtMs,
+    cpuPercent: sample?.cpuPercent,
+    memoryTotalBytes: sample?.memoryTotalBytes,
+    memoryUsedBytes: sample?.memoryUsedBytes,
+    sequence: sample?.sequence,
+    uptimeSeconds: sample?.uptimeSeconds,
   }));
 }
 
-function portableMetricIdentities(samples) {
+function portableMetricIdentities(samples: readonly unknown[]) {
   return samples
     .filter(isPortableMetricSample)
     .map((sample) => ({
@@ -3983,7 +5178,10 @@ function portableMetricIdentities(samples) {
     );
 }
 
-function metricsHistoryEvidence(samples, { retain = [] } = {}) {
+function metricsHistoryEvidence(
+  samples: readonly unknown[],
+  { retain = [] }: { retain?: readonly MetricHistoryAnchor[] } = {},
+) {
   const ordered = samples
     .filter(isPortableMetricSample)
     .sort((left, right) => left.sequence - right.sequence)
@@ -3997,7 +5195,7 @@ function metricsHistoryEvidence(samples, { retain = [] } = {}) {
         (sample) => JSON.stringify(sample) === JSON.stringify(anchor),
       ),
     ),
-  ].filter(Boolean);
+  ].filter((anchor): anchor is MetricHistoryAnchor => Boolean(anchor));
   const anchors = [
     ...new Map(selected.map((anchor) => [anchor.sequence, anchor])).values(),
   ].sort((left, right) => left.sequence - right.sequence);
@@ -4007,7 +5205,7 @@ function metricsHistoryEvidence(samples, { retain = [] } = {}) {
   };
 }
 
-function compactMetricAnchor(sample) {
+function compactMetricAnchor(sample: PortableMetricSample) {
   return {
     collectedAtMs: sample.collectedAtMs,
     cpuPercent: sample.cpuPercent,
@@ -4018,8 +5216,8 @@ function compactMetricAnchor(sample) {
   };
 }
 
-function latestPortableMetric(samples) {
-  if (!Array.isArray(samples)) return null;
+function latestPortableMetric(samples: unknown): PortableMetricSample | null {
+  if (!isUnknownArray(samples)) return null;
   return (
     samples
       .filter(isPortableMetricSample)
@@ -4035,18 +5233,28 @@ const releaseBaselineAuthorizationEvidencePath = Object.freeze([
 ]);
 
 export function redactReleaseE2EEvidence(
-  value,
-  { candidateManifest, secrets = [] } = {},
-) {
+  value: unknown,
+  {
+    candidateManifest,
+    secrets = [],
+  }: { candidateManifest?: unknown; secrets?: readonly string[] } = {},
+): unknown {
   assertCandidateManifest(candidateManifest);
   const baseline = candidateManifest.releaseBaseline;
   return redactSensitiveEvidence(value, secrets, [], {
-    expectedReleaseBaselineAuthorizationSha256:
-      baseline.authorization?.sha256 ?? null,
+    expectedReleaseBaselineAuthorizationSha256: isTrustEpochMigrationBaseline(
+      baseline,
+    )
+      ? baseline.authorization.sha256
+      : null,
   });
 }
 
-function isValidatedReleaseBaselineAuthorizationSummary(path, value, expected) {
+function isValidatedReleaseBaselineAuthorizationSummary(
+  path: readonly string[],
+  value: unknown,
+  expected: unknown,
+): boolean {
   return (
     path.length === releaseBaselineAuthorizationEvidencePath.length &&
     path.every(
@@ -4059,7 +5267,12 @@ function isValidatedReleaseBaselineAuthorizationSummary(path, value, expected) {
   );
 }
 
-function redactSensitiveEvidence(value, secrets, path, context) {
+function redactSensitiveEvidence(
+  value: unknown,
+  secrets: readonly string[],
+  path: readonly string[],
+  context: { expectedReleaseBaselineAuthorizationSha256: unknown },
+): unknown {
   const key = path.at(-1) ?? "";
   if (
     key &&
@@ -4093,7 +5306,10 @@ function redactSensitiveEvidence(value, secrets, path, context) {
   return value;
 }
 
-function redactSensitiveText(value, secrets) {
+function redactSensitiveText(
+  value: unknown,
+  secrets: readonly string[],
+): string {
   let redacted = String(value ?? "");
   for (const secret of secrets) {
     if (secret) redacted = redacted.replaceAll(secret, "[REDACTED]");
@@ -4119,8 +5335,9 @@ function redactSensitiveText(value, secrets) {
     );
 }
 
-function cleanupDidNotSucceed(cleanup) {
-  return Object.values(cleanup).some(
-    (result) => result?.error || result?.clean !== true,
-  );
+function cleanupDidNotSucceed(cleanup: ScenarioCleanupEvidence): boolean {
+  return Object.values(cleanup).some((result) => {
+    const view = objectView(result);
+    return Boolean(view.error) || view.clean !== true;
+  });
 }

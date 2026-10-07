@@ -1,93 +1,13 @@
 #!/usr/bin/env node
 
-import path from "node:path";
+// GitHub Actions 场景计划作业入口：`release-scenario-plan.mjs github-actions` 由
+// 发布工作流的 prepare-release-e2e-matrix 作业直接调用。计划编译与 provisioning
+// 归属的唯一实现位于 release-scenario-plan.ts，本文件只保留该作业的参数解析与输出。
+
 import { pathToFileURL } from "node:url";
 
-import {
-  releaseTransitionForValidatedCandidate,
-  validateReleaseCandidate,
-} from "./release-candidate-verification.ts";
-import { readSupportedHostMatrix } from "./release-e2e-matrix.ts";
-import {
-  compileReleaseScenarioPlan,
-  createGitHubActionsScenarioMatrix,
-  resolveReleaseScenarioPlanCell,
-} from "./release-scenario-plan-compile.ts";
-
-export {
-  compileReleaseScenarioPlan,
-  createGitHubActionsScenarioMatrix,
-  resolveReleaseScenarioPlanCell,
-};
-
-export async function compileVerifiedReleaseScenarioPlan({
-  candidateManifestPath,
-  matrixPath,
-  trustedRootPublicKeyPem,
-}) {
-  if (!trustedRootPublicKeyPem) {
-    throw new Error("Release Scenario Planner requires the trusted root");
-  }
-  const candidateDir = path.dirname(path.resolve(candidateManifestPath));
-  const candidateManifest = await validateReleaseCandidate(candidateDir, {
-    trustedRootPublicKeyPem,
-  });
-  const releaseTransition =
-    releaseTransitionForValidatedCandidate(candidateManifest);
-  if (!releaseTransition) {
-    throw new Error(
-      "verified Release Transition Contract is required before Host provisioning",
-    );
-  }
-  const supportedHostMatrix = await readSupportedHostMatrix(matrixPath);
-  return compileReleaseScenarioPlan({
-    candidateManifest,
-    releaseTransition,
-    supportedHostMatrix,
-  });
-}
-
-export async function prepareReleaseScenarioCell({
-  cellId,
-  compilePlan = () => {
-    throw new Error("Release Scenario Plan compiler is required");
-  },
-  initialize,
-  provision,
-  release,
-}) {
-  if (typeof provision !== "function") {
-    throw new Error("Release Scenario Plan provisioning adapter is required");
-  }
-  const plan = await compilePlan();
-  const cell = resolveReleaseScenarioPlanCell(plan, cellId);
-  const prepared = await provision(cell);
-  let cleanupOwnedByInitializer = false;
-  try {
-    const initialized = initialize
-      ? await initialize({
-          cell,
-          plan,
-          prepared,
-          takeCleanupOwnership() {
-            cleanupOwnedByInitializer = true;
-          },
-        })
-      : undefined;
-    return { cell, initialized, plan, prepared };
-  } catch (error) {
-    if (!cleanupOwnedByInitializer && typeof release === "function") {
-      try {
-        await release({ cell, plan, prepared });
-      } catch (releaseError) {
-        if (error && typeof error === "object") {
-          error.releaseError = releaseError;
-        }
-      }
-    }
-    throw error;
-  }
-}
+import { createGitHubActionsScenarioMatrix } from "./release-scenario-plan-compile.ts";
+import { compileVerifiedReleaseScenarioPlan } from "./release-scenario-plan.ts";
 
 if (
   process.argv[1] &&

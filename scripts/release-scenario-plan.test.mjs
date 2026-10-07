@@ -7,11 +7,12 @@ import {
 } from "@enoki/probe-release";
 import { describe, expect, it, vi } from "vitest";
 
-import * as planner from "./release-scenario-plan.mjs";
+import { compileReleaseScenarioPlan } from "./release-scenario-plan-compile.ts";
+import { prepareReleaseScenarioCell } from "./release-scenario-plan.ts";
 
 describe("Release Scenario Planner", () => {
   it("compiles the exact Compatible capabilities without caller-selected scenarios", () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract({ transition: "compatible" }),
       supportedHostMatrix: supportedHostMatrix(),
@@ -57,7 +58,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("compiles Replacement without claiming pre-commit snapshot restoration", () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract({
         transition: "replacement-required",
@@ -107,10 +108,10 @@ describe("Release Scenario Planner", () => {
       const provision = vi.fn();
 
       await expect(
-        planner.prepareReleaseScenarioCell({
+        prepareReleaseScenarioCell({
           cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
           compilePlan: async () =>
-            planner.compileReleaseScenarioPlan({
+            compileReleaseScenarioPlan({
               candidateManifest: candidateManifest(),
               releaseTransition,
               supportedHostMatrix: supportedHostMatrix(),
@@ -123,7 +124,7 @@ describe("Release Scenario Planner", () => {
   );
 
   it("provisions exactly the closed set of planned cells", async () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract(),
       supportedHostMatrix: supportedHostMatrix(),
@@ -131,7 +132,7 @@ describe("Release Scenario Planner", () => {
     const provisioned = [];
 
     for (const cell of plan.cells) {
-      await planner.prepareReleaseScenarioCell({
+      await prepareReleaseScenarioCell({
         cellId: cell.cellId,
         compilePlan: async () => plan,
         provision: async (plannedCell) => provisioned.push(plannedCell),
@@ -145,7 +146,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("releases a provisioned plan cell when initialization fails", async () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract(),
       supportedHostMatrix: supportedHostMatrix(),
@@ -154,7 +155,7 @@ describe("Release Scenario Planner", () => {
     const release = vi.fn(async () => ({ clean: true }));
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => plan,
         initialize: async () => {
@@ -177,7 +178,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("does not release twice after the scenario runner takes cleanup ownership", async () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract(),
       supportedHostMatrix: supportedHostMatrix(),
@@ -186,7 +187,7 @@ describe("Release Scenario Planner", () => {
     const release = vi.fn(async () => ({ clean: true }));
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => plan,
         initialize: async ({ takeCleanupOwnership }) => {
@@ -208,10 +209,10 @@ describe("Release Scenario Planner", () => {
     matrix.environments[0].capabilityId = "ubuntu-20.04-x86_64";
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-20.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () =>
-          planner.compileReleaseScenarioPlan({
+          compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
             releaseTransition: transitionContract(),
             supportedHostMatrix: matrix,
@@ -228,7 +229,7 @@ describe("Release Scenario Planner", () => {
     const provision = vi.fn();
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => {
           const releaseTransition = verifyReleaseTransitionContract({
@@ -236,7 +237,7 @@ describe("Release Scenario Planner", () => {
             contractBytes: Buffer.from(`${JSON.stringify(contract)}\n`),
             contractSignature: Buffer.alloc(256),
           });
-          return planner.compileReleaseScenarioPlan({
+          return compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
             releaseTransition,
             supportedHostMatrix: supportedHostMatrix(),
@@ -265,7 +266,7 @@ describe("Release Scenario Planner", () => {
     const provision = vi.fn();
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => {
           const releaseTransition = verifyReleaseTransitionContract({
@@ -281,7 +282,7 @@ describe("Release Scenario Planner", () => {
               targetVersion: "1.2.3",
             },
           });
-          return planner.compileReleaseScenarioPlan({
+          return compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
             releaseTransition,
             supportedHostMatrix: supportedHostMatrix(),
@@ -301,7 +302,7 @@ describe("Release Scenario Planner", () => {
       privateKey: "sensitive-private-key",
       rootKeyId: "c".repeat(64),
     };
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition,
       supportedHostMatrix: supportedHostMatrix(),

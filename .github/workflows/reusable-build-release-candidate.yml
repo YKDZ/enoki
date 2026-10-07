@@ -640,7 +640,7 @@ jobs:
           ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           RELEASE_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cellId }}
         run: >-
-          node trusted-tool/scripts/release-e2e.mjs run
+          node trusted-tool/scripts/release-e2e.ts run
           --candidate-manifest candidate/candidate-manifest.json
           --matrix trusted-tool/scripts/release-e2e-matrix.json
           --matrix-cell "$MATRIX_CELL"
@@ -659,7 +659,7 @@ jobs:
           HOST_ADAPTER: ${{ matrix.hostAdapter }}
           MATRIX_CELL: ${{ matrix.cellId }}
         run: >-
-          node trusted-tool/scripts/release-e2e.mjs verify-clean
+          node trusted-tool/scripts/release-e2e.ts verify-clean
           --run-manifest "release-e2e-evidence/$MATRIX_CELL/run-manifest.json"
           --host-adapter "$HOST_ADAPTER"
 

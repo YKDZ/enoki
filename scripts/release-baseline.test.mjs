@@ -116,7 +116,7 @@ describe("Release Baseline resolution", () => {
         "scripts/release-baseline.mjs",
         "scripts/release-baseline-lib.mjs",
         "scripts/release-candidate-lib.mjs",
-        "scripts/release-e2e-lib.mjs",
+        "scripts/release-e2e-orchestration.ts",
         "scripts/release-verification-lib.ts",
       ].map((file) => readFile(file, "utf8")),
     );

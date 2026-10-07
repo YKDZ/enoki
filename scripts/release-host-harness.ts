@@ -96,7 +96,7 @@ const releaseE2EGroups: readonly string[] = Object.freeze(
     .map((resource) => resource.name),
 );
 
-type ProbeOperationState =
+export type ProbeOperationState =
   | "pending"
   | "accepted"
   | "running"
@@ -117,12 +117,12 @@ export const probeOperationStateRank: Readonly<
   superseded: 3,
 });
 
-type ProbeOperationFailure = {
+export type ProbeOperationFailure = {
   code: string;
   message: string;
 };
 
-type ProbeOperation = {
+export type ProbeOperation = {
   acceptedAtMs: number | null;
   completedAtMs: number | null;
   createdAtMs: number;
@@ -136,20 +136,20 @@ type ProbeOperation = {
   updatedAtMs: number;
 };
 
-type ProbeOperationExpectation = {
+export type ProbeOperationExpectation = {
   hostId?: number;
   id?: number;
   kind?: string;
   targetProbeVersion?: string;
 };
 
-type InstallContract = {
+export type InstallContract = {
   hubUrl: string;
   kind: "bootstrap-recipe" | "legacy-v0.1.74";
   token: string;
 };
 
-type BootstrapRecipeRecord = {
+export type BootstrapRecipeRecord = {
   bundleVersion?: string;
   distribution?: string;
   kind?: string;
@@ -159,25 +159,25 @@ type BootstrapRecipeRecord = {
   targets?: unknown;
 };
 
-type Enrollment = {
+export type Enrollment = {
   bootstrapRecipe?: unknown;
   enrollmentToken?: string;
   hubUrl?: string;
   installCommand?: string;
 };
 
-type PreparedInstall = {
+export type PreparedInstall = {
   evidence?: unknown;
   workingDirectory?: string;
 };
 
-type PreparedInstallOptions = {
+export type PreparedInstallOptions = {
   enrollment: Enrollment;
   installContract: InstallContract;
   runId: string;
 };
 
-type PrepareInstall = (
+export type PrepareInstall = (
   options: PreparedInstallOptions,
 ) =>
   | PreparedInstall
@@ -185,26 +185,26 @@ type PrepareInstall = (
   | undefined
   | Promise<PreparedInstall | null | undefined>;
 
-type PreparedEnrollmentInstall = {
+export type PreparedEnrollmentInstall = {
   bootstrapRecipeProvenance: unknown;
   installContract: InstallContract;
   workingDirectory: string | undefined;
 };
 
-type CommandEvidence = {
+export type CommandEvidence = {
   code: number;
   stderr: string;
   stdout: string;
 };
 
-type SerializedError = {
+export type SerializedError = {
   code: unknown;
   message: string;
   installerEvidence?: unknown;
   errors?: SerializedError[];
 };
 
-type DiagnosticComponent =
+export type DiagnosticComponent =
   | { available: true; output: CommandEvidence; value: unknown }
   | {
       available: false;
@@ -212,13 +212,13 @@ type DiagnosticComponent =
       output?: CommandEvidence;
     };
 
-type HostInventory = {
+export type HostInventory = {
   accounts: { group: boolean; user: boolean };
   files: string[];
   units: string[];
 };
 
-type InstalledState = {
+export type InstalledState = {
   binarySha256: string;
   identity: { identitySha256: string; probeId: string };
   installMetadataSha256: string;
@@ -226,7 +226,7 @@ type InstalledState = {
   service: { ActiveState: string; LoadState: string; SubState: string };
 };
 
-type PermanentReportRejection = {
+export type PermanentReportRejection = {
   binarySha256: string;
   identity: { identitySha256: string; probeId: string };
   installMetadataSha256: string;
@@ -240,7 +240,7 @@ type PermanentReportRejection = {
   };
 };
 
-type InstalledDiagnostics = {
+export type InstalledDiagnostics = {
   binary: { sha256: string; version: string };
   identity: { identitySha256: string; probeId: string };
   installMetadataSha256: string;
@@ -254,7 +254,7 @@ type InstalledDiagnostics = {
   };
 };
 
-type HostPlatformExpectation = {
+export type HostPlatformExpectation = {
   architecture: string;
   operatingSystem: string;
   operatingSystemVersion: string;

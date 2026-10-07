@@ -3,7 +3,7 @@ import { createServer, get, request } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
-import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.mjs";
+import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.ts";
 
 const ReportRequest = enoki.v1.ProbeReportRequest;
 const ReportResponse = enoki.v1.ProbeReportResponse;

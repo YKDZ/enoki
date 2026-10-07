@@ -12,19 +12,31 @@ import {
   newRunIdentity,
   parseReleaseE2ECommandLine,
   readRunManifest,
-} from "./release-e2e-adapters.mjs";
+} from "./release-e2e-environment.ts";
 import {
   createProbeHostHarness,
   runReleaseE2EScenario,
-} from "./release-e2e-lib.mjs";
+} from "./release-e2e-orchestration.ts";
+import { objectView } from "./release-json-guards.ts";
+import {
+  resolveReleaseScenarioPlanCell,
+  type ScenarioPlanCell,
+} from "./release-scenario-plan-compile.ts";
 import {
   compileVerifiedReleaseScenarioPlan,
   prepareReleaseScenarioCell,
-  resolveReleaseScenarioPlanCell,
-} from "./release-scenario-plan.mjs";
+} from "./release-scenario-plan.ts";
+
+// CLI 参数表由 Environment Adapter 的公开解析器给出，这里只复用同一类型视图。
+type ReleaseE2EOptionValues = ReturnType<
+  typeof parseReleaseE2ECommandLine
+>["values"];
+
+// Host 执行器的形状由 Environment Adapter 的两个公开工厂共同给出。
+type ReleaseHostExecutor = ReturnType<typeof createCiHostExecutor>;
 
 const usage = `Usage:
-  node scripts/release-e2e.mjs run \\
+  node scripts/release-e2e.ts run \\
     --candidate-manifest <candidate-dir>/candidate-manifest.json \\
     --matrix scripts/release-e2e-matrix.json \\
     --matrix-cell <environment-id>--<scenario-id> \\
@@ -35,7 +47,7 @@ const usage = `Usage:
     --owner-password-env <environment-variable> \\
     --evidence-dir <new-or-run-owned-directory>
 
-  node scripts/release-e2e.mjs run \\
+  node scripts/release-e2e.ts run \\
     --candidate-manifest <candidate-dir>/candidate-manifest.json \\
     --matrix scripts/release-e2e-matrix.json \\
     --matrix-cell <environment-id>--<scenario-id> \\
@@ -45,7 +57,7 @@ const usage = `Usage:
     --owner-password-env <environment-variable> \\
     --evidence-dir <new-run-directory>
 
-  node scripts/release-e2e.mjs verify-clean \\
+  node scripts/release-e2e.ts verify-clean \\
     --run-manifest <evidence-dir>/run-manifest.json \\
     --host-adapter ssh \\
     --ssh-host <same-user@same-host> [--ssh-port 22] [--ssh-key <same-path>]`;
@@ -67,65 +79,77 @@ try {
   process.exitCode = 1;
 }
 
-async function run(options) {
-  const candidateManifestPath = options["--candidate-manifest"];
-  const trustedRootPublicKeyPem = process.env[options["--root-public-key-env"]];
+// parseReleaseE2ECommandLine 已按命令表校验必填项并填入默认值；这里沿用同一条
+// `${name} is required` 失败文本，不新增第二种拒绝。
+function requiredOption(values: ReleaseE2EOptionValues, name: string): string {
+  const value = values[name];
+  if (value === undefined) throw new Error(`${name} is required`);
+  return value;
+}
+
+async function run(options: ReleaseE2EOptionValues): Promise<void> {
+  const candidateManifestPath = requiredOption(options, "--candidate-manifest");
+  const rootPublicKeyEnvironment = requiredOption(
+    options,
+    "--root-public-key-env",
+  );
+  const trustedRootPublicKeyPem = process.env[rootPublicKeyEnvironment];
   if (!trustedRootPublicKeyPem) {
     throw new Error(
-      `Probe Distribution Trust Root environment variable ${options["--root-public-key-env"]} is empty`,
+      `Probe Distribution Trust Root environment variable ${rootPublicKeyEnvironment} is empty`,
     );
   }
-  const evidenceDir = path.resolve(options["--evidence-dir"]);
+  const evidenceDir = path.resolve(requiredOption(options, "--evidence-dir"));
   const { ownershipToken, runId } = newRunIdentity(options["--run-id"]);
+  const hostAdapter = requiredOption(options, "--host-adapter");
   const ssh =
-    options["--host-adapter"] === "ssh"
+    hostAdapter === "ssh"
       ? {
-          host: options["--ssh-host"],
+          host: requiredOption(options, "--ssh-host"),
           keyPath: options["--ssh-key"]
             ? path.resolve(options["--ssh-key"])
             : null,
-          port: Number(options["--ssh-port"]),
+          port: Number(requiredOption(options, "--ssh-port")),
         }
       : null;
   const infrastructure =
-    options["--host-adapter"] === "ci"
+    hostAdapter === "ci"
       ? createCiReleaseInfrastructureAdapter({
           candidateManifestPath,
           trustedRootPublicKeyPem,
         })
       : createSshReleaseInfrastructureAdapter({
           candidateManifestPath,
-          host: options["--ssh-host"],
+          host: requiredOption(options, "--ssh-host"),
           keyPath: options["--ssh-key"],
           knownHostsPath: path.join(evidenceDir, "known_hosts"),
-          port: Number(options["--ssh-port"]),
+          port: Number(requiredOption(options, "--ssh-port")),
           trustedRootPublicKeyPem,
         });
+  const matrixCellId = requiredOption(options, "--matrix-cell");
   const scenarioPlan = await compileVerifiedReleaseScenarioPlan({
     candidateManifestPath,
-    matrixPath: options["--matrix"],
+    matrixPath: requiredOption(options, "--matrix"),
     trustedRootPublicKeyPem,
   });
-  const matrixCell = resolveReleaseScenarioPlanCell(
-    scenarioPlan,
-    options["--matrix-cell"],
-  );
+  const matrixCell = resolveReleaseScenarioPlanCell(scenarioPlan, matrixCellId);
   const journal = await createRunArtifactJournal({
     evidenceDir,
     inputs: {
       candidateManifestPath: path.resolve(candidateManifestPath),
-      hostAdapter: options["--host-adapter"],
-      hubOwnerUrl: options["--hub-owner-url"],
-      hubPublicUrl: options["--hub-public-url"],
-      matrixCellId: options["--matrix-cell"],
-      matrixPath: path.resolve(options["--matrix"]),
+      hostAdapter,
+      hubOwnerUrl: requiredOption(options, "--hub-owner-url"),
+      hubPublicUrl: requiredOption(options, "--hub-public-url"),
+      matrixCellId,
+      matrixPath: path.resolve(requiredOption(options, "--matrix")),
       ssh,
     },
     ownershipToken,
     runId,
   });
   let failurePhase = "plan-validated";
-  let ownerPassword = null;
+  // 与原实现一致：环境变量缺失时先记录 undefined，再由同一 falsy 判据拒绝。
+  let ownerPassword: string | null | undefined = null;
 
   try {
     await journal.update({
@@ -134,13 +158,19 @@ async function run(options) {
       scenario: matrixCell.scenarioId,
     });
 
-    const ownerPasswordEnvironment = options["--owner-password-env"];
+    const ownerPasswordEnvironment = requiredOption(
+      options,
+      "--owner-password-env",
+    );
     ownerPassword = process.env[ownerPasswordEnvironment];
     if (!ownerPassword) {
       throw new Error(
         `Owner password environment variable ${ownerPasswordEnvironment} is empty`,
       );
     }
+    // 场景运行需要精确的 string；catch 仍读取外层 ownerPassword 以便脱敏。
+    const runOwnerPassword = ownerPassword;
+
     failurePhase = "candidate-prepare";
     await journal.update({ phase: failurePhase });
     await prepareReleaseScenarioCell({
@@ -158,12 +188,12 @@ async function run(options) {
           bootstrapProvisioner: prepared.provisionBootstrap,
           candidateDir,
           execute: prepared.execute,
-          hubOwnerUrl: options["--hub-owner-url"],
-          hubPublicUrl: options["--hub-public-url"],
+          hubOwnerUrl: requiredOption(options, "--hub-owner-url"),
+          hubPublicUrl: requiredOption(options, "--hub-public-url"),
           infrastructure: prepared.infrastructure,
           matrixCell,
           onCleanupManaged: takeCleanupOwnership,
-          ownerPassword,
+          ownerPassword: runOwnerPassword,
           ownershipToken,
           releaseInfrastructure: (context) => infrastructure.release(context),
         });
@@ -177,12 +207,13 @@ async function run(options) {
           candidateManifest: manifest,
           environment,
           evidenceSink: journal.evidenceSink,
-          ownerPassword,
+          ownerPassword: runOwnerPassword,
           runId,
           scenario: matrixCell.scenarioId,
         });
       },
-      provision: (cell) => infrastructure.prepare({ matrixCell: cell, runId }),
+      provision: (cell: ScenarioPlanCell) =>
+        infrastructure.prepare({ matrixCell: cell, runId }),
       release: ({ prepared }) => infrastructure.release({ prepared, runId }),
     });
     await journal.update({ phase: "succeeded" });
@@ -198,17 +229,19 @@ async function run(options) {
       });
     } catch (journalError) {
       process.stderr.write(
-        `release-e2e: secondary artifact journal failure: ${journalError.message}\n`,
+        `release-e2e: secondary artifact journal failure: ${objectView(journalError).message}\n`,
       );
     }
     throw error;
   }
 }
 
-async function verifyClean(options) {
-  const manifestPath = path.resolve(options["--run-manifest"]);
+async function verifyClean(options: ReleaseE2EOptionValues): Promise<void> {
+  const manifestPath = path.resolve(requiredOption(options, "--run-manifest"));
   const manifest = await readRunManifest(manifestPath);
-  if (manifest.inputs.hostAdapter !== options["--host-adapter"]) {
+  if (
+    manifest.inputs.hostAdapter !== requiredOption(options, "--host-adapter")
+  ) {
     throw new Error("Host adapter does not match the exact run manifest");
   }
   if (!manifest.hostMutationPossible) {
@@ -217,21 +250,24 @@ async function verifyClean(options) {
     );
     return;
   }
-  let execute;
+  let execute: ReleaseHostExecutor;
   if (manifest.inputs.hostAdapter === "ssh") {
+    // 原判据用 manifest.ssh?.host 与调用方选项比较：ssh 身份缺失时同样落入本拒绝分支。
+    const sshIdentity = manifest.ssh;
     if (
-      manifest.ssh?.host !== options["--ssh-host"] ||
-      manifest.ssh?.port !== Number(options["--ssh-port"]) ||
-      (manifest.ssh?.keyPath ?? null) !==
+      !sshIdentity ||
+      sshIdentity.host !== requiredOption(options, "--ssh-host") ||
+      sshIdentity.port !== Number(requiredOption(options, "--ssh-port")) ||
+      (sshIdentity.keyPath ?? null) !==
         (options["--ssh-key"] ? path.resolve(options["--ssh-key"]) : null)
     ) {
       throw new Error("SSH Host does not match the exact run manifest");
     }
     execute = createSshExecutor({
-      host: manifest.ssh.host,
-      keyPath: manifest.ssh.keyPath ?? undefined,
+      host: sshIdentity.host,
+      keyPath: sshIdentity.keyPath ?? undefined,
       knownHostsPath: path.join(path.dirname(manifestPath), "known_hosts"),
-      port: manifest.ssh.port,
+      port: sshIdentity.port,
     });
   } else {
     execute = createCiHostExecutor();
@@ -240,7 +276,7 @@ async function verifyClean(options) {
     execute,
     ownershipToken: manifest.ownershipToken,
   });
-  await host.assertReleaseTestHost(manifest.matrixCell);
+  await host.assertReleaseTestHost(manifest.matrixCell ?? {});
   await host.verifyClean(manifest.runId);
   process.stdout.write(`Release Test Host is clean: ${manifest.runId}\n`);
 }

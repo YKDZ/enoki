@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { createServer, request } from "node:http";
+import {
+  createServer,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type OutgoingHttpHeaders,
+  request,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 
 import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
 
@@ -8,10 +16,116 @@ const ReportResponse = enoki.v1.ProbeReportResponse;
 const maxProbeReportPayloadBytes = 1024 * 1024;
 const reportPath = "/api/probe/report";
 
+type NumericLike =
+  | number
+  | string
+  | bigint
+  | { toString(): string }
+  | null
+  | undefined;
+
+type ProbeReportRequestMessage = InstanceType<typeof ReportRequest>;
+type ProbeReportResponseMessage = InstanceType<typeof ReportResponse>;
+
+type CanonicalReportProjection = {
+  body: Buffer;
+  bootId: string;
+  bytes: number;
+  collectionOutcomeCount: number;
+  enrollmentId: string;
+  failureReason: number;
+  metricsCount: number;
+  payloadSha256: string;
+  probeAssetBundleVersion: string;
+  probeConfigurationVersion: string;
+  probeId: string;
+  sequenceEnd: number;
+  sequenceStart: number;
+};
+
+type BootResponseEvidence = {
+  acceptedSequenceEnd: number;
+  currentConfigurationVersion: string;
+  pendingOperation: "absent" | "present";
+  requestedSnapshotCollectorIdsCount: number;
+  responseSha256: string;
+};
+
+type FailureResponseEvidence = {
+  acceptedSequenceEnd: number;
+  responseSha256: string;
+  upstreamStatus: number;
+};
+
+type ArmedCanonicalReport = {
+  boot: CanonicalReportProjection | null;
+  bootResponse: BootResponseEvidence | null;
+  expectedProbeId: string | undefined;
+  failure: CanonicalReportProjection | null;
+  firstFailureResponse?: FailureResponseEvidence | null;
+};
+
+export type CanonicalReportEvidence = {
+  bootId: string;
+  bootReport: {
+    acceptedSequenceEnd: number;
+    bytes: number;
+    payloadSha256: string;
+    reconciliation: {
+      currentProbeConfigurationVersion: string;
+      pendingOperation: string;
+      requestedSnapshotCollectorIdsCount: number;
+    };
+    responseDelivered: true;
+    responseSha256: string;
+    sequence: number;
+    upstreamStatus: number;
+  };
+  failureReport: {
+    attempts: {
+      acceptedSequenceEnd: number;
+      response: string;
+      responseSha256: string;
+      upstreamStatus: number;
+    }[];
+    bytes: number;
+    collectionOutcomeCount: number;
+    metricsCount: number;
+    payloadSha256: string;
+    probeConfigurationVersion: string;
+    reason: string;
+    retryPayloadSha256: string;
+    sequence: number;
+  };
+  kind: string;
+  receiptConvergence: {
+    contract: string;
+    key: { bootId: string; probeId: string; sequence: number };
+    requestAttemptCount: number;
+    uniquePayloadCount: number;
+  };
+  probeId: string;
+  schemaVersion: number;
+};
+
+type Observation =
+  | { kind: "invalid" }
+  | {
+      kind: "boot" | "first-failure" | "retry";
+      projected: CanonicalReportProjection;
+    }
+  | null;
+
+type CodedError = Error & { code?: string };
+
 export function createCanonicalReportEvidenceTransport({
   fetch: fetch_ = globalThis.fetch,
   listenUrl,
   upstreamUrl,
+}: {
+  fetch?: typeof globalThis.fetch;
+  listenUrl: string;
+  upstreamUrl: string;
 }) {
   const listen = validatedHttpOrigin(listenUrl, "listen");
   const upstream = validatedHttpOrigin(upstreamUrl, "upstream");
@@ -20,20 +134,20 @@ export function createCanonicalReportEvidenceTransport({
       "canonical report evidence transport requires distinct listen and upstream origins",
     );
   }
-  let armed = null;
-  let completedEvidence = null;
-  let failure = null;
-  let server = null;
+  let armed: ArmedCanonicalReport | null = null;
+  let completedEvidence: CanonicalReportEvidence | null = null;
+  let failure: CodedError | null = null;
+  let server: Server | null = null;
   let reportRequestCount = 0;
-  let lastUpstreamStatus = null;
-  const waiters = new Set();
+  let lastUpstreamStatus: number | null = null;
+  const waiters = new Set<() => void>();
 
   function notify() {
     for (const waiter of waiters) waiter();
     waiters.clear();
   }
 
-  async function handle(incoming, outgoing) {
+  async function handle(incoming: IncomingMessage, outgoing: ServerResponse) {
     try {
       const target = new URL(incoming.url ?? "/", upstream);
       const isReport =
@@ -52,10 +166,9 @@ export function createCanonicalReportEvidenceTransport({
         return;
       }
       const headers = forwardedHeaders(incoming.headers, body.byteLength);
-      const observation =
-        isReport && armed && !completedEvidence && !failure
-          ? observeReport(body)
-          : null;
+      const activeArmed =
+        isReport && !completedEvidence && !failure ? armed : null;
+      const observation = activeArmed ? observeReport(activeArmed, body) : null;
       const response = await fetch_(target, {
         body:
           incoming.method === "GET" || incoming.method === "HEAD"
@@ -70,25 +183,39 @@ export function createCanonicalReportEvidenceTransport({
         reportRequestCount += 1;
         lastUpstreamStatus = response.status;
       }
-      const disposition = observation
-        ? acceptUpstreamObservation(observation, response.status, responseBody)
-        : "deliver";
+      const disposition =
+        activeArmed && observation
+          ? acceptUpstreamObservation(
+              activeArmed,
+              observation,
+              response.status,
+              responseBody,
+            )
+          : "deliver";
       if (disposition === "drop") {
         outgoing.destroy();
         return;
       }
       writeResponse(outgoing, response, responseBody);
     } catch (error) {
-      if (!outgoing.destroyed) outgoing.destroy(error);
+      if (!outgoing.destroyed)
+        outgoing.destroy(
+          error instanceof Error ? error : new Error(String(error)),
+        );
     }
   }
 
-  function observeReport(body) {
+  function observeReport(
+    armed: ArmedCanonicalReport,
+    body: Buffer,
+  ): Observation {
     let report;
     try {
       report = ReportRequest.decode(body);
     } catch (error) {
-      fail(`canonical report payload could not be decoded: ${error.message}`);
+      fail(
+        `canonical report payload could not be decoded: ${errorText(error)}`,
+      );
       return { kind: "invalid" };
     }
     const projected = projectReport(report, body);
@@ -142,7 +269,12 @@ export function createCanonicalReportEvidenceTransport({
     return { kind: "retry", projected };
   }
 
-  function acceptUpstreamObservation(observation, status, responseBody) {
+  function acceptUpstreamObservation(
+    armed: ArmedCanonicalReport,
+    observation: NonNullable<Observation>,
+    status: number,
+    responseBody: Buffer,
+  ): "deliver" | "drop" {
     if (!observation || observation.kind === "invalid") return "deliver";
     if (status !== 200) {
       fail(
@@ -150,11 +282,11 @@ export function createCanonicalReportEvidenceTransport({
       );
       return "deliver";
     }
-    let response;
+    let response: ProbeReportResponseMessage;
     try {
       response = ReportResponse.decode(responseBody);
     } catch (error) {
-      fail(`canonical Hub response could not be decoded: ${error.message}`);
+      fail(`canonical Hub response could not be decoded: ${errorText(error)}`);
       return "deliver";
     }
     const acceptedSequenceEnd = unsignedNumber(response.acceptedSequenceEnd);
@@ -213,7 +345,10 @@ export function createCanonicalReportEvidenceTransport({
     return "deliver";
   }
 
-  function rejectOversizedReport(incoming, outgoing) {
+  function rejectOversizedReport(
+    incoming: IncomingMessage,
+    outgoing: ServerResponse,
+  ) {
     fail(
       "canonical report payload exceeded the production 1 MiB limit",
       "canonical_report_payload_too_large",
@@ -222,7 +357,10 @@ export function createCanonicalReportEvidenceTransport({
     if (!outgoing.destroyed) outgoing.destroy();
   }
 
-  function fail(message, code = "canonical_report_evidence_invalid") {
+  function fail(
+    message: string,
+    code = "canonical_report_evidence_invalid",
+  ): void {
     if (!failure) {
       failure = new Error(message);
       failure.code = code;
@@ -231,7 +369,7 @@ export function createCanonicalReportEvidenceTransport({
   }
 
   return {
-    arm({ expectedProbeId }) {
+    arm({ expectedProbeId }: { expectedProbeId?: string }) {
       if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(expectedProbeId ?? "")) {
         throw new Error("canonical report evidence Probe ID is invalid");
       }
@@ -252,7 +390,7 @@ export function createCanonicalReportEvidenceTransport({
       if (!server) return { clean: true, skipped: "not_started" };
       const closing = server;
       server = null;
-      await new Promise((resolve, reject) =>
+      await new Promise<void>((resolve, reject) =>
         closing.close((error) => (error ? reject(error) : resolve())),
       );
       return { clean: true };
@@ -277,19 +415,25 @@ export function createCanonicalReportEvidenceTransport({
         throw new Error(
           "canonical report evidence transport is already started",
         );
-      server = createServer((incoming, outgoing) => {
+      const listening = createServer((incoming, outgoing) => {
         handle(incoming, outgoing);
       });
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(Number(listen.port), listen.hostname, resolve);
+      server = listening;
+      await new Promise<void>((resolve, reject) => {
+        listening.once("error", reject);
+        listening.listen(Number(listen.port), listen.hostname, resolve);
       });
-      const address = server.address();
+      const address = listening.address();
+      if (address === null || typeof address === "string") {
+        throw new Error(
+          "canonical report evidence transport did not bind a port",
+        );
+      }
       const origin = `${listen.protocol}//${listen.hostname}:${address.port}`;
       return { origin };
     },
 
-    async waitForEvidence({ timeoutMs }) {
+    async waitForEvidence({ timeoutMs }: { timeoutMs: number }) {
       if (!armed)
         throw new Error("canonical report evidence transport is not armed");
       if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
@@ -297,7 +441,7 @@ export function createCanonicalReportEvidenceTransport({
       }
       const deadline = Date.now() + timeoutMs;
       while (!completedEvidence && !failure && Date.now() < deadline) {
-        await new Promise((resolve) => {
+        await new Promise<void>((resolve) => {
           const remaining = Math.max(1, deadline - Date.now());
           const timer = setTimeout(() => {
             waiters.delete(wake);
@@ -321,7 +465,7 @@ export function createCanonicalReportEvidenceTransport({
             : !armed.firstFailureResponse
               ? "ObservationWindowFailure did not receive Hub 200"
               : "ObservationWindowFailure retry was not sent";
-      const error = new Error(
+      const error: CodedError = new Error(
         `canonical report evidence timed out: ${missing}`,
       );
       error.code = "canonical_report_evidence_timeout";
@@ -330,8 +474,16 @@ export function createCanonicalReportEvidenceTransport({
   };
 }
 
-function streamTransparent(incoming, outgoing, target) {
-  let upstreamResponse = null;
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function streamTransparent(
+  incoming: IncomingMessage,
+  outgoing: ServerResponse,
+  target: URL,
+) {
+  let upstreamResponse: IncomingMessage | null = null;
   const upstreamRequest = request(
     target,
     {
@@ -345,7 +497,7 @@ function streamTransparent(incoming, outgoing, target) {
         response.statusMessage ?? undefined,
         transparentHeaders(response.headers),
       );
-      response.once("error", (error) => outgoing.destroy(error));
+      response.once("error", (error: Error) => outgoing.destroy(error));
       response.pipe(outgoing);
     },
   );
@@ -357,30 +509,41 @@ function streamTransparent(incoming, outgoing, target) {
   };
   incoming.once("aborted", releaseUpstream);
   outgoing.once("close", releaseUpstream);
-  upstreamRequest.once("error", (error) => {
+  upstreamRequest.once("error", (error: Error) => {
     if (!outgoing.destroyed) outgoing.destroy(error);
   });
   incoming.pipe(upstreamRequest);
 }
 
-function buildEvidence({ armed, retryResponseSha256 }) {
+function buildEvidence({
+  armed,
+  retryResponseSha256,
+}: {
+  armed: ArmedCanonicalReport;
+  retryResponseSha256: string;
+}): CanonicalReportEvidence {
   const boot = armed.boot;
   const failure = armed.failure;
+  const bootResponse = armed.bootResponse;
+  const firstFailureResponse = armed.firstFailureResponse;
+  if (!boot || !failure || !bootResponse || !firstFailureResponse) {
+    throw new Error("canonical report evidence is incomplete");
+  }
   return {
     bootId: boot.bootId,
     bootReport: {
-      acceptedSequenceEnd: armed.bootResponse.acceptedSequenceEnd,
+      acceptedSequenceEnd: bootResponse.acceptedSequenceEnd,
       bytes: boot.bytes,
       payloadSha256: boot.payloadSha256,
       reconciliation: {
         currentProbeConfigurationVersion:
-          armed.bootResponse.currentConfigurationVersion,
-        pendingOperation: armed.bootResponse.pendingOperation,
+          bootResponse.currentConfigurationVersion,
+        pendingOperation: bootResponse.pendingOperation,
         requestedSnapshotCollectorIdsCount:
-          armed.bootResponse.requestedSnapshotCollectorIdsCount,
+          bootResponse.requestedSnapshotCollectorIdsCount,
       },
       responseDelivered: true,
-      responseSha256: armed.bootResponse.responseSha256,
+      responseSha256: bootResponse.responseSha256,
       sequence: 1,
       upstreamStatus: 200,
     },
@@ -389,7 +552,7 @@ function buildEvidence({ armed, retryResponseSha256 }) {
         {
           acceptedSequenceEnd: 2,
           response: "dropped",
-          responseSha256: armed.firstFailureResponse.responseSha256,
+          responseSha256: firstFailureResponse.responseSha256,
           upstreamStatus: 200,
         },
         {
@@ -424,7 +587,10 @@ function buildEvidence({ armed, retryResponseSha256 }) {
   };
 }
 
-function projectReport(report, body) {
+function projectReport(
+  report: ProbeReportRequestMessage,
+  body: Buffer,
+): CanonicalReportProjection {
   return {
     body,
     bootId: report.bootId ?? "",
@@ -445,21 +611,21 @@ function projectReport(report, body) {
   };
 }
 
-function observationLabel(kind) {
+function observationLabel(kind: "boot" | "first-failure" | "retry"): string {
   return kind === "boot" ? "Boot Report" : "ObservationWindowFailure";
 }
 
-function unsignedNumber(value) {
+function unsignedNumber(value: NumericLike): number {
   const number =
-    typeof value === "number" ? value : Number(value?.toString?.() ?? value);
+    typeof value === "number" ? value : Number(value?.toString() ?? value);
   return Number.isSafeInteger(number) && number >= 0 ? number : -1;
 }
 
-function sha256(value) {
+function sha256(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function validatedHttpOrigin(value, label) {
+function validatedHttpOrigin(value: string, label: string): URL {
   const url = new URL(value);
   if (
     url.protocol !== "http:" ||
@@ -478,7 +644,10 @@ function validatedHttpOrigin(value, label) {
   return url;
 }
 
-function forwardedHeaders(source, length) {
+function forwardedHeaders(
+  source: IncomingHttpHeaders,
+  length: number,
+): Headers {
   const headers = new Headers();
   for (const [name, value] of Object.entries(source)) {
     if (
@@ -497,8 +666,8 @@ function forwardedHeaders(source, length) {
   return headers;
 }
 
-function transparentHeaders(source) {
-  const headers = {};
+function transparentHeaders(source: IncomingHttpHeaders): OutgoingHttpHeaders {
+  const headers: OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(source)) {
     if (
       value !== undefined &&
@@ -520,9 +689,16 @@ function transparentHeaders(source) {
   return headers;
 }
 
-function contentLengthExceeds(headers, maxBytes) {
+function contentLengthExceeds(
+  headers: IncomingHttpHeaders,
+  maxBytes: number,
+): boolean {
   const value = headers["content-length"];
-  const contentLength = Array.isArray(value) ? value[0] : value?.trim();
+  const contentLength = Array.isArray(value)
+    ? value[0]?.trim()
+    : typeof value === "string"
+      ? value.trim()
+      : undefined;
   return Boolean(
     contentLength &&
     /^\d+$/.test(contentLength) &&
@@ -530,8 +706,12 @@ function contentLengthExceeds(headers, maxBytes) {
   );
 }
 
-function writeResponse(outgoing, response, body) {
-  const headers = {};
+function writeResponse(
+  outgoing: ServerResponse,
+  response: Response,
+  body: Buffer,
+) {
+  const headers: OutgoingHttpHeaders = {};
   response.headers.forEach((value, name) => {
     if (
       !new Set(["connection", "content-length", "transfer-encoding"]).has(name)
@@ -544,10 +724,13 @@ function writeResponse(outgoing, response, body) {
   outgoing.end(body);
 }
 
-async function readCappedBody(request, maxBytes) {
-  const chunks = [];
+async function readCappedBody(
+  incoming: IncomingMessage,
+  maxBytes: number,
+): Promise<Buffer<ArrayBuffer> | null> {
+  const chunks: Buffer[] = [];
   let totalBytes = 0;
-  for await (const chunk of request) {
+  for await (const chunk of incoming) {
     totalBytes += chunk.byteLength;
     if (totalBytes > maxBytes) return null;
     chunks.push(chunk);

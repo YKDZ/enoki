@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -15,60 +15,404 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { validateReleaseCandidate } from "./release-candidate-lib.mjs";
-import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.mjs";
 import {
+  sha256,
+  validateReleaseCandidate,
+} from "./release-candidate-verification.ts";
+import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.ts";
+import {
+  assertCandidateManifest,
   createHubLifecycleClient,
   createProbeHostHarness,
   releaseE2EScenarioRegistry,
-} from "./release-e2e-lib.mjs";
+} from "./release-e2e-orchestration.ts";
+import type {
+  HubStateSnapshotEvidence,
+  ReleaseE2ECandidateManifest,
+} from "./release-e2e-orchestration.ts";
+import type {
+  CommandExecutor,
+  CommandOptions,
+  CommandResult,
+} from "./release-installed-bundle-failure-repair.ts";
+import {
+  isNonEmptyString,
+  isPositiveSafeInteger,
+  isSafeInteger,
+  isUnknownArray,
+  isUnknownRecord,
+  objectView,
+  regexInput,
+  stringValue,
+} from "./release-json-guards.ts";
+import type { UnknownRecord } from "./release-json-guards.ts";
 
 const execFileAsync = promisify(execFile);
 
-const runOptions = Object.freeze({
-  "--candidate-manifest": { required: true },
-  "--container-engine": { default: "docker" },
-  "--evidence-dir": { required: true },
-  "--host-adapter": { default: "ssh" },
-  "--hub-owner-url": { required: true },
-  "--hub-public-url": { required: true },
-  "--matrix": { required: true },
-  "--matrix-cell": { required: true },
-  "--owner-password-env": { required: true },
-  "--root-public-key-env": { required: true },
-  "--run-id": {},
-  "--ssh-host": {},
-  "--ssh-key": {},
-  "--ssh-port": { default: "22" },
-});
+// —— 进程与命令执行 ——
 
-const verifyCleanOptions = Object.freeze({
-  "--host-adapter": { default: "ssh" },
-  "--run-manifest": { required: true },
-  "--ssh-host": {},
-  "--ssh-key": {},
-  "--ssh-port": { default: "22" },
-});
+type ProcessRunOptions = { input?: string; timeoutMs?: number };
 
-export function parseReleaseE2ECommandLine(arguments_) {
+type ProcessRunner = (
+  command: string,
+  arguments_: readonly string[],
+  options: ProcessRunOptions,
+) => Promise<CommandResult>;
+
+type SleepFunction = (milliseconds: number) => Promise<void>;
+
+// Docker 与 tar 等本地 CLI 经 execFile 执行；失败时 Node 会把退出码放在 error.code，
+// 命令缺失时该字段是 ENOENT 之类的字符串。原实现把这个值原样交给调用方的
+// code !== 0 判据，这里保留同一取值空间，不把它压成数字。
+type DockerCommandResult = {
+  code: number | string;
+  stderr: string;
+  stdout: string;
+};
+
+type DockerExecutor = (
+  command: string,
+  arguments_: readonly string[],
+) => Promise<DockerCommandResult>;
+
+type DockerObjectType = "container" | "image" | "volume";
+
+type DockerCreatedFlag =
+  | "containerCreated"
+  | "snapshotContainerMayExist"
+  | "snapshotVolumeCreated"
+  | "tagCreated"
+  | "volumeCreated";
+
+type DockerObjectOwner = { [key in DockerCreatedFlag]?: boolean };
+
+// —— Candidate、Recipe 与 Infrastructure ——
+
+type CandidateBootstrapRecipe = {
+  file: string;
+  sha256: string;
+  size: number;
+  version: string;
+};
+
+type ValidatedCandidate = {
+  candidateDir: string;
+  manifest: ReleaseE2ECandidateManifest;
+};
+
+type LoadValidatedCandidate = (
+  candidateManifestPath: string,
+  options?: { trustedRootPublicKeyPem?: string },
+) => Promise<ValidatedCandidate>;
+
+type CandidateArchiveTransfer = (input: {
+  destination: string;
+  source: string;
+}) => Promise<void>;
+
+type BootstrapProvisionResult = {
+  evidence?: unknown;
+  workingDirectory?: string;
+};
+
+type BootstrapProvisioner = (input?: {
+  recipe?: CandidateBootstrapRecipe;
+  runId?: string;
+  sourcePath?: string;
+}) => Promise<BootstrapProvisionResult>;
+
+type CandidateBootstrapProvisioner = {
+  cleanup: (input: { runId: string }) => Promise<unknown>;
+  provision: BootstrapProvisioner;
+};
+
+type ReleaseInfrastructureIdentity = {
+  artifactAccess: string;
+  connection: string;
+  kind: string;
+  matrixCellId: string;
+  provisioning: string;
+};
+
+type PreparedReleaseInfrastructure = {
+  candidateDir: string;
+  execute: CommandExecutor;
+  infrastructure: ReleaseInfrastructureIdentity;
+  manifest: ReleaseE2ECandidateManifest;
+  provisionBootstrap: BootstrapProvisioner;
+};
+
+type ReleaseInfrastructureAdapter = {
+  kind: string;
+  prepare: (input: {
+    matrixCell?: ReleaseInfrastructureMatrixCell;
+    runId: string;
+  }) => Promise<PreparedReleaseInfrastructure>;
+  release: (input: { prepared: unknown; runId: string }) => Promise<unknown>;
+};
+
+// —— 场景矩阵单元与运行工件 ——
+
+// Infrastructure Adapter 只按原始判据核对调用方是否给出完整矩阵单元，因此这里的
+// 字段保持可选，由 prepare 自己拒绝缺字段的调用。
+type ReleaseInfrastructureMatrixCell = {
+  cellId?: string;
+  environmentId?: string;
+  scenarioId?: string;
+};
+
+// 已验证场景计划的矩阵单元。Journal 与 Environment 只消费下列字段；平台字段由
+// writeRunManifest 从真实计划单元写入，verify-clean 的匹配判据仍由已接受的
+// Harness assertReleaseTestHost 承担，readRunManifest 不额外新增判据。
+type ReleaseScenarioMatrixCell = ReleaseInfrastructureMatrixCell & {
+  architecture: string;
+  operatingSystem: string;
+  operatingSystemVersion: string;
+};
+
+type ReleaseE2ESshIdentity = {
+  host: string;
+  keyPath: string | null;
+  port: number;
+};
+
+type ReleaseE2ERunInputs = {
+  candidateManifestPath: string;
+  hostAdapter: string;
+  hubOwnerUrl: string;
+  hubPublicUrl: string;
+  matrixCellId: string;
+  matrixPath: string;
+  ssh: ReleaseE2ESshIdentity | null;
+};
+
+type SerializedRunError = {
+  code: string;
+  message: string;
+  name: string;
+};
+
+type ReleaseE2ERunManifest = {
+  candidate?: unknown;
+  createdAt: string;
+  failure: { error: SerializedRunError; phase: string } | null;
+  hostMutationPossible: boolean;
+  hubDigest?: unknown;
+  infrastructure?: ReleaseInfrastructureIdentity | null;
+  inputs: ReleaseE2ERunInputs;
+  matrixCell: ReleaseScenarioMatrixCell | null;
+  ownershipToken: string;
+  phase: string;
+  runId: string;
+  scenario?: string | null;
+  schemaVersion: number;
+  ssh: ReleaseE2ESshIdentity | null;
+  updatedAt: string;
+};
+
+type EvidenceSink = { write(evidence: unknown): Promise<void> };
+
+type ReleaseRunArtifactJournal = {
+  evidenceSink: EvidenceSink;
+  fail: (input: {
+    error: unknown;
+    phase: string;
+    secrets?: readonly string[];
+  }) => Promise<void>;
+  manifest: ReleaseE2ERunManifest;
+  update: (patch: Partial<ReleaseE2ERunManifest>) => Promise<unknown>;
+};
+
+// —— Hub 运行资源 ——
+
+type HubRuntime = {
+  archivePath: string;
+  configDigest: string;
+  manifestDigest: string;
+  name: string;
+  tag: string;
+  tagCreated: boolean;
+};
+
+type HubRuntimeHistoryEntry = {
+  configDigest: string;
+  hub: string;
+  manifestDigest: string;
+  volume: string;
+};
+
+// 快照操作证据只作为证据透传；error 字段保持原实现读取 error.message 得到的值，
+// 因此不把它收窄成 string。
+type HubSnapshotOperationEvidence = {
+  error?: unknown;
+  manifestDigest?: string;
+  operation: string;
+  status: string;
+};
+
+type HubResources = DockerObjectOwner & {
+  activeHub: string;
+  baseline: HubRuntime | null;
+  candidate: HubRuntime;
+  configDigest: string;
+  container: string;
+  containerCreated: boolean;
+  exportedRecipeDirs: string[];
+  identityVerified: boolean;
+  manifestDigest: string;
+  redactionSecrets: string[];
+  runId: string;
+  runtimeHistory: HubRuntimeHistoryEntry[];
+  snapshot: HubStateSnapshotEvidence | null;
+  snapshotContainer: string;
+  snapshotContainerMayExist: boolean;
+  snapshotOperations: HubSnapshotOperationEvidence[];
+  snapshotVolume: string;
+  snapshotVolumeCreated: boolean;
+  tag: string;
+  tagCreated: boolean;
+  volume: string;
+  volumeCreated: boolean;
+};
+
+// enoki-hub-state 工具 JSON 输出在本模块读取的字段视图；其余字段只作为证据原样
+// 透传，因此保持索引视图。
+type HubStateSnapshotToolResult = {
+  manifest?: unknown;
+  manifestDigest: string;
+  [key: string]: unknown;
+};
+
+// requireHubStateSnapshotResources 判据确认 Release Baseline 运行态存在后的资源视图。
+type HubResourcesWithBaseline = HubResources & { baseline: HubRuntime };
+
+type HubRuntimeEnvironment = {
+  hubOwnerUrl: string;
+  hubPublicUrl: string;
+  operationSigningSecret: string;
+  ownerPassword: string;
+  ownerPort: string;
+  probeOperationRunningTimeoutSeconds: number | null;
+  useHubStateSnapshot: boolean;
+};
+
+// Hub Enrollment 返回的 Probe Bootstrap Recipe Record。Orchestrator 只把它作为
+// 未知证据传递，因此这里的可读视图保持 unknown，由已接受的 provenance 判据校验。
+type EnrollmentRecipeRecord = {
+  bundleVersion?: unknown;
+  distribution?: unknown;
+  kind?: unknown;
+  recipe?: unknown;
+  rootFingerprint?: unknown;
+  schemaVersion?: unknown;
+  targets?: unknown;
+};
+
+type DockerHubController = ReturnType<typeof createDockerHubController>;
+
+type RecipeProvenance = ReturnType<
+  typeof verifyActiveHubBootstrapRecipeProvenance
+>;
+
+type CanonicalReportTransport = ReturnType<
+  typeof createCanonicalReportEvidenceTransport
+>;
+type CanonicalReportTransportFactory = (input: {
+  fetch?: typeof globalThis.fetch;
+  listenUrl: string;
+  upstreamUrl: string;
+}) => CanonicalReportTransport;
+
+type RecipeStagingError = Error & { cleanupError?: Error };
+
+type LocalSshReleaseEnvironmentOptions = {
+  candidateDir: string;
+  containerEngine?: string;
+  docker?: DockerHubController;
+  hubOwnerUrl: string;
+  hubPublicUrl: string;
+  ownerPassword: string;
+  ownershipToken?: string;
+  sshExecute: CommandExecutor;
+};
+
+type ReleaseEnvironmentOptions = {
+  bootstrapProvisioner?: BootstrapProvisioner;
+  candidateDir: string;
+  canonicalReportTransportFactory?: CanonicalReportTransportFactory;
+  docker?: DockerHubController;
+  execute?: CommandExecutor;
+  hubOwnerUrl: string;
+  hubPublicUrl: string;
+  infrastructure?: unknown;
+  matrixCell?: ReleaseScenarioMatrixCell;
+  onCleanupManaged?: () => unknown;
+  ownerPassword: string;
+  ownershipToken?: string;
+  releaseInfrastructure?: (input: {
+    prepared: unknown;
+    runId: string;
+  }) => Promise<unknown>;
+};
+
+// Environment cleanup 的逐项结果；失败时统一聚合为 AggregateError 抛出。
+type ReleaseEnvironmentCleanupReport = {
+  hub?: unknown;
+  infrastructure?: unknown;
+  transport?: unknown;
+};
+
+type ReleaseE2EOptionDefinition = { default?: string; required?: boolean };
+type ReleaseE2EOptionValues = Record<string, string | undefined>;
+type ReleaseE2ECommandName = "run" | "verify-clean";
+type ReleaseE2EParsedCommand = {
+  command: ReleaseE2ECommandName;
+  values: ReleaseE2EOptionValues;
+};
+
+const runOptions: Readonly<Record<string, ReleaseE2EOptionDefinition>> =
+  Object.freeze({
+    "--candidate-manifest": { required: true },
+    "--container-engine": { default: "docker" },
+    "--evidence-dir": { required: true },
+    "--host-adapter": { default: "ssh" },
+    "--hub-owner-url": { required: true },
+    "--hub-public-url": { required: true },
+    "--matrix": { required: true },
+    "--matrix-cell": { required: true },
+    "--owner-password-env": { required: true },
+    "--root-public-key-env": { required: true },
+    "--run-id": {},
+    "--ssh-host": {},
+    "--ssh-key": {},
+    "--ssh-port": { default: "22" },
+  });
+
+const verifyCleanOptions: Readonly<Record<string, ReleaseE2EOptionDefinition>> =
+  Object.freeze({
+    "--host-adapter": { default: "ssh" },
+    "--run-manifest": { required: true },
+    "--ssh-host": {},
+    "--ssh-key": {},
+    "--ssh-port": { default: "22" },
+  });
+
+export function parseReleaseE2ECommandLine(
+  arguments_: readonly string[],
+): ReleaseE2EParsedCommand {
   const [command, ...tokens] = arguments_;
-  const definitions =
-    command === "run"
-      ? runOptions
-      : command === "verify-clean"
-        ? verifyCleanOptions
-        : null;
-  if (!definitions) {
+  if (command !== "run" && command !== "verify-clean") {
     throw new Error("command must be run or verify-clean");
   }
+  const definitions = command === "run" ? runOptions : verifyCleanOptions;
   if (tokens.length % 2 !== 0) {
     throw new Error(`option ${tokens.at(-1)} requires a value`);
   }
-  const values = {};
+  const values: ReleaseE2EOptionValues = {};
   for (let index = 0; index < tokens.length; index += 2) {
     const name = tokens[index];
     const value = tokens[index + 1];
-    if (!Object.hasOwn(definitions, name)) {
+    if (!name || !Object.hasOwn(definitions, name)) {
       throw new Error(`unknown option: ${name}`);
     }
     if (Object.hasOwn(values, name)) {
@@ -103,35 +447,49 @@ export function parseReleaseE2ECommandLine(arguments_) {
 
   if (hostAdapter === "ssh") validateSshOptions(values);
   if (command === "run") {
+    // 上方 required 循环已保证这些选项存在；缺失时沿用同一 `${name} is required` 文本。
+    const requiredValue = (name: string): string => {
+      const value = values[name];
+      if (value === undefined) throw new Error(`${name} is required`);
+      return value;
+    };
     if (
-      path.basename(values["--candidate-manifest"]) !==
+      path.basename(requiredValue("--candidate-manifest")) !==
       "candidate-manifest.json"
     ) {
       throw new Error("--candidate-manifest must name candidate-manifest.json");
     }
-    if (path.basename(values["--matrix"]) !== "release-e2e-matrix.json") {
+    if (
+      path.basename(requiredValue("--matrix")) !== "release-e2e-matrix.json"
+    ) {
       throw new Error("--matrix must name release-e2e-matrix.json");
     }
     if (
-      !/^[a-z0-9][a-z0-9._-]*--[a-z][a-z0-9-]*$/.test(values["--matrix-cell"])
+      !/^[a-z0-9][a-z0-9._-]*--[a-z][a-z0-9-]*$/.test(
+        requiredValue("--matrix-cell"),
+      )
     ) {
       throw new Error("--matrix-cell must be a stable declared cell ID");
     }
     if (values["--container-engine"] !== "docker") {
       throw new Error("--container-engine must be docker");
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(values["--owner-password-env"])) {
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(requiredValue("--owner-password-env"))
+    ) {
       throw new Error(
         "--owner-password-env must be an environment variable name",
       );
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(values["--root-public-key-env"])) {
+    if (
+      !/^[A-Za-z_][A-Za-z0-9_]*$/.test(requiredValue("--root-public-key-env"))
+    ) {
       throw new Error(
         "--root-public-key-env must name an environment variable",
       );
     }
     for (const option of ["--hub-owner-url", "--hub-public-url"]) {
-      const url = new URL(values[option]);
+      const url = new URL(requiredValue(option));
       if (url.protocol !== "http:" && url.protocol !== "https:") {
         throw new Error(`${option} must use HTTP or HTTPS`);
       }
@@ -139,18 +497,18 @@ export function parseReleaseE2ECommandLine(arguments_) {
         throw new Error(`${option} must not contain credentials`);
       }
     }
-    if (new URL(values["--hub-owner-url"]).protocol !== "http:") {
+    if (new URL(requiredValue("--hub-owner-url")).protocol !== "http:") {
       throw new Error("--hub-owner-url must use direct HTTP for local Docker");
     }
-    assertCandidateHubOwnerUrl(values["--hub-owner-url"]);
+    assertCandidateHubOwnerUrl(requiredValue("--hub-owner-url"));
   }
   return { command, values };
 }
 
 export async function loadValidatedCandidate(
-  candidateManifestPath,
-  { trustedRootPublicKeyPem } = {},
-) {
+  candidateManifestPath: string,
+  { trustedRootPublicKeyPem }: { trustedRootPublicKeyPem?: string } = {},
+): Promise<ValidatedCandidate> {
   if (path.basename(candidateManifestPath) !== "candidate-manifest.json") {
     throw new Error(
       "Candidate Manifest path must name candidate-manifest.json",
@@ -163,6 +521,9 @@ export async function loadValidatedCandidate(
   const manifest = await validateReleaseCandidate(candidateDir, {
     trustedRootPublicKeyPem,
   });
+  // 03 的候选验证已保证这份 Manifest 的结构；这里复用 Orchestrator 已接受的同一判据，
+  // 把它提升到本模块消费的数据 Interface，不重复实现字段校验。
+  assertCandidateManifest(manifest);
   return { candidateDir, manifest };
 }
 
@@ -176,7 +537,17 @@ export function createSshReleaseInfrastructureAdapter({
   runProcess = runSpawnedProcess,
   transferFile,
   trustedRootPublicKeyPem,
-}) {
+}: {
+  candidateManifestPath: string;
+  host: string;
+  keyPath?: string | null;
+  knownHostsPath: string;
+  loadCandidate?: LoadValidatedCandidate;
+  port?: number;
+  runProcess?: ProcessRunner;
+  transferFile?: CandidateArchiveTransfer;
+  trustedRootPublicKeyPem: string;
+}): ReleaseInfrastructureAdapter {
   const execute = createSshExecutor({
     host,
     keyPath,
@@ -213,7 +584,15 @@ export function createCiReleaseInfrastructureAdapter({
   timeoutMs = 5 * 60 * 1000,
   transferFile = copyCandidateArchive,
   trustedRootPublicKeyPem,
-}) {
+}: {
+  candidateManifestPath: string;
+  environment?: NodeJS.ProcessEnv;
+  loadCandidate?: LoadValidatedCandidate;
+  runProcess?: ProcessRunner;
+  timeoutMs?: number;
+  transferFile?: CandidateArchiveTransfer;
+  trustedRootPublicKeyPem: string;
+}): ReleaseInfrastructureAdapter {
   if (
     environment.GITHUB_ACTIONS !== "true" ||
     environment.RUNNER_OS !== "Linux" ||
@@ -242,7 +621,7 @@ export function createCiReleaseInfrastructureAdapter({
 export function createCiHostExecutor({
   runProcess = runSpawnedProcess,
   timeoutMs = 5 * 60 * 1000,
-} = {}) {
+}: { runProcess?: ProcessRunner; timeoutMs?: number } = {}): CommandExecutor {
   return (script, options = {}) => {
     if (typeof script !== "string" || !script) {
       throw new Error("local Host script must be non-empty");
@@ -267,9 +646,19 @@ function createReleaseInfrastructureAdapter({
   provisioning,
   transferFile,
   trustedRootPublicKeyPem,
-}) {
-  let preparedRunId = null;
-  let bootstrapProvisioner = null;
+}: {
+  artifactAccess: string;
+  candidateManifestPath: string;
+  connection: string;
+  execute: CommandExecutor;
+  kind: string;
+  loadCandidate: LoadValidatedCandidate;
+  provisioning: string;
+  transferFile: CandidateArchiveTransfer;
+  trustedRootPublicKeyPem: string;
+}): ReleaseInfrastructureAdapter {
+  let preparedRunId: string | null = null;
+  let bootstrapProvisioner: CandidateBootstrapProvisioner | null = null;
   return {
     kind,
     async prepare({ matrixCell, runId }) {
@@ -326,12 +715,17 @@ function createCandidateBootstrapProvisioner({
   execute,
   manifest,
   transferFile,
-}) {
+}: {
+  candidateDir: string;
+  execute: CommandExecutor;
+  manifest: ReleaseE2ECandidateManifest;
+  transferFile: CandidateArchiveTransfer;
+}): CandidateBootstrapProvisioner {
   const recipe = selectCandidateBootstrapRecipe(manifest);
   const recipePath = path.join(candidateDir, "recipe", recipe.file);
   let provisioned = false;
-  let provisionedRunId = null;
-  let stageDir = null;
+  let provisionedRunId: string | null | undefined = null;
+  let stageDir: string | null = null;
   return {
     async provision({ recipe: requestedRecipe, runId, sourcePath } = {}) {
       const selectedRecipe = requestedRecipe ?? recipe;
@@ -396,8 +790,9 @@ function createCandidateBootstrapProvisioner({
         }));
         if (cleanup.code === 0 && cleanup.stdout.trim() === "removed") {
           stageDir = null;
-        } else {
-          error.cleanupError = new Error(
+        } else if (error instanceof Error) {
+          attachRecipeStagingCleanupError(
+            error,
             `Could not clean failed Probe Bootstrap recipe staging: ${cleanup.stderr}`,
           );
         }
@@ -437,39 +832,62 @@ function createCandidateBootstrapProvisioner({
   };
 }
 
-function selectCandidateBootstrapRecipe(manifest) {
+function attachRecipeStagingCleanupError(
+  error: RecipeStagingError,
+  message: string,
+): void {
+  error.cleanupError = new Error(message);
+}
+
+function selectCandidateBootstrapRecipe(
+  manifest: ReleaseE2ECandidateManifest,
+): CandidateBootstrapRecipe {
   const recipe = manifest?.bootstrapRecipe;
+  assertCandidateBootstrapRecipe(recipe);
+  return recipe;
+}
+
+function assertCandidateBootstrapRecipe(
+  recipe: unknown,
+): asserts recipe is CandidateBootstrapRecipe {
+  const view = objectView(recipe);
   if (
-    recipe?.file !== "enoki-probe-bootstrap.py" ||
-    recipe?.version !== "v1" ||
-    !/^[0-9a-f]{64}$/.test(recipe?.sha256 ?? "") ||
-    !Number.isSafeInteger(recipe?.size) ||
-    recipe.size <= 0
+    view.file !== "enoki-probe-bootstrap.py" ||
+    view.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(regexInput(view.sha256)) ||
+    !isPositiveSafeInteger(view.size)
   ) {
     throw new Error("Validated Candidate has no exact Probe Bootstrap recipe");
   }
-  return recipe;
 }
 
 function stageCandidateBootstrapRecipeScript() {
   return `# enoki-release-e2e:candidate-bootstrap-recipe-stage\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=$(mktemp -d /tmp/enoki-release-e2e-recipe.XXXXXX)\nchmod 0700 "$stage_dir"\nprintf '%s\\n' "$stage_dir"\n`;
 }
 
-function verifyCandidateBootstrapRecipeScript({ recipe, stageDir }) {
+function verifyCandidateBootstrapRecipeScript({
+  recipe,
+  stageDir,
+}: {
+  recipe: CandidateBootstrapRecipe;
+  stageDir: string;
+}) {
   return `# enoki-release-e2e:candidate-bootstrap-recipe-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\nrecipe="$stage_dir/${recipe.file}"\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n[ -f "$recipe" ] && [ ! -L "$recipe" ]\n[ "$(wc -c < "$recipe" | tr -d ' ')" = ${shellSingleQuote(String(recipe.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(recipe.sha256)} "$recipe" | sha256sum -c -\nchmod 0500 "$recipe"\nprintf 'verified\\n'\n`;
 }
 
-function removeCandidateBootstrapRecipeScript(stageDir) {
+function removeCandidateBootstrapRecipeScript(stageDir: string | null) {
   return `# enoki-release-e2e:candidate-bootstrap-recipe-remove\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\ncase "$stage_dir" in /tmp/enoki-release-e2e-recipe.*) ;; *) exit 1 ;; esac\nrm -f -- "$stage_dir/enoki-probe-bootstrap.py"\nrmdir -- "$stage_dir"\nprintf 'removed\\n'\n`;
 }
 
-async function copyCandidateArchive({ source, destination }) {
+async function copyCandidateArchive({
+  destination,
+  source,
+}: {
+  destination: string;
+  source: string;
+}): Promise<void> {
   await copyFile(source, destination);
   await chmod(destination, 0o600);
-}
-
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 export function verifyActiveHubBootstrapRecipeProvenance({
@@ -478,7 +896,15 @@ export function verifyActiveHubBootstrapRecipeProvenance({
   candidateManifest,
   enrollmentRecipe,
   recipeBytes,
+}: {
+  activeHub: string;
+  activeManifestDigest: string;
+  candidateManifest: ReleaseE2ECandidateManifest;
+  enrollmentRecipe: unknown;
+  recipeBytes: Buffer;
 }) {
+  const record = objectView(enrollmentRecipe);
+  const recipe = objectView(record.recipe);
   const expectedHubDigest =
     activeHub === "candidate"
       ? candidateManifest?.hub?.digest
@@ -512,22 +938,21 @@ export function verifyActiveHubBootstrapRecipeProvenance({
   const expectedRecipeKeys = ["file", "sha256", "size", "version"];
   if (
     !hasExactKeys(enrollmentRecipe, expectedRecordKeys) ||
-    !hasExactKeys(enrollmentRecipe.recipe, expectedRecipeKeys) ||
-    enrollmentRecipe.bundleVersion !== expectedBundleVersion ||
-    enrollmentRecipe.distribution !== "enoki" ||
-    enrollmentRecipe.kind !== "enoki-probe-bootstrap-recipe-record" ||
-    enrollmentRecipe.schemaVersion !== 1 ||
-    enrollmentRecipe.recipe.file !== "enoki-probe-bootstrap.py" ||
-    enrollmentRecipe.recipe.version !== "v1" ||
-    !/^[0-9a-f]{64}$/.test(enrollmentRecipe.rootFingerprint ?? "") ||
-    !/^[0-9a-f]{64}$/.test(enrollmentRecipe.recipe.sha256 ?? "") ||
-    !Number.isSafeInteger(enrollmentRecipe.recipe.size) ||
-    enrollmentRecipe.recipe.size < 1 ||
-    !Array.isArray(enrollmentRecipe.targets) ||
-    enrollmentRecipe.targets.length !== 4 ||
+    !hasExactKeys(record.recipe, expectedRecipeKeys) ||
+    record.bundleVersion !== expectedBundleVersion ||
+    record.distribution !== "enoki" ||
+    record.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    record.schemaVersion !== 1 ||
+    recipe.file !== "enoki-probe-bootstrap.py" ||
+    recipe.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(regexInput(record.rootFingerprint)) ||
+    !/^[0-9a-f]{64}$/.test(regexInput(recipe.sha256)) ||
+    !isPositiveSafeInteger(recipe.size) ||
+    !isUnknownArray(record.targets) ||
+    record.targets.length !== 4 ||
     !Buffer.isBuffer(recipeBytes) ||
-    recipeBytes.byteLength !== enrollmentRecipe.recipe.size ||
-    sha256(recipeBytes) !== enrollmentRecipe.recipe.sha256
+    recipeBytes.byteLength !== recipe.size ||
+    sha256(recipeBytes) !== recipe.sha256
   ) {
     throw new Error(
       "Active Hub Enrollment recipe record or exported bytes are invalid",
@@ -535,18 +960,18 @@ export function verifyActiveHubBootstrapRecipeProvenance({
   }
 
   const normalizedRecord = {
-    bundleVersion: enrollmentRecipe.bundleVersion,
-    distribution: enrollmentRecipe.distribution,
-    kind: enrollmentRecipe.kind,
+    bundleVersion: record.bundleVersion,
+    distribution: record.distribution,
+    kind: record.kind,
     recipe: {
-      file: enrollmentRecipe.recipe.file,
-      sha256: enrollmentRecipe.recipe.sha256,
-      size: enrollmentRecipe.recipe.size,
-      version: enrollmentRecipe.recipe.version,
+      file: recipe.file,
+      sha256: recipe.sha256,
+      size: recipe.size,
+      version: recipe.version,
     },
-    rootFingerprint: enrollmentRecipe.rootFingerprint,
-    schemaVersion: enrollmentRecipe.schemaVersion,
-    targets: enrollmentRecipe.targets,
+    rootFingerprint: record.rootFingerprint,
+    schemaVersion: record.schemaVersion,
+    targets: record.targets,
   };
   const recordBytes = Buffer.from(
     `${JSON.stringify(normalizedRecord, null, 2)}\n`,
@@ -589,7 +1014,7 @@ export function verifyActiveHubBootstrapRecipeProvenance({
   };
 }
 
-function hasExactKeys(value, keys) {
+function hasExactKeys(value: unknown, keys: readonly string[]): boolean {
   return (
     value !== null &&
     typeof value === "object" &&
@@ -599,7 +1024,7 @@ function hasExactKeys(value, keys) {
   );
 }
 
-function shellSingleQuote(value) {
+function shellSingleQuote(value: unknown): string {
   return `'${String(value).replaceAll("'", "'\\\"'\\\"'")}'`;
 }
 
@@ -609,9 +1034,15 @@ function createSshCandidateArchiveTransfer({
   knownHostsPath,
   port,
   runProcess,
-}) {
+}: {
+  host: string;
+  keyPath?: string | null;
+  knownHostsPath: string;
+  port: number;
+  runProcess: ProcessRunner;
+}): CandidateArchiveTransfer {
   validateSshOptions({ "--ssh-host": host, "--ssh-port": String(port) });
-  return async ({ source, destination }) => {
+  return async ({ destination, source }) => {
     if (!knownHostsPath || !source || !destination) {
       throw new Error(
         "SSH Candidate archive transfer is missing an exact path",
@@ -650,10 +1081,17 @@ export function createSshExecutor({
   port = 22,
   runProcess = runSpawnedProcess,
   timeoutMs = 5 * 60 * 1000,
-}) {
+}: {
+  host: string;
+  keyPath?: string | null;
+  knownHostsPath: string;
+  port?: number;
+  runProcess?: ProcessRunner;
+  timeoutMs?: number;
+}): CommandExecutor {
   validateSshOptions({ "--ssh-host": host, "--ssh-port": String(port) });
   if (!knownHostsPath) throw new Error("SSH known-hosts path is required");
-  return async (script, options = {}) => {
+  return async (script: unknown, options: CommandOptions = {}) => {
     if (typeof script !== "string" || !script) {
       throw new Error("SSH script must be non-empty");
     }
@@ -686,28 +1124,39 @@ export function createSshExecutor({
   };
 }
 
-export function createFileEvidenceSink(evidenceDir, { runId } = {}) {
+export function createFileEvidenceSink(
+  evidenceDir: string,
+  { runId }: { runId?: string } = {},
+) {
   const resolved = path.resolve(evidenceDir);
   return {
-    async write(evidence) {
+    async write(evidence: unknown): Promise<void> {
       await mkdir(resolved, { recursive: true });
       const destination = path.join(resolved, "evidence.json");
+      const record = objectView(evidence);
       if (runId === undefined) {
         await writeJsonAtomically(destination, evidence);
         return;
       }
-      if (evidence?.runId !== runId) {
+      if (record.runId !== runId) {
         throw new Error("Release E2E evidence run ID does not match");
       }
-      const current = JSON.parse(await readFile(destination, "utf8"));
-      if (current?.runId !== runId || current?.result?.status !== "running") {
-        const error = new Error("Release E2E final evidence already exists");
-        error.code = "EEXIST";
-        throw error;
+      const parsedCurrent: unknown = JSON.parse(
+        await readFile(destination, "utf8"),
+      );
+      const current = objectView(parsedCurrent);
+      if (
+        current.runId !== runId ||
+        objectView(current.result).status !== "running"
+      ) {
+        throw Object.assign(
+          new Error("Release E2E final evidence already exists"),
+          { code: "EEXIST" },
+        );
       }
       await replaceJsonAtomically(destination, {
         ...current,
-        ...evidence,
+        ...record,
         inputs: current.inputs,
         schemaVersion: 2,
       });
@@ -720,10 +1169,15 @@ export async function createRunArtifactJournal({
   inputs,
   ownershipToken,
   runId,
-}) {
+}: {
+  evidenceDir: string;
+  inputs: ReleaseE2ERunInputs;
+  ownershipToken: string;
+  runId: string;
+}): Promise<ReleaseRunArtifactJournal> {
   const resolved = path.resolve(evidenceDir);
   const createdAt = new Date().toISOString();
-  let manifest = {
+  let manifest: ReleaseE2ERunManifest = {
     createdAt,
     failure: null,
     hostMutationPossible: false,
@@ -759,7 +1213,15 @@ export async function createRunArtifactJournal({
     get manifest() {
       return manifest;
     },
-    async fail({ error, phase, secrets = [] }) {
+    async fail({
+      error,
+      phase,
+      secrets = [],
+    }: {
+      error: unknown;
+      phase: string;
+      secrets?: readonly string[];
+    }): Promise<void> {
       const serialized = serializeRunError(error, secrets);
       manifest = {
         ...manifest,
@@ -772,8 +1234,14 @@ export async function createRunArtifactJournal({
         manifest,
       );
       const evidencePath = path.join(resolved, "evidence.json");
-      const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
-      if (evidence?.runId === runId && evidence?.result?.status === "running") {
+      const parsedEvidence: unknown = JSON.parse(
+        await readFile(evidencePath, "utf8"),
+      );
+      const evidence = objectView(parsedEvidence);
+      if (
+        evidence.runId === runId &&
+        objectView(evidence.result).status === "running"
+      ) {
         await replaceJsonAtomically(evidencePath, {
           ...evidence,
           diagnostics: { error: serialized },
@@ -783,7 +1251,7 @@ export async function createRunArtifactJournal({
         });
       }
     },
-    async update(patch) {
+    async update(patch: Partial<ReleaseE2ERunManifest>): Promise<unknown> {
       manifest = {
         ...manifest,
         ...patch,
@@ -794,8 +1262,14 @@ export async function createRunArtifactJournal({
         manifest,
       );
       const evidencePath = path.join(resolved, "evidence.json");
-      const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
-      if (evidence?.runId === runId && evidence?.result?.status === "running") {
+      const parsedEvidence: unknown = JSON.parse(
+        await readFile(evidencePath, "utf8"),
+      );
+      const evidence = objectView(parsedEvidence);
+      if (
+        evidence.runId === runId &&
+        objectView(evidence.result).status === "running"
+      ) {
         await replaceJsonAtomically(evidencePath, {
           ...evidence,
           phase: manifest.phase,
@@ -807,7 +1281,10 @@ export async function createRunArtifactJournal({
   };
 }
 
-export async function writeRunManifest(evidenceDir, manifest) {
+export async function writeRunManifest(
+  evidenceDir: string,
+  manifest: ReleaseE2ERunManifest,
+): Promise<void> {
   await mkdir(evidenceDir, { recursive: true });
   await writeJsonAtomically(
     path.join(evidenceDir, "run-manifest.json"),
@@ -815,39 +1292,58 @@ export async function writeRunManifest(evidenceDir, manifest) {
   );
 }
 
-export async function readRunManifest(manifestPath) {
-  const value = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (
-    value?.schemaVersion !== 3 ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.runId ?? "") ||
-    !/^[0-9a-f-]{36}$/.test(value.ownershipToken ?? "") ||
-    !value.inputs ||
-    (value.inputs.hostAdapter !== "ssh" && value.inputs.hostAdapter !== "ci") ||
-    typeof value.hostMutationPossible !== "boolean" ||
-    !/^(?:initialized|plan-validated|candidate-prepare|candidate-prepared|scenario-running|succeeded|failed)$/.test(
-      value.phase ?? "",
-    ) ||
-    (value.matrixCell !== null &&
-      (value.matrixCell?.scenarioId !== value.scenario ||
-        !Object.hasOwn(releaseE2EScenarioRegistry, value.scenario) ||
-        value.inputs.matrixCellId !== value.matrixCell?.cellId ||
-        (value.infrastructure &&
-          value.matrixCell?.cellId !== value.infrastructure?.matrixCellId))) ||
-    (value.hostMutationPossible &&
-      (!value.matrixCell || !value.infrastructure)) ||
-    (value.inputs.hostAdapter === "ssh" &&
-      (!value.ssh ||
-        value.ssh.host !== value.inputs.ssh?.host ||
-        value.ssh.port !== value.inputs.ssh?.port ||
-        value.ssh.keyPath !== value.inputs.ssh?.keyPath)) ||
-    (value.inputs.hostAdapter === "ci" && value.ssh !== null)
-  ) {
+export async function readRunManifest(
+  manifestPath: string,
+): Promise<ReleaseE2ERunManifest> {
+  const parsedManifest: unknown = JSON.parse(
+    await readFile(manifestPath, "utf8"),
+  );
+  const value = objectView(parsedManifest);
+  if (!isReleaseE2ERunManifest(value)) {
     throw new Error("Release E2E run manifest is invalid");
   }
   return value;
 }
 
-export function newRunIdentity(runId) {
+// 判据与原实现逐条等价（只把「拒绝条件」整体取反）：校验归属、阶段与
+// 矩阵/SSH 身份的跨字段一致性，这些正是独立 verify-clean 消费的不变量。
+// 属性读取用 objectView，其对非对象 JSON 值给出 undefined，与原 `?.` 取值一致。
+function isReleaseE2ERunManifest(
+  value: UnknownRecord,
+): value is ReleaseE2ERunManifest {
+  const inputs = objectView(value.inputs);
+  const matrixCell = objectView(value.matrixCell);
+  const infrastructure = objectView(value.infrastructure);
+  const ssh = objectView(value.ssh);
+  const inputsSsh = objectView(inputs.ssh);
+  return (
+    value.schemaVersion === 3 &&
+    /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(regexInput(value.runId)) &&
+    /^[0-9a-f-]{36}$/.test(regexInput(value.ownershipToken)) &&
+    isUnknownRecord(value.inputs) &&
+    (inputs.hostAdapter === "ssh" || inputs.hostAdapter === "ci") &&
+    typeof value.hostMutationPossible === "boolean" &&
+    /^(?:initialized|plan-validated|candidate-prepare|candidate-prepared|scenario-running|succeeded|failed)$/.test(
+      regexInput(value.phase),
+    ) &&
+    (value.matrixCell === null ||
+      (matrixCell.scenarioId === value.scenario &&
+        Object.hasOwn(releaseE2EScenarioRegistry, regexInput(value.scenario)) &&
+        inputs.matrixCellId === matrixCell.cellId &&
+        (!value.infrastructure ||
+          matrixCell.cellId === infrastructure.matrixCellId))) &&
+    (!value.hostMutationPossible ||
+      (!!value.matrixCell && !!value.infrastructure)) &&
+    (inputs.hostAdapter !== "ssh" ||
+      (!!value.ssh &&
+        ssh.host === inputsSsh.host &&
+        ssh.port === inputsSsh.port &&
+        ssh.keyPath === inputsSsh.keyPath)) &&
+    (inputs.hostAdapter !== "ci" || value.ssh === null)
+  );
+}
+
+export function newRunIdentity(runId?: string) {
   const generated = runId ?? `e2e-${Date.now()}-${randomUUID().slice(0, 8)}`;
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(generated)) {
     throw new Error("run ID must be a safe non-empty identifier");
@@ -864,7 +1360,7 @@ export function createLocalSshReleaseEnvironment({
   ownershipToken,
   sshExecute,
   docker = createDockerHubController({ containerEngine }),
-}) {
+}: LocalSshReleaseEnvironmentOptions) {
   return createReleaseEnvironment({
     candidateDir,
     docker,
@@ -890,7 +1386,7 @@ export function createReleaseEnvironment({
   onCleanupManaged = () => {},
   ownershipToken,
   releaseInfrastructure = async () => ({ clean: true }),
-}) {
+}: ReleaseEnvironmentOptions) {
   if (typeof execute !== "function") {
     throw new Error("Release E2E environment requires a Host connection");
   }
@@ -899,14 +1395,19 @@ export function createReleaseEnvironment({
       "Release E2E cleanup ownership callback must be a function",
     );
   }
-  let dockerResources = null;
-  let canonicalReports = null;
+  let dockerResources: HubResources | null = null;
+  let canonicalReports: CanonicalReportTransport | null = null;
   return {
     async start({
       candidateManifest,
       hubMode = "candidate",
       runId,
       scenario = matrixCell?.scenarioId,
+    }: {
+      candidateManifest: ReleaseE2ECandidateManifest;
+      hubMode?: string;
+      runId: string;
+      scenario?: string;
     }) {
       onCleanupManaged();
       dockerResources = await docker.start({
@@ -961,7 +1462,7 @@ export function createReleaseEnvironment({
             runId,
           });
           const staged = await bootstrapProvisioner({
-            recipe: enrollment.bootstrapRecipe.recipe,
+            recipe: exported.recipe,
             runId,
             sourcePath: exported.sourcePath,
           });
@@ -978,14 +1479,22 @@ export function createReleaseEnvironment({
         host,
         hub: {
           ...lifecycle,
-          async captureBaselineStateSnapshot(input) {
+          async captureBaselineStateSnapshot(input: {
+            baselineImageDigest: string;
+            baselineVersion: string;
+          }) {
             return docker.captureBaselineStateSnapshot({
               ...input,
               resources: dockerResources,
               runId,
             });
           },
-          async restoreBaselineStateSnapshot(input) {
+          async restoreBaselineStateSnapshot(input: {
+            baselineImageDigest: string;
+            baselineVersion: string;
+            expectedManifestDigest: string;
+            recoveryTime: string;
+          }) {
             const result = await docker.restoreBaselineStateSnapshot({
               ...input,
               resources: dockerResources,
@@ -1012,15 +1521,18 @@ export function createReleaseEnvironment({
         releaseTestHost,
       };
     },
-    async cleanup({ resources, runId }) {
-      const cleanup = {};
-      const errors = [];
+    async cleanup({ resources, runId }: { resources: unknown; runId: string }) {
+      const cleanup: ReleaseEnvironmentCleanupReport = {};
+      const errors: unknown[] = [];
       if (canonicalReports) {
         try {
           cleanup.transport = await canonicalReports.close();
         } catch (error) {
           errors.push(error);
-          cleanup.transport = { clean: false, error: error.message };
+          cleanup.transport = {
+            clean: false,
+            error: objectView(error).message,
+          };
         }
       }
       canonicalReports = null;
@@ -1031,7 +1543,7 @@ export function createReleaseEnvironment({
         });
       } catch (error) {
         errors.push(error);
-        cleanup.hub = { clean: false, error: error.message };
+        cleanup.hub = { clean: false, error: objectView(error).message };
       }
       dockerResources = null;
       try {
@@ -1041,7 +1553,10 @@ export function createReleaseEnvironment({
         });
       } catch (error) {
         errors.push(error);
-        cleanup.infrastructure = { clean: false, error: error.message };
+        cleanup.infrastructure = {
+          clean: false,
+          error: objectView(error).message,
+        };
       }
       if (errors.length > 0) {
         throw new AggregateError(
@@ -1058,14 +1573,19 @@ export function createDockerHubController({
   containerEngine = "docker",
   exec = execFileWithResult,
   fetch: fetch_ = globalThis.fetch,
-  sleep = (milliseconds) =>
+  sleep = (milliseconds: number) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
+}: {
+  containerEngine?: string;
+  exec?: DockerExecutor;
+  fetch?: typeof globalThis.fetch;
+  sleep?: SleepFunction;
 } = {}) {
   if (containerEngine !== "docker") {
     throw new Error("Only the docker container engine is supported");
   }
-  let currentResources = null;
-  let currentRuntimeEnvironment = null;
+  let currentResources: HubResources | null = null;
+  let currentRuntimeEnvironment: HubRuntimeEnvironment | null = null;
   return {
     async start({
       candidateDir,
@@ -1077,6 +1597,16 @@ export function createDockerHubController({
       probeOperationRunningTimeoutSeconds = null,
       runId,
       useHubStateSnapshot = false,
+    }: {
+      candidateDir: string;
+      candidateManifest: ReleaseE2ECandidateManifest;
+      hubMode?: string;
+      hubOwnerUrl: string;
+      hubPublicUrl: string;
+      ownerPassword: string;
+      probeOperationRunningTimeoutSeconds?: number | null;
+      runId: string;
+      useHubStateSnapshot?: boolean;
     }) {
       assertCandidateHubOwnerUrl(hubOwnerUrl);
       if (
@@ -1101,7 +1631,7 @@ export function createDockerHubController({
             ? `enoki-release-e2e:${runId}`
             : `enoki-release-e2e-candidate:${runId}`,
       });
-      let baseline = null;
+      let baseline: HubRuntime | null = null;
       if (hubMode === "baseline") {
         const descriptor = candidateManifest.releaseBaseline;
         if (
@@ -1154,7 +1684,9 @@ export function createDockerHubController({
           snapshotVolume,
         );
       }
-      for (const runtime of [candidate, baseline].filter(Boolean)) {
+      for (const runtime of [candidate, baseline].filter(
+        (entry) => entry !== null,
+      )) {
         await assertDockerObjectAbsent(
           exec,
           containerEngine,
@@ -1175,7 +1707,9 @@ export function createDockerHubController({
         probeOperationRunningTimeoutSeconds,
         useHubStateSnapshot,
       };
-      const active = hubMode === "baseline" ? baseline : candidate;
+      // baseline 仅在 hubMode === "baseline" 分支内被赋值（否则已抛出），
+      // 因此 ?? candidate 与原来的 hubMode === "baseline" ? baseline : candidate 等价。
+      const active = baseline ?? candidate;
       currentResources = {
         activeHub: active.name,
         baseline,
@@ -1228,9 +1762,19 @@ export function createDockerHubController({
       recipeRecord,
       resources,
       runId,
+    }: {
+      candidateManifest: ReleaseE2ECandidateManifest;
+      recipeRecord?: unknown;
+      resources?: HubResources | null;
+      runId: string;
     }) {
       const owned = resources ?? currentResources;
-      const recipe = recipeRecord?.recipe;
+      const record = objectView(recipeRecord);
+      const recipe = objectView(record.recipe);
+      const recipeFile = recipe.file;
+      const recipeSha256 = recipe.sha256;
+      const recipeSize = recipe.size;
+      const recipeVersion = recipe.version;
       if (
         !owned ||
         owned !== currentResources ||
@@ -1242,28 +1786,31 @@ export function createDockerHubController({
           "Active verified Hub runtime is required to export its Probe Bootstrap recipe",
         );
       }
+      // typeof 判据是后面字面量/正则/整数判据的逻辑子集，加入后接受集合不变。
       if (
-        recipe?.file !== "enoki-probe-bootstrap.py" ||
-        !/^[0-9a-f]{64}$/.test(recipe?.sha256 ?? "") ||
-        !Number.isSafeInteger(recipe?.size) ||
-        recipe.size < 1 ||
-        recipe.version !== "v1"
+        typeof recipeFile !== "string" ||
+        recipeFile !== "enoki-probe-bootstrap.py" ||
+        typeof recipeSha256 !== "string" ||
+        !/^[0-9a-f]{64}$/.test(recipeSha256) ||
+        !isPositiveSafeInteger(recipeSize) ||
+        typeof recipeVersion !== "string" ||
+        recipeVersion !== "v1"
       ) {
         throw new Error("Active Hub Enrollment recipe descriptor is invalid");
       }
       const exportDir = await mkdtemp(
         path.join(tmpdir(), "enoki-release-e2e-active-recipe."),
       );
-      const sourcePath = path.join(exportDir, recipe.file);
-      let provenance;
+      const sourcePath = path.join(exportDir, recipeFile);
+      let provenance: RecipeProvenance;
       try {
         await successfulExec(exec, containerEngine, [
           "cp",
-          `${owned.container}:/app/probe-bootstrap-publication/${recipe.file}`,
+          `${owned.container}:/app/probe-bootstrap-publication/${recipeFile}`,
           sourcePath,
         ]);
         const bytes = await readFile(sourcePath);
-        if (bytes.length !== recipe.size || sha256(bytes) !== recipe.sha256) {
+        if (bytes.length !== recipeSize || sha256(bytes) !== recipeSha256) {
           throw new Error(
             "Active Hub Probe Bootstrap recipe does not match its verified Enrollment record",
           );
@@ -1282,6 +1829,12 @@ export function createDockerHubController({
       owned.exportedRecipeDirs.push(exportDir);
       return {
         provenance,
+        recipe: {
+          file: recipeFile,
+          sha256: recipeSha256,
+          size: recipeSize,
+          version: recipeVersion,
+        },
         sourcePath,
       };
     },
@@ -1291,6 +1844,11 @@ export function createDockerHubController({
       baselineVersion,
       resources,
       runId,
+    }: {
+      baselineImageDigest: string;
+      baselineVersion: string;
+      resources?: HubResources | null;
+      runId: string;
     }) {
       const owned = requireHubStateSnapshotResources({
         activeHub: "baseline",
@@ -1318,36 +1876,38 @@ export function createDockerHubController({
         ],
         operation: "snapshot",
       });
-      const manifest = result.manifest;
+      // 以下读取全部走 objectView/isUnknownArray，与原来 manifest?.X?.some(...)
+      // 的 undefined 短路等价；manifest 由本行动消费的 enoki-hub-state 工具产出。
+      const manifest = objectView(result.manifest);
+      const releaseBaseline = objectView(manifest.releaseBaseline);
       if (
-        manifest?.releaseBaseline?.hubImageDigest !== baselineImageDigest ||
-        manifest?.releaseBaseline?.version !== baselineVersion
+        releaseBaseline.hubImageDigest !== baselineImageDigest ||
+        releaseBaseline.version !== baselineVersion
       ) {
         throw new Error(
           "Hub State Snapshot manifest does not match the pinned Release Baseline",
         );
       }
       const archiveIncluded =
-        manifest?.logicalRoots?.some(
-          (root) => root?.id === "metrics-archive",
+        recordList(manifest.logicalRoots).some(
+          (root) => root.id === "metrics-archive",
         ) ||
-        manifest?.directories?.some(
+        recordList(manifest.directories).some(
           (directory) =>
-            directory?.logicalRoot === "data-root" &&
+            directory.logicalRoot === "data-root" &&
             (directory.path === "metrics-archive" ||
-              directory.path.startsWith("metrics-archive/")),
+              stringValue(directory.path).startsWith("metrics-archive/")),
         );
+      const files = recordList(manifest.files);
       const snapshot = {
         baselineImageDigest,
         baselineVersion,
-        hotDataFileCount: Array.isArray(manifest?.files)
-          ? manifest.files.length
-          : 0,
-        hotDataFiles: Array.isArray(manifest?.files)
-          ? manifest.files.map((file) => `${file.logicalRoot}/${file.path}`)
-          : [],
+        hotDataFileCount: files.length,
+        hotDataFiles: files.map(
+          (file) => `${String(file.logicalRoot)}/${String(file.path)}`,
+        ),
         manifestDigest: result.manifestDigest,
-        recoveryTime: manifest?.recoveryTime,
+        recoveryTime: stringValue(manifest.recoveryTime),
         roots: [
           { id: "data-root", included: true, path: "/data" },
           {
@@ -1363,7 +1923,13 @@ export function createDockerHubController({
       return snapshot;
     },
 
-    async switchToCandidate({ resources, runId }) {
+    async switchToCandidate({
+      resources,
+      runId,
+    }: {
+      resources?: HubResources | null;
+      runId: string;
+    }): Promise<HubResources> {
       const owned = resources ?? currentResources;
       const stoppedAfterSnapshot =
         owned?.snapshot &&
@@ -1410,6 +1976,13 @@ export function createDockerHubController({
       recoveryTime,
       resources,
       runId,
+    }: {
+      baselineImageDigest: string;
+      baselineVersion: string;
+      expectedManifestDigest: string;
+      recoveryTime: string;
+      resources?: HubResources | null;
+      runId: string;
     }) {
       const owned = requireHubStateSnapshotResources({
         activeHub: "candidate",
@@ -1497,7 +2070,11 @@ export function createDockerHubController({
       };
     },
 
-    async collectEvidence({ resources } = {}) {
+    async collectEvidence({
+      resources,
+    }: {
+      resources?: HubResources | null;
+    } = {}) {
       const owned = resources ?? currentResources;
       if (!owned?.containerCreated || !owned.identityVerified) {
         throw new Error("Hub runtime identity is not available");
@@ -1537,14 +2114,15 @@ export function createDockerHubController({
         candidateManifestDigest:
           owned.candidate?.manifestDigest ?? owned.manifestDigest,
         containerConfigDigest: owned.configDigest,
+        // objectView(X).Y 与原来 X?.Y 的读取结果一致：缺失或非对象都得到 undefined。
         containerInspect: redactText(
           JSON.stringify({
             Id: containerInspect.Id,
             Image: containerInspect.Image,
-            ImageName: containerInspect.Config?.Image,
-            Labels: containerInspect.Config?.Labels,
+            ImageName: objectView(containerInspect.Config).Image,
+            Labels: objectView(containerInspect.Config).Labels,
             Mounts: containerInspect.Mounts,
-            Ports: containerInspect.NetworkSettings?.Ports,
+            Ports: objectView(containerInspect.NetworkSettings).Ports,
             State: containerInspect.State,
           }),
           owned.redactionSecrets,
@@ -1566,10 +2144,16 @@ export function createDockerHubController({
       };
     },
 
-    async cleanup({ resources, runId }) {
+    async cleanup({
+      resources,
+      runId,
+    }: {
+      resources?: HubResources | null;
+      runId: string;
+    }) {
       const owned = resources ?? currentResources;
       if (!owned) return { clean: true, skipped: "hub_not_started" };
-      const errors = [];
+      const errors: unknown[] = [];
       for (const exportDir of owned.exportedRecipeDirs ?? []) {
         try {
           await rm(exportDir, { force: true, recursive: true });
@@ -1641,7 +2225,9 @@ export function createDockerHubController({
           ),
       });
       const runtimes = owned.candidate
-        ? [owned.candidate, owned.baseline].filter(Boolean)
+        ? [owned.candidate, owned.baseline].filter(
+            (runtime) => runtime !== null,
+          )
         : [
             {
               configDigest: owned.configDigest,
@@ -1683,7 +2269,7 @@ export function createDockerHubController({
         throw new AggregateError(
           errors,
           `Candidate Hub cleanup failed:\n${errors
-            .map((error) => `- ${error.message}`)
+            .map((error) => `- ${String(errorMessage(error))}`)
             .join("\n")}`,
         );
       }
@@ -1696,6 +2282,13 @@ export function createDockerHubController({
         removeArguments,
         type,
         verifyOwnership,
+      }: {
+        createdProperty: DockerCreatedFlag;
+        name: string;
+        owned: DockerObjectOwner;
+        removeArguments: string[];
+        type: DockerObjectType;
+        verifyOwnership: () => Promise<boolean>;
       }) {
         if (!resources_[createdProperty]) return;
         let isOwned = false;
@@ -1726,14 +2319,19 @@ export function createDockerHubController({
     baselineImageDigest,
     resources,
     runId,
-  }) {
+  }: {
+    activeHub: string;
+    baselineImageDigest: string;
+    resources?: HubResources | null;
+    runId: string;
+  }): HubResourcesWithBaseline {
     const owned = resources ?? currentResources;
     if (
       !owned ||
       owned !== currentResources ||
       owned.runId !== runId ||
       owned.activeHub !== activeHub ||
-      !owned.baseline ||
+      !hasPinnedBaseline(owned) ||
       !owned.candidate ||
       !owned.snapshotVolumeCreated ||
       owned.baseline.manifestDigest !== baselineImageDigest
@@ -1745,7 +2343,10 @@ export function createDockerHubController({
     return owned;
   }
 
-  async function stopOwnedHub(owned, runId) {
+  async function stopOwnedHub(
+    owned: HubResources,
+    runId: string,
+  ): Promise<void> {
     if (
       !(await verifyDockerRunLabel(
         exec,
@@ -1768,7 +2369,16 @@ export function createDockerHubController({
     owned.identityVerified = false;
   }
 
-  async function invokeHubStateSnapshotTool(owned, { arguments_, operation }) {
+  async function invokeHubStateSnapshotTool(
+    owned: HubResources,
+    {
+      arguments_,
+      operation,
+    }: {
+      arguments_: string[];
+      operation: string;
+    },
+  ): Promise<HubStateSnapshotToolResult> {
     owned.snapshotContainerMayExist = true;
     try {
       const result = await successfulExec(exec, containerEngine, [
@@ -1797,15 +2407,14 @@ export function createDockerHubController({
         ...arguments_,
       ]);
       owned.snapshotContainerMayExist = false;
-      const parsed = parseCommandJson(
-        result.stdout,
-        `Hub State Snapshot ${operation}`,
+      const parsed = objectView(
+        parseCommandJson(result.stdout, `Hub State Snapshot ${operation}`),
       );
       const manifestDigest = canonicalSnapshotManifestDigest(
-        parsed?.manifestDigest,
+        parsed.manifestDigest,
       );
       if (
-        parsed?.operation !== operation ||
+        parsed.operation !== operation ||
         parsed.version !== "v1" ||
         manifestDigest === null
       ) {
@@ -1821,7 +2430,7 @@ export function createDockerHubController({
       return { ...parsed, manifestDigest };
     } catch (error) {
       owned.snapshotOperations.push({
-        error: error.message,
+        error: errorMessage(error),
         operation,
         status: "failed",
       });
@@ -1834,7 +2443,12 @@ export function createDockerHubController({
     expectedManifestDigest,
     name,
     tag,
-  }) {
+  }: {
+    archivePath: string;
+    expectedManifestDigest: string;
+    name: string;
+    tag: string;
+  }): Promise<HubRuntime> {
     const { configDigest, manifestDigest } = await readOciImageIdentities(
       archivePath,
       exec,
@@ -1854,7 +2468,10 @@ export function createDockerHubController({
     };
   }
 
-  async function loadHubRuntime(owned, runtime) {
+  async function loadHubRuntime(
+    owned: HubResources,
+    runtime: HubRuntime,
+  ): Promise<void> {
     await ensureHubRuntimeLoaded(runtime);
     owned.activeHub = runtime.name;
     owned.configDigest = runtime.configDigest;
@@ -1863,7 +2480,7 @@ export function createDockerHubController({
     owned.tagCreated = true;
   }
 
-  async function ensureHubRuntimeLoaded(runtime) {
+  async function ensureHubRuntimeLoaded(runtime: HubRuntime): Promise<void> {
     if (runtime.tagCreated) return;
     const conversionDir = await mkdtemp(
       path.join(tmpdir(), "enoki-release-e2e-docker-archive-"),
@@ -1886,7 +2503,10 @@ export function createDockerHubController({
     }
   }
 
-  async function runHubRuntime(owned, runtime) {
+  async function runHubRuntime(
+    owned: HubResources,
+    runtime: HubRuntime,
+  ): Promise<void> {
     if (!currentRuntimeEnvironment) {
       throw new Error("Hub runtime environment is unavailable");
     }
@@ -1976,7 +2596,7 @@ export function createDockerHubController({
   }
 }
 
-function validateSshOptions(values) {
+function validateSshOptions(values: ReleaseE2EOptionValues): void {
   if (!/^(?!-)[A-Za-z0-9._%+@:[\]-]+$/.test(values["--ssh-host"] ?? "")) {
     throw new Error("--ssh-host is invalid");
   }
@@ -1986,7 +2606,7 @@ function validateSshOptions(values) {
   }
 }
 
-function assertCandidateHubOwnerUrl(value) {
+function assertCandidateHubOwnerUrl(value: string): void {
   const url = new URL(value);
   const loopbackHosts = new Set(["127.0.0.1", "[::1]", "localhost"]);
   if (
@@ -2004,7 +2624,10 @@ function assertCandidateHubOwnerUrl(value) {
   }
 }
 
-async function writeJsonAtomically(destination, value) {
+async function writeJsonAtomically(
+  destination: string,
+  value: unknown,
+): Promise<void> {
   const temporary = `${destination}.tmp-${randomUUID()}`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
@@ -2017,7 +2640,10 @@ async function writeJsonAtomically(destination, value) {
   }
 }
 
-async function replaceJsonAtomically(destination, value) {
+async function replaceJsonAtomically(
+  destination: string,
+  value: unknown,
+): Promise<void> {
   const temporary = `${destination}.tmp-${randomUUID()}`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
@@ -2030,37 +2656,46 @@ async function replaceJsonAtomically(destination, value) {
   }
 }
 
-function serializeRunError(error, secrets) {
+function serializeRunError(
+  error: unknown,
+  secrets: readonly string[],
+): SerializedRunError {
   const message = error instanceof Error ? error.message : String(error);
+  const code = objectView(error).code;
   return {
-    code: typeof error?.code === "string" ? error.code : "release_e2e_failed",
+    code: typeof code === "string" ? code : "release_e2e_failed",
     message: redactText(message, secrets),
     name: error instanceof Error ? error.name : "Error",
   };
 }
 
-function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {
-  return new Promise((resolve, reject) => {
+function runSpawnedProcess(
+  command: string,
+  arguments_: readonly string[],
+  { input, timeoutMs }: ProcessRunOptions,
+): Promise<CommandResult> {
+  return new Promise<CommandResult>((resolve, reject) => {
     const usesProcessGroup = process.platform !== "win32";
     const child = spawn(command, arguments_, {
       detached: usesProcessGroup,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const stdout = [];
-    const stderr = [];
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
     let outputBytes = 0;
     const maximumOutputBytes = 16 * 1024 * 1024;
     let timedOut = false;
-    let killTimer = null;
-    const signalProcessTree = (signal) => {
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const signalProcessTree = (signal: NodeJS.Signals): void => {
       try {
-        if (usesProcessGroup && Number.isSafeInteger(child.pid)) {
-          process.kill(-child.pid, signal);
+        const pid = child.pid;
+        if (usesProcessGroup && isSafeInteger(pid)) {
+          process.kill(-pid, signal);
         } else {
           child.kill(signal);
         }
       } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
+        if (objectView(error).code !== "ESRCH") throw error;
       }
     };
     const timer = setTimeout(() => {
@@ -2069,60 +2704,80 @@ function runSpawnedProcess(command, arguments_, { input, timeoutMs }) {
       killTimer = setTimeout(() => signalProcessTree("SIGKILL"), 250);
       killTimer.unref?.();
     }, timeoutMs);
-    child.stdout.on("data", (chunk) => {
+    child.stdout.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes <= maximumOutputBytes) stdout.push(chunk);
     });
-    child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
       if (outputBytes <= maximumOutputBytes) stderr.push(chunk);
     });
-    child.once("error", (error) => {
+    child.once("error", (error: Error) => {
       clearTimeout(timer);
       clearTimeout(killTimer);
       reject(error);
     });
-    child.once("close", (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      const result = {
-        code: code ?? 1,
-        stderr: Buffer.concat(stderr).toString("utf8"),
-        stdout: Buffer.concat(stdout).toString("utf8"),
-      };
-      if (signal) {
-        result.stderr += `\nprocess terminated by ${signal}`;
-      }
-      if (timedOut) {
-        result.code = 1;
-        result.stderr += `\nprocess timed out after ${timeoutMs}ms`;
-      }
-      if (outputBytes > maximumOutputBytes) {
-        result.code = 1;
-        result.stderr += "\nprocess output exceeded 16 MiB";
-      }
-      resolve(result);
-    });
+    child.once(
+      "close",
+      (code: number | null, signal: NodeJS.Signals | null) => {
+        clearTimeout(timer);
+        clearTimeout(killTimer);
+        const result: CommandResult = {
+          code: code ?? 1,
+          stderr: Buffer.concat(stderr).toString("utf8"),
+          stdout: Buffer.concat(stdout).toString("utf8"),
+        };
+        if (signal) {
+          result.stderr += `\nprocess terminated by ${signal}`;
+        }
+        if (timedOut) {
+          result.code = 1;
+          result.stderr += `\nprocess timed out after ${timeoutMs}ms`;
+        }
+        if (outputBytes > maximumOutputBytes) {
+          result.code = 1;
+          result.stderr += "\nprocess output exceeded 16 MiB";
+        }
+        resolve(result);
+      },
+    );
     child.stdin.end(input);
   });
 }
 
-async function execFileWithResult(command, arguments_) {
+async function execFileWithResult(
+  command: string,
+  arguments_: readonly string[],
+): Promise<DockerCommandResult> {
   try {
     const result = await execFileAsync(command, arguments_, {
       maxBuffer: 64 * 1024 * 1024,
     });
     return { code: 0, stderr: result.stderr, stdout: result.stdout };
   } catch (error) {
+    const failure = objectView(error);
+    const code = failure.code;
+    const stderr = failure.stderr;
+    const message = failure.message;
+    const stdout = failure.stdout;
     return {
-      code: error.code ?? 1,
-      stderr: error.stderr ?? error.message,
-      stdout: error.stdout ?? "",
+      code: typeof code === "number" || typeof code === "string" ? code : 1,
+      stderr:
+        typeof stderr === "string"
+          ? stderr
+          : typeof message === "string"
+            ? message
+            : "",
+      stdout: typeof stdout === "string" ? stdout : "",
     };
   }
 }
 
-async function successfulExec(exec, command, arguments_) {
+async function successfulExec(
+  exec: DockerExecutor,
+  command: string,
+  arguments_: readonly string[],
+): Promise<DockerCommandResult> {
   const result = await exec(command, arguments_);
   if (result.code !== 0) {
     throw new Error(
@@ -2132,7 +2787,10 @@ async function successfulExec(exec, command, arguments_) {
   return result;
 }
 
-async function readOciImageIdentities(archivePath, exec) {
+async function readOciImageIdentities(
+  archivePath: string,
+  exec: DockerExecutor,
+): Promise<{ configDigest: string; manifestDigest: string }> {
   const indexResult = await successfulExec(exec, "tar", [
     "--extract",
     "--to-stdout",
@@ -2140,9 +2798,12 @@ async function readOciImageIdentities(archivePath, exec) {
     archivePath,
     "index.json",
   ]);
-  const index = JSON.parse(indexResult.stdout);
-  const manifestDigest = index?.manifests?.[0]?.digest;
-  if (!/^sha256:[0-9a-f]{64}$/.test(manifestDigest ?? "")) {
+  const index: unknown = JSON.parse(indexResult.stdout);
+  const manifests = objectView(index).manifests;
+  const manifestDigest = objectView(
+    isUnknownArray(manifests) ? manifests[0] : undefined,
+  ).digest;
+  if (!/^sha256:[0-9a-f]{64}$/.test(regexInput(manifestDigest))) {
     throw new Error("Candidate Hub OCI index has no image manifest digest");
   }
   const manifestResult = await successfulExec(exec, "tar", [
@@ -2150,17 +2811,22 @@ async function readOciImageIdentities(archivePath, exec) {
     "--to-stdout",
     "--file",
     archivePath,
-    `blobs/sha256/${manifestDigest.slice("sha256:".length)}`,
+    `blobs/sha256/${regexInput(manifestDigest).slice("sha256:".length)}`,
   ]);
-  const manifest = JSON.parse(manifestResult.stdout);
-  const configDigest = manifest?.config?.digest;
-  if (!/^sha256:[0-9a-f]{64}$/.test(configDigest ?? "")) {
+  const manifest: unknown = JSON.parse(manifestResult.stdout);
+  const configDigest = objectView(manifest).config;
+  if (
+    !/^sha256:[0-9a-f]{64}$/.test(regexInput(objectView(configDigest).digest))
+  ) {
     throw new Error("Candidate Hub OCI manifest has no config digest");
   }
-  return { configDigest, manifestDigest };
+  return {
+    configDigest: regexInput(objectView(configDigest).digest),
+    manifestDigest: regexInput(manifestDigest),
+  };
 }
 
-function parseCommandJson(value, label) {
+function parseCommandJson(value: string, label: string): unknown {
   try {
     return JSON.parse(value);
   } catch (error) {
@@ -2168,13 +2834,14 @@ function parseCommandJson(value, label) {
   }
 }
 
-function canonicalSnapshotManifestDigest(value) {
-  if (/^[0-9a-f]{64}$/.test(value ?? "")) return `sha256:${value}`;
-  if (/^sha256:[0-9a-f]{64}$/.test(value ?? "")) return value;
+function canonicalSnapshotManifestDigest(value: unknown): string | null {
+  if (/^[0-9a-f]{64}$/.test(regexInput(value)))
+    return `sha256:${regexInput(value)}`;
+  if (/^sha256:[0-9a-f]{64}$/.test(regexInput(value))) return regexInput(value);
   return null;
 }
 
-function snapshotManifestDigestForCli(value) {
+function snapshotManifestDigestForCli(value: unknown): string {
   const canonical = canonicalSnapshotManifestDigest(value);
   if (canonical === null) {
     throw new Error("Hub State Snapshot manifest digest is invalid");
@@ -2182,21 +2849,38 @@ function snapshotManifestDigestForCli(value) {
   return canonical.slice("sha256:".length);
 }
 
-function parseDockerInspectObject(value, label) {
+function parseDockerInspectObject(value: string, label: string): UnknownRecord {
   const parsed = parseCommandJson(value, label);
   if (
-    !Array.isArray(parsed) ||
+    !isUnknownArray(parsed) ||
     parsed.length !== 1 ||
-    !parsed[0] ||
-    typeof parsed[0] !== "object" ||
-    Array.isArray(parsed[0])
+    !isUnknownRecord(parsed[0])
   ) {
     throw new Error(`${label} did not return exactly one object`);
   }
   return parsed[0];
 }
 
-function redactText(value, secrets = []) {
+// 与原来 manifest?.logicalRoots?.some(...) / Array.isArray(manifest?.files) 的
+// 读取判据一致：非数组值一律得到空列表，条目通过 objectView 读取字段。
+function recordList(value: unknown): readonly UnknownRecord[] {
+  return isUnknownArray(value) ? value.map(objectView) : [];
+}
+
+// 该谓词就是 requireHubStateSnapshotResources 原有的 !owned.baseline 判据项，
+// 把它编码为类型谓词后，restore 读取 baseline 不需要新增运行时检查。
+function hasPinnedBaseline(
+  owned: HubResources,
+): owned is HubResourcesWithBaseline {
+  return Boolean(owned.baseline);
+}
+
+// 原实现直接读取 error.message；对非 Error 抛出值同样是 undefined，这里保持该读取。
+function errorMessage(error: unknown): unknown {
+  return objectView(error).message;
+}
+
+function redactText(value: unknown, secrets: readonly string[] = []): string {
   let redacted = String(value ?? "");
   for (const secret of secrets) {
     if (secret) redacted = redacted.replaceAll(secret, "[REDACTED]");
@@ -2207,14 +2891,24 @@ function redactText(value, secrets = []) {
     .replace(/(cookie["'=:\s]+)[^\n"']+/gi, "$1[REDACTED]");
 }
 
-async function waitForHubHealth(baseUrl, { fetch: fetch_, sleep }) {
-  let lastError = null;
+async function waitForHubHealth(
+  baseUrl: string,
+  {
+    fetch: fetch_,
+    sleep,
+  }: { fetch: typeof globalThis.fetch; sleep: SleepFunction },
+): Promise<void> {
+  let lastError: unknown = null;
   for (let attempt = 0; attempt < 60; attempt += 1) {
     try {
       const response = await fetch_(new URL("/api/health", baseUrl));
       if (response.ok) {
-        const body = await response.json();
-        if (body?.service === "enoki-hub" && body.status === "ok") return;
+        const body: unknown = await response.json();
+        if (
+          objectView(body).service === "enoki-hub" &&
+          objectView(body).status === "ok"
+        )
+          return;
       }
       lastError = new Error(`health returned ${response.status}`);
     } catch (error) {
@@ -2223,11 +2917,17 @@ async function waitForHubHealth(baseUrl, { fetch: fetch_, sleep }) {
     if (attempt < 59) await sleep(1_000);
   }
   throw new Error(
-    `Candidate Hub did not become healthy: ${lastError?.message}`,
+    `Candidate Hub did not become healthy: ${objectView(lastError).message}`,
   );
 }
 
-async function verifyDockerRunLabel(exec, engine, type, name, runId) {
+async function verifyDockerRunLabel(
+  exec: DockerExecutor,
+  engine: string,
+  type: DockerObjectType,
+  name: string,
+  runId: string,
+): Promise<boolean> {
   const arguments_ =
     type === "container"
       ? [
@@ -2257,11 +2957,11 @@ async function verifyDockerRunLabel(exec, engine, type, name, runId) {
 }
 
 async function verifyDockerImageIdentity(
-  exec,
-  engine,
-  name,
-  expectedConfigDigest,
-) {
+  exec: DockerExecutor,
+  engine: string,
+  name: string,
+  expectedConfigDigest: string,
+): Promise<boolean> {
   const result = await exec(engine, [
     "image",
     "inspect",
@@ -2283,7 +2983,12 @@ async function verifyDockerImageIdentity(
   return true;
 }
 
-async function assertDockerObjectAbsent(exec, engine, type, name) {
+async function assertDockerObjectAbsent(
+  exec: DockerExecutor,
+  engine: string,
+  type: DockerObjectType,
+  name: string,
+): Promise<void> {
   const arguments_ =
     type === "container"
       ? ["container", "inspect", name]

@@ -81,13 +81,13 @@ describe("supported Release Test Host matrix", () => {
       "matrix: ${{ fromJSON(needs.prepare-release-e2e-matrix.outputs.matrix) }}",
     );
     expect(workflow).toContain('--matrix-cell "$MATRIX_CELL"');
-    expect(workflow.match(/release-e2e[.]mjs run/g)).toHaveLength(1);
+    expect(workflow.match(/release-e2e[.]ts run/g)).toHaveLength(1);
     expect(workflow).not.toContain("continue-on-error:");
   });
 
   it("validates the plan before journaling and protects provisioning with release", async () => {
     const entrypoint = await readFile(
-      new URL("./release-e2e.mjs", import.meta.url),
+      new URL("./release-e2e.ts", import.meta.url),
       "utf8",
     );
     const run = entrypoint.slice(entrypoint.indexOf("async function run("));
