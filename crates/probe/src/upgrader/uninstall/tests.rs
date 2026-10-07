@@ -1,4 +1,7 @@
-use super::cleanup::{StateRootRemovalFault, inject_state_root_removal_fault};
+use super::cleanup::{
+    StateRootRemovalFault, execute_committed_replacement_cleanup, inject_state_root_removal_fault,
+    plan_committed_replacement_cleanup,
+};
 use super::{
     CompanionBinaryFacts, PostCommitSelfFinalizeFacts, ResumeDecision, UninstallCapsulePhase,
     adapt_uninstall_wire_request, commit_lifecycle_capsule_with,
@@ -1751,6 +1754,52 @@ fn an_unremovable_canonical_shell_still_completes_once_its_data_is_cleared() {
             .count(),
         0,
         "保留的 canonical 根必须已证明没有任何 child"
+    );
+}
+
+/// 替换迁移的 committed 清理走同一退休判据：实际数据确已清空后，无法删除的无害壳可保留；
+/// 可信 metadata 不由清理路径退休，仍留给 exact commit custody。
+#[test]
+fn committed_replacement_cleanup_completes_around_a_retained_harmless_canonical_shell() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let (fixture, private_root) = canonical_local_uninstall_fixture(root);
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: fixture.metadata.identity_path.clone(),
+    };
+    let plan =
+        plan_committed_replacement_cleanup(&input, &fixture.metadata, &fixture.metadata_path)
+            .expect("committed Replacement cleanup plan");
+    let mut systemd = RecordingSystemdRunner::default();
+    inject_state_root_removal_fault(Some(StateRootRemovalFault::ContentsCleared));
+
+    let outcome = execute_committed_replacement_cleanup(&plan, &mut systemd);
+    inject_state_root_removal_fault(None);
+
+    outcome.expect("已证明无害的保留壳不阻塞 committed Replacement 清理");
+    assert!(
+        fixture.metadata.state_dir.is_symlink(),
+        "尽力删除失败后 exact public 链可保留"
+    );
+    assert_eq!(
+        fs::read_dir(&private_root)
+            .expect("enumerate canonical shell")
+            .count(),
+        0,
+        "替换清理保留的壳必须已证明没有任何 child"
+    );
+    assert!(
+        fixture.metadata_path.exists(),
+        "替换清理不退休可信 metadata"
+    );
+    assert!(
+        fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .unwrap()
+            .exists(),
+        "committed Replacement 保留候选 Bootstrap custody"
     );
 }
 

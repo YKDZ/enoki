@@ -6611,6 +6611,172 @@ mod tests {
         }
     }
 
+    /// 把 fixture 的 ordinary state 根投影为 canonical：真实内容搬到固定私有根，
+    /// public 路径只剩那条精确的 `private/enoki-probe` 链。
+    fn project_replacement_state_root_to_canonical(root: &Path, state_dir: &Path) -> PathBuf {
+        let private_root = root.join("var/lib/private/enoki-probe");
+        fs::create_dir_all(private_root.parent().expect("private parent")).expect("private parent");
+        fs::rename(state_dir, &private_root).expect("project state root");
+        fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750))
+            .expect("private root mode");
+        std::os::unix::fs::symlink("private/enoki-probe", state_dir).expect("exact public link");
+        private_root
+    }
+
+    fn committed_replacement_intent(root: &Path) -> ReplacementIntent {
+        let installed_probe_sha256 =
+            fixed_installed_probe_sha256(Path::new(PRODUCTION_PROBE_BINARY_PATH), Some(root))
+                .expect("installed Probe digest");
+        ReplacementIntent {
+            enrollment_id: "enr_0123456789abcdef".to_owned(),
+            enrollment_token_sha256: "a".repeat(64),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_old_01".to_owned(),
+            source_probe_version: "1.2.3".to_owned(),
+            source_probe_sha256: installed_probe_sha256,
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+            target_probe_version: "1.2.3".to_owned(),
+            target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+        }
+    }
+
+    #[test]
+    fn committed_replacement_cleanup_clears_a_canonical_state_roots_actual_data() {
+        #[derive(Default)]
+        struct Store {
+            fact: Option<ReplacementCommitFact>,
+            persisted_cleanup: Vec<bool>,
+        }
+        impl ReplacementCommitStore for Store {
+            type Error = ();
+            fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
+                Ok(self.fact.clone())
+            }
+            fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
+                self.persisted_cleanup.push(fact.cleanup_complete);
+                self.fact = Some(fact.clone());
+                Ok(())
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path();
+        let (metadata_path, candidate_bootstrap_state, _, state_dir) =
+            fixed_replacement_cleanup_fixture(root);
+        let private_root = project_replacement_state_root_to_canonical(root, &state_dir);
+        fs::create_dir_all(private_root.join("audit")).expect("audit state");
+        fs::write(private_root.join("audit/evidence.json"), "install data").expect("install data");
+        let intent = committed_replacement_intent(root);
+        let mut store = Store::default();
+
+        let completed = commit_replacement_and_cleanup_install_with_systemd(
+            intent.clone(),
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            Some(root),
+            &mut RecordingSystemdRunner::default(),
+        )
+        .expect("committed Replacement converges the canonical state root");
+
+        assert!(completed.cleanup_complete);
+        assert_eq!(store.persisted_cleanup, [false, true]);
+        assert!(
+            !state_dir.exists(),
+            "exact public 链随已证明无害的壳一起尽力删除"
+        );
+        assert!(
+            !private_root.exists(),
+            "canonical 私有根的实际安装数据必须清空，public absence 不掩盖私有数据"
+        );
+        assert!(
+            matches!(
+                enoki_probe_bootstrap::install::ProbeStateRoot::resolve(&state_dir),
+                Ok(None)
+            ),
+            "替换后的 state 根满足正式 fresh 继续安装所需的退休判据"
+        );
+        assert!(
+            candidate_bootstrap_state.exists(),
+            "committed Replacement 保留候选 Bootstrap custody"
+        );
+        assert!(
+            !metadata_path.exists(),
+            "cleanup 完成后 metadata 由 exact commit custody 退休"
+        );
+
+        commit_replacement_and_cleanup_install_with_systemd(
+            intent,
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            Some(root),
+            &mut RecordingSystemdRunner::default(),
+        )
+        .expect("canonical 退休后的重试保持幂等");
+    }
+
+    #[test]
+    fn committed_replacement_refuses_a_canonical_root_whose_ownership_is_unconfirmed() {
+        #[derive(Default)]
+        struct Store {
+            fact: Option<ReplacementCommitFact>,
+            persisted_cleanup: Vec<bool>,
+        }
+        impl ReplacementCommitStore for Store {
+            type Error = ();
+            fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
+                Ok(self.fact.clone())
+            }
+            fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
+                self.persisted_cleanup.push(fact.cleanup_complete);
+                self.fact = Some(fact.clone());
+                Ok(())
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path();
+        let (metadata_path, candidate_bootstrap_state, _, state_dir) =
+            fixed_replacement_cleanup_fixture(root);
+        let private_root = project_replacement_state_root_to_canonical(root, &state_dir);
+        fs::write(private_root.join("unknown-payload"), "unknown data").expect("unknown payload");
+        std::os::unix::fs::chown(&private_root, Some(1000), Some(0)).expect("非本安装的私有根");
+        let intent = committed_replacement_intent(root);
+        let mut store = Store::default();
+
+        let outcome = commit_replacement_and_cleanup_install_with_systemd(
+            intent,
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            Some(root),
+            &mut RecordingSystemdRunner::default(),
+        );
+
+        assert!(
+            matches!(outcome, Err(ReplacementCommitError::Effect(_))),
+            "形态未确认的私有根不能判完成：{outcome:?}"
+        );
+        assert_eq!(
+            fs::read(private_root.join("unknown-payload")).expect("unknown payload"),
+            b"unknown data",
+            "归属未确认的私有数据不被替换清理删除"
+        );
+        assert_eq!(
+            store.persisted_cleanup,
+            [false],
+            "本机未退休不能记为清理完成"
+        );
+        assert!(
+            metadata_path.exists(),
+            "可信 metadata 活过可失败清理，仍由 exact commit custody 最后退休"
+        );
+        assert!(
+            candidate_bootstrap_state.exists(),
+            "候选 custody 不因失败被吞掉"
+        );
+    }
+
     #[test]
     fn committed_replacement_metadata_mismatch_is_zero_effect_and_keeps_the_incomplete_fact() {
         struct Store {

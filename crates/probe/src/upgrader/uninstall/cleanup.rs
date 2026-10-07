@@ -19,9 +19,6 @@ use enoki_probe_bootstrap::replacement::{
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
-use std::cell::Cell;
-
-#[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
     input: &ProbeUninstallerRunInput,
     install_metadata: &TrustedProbeInstallMetadata,
@@ -568,20 +565,27 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     remove_probe_bootstrap_state(plan)?;
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
-    remove_uninstall_local_state_with(plan, |path| {
-        if path == plan.install_metadata.state_dir {
-            retire_uninstall_state_root(path)
-        } else {
-            remove_path_if_exists(path)
-        }
-    })?;
+    remove_uninstall_local_state_with(plan, |path| retire_local_state_path(plan, path))?;
     remove_empty_parent_dir(&plan.input.bootstrap_config_path);
     verify_uninstall_residue_absent(plan, systemd)
 }
 
+/// 本地 state 清理的唯一路由：只有可信 state 根交给共同退休机制，其余路径保持原有尽力删除语义。
+fn retire_local_state_path(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+    path: &Path,
+) -> Result<(), ProbeUpgraderRunError> {
+    if path == plan.install_metadata.state_dir {
+        retire_state_root(path)
+    } else {
+        remove_path_if_exists(path)
+    }
+}
+
 /// 尽力退休可信 state 根。先清空本安装的实际 state 内容，再尽力删除壳；只有内容确已清空、
 /// 剩余对象仍是已证明无害的空壳时才按 ADR-0098 容许保留，否则如实上抛主错误，不吞掉数据失败。
-fn retire_uninstall_state_root(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+/// 卸载与 committed 替换迁移共用这一机制，私有根的实际数据不会被 public absence 掩盖。
+fn retire_state_root(path: &Path) -> Result<(), ProbeUpgraderRunError> {
     let Some(state_root) =
         ProbeStateRoot::resolve(path).map_err(|error| state_root_removal_error(path, error))?
     else {
@@ -603,7 +607,9 @@ fn remove_state_root(
     state_root: &ProbeStateRoot,
 ) -> Result<(), ProbeUpgraderRunError> {
     #[cfg(test)]
-    if let Some(fault) = STATE_ROOT_REMOVAL_FAULT.with(Cell::get) {
+    if let Some(fault) =
+        state_root_removal_fault::STATE_ROOT_REMOVAL_FAULT.with(|injected| injected.get())
+    {
         if matches!(fault, StateRootRemovalFault::ContentsCleared) {
             state_root
                 .clear_authorized_contents()
@@ -658,14 +664,21 @@ pub(super) enum StateRootRemovalFault {
     ContentsRetained,
 }
 
+/// 故障注入点放在嵌套模块内：架构门禁的顶层 AST 分类不接受顶层宏调用。
 #[cfg(test)]
-thread_local! {
-    static STATE_ROOT_REMOVAL_FAULT: Cell<Option<StateRootRemovalFault>> = const { Cell::new(None) };
+mod state_root_removal_fault {
+    use super::StateRootRemovalFault;
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(super) static STATE_ROOT_REMOVAL_FAULT: Cell<Option<StateRootRemovalFault>> =
+            const { Cell::new(None) };
+    }
 }
 
 #[cfg(test)]
 pub(super) fn inject_state_root_removal_fault(fault: Option<StateRootRemovalFault>) {
-    STATE_ROOT_REMOVAL_FAULT.with(|injected| injected.set(fault));
+    state_root_removal_fault::STATE_ROOT_REMOVAL_FAULT.with(|injected| injected.set(fault));
 }
 
 #[cfg(test)]
@@ -693,7 +706,7 @@ pub(super) fn execute_committed_replacement_cleanup(
     finalize_replacement_local_state_with(
         &plan.input.bootstrap_config_path,
         &plan.install_metadata.state_dir,
-        remove_path_if_exists,
+        |path| retire_local_state_path(plan, path),
         || verify_replacement_residue_absent(plan, systemd),
     )
 }
@@ -750,14 +763,10 @@ pub(super) fn verify_replacement_residue_absent(
             "probe_uninstall_config_residue",
             "verifying the Probe bootstrap config is absent",
         ),
-        (
-            plan.install_metadata.state_dir.as_path(),
-            "probe_uninstall_state_residue",
-            "verifying Probe state is absent",
-        ),
     ] {
         verify_path_absent(path, code, action)?;
     }
+    verify_state_root_retired(&plan.install_metadata.state_dir)?;
     verify_lifecycle_companion_binary_absent(plan)
 }
 
