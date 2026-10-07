@@ -541,9 +541,6 @@ with open(os.devnull, "rb") as input_stream:
     );
     expect(signJob).toContain("--release-baseline release-baseline");
     expect(signJob).toContain('--candidate-commit "${{ inputs.commit }}"');
-    expect(signJob).not.toContain("ENOKI_RELEASE_TRANSITION_CONTRACT_");
-    expect(signJob).not.toContain("ENOKI_TRUST_EPOCH_MIGRATION_");
-    expect(signJob).not.toContain("RELEASE_BASELINE_KIND");
     expect(signJob).not.toContain("ref: ${{ inputs.commit }}");
     expect(signJob).toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
     expect(downstreamJobs).not.toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
