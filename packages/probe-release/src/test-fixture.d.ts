@@ -12,17 +12,3 @@ export function createSignedLegacyProbeAssetSetFixture(input: {
     target: string;
   }>;
 }>;
-
-export function createGenericReleaseTransitionContractFixture(input: {
-  authority: { privateKey: string | Buffer; publicKey: string | Buffer };
-  candidateCommit: string;
-  manifest: Buffer;
-  sourceVersion: string;
-  transition: "compatible" | "replacement-required";
-  sourceProbeComponents: Array<{
-    file: string;
-    role: string;
-    sha256: string;
-    target: string;
-  }>;
-}): { bytes: Buffer; signature: Buffer };

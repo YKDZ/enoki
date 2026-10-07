@@ -14,7 +14,6 @@ export {
 } from "./probe-trust-delegation.mjs";
 export {
   createReleaseTransitionContract,
-  preflightReleaseMigrationConfiguration,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
 } from "./release-transition-contract.mjs";

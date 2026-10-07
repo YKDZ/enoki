@@ -8,7 +8,10 @@ import {
 
 import { inspectLegacyProbeAssetSet } from "./legacy-probe-asset-set.mjs";
 import { probeTargets } from "./probe-asset-bundle.mjs";
-import { verifyProbeTrustDelegation } from "./probe-trust-delegation.mjs";
+import {
+  canonicalPublicKeyPem,
+  verifyProbeTrustDelegation,
+} from "./probe-trust-delegation.mjs";
 import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const signingDomain = Buffer.from(
@@ -28,19 +31,22 @@ export async function createReleaseTransitionContract(input) {
     MAX_CONTRACT_BYTES,
     "target manifest",
   );
-  const authorization = verifyTrustEpochMigrationAuthorization({
-    bytes: input.authorizationBytes,
-    expectedCandidateVersion: `v${input.targetVersion}`,
-    expectedLegacyRelease: input.legacyRelease,
-    rootPublicKeyPem: input.rootPublicKeyPem,
-    signature: input.authorizationSignature,
-  });
   const delegation = verifyProbeTrustDelegation({
     bytes: input.delegationBytes,
-    expectedDistribution: authorization.distribution,
+    expectedDistribution: input.distribution,
     rootPublicKeyPem: input.rootPublicKeyPem,
     signature: input.delegationSignature,
   });
+  const releasePrivateKey = createPrivateKey(input.releasePrivateKeyPem);
+  if (
+    !canonicalPublicKey(createPublicKey(releasePrivateKey)).equals(
+      canonicalPublicKeyPem(delegation.signingIdentity.publicKeyPem),
+    )
+  ) {
+    throw new Error(
+      "Release Transition Contract signing identity is not authorized by the Probe Trust Delegation",
+    );
+  }
   const target = parseTargetManifest(input.targetManifestBytes);
   if (
     target.version !== input.targetVersion ||
@@ -49,17 +55,54 @@ export async function createReleaseTransitionContract(input) {
   ) {
     throw new Error("Release Transition Contract target does not match");
   }
-  const rootPrivateKey = createPrivateKey(input.rootPrivateKeyPem);
+  const contractTarget = {
+    assetClosure: target.assets,
+    assetSetManifestSha256: sha256(input.targetManifestBytes),
+    delegationGeneration: delegation.generation,
+    signingKeyId: delegation.signingIdentity.keyId,
+    version: input.targetVersion,
+  };
+  const migrationClosure = [
+    input.authorizationBytes,
+    input.authorizationSignature,
+    input.legacyRelease,
+    input.sourceAssetDir,
+  ].filter((value) => value !== undefined).length;
+  if (migrationClosure !== 0 && migrationClosure !== 4) {
+    throw new Error(
+      "Release Transition Contract migration closure is incomplete",
+    );
+  }
+
+  if (migrationClosure === 0) {
+    const contract = validateContract({
+      candidateCommit: input.candidateCommit,
+      distribution: delegation.distribution,
+      kind: "enoki-release-transition-contract",
+      rootKeyId: delegation.rootKeyId,
+      schemaVersion: 1,
+      source: {
+        probeComponents: input.sourceProbeComponents,
+        version: input.sourceVersion,
+      },
+      target: contractTarget,
+      transition: input.transition,
+    });
+    return signContract(contract, releasePrivateKey);
+  }
+
+  const authorization = verifyTrustEpochMigrationAuthorization({
+    bytes: input.authorizationBytes,
+    expectedCandidateVersion: `v${input.targetVersion}`,
+    expectedLegacyRelease: input.legacyRelease,
+    rootPublicKeyPem: input.rootPublicKeyPem,
+    signature: input.authorizationSignature,
+  });
   if (
-    sha256(canonicalPublicKey(createPublicKey(rootPrivateKey))) !==
-    authorization.rootKeyId
+    authorization.distribution !== delegation.distribution ||
+    authorization.rootKeyId !== delegation.rootKeyId
   ) {
     throw new Error("Release Transition Contract root identity does not match");
-  }
-  if (typeof input.sourceAssetDir !== "string" || !input.sourceAssetDir) {
-    throw new Error(
-      "Release Transition Contract source Probe asset closure is required",
-    );
   }
   const sourceAssetSet = await inspectLegacyProbeAssetSet(
     input.sourceAssetDir,
@@ -93,15 +136,13 @@ export async function createReleaseTransitionContract(input) {
       targetCommitish:
         authorization.legacyRelease.githubRelease.targetCommitish,
     },
-    target: {
-      assetClosure: target.assets,
-      assetSetManifestSha256: sha256(input.targetManifestBytes),
-      delegationGeneration: delegation.generation,
-      signingKeyId: delegation.signingIdentity.keyId,
-      version: input.targetVersion,
-    },
+    target: contractTarget,
     transition: "replacement-required",
   });
+  return signContract(contract, releasePrivateKey);
+}
+
+function signContract(contract, releasePrivateKey) {
   const bytes = canonicalBytes(contract);
   assertBoundedBytes(bytes, MAX_CONTRACT_BYTES, "contract");
   return {
@@ -110,7 +151,7 @@ export async function createReleaseTransitionContract(input) {
     signature: sign(
       "RSA-SHA256",
       releaseTransitionContractSigningInput(bytes),
-      rootPrivateKey,
+      releasePrivateKey,
     ),
   };
 }
@@ -120,7 +161,10 @@ export function verifyReleaseTransitionContract({
   authorizationSignature,
   contractBytes,
   contractSignature,
+  delegationBytes,
+  delegationSignature,
   expected,
+  expectedDistribution,
   rootPublicKeyPem,
 }) {
   assertBoundedBytes(contractBytes, MAX_CONTRACT_BYTES, "contract");
@@ -136,27 +180,22 @@ export function verifyReleaseTransitionContract({
   if (!Buffer.from(contractBytes).equals(canonical)) {
     throw new Error("Release Transition Contract encoding does not match");
   }
-  if (
-    !verify(
-      "RSA-SHA256",
-      releaseTransitionContractSigningInput(canonical),
-      createPublicKey(rootPublicKeyPem),
-      contractSignature,
-    )
-  ) {
-    throw new Error(
-      "Release Transition Contract root signature does not match",
-    );
-  }
+  const delegation = verifyProbeTrustDelegation({
+    bytes: delegationBytes,
+    expectedDistribution,
+    rootPublicKeyPem,
+    signature: delegationSignature,
+  });
   if (!isMigrationContract(contract)) {
     if (
-      contract.rootKeyId !==
-      sha256(canonicalPublicKey(createPublicKey(rootPublicKeyPem)))
+      contract.rootKeyId !== delegation.rootKeyId ||
+      contract.distribution !== delegation.distribution ||
+      contract.target.signingKeyId !== delegation.signingIdentity.keyId ||
+      contract.target.delegationGeneration !== delegation.generation
     ) {
-      throw new Error(
-        "Release Transition Contract root identity does not match",
-      );
+      throw new Error("Release Transition Contract delegation does not match");
     }
+    assertDelegatedSignature(delegation, canonical, contractSignature);
     if (expected && !matchesExpectedContract(contract, expected)) {
       throw new Error("Release Transition Contract candidate does not match");
     }
@@ -188,14 +227,36 @@ export function verifyReleaseTransitionContract({
     contract.migrationAuthorizationSha256 !== sha256(authorizationBytes) ||
     contract.migrationGeneration !== authorization.migrationGeneration ||
     contract.distribution !== authorization.distribution ||
-    contract.rootKeyId !== authorization.rootKeyId
+    contract.rootKeyId !== authorization.rootKeyId ||
+    authorization.rootKeyId !== delegation.rootKeyId ||
+    authorization.distribution !== delegation.distribution
   ) {
     throw new Error("Release Transition Contract authorization does not match");
   }
+  assertDelegatedSignature(delegation, canonical, contractSignature);
   if (expected && !matchesExpectedContract(contract, expected)) {
     throw new Error("Release Transition Contract candidate does not match");
   }
   return contract;
+}
+
+function assertDelegatedSignature(delegation, canonical, signature) {
+  let valid = false;
+  try {
+    valid = verify(
+      "RSA-SHA256",
+      releaseTransitionContractSigningInput(canonical),
+      createPublicKey(delegation.signingIdentity.publicKeyPem),
+      signature,
+    );
+  } catch {
+    valid = false;
+  }
+  if (!valid) {
+    throw new Error(
+      "Release Transition Contract signature does not match the authorized Probe signing identity",
+    );
+  }
 }
 
 function matchesExpectedContract(contract, expected) {
@@ -221,95 +282,6 @@ function matchesExpectedContract(contract, expected) {
 
 export function releaseTransitionContractSigningInput(bytes) {
   return Buffer.concat([signingDomain, Buffer.from(bytes)]);
-}
-
-export function preflightReleaseMigrationConfiguration({
-  authorization,
-  authorizationSignatureBase64,
-  candidateCommit,
-  candidateVersion,
-  contract,
-  contractSignatureBase64,
-  rootPublicKeyPem,
-}) {
-  const contractValues = [contract, contractSignatureBase64];
-  const contractConfigured = contractValues.filter(
-    (value) => typeof value === "string" && value.length > 0,
-  ).length;
-  if (contractConfigured !== contractValues.length) {
-    throw new Error(
-      "Release Transition Contract must be provided as one complete closure",
-    );
-  }
-  const authorizationValues = [authorization, authorizationSignatureBase64];
-  const authorizationConfigured = authorizationValues.filter(
-    (value) => typeof value === "string" && value.length > 0,
-  ).length;
-  if (authorizationConfigured !== 0 && authorizationConfigured !== 2) {
-    throw new Error(
-      "Release migration authorization must be provided as one complete closure",
-    );
-  }
-  if (
-    (authorizationConfigured === 2 &&
-      Buffer.byteLength(authorization) > MAX_CONTRACT_BYTES) ||
-    Buffer.byteLength(contract) > MAX_CONTRACT_BYTES
-  ) {
-    throw new Error("Release migration public configuration is invalid");
-  }
-  const contractBytes = Buffer.from(contract);
-  const migrationContract =
-    parsedContractUsesMigrationAuthorization(contractBytes);
-  return verifyReleaseTransitionContract({
-    ...(authorizationConfigured === 2
-      ? {
-          authorizationBytes: Buffer.from(authorization),
-          authorizationSignature: decodeBoundedBase64(
-            authorizationSignatureBase64,
-            "authorization signature",
-          ),
-        }
-      : {}),
-    contractBytes,
-    contractSignature: decodeBoundedBase64(
-      contractSignatureBase64,
-      "contract signature",
-    ),
-    expected: {
-      candidateCommit,
-      ...(migrationContract ? { sourceTag: "v0.1.74" } : {}),
-      targetVersion: candidateVersion.replace(/^v/, ""),
-    },
-    rootPublicKeyPem,
-  });
-}
-
-function parsedContractUsesMigrationAuthorization(contractBytes) {
-  try {
-    return isMigrationContract(
-      JSON.parse(Buffer.from(contractBytes).toString("utf8")),
-    );
-  } catch {
-    return false;
-  }
-}
-
-function decodeBoundedBase64(value, description) {
-  if (
-    typeof value !== "string" ||
-    value.length < 4 ||
-    value.length > 2048 ||
-    value.length % 4 !== 0 ||
-    !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
-  ) {
-    throw new Error(`Release migration ${description} is invalid`);
-  }
-  const bytes = Buffer.from(value, "base64");
-  assertBoundedBytes(bytes, MAX_SIGNATURE_BYTES, description);
-  if (bytes.toString("base64") !== value) {
-    throw new Error(`Release migration ${description} is invalid`);
-  }
-  return bytes;
 }
 
 function validateContract(value) {

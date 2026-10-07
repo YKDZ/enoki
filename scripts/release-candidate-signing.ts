@@ -25,6 +25,7 @@ import { promisify } from "node:util";
 
 import {
   canonicalPublicKeyPem,
+  createReleaseTransitionContract,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
@@ -37,6 +38,7 @@ import {
   type ProbeBootstrapArchiveExpectation,
   type VerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-inspection.ts";
+import { readReleaseBaselineTransitionSource } from "./release-baseline-verification.ts";
 import {
   assertSameFileNames,
   inspectProbeArchive,
@@ -53,6 +55,7 @@ import {
   requiredOption,
   type CommandLineOptions,
 } from "./release-json-guards.ts";
+import { declareReleaseTransition } from "./release-transition-declaration.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -518,11 +521,19 @@ export async function prepareUnsignedProbeAssetSet({
   return { outputDir, publicKeySha256, version: stableVersion };
 }
 
+// 正式签名入口必须提供本运行已验证的 Release Baseline 与 candidate commit；
+// 缺少该输入时只产出 manifest 签名的资产集，无法成为 Release Candidate。
+export type ReleaseTransitionSigningInput = Readonly<{
+  candidateCommit: string;
+  releaseBaselineDir: string;
+}>;
+
 export async function signProbeAssetSet({
   expectedDelegationBytes,
   expectedDelegationSignature,
   outputDir,
   privateKeyPem,
+  releaseTransition,
   trustedRootPublicKeyPem,
   unsignedAssetDir,
 }: {
@@ -530,6 +541,7 @@ export async function signProbeAssetSet({
   expectedDelegationSignature: Buffer | undefined;
   outputDir: string;
   privateKeyPem: Buffer | string | undefined;
+  releaseTransition?: ReleaseTransitionSigningInput;
   trustedRootPublicKeyPem: Buffer | string | undefined;
   unsignedAssetDir: string;
 }) {
@@ -565,6 +577,36 @@ export async function signProbeAssetSet({
   try {
     await cp(unsignedAssetDir, stagingDir, { recursive: true });
     await writeFile(path.join(stagingDir, "manifest.json.sig"), signature);
+    if (releaseTransition) {
+      const transition = await createSignedReleaseTransitionClosure({
+        candidateCommit: releaseTransition.candidateCommit,
+        delegationBytes: expectedDelegationBytes,
+        delegationSignature: expectedDelegationSignature,
+        manifestBytes,
+        privateKeyPem,
+        releaseBaselineDir: releaseTransition.releaseBaselineDir,
+        targetVersion: regexInput(inspected.version),
+        trustedRootPublicKeyPem,
+      });
+      await writeFile(
+        path.join(stagingDir, "release-transition-contract.json"),
+        transition.contract.bytes,
+      );
+      await writeFile(
+        path.join(stagingDir, "release-transition-contract.json.sig"),
+        transition.contract.signature,
+      );
+      if (transition.migrationAuthorization) {
+        await writeFile(
+          path.join(stagingDir, "trust-epoch-migration-authorization.json"),
+          transition.migrationAuthorization.bytes,
+        );
+        await writeFile(
+          path.join(stagingDir, "trust-epoch-migration-authorization.json.sig"),
+          transition.migrationAuthorization.signature,
+        );
+      }
+    }
     await inspectProbeAssetSet(stagingDir, {
       expectedDelegationBytes,
       expectedDelegationSignature,
@@ -583,6 +625,76 @@ export async function signProbeAssetSet({
     outputDir,
     publicKeySha256: inspected.signingIdentity.publicKeySha256,
     version: `v${regexInput(inspected.version)}`,
+  };
+}
+
+// 同一委托发布身份在同一隔离动作内签署 manifest 与精确 Release Transition
+// Contract：源侧事实只读自本运行已验证的 Release Baseline，分类只来自受保护
+// 签名来源内的显式声明。迁移形态把 Baseline 内既有的一次性根授权原样带入，
+// 不重新签发，也不要求离线根私钥。
+async function createSignedReleaseTransitionClosure({
+  candidateCommit,
+  delegationBytes,
+  delegationSignature,
+  manifestBytes,
+  privateKeyPem,
+  releaseBaselineDir,
+  targetVersion,
+  trustedRootPublicKeyPem,
+}: {
+  candidateCommit: string;
+  delegationBytes: Buffer;
+  delegationSignature: Buffer;
+  manifestBytes: Buffer;
+  privateKeyPem: Buffer | string;
+  releaseBaselineDir: string;
+  targetVersion: string;
+  trustedRootPublicKeyPem: Buffer | string;
+}) {
+  const baseline = await readReleaseBaselineTransitionSource(
+    releaseBaselineDir,
+    {
+      candidateVersion: `v${targetVersion}`,
+      trustedRootPublicKeyPem,
+    },
+  );
+  const declared = declareReleaseTransition({
+    baselineIsTrustEpochMigration: baseline.baselineIsTrustEpochMigration,
+    sourceVersion: baseline.sourceVersion,
+    targetVersion,
+  });
+  const contract = await createReleaseTransitionContract({
+    candidateCommit,
+    delegationBytes,
+    delegationSignature,
+    distribution: "enoki",
+    ...(baseline.baselineIsTrustEpochMigration
+      ? {
+          authorizationBytes: baseline.authorizationBytes,
+          authorizationSignature: baseline.authorizationSignature,
+          legacyRelease: baseline.legacyRelease,
+          sourceAssetDir: baseline.sourceAssetDir,
+        }
+      : {
+          sourceProbeComponents: baseline.sourceProbeComponents,
+          sourceVersion: baseline.sourceVersion,
+          transition: declared.classification,
+        }),
+    releasePrivateKeyPem: privateKeyPem,
+    rootPublicKeyPem: trustedRootPublicKeyPem,
+    targetManifestBytes: manifestBytes,
+    targetVersion,
+  });
+  return {
+    contract,
+    ...(baseline.baselineIsTrustEpochMigration
+      ? {
+          migrationAuthorization: {
+            bytes: baseline.authorizationBytes,
+            signature: baseline.authorizationSignature,
+          },
+        }
+      : {}),
   };
 }
 
@@ -664,9 +776,11 @@ export async function runSignProbeAssetsCommand({
 }: SigningCommandInput): Promise<string> {
   const { command, options } = parseCommandLine(argv);
   assertAllowedOptions(command, options, [
+    "--candidate-commit",
     "--input",
     "--output",
     "--private-key-env",
+    "--release-baseline",
     "--root-public-key-env",
     "--trust-delegation",
     "--trust-delegation-signature",
@@ -681,6 +795,10 @@ export async function runSignProbeAssetsCommand({
     ),
     outputDir: requiredOption(options, "--output"),
     privateKeyPem: environment[privateKeyEnvironment],
+    releaseTransition: {
+      candidateCommit: requiredOption(options, "--candidate-commit"),
+      releaseBaselineDir: requiredOption(options, "--release-baseline"),
+    },
     trustedRootPublicKeyPem:
       environment[requiredOption(options, "--root-public-key-env")],
     unsignedAssetDir: requiredOption(options, "--input"),

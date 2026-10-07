@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, createPublicKey, sign } from "node:crypto";
+import { createHash, sign } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -14,7 +14,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { probeTargets } from "./probe-asset-bundle.mjs";
-import { releaseTransitionContractSigningInput } from "./release-transition-contract.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,52 +89,6 @@ export async function createSignedLegacyProbeAssetSetFixture({
     assets: authorizedAssets,
     cleanup: () => rm(assetDir, { force: true, recursive: true }),
     probeComponents,
-  };
-}
-
-export function createGenericReleaseTransitionContractFixture({
-  authority,
-  candidateCommit,
-  manifest,
-  sourceVersion,
-  transition,
-  sourceProbeComponents,
-}) {
-  const value = JSON.parse(manifest.toString("utf8"));
-  const rootPublicKey = Buffer.from(
-    createPublicKey(authority.publicKey).export({
-      format: "pem",
-      type: "spki",
-    }),
-  );
-  const bytes = Buffer.from(
-    `${JSON.stringify({
-      candidateCommit,
-      distribution: "enoki",
-      kind: "enoki-release-transition-contract",
-      rootKeyId: sha256(rootPublicKey),
-      schemaVersion: 1,
-      source: {
-        probeComponents: sourceProbeComponents,
-        version: sourceVersion,
-      },
-      target: {
-        assetClosure: value.assets,
-        assetSetManifestSha256: sha256(manifest),
-        delegationGeneration: value.signature.delegationGeneration,
-        signingKeyId: value.signature.delegationKeyId,
-        version: value.version,
-      },
-      transition,
-    })}\n`,
-  );
-  return {
-    bytes,
-    signature: sign(
-      "RSA-SHA256",
-      releaseTransitionContractSigningInput(bytes),
-      authority.privateKey,
-    ),
   };
 }
 

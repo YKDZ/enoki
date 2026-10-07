@@ -112,6 +112,8 @@ export function verifiedReleaseTransitionFromMetadata(input: {
     authorizationSignature: files.authorizationSignature,
     contractBytes: files.contract,
     contractSignature: files.contractSignature,
+    delegationBytes: files.delegation,
+    delegationSignature: files.delegationSignature,
     manifestBytes: files.manifest,
     signingKeyId,
     trustedRoot,
@@ -269,6 +271,8 @@ function verifiedReleaseTransitionContract(input: {
   authorizationSignature: Buffer | null;
   contractBytes: Buffer;
   contractSignature: Buffer;
+  delegationBytes: Buffer;
+  delegationSignature: Buffer;
   manifestBytes: Buffer;
   signingKeyId: string;
   trustedRoot: Buffer;
@@ -284,6 +288,9 @@ function verifiedReleaseTransitionContract(input: {
         : {}),
       contractBytes: input.contractBytes,
       contractSignature: input.contractSignature,
+      delegationBytes: input.delegationBytes,
+      delegationSignature: input.delegationSignature,
+      expectedDistribution: enokiDistribution,
       expected: {
         delegationGeneration: input.assetSet.delegationGeneration,
         targetAssetClosure: input.assetSet.assets,

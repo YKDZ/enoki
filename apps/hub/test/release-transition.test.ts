@@ -68,7 +68,7 @@ describe("verified Probe release transition", () => {
     ).resolves.toBeNull();
   });
 
-  it("reads a root-authorized compatible source-to-target transition", async () => {
+  it("reads a delegation-authorized compatible source-to-target transition", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
     const fixture = await writeSignedProbeAssetSet(assetDir, {
       sourceVersion: "1.3.0",
@@ -230,7 +230,7 @@ describe("verified Probe release transition", () => {
     ).toBeNull();
   });
 
-  it("rejects a contract signature that does not match the trusted root", async () => {
+  it("rejects a contract signature that does not match the delegated Probe signing identity", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
     const fixture = await writeSignedProbeAssetSet(assetDir, {
       sourceVersion: "1.3.0",
@@ -265,7 +265,7 @@ describe("verified Probe release transition", () => {
     });
     const contract = await readContract(assetDir);
     contract.target.assetClosure[0]!.sha256 = "f".repeat(64);
-    await writeResignedContract(assetDir, fixture.authority, contract);
+    await writeResignedContract(assetDir, fixture.release, contract);
 
     await expect(
       readVerifiedReleaseTransitionFromDirectory({
@@ -284,7 +284,7 @@ describe("verified Probe release transition", () => {
     });
     const contract = await readContract(assetDir);
     delete contract.candidateCommit;
-    await writeResignedContract(assetDir, fixture.authority, contract);
+    await writeResignedContract(assetDir, fixture.release, contract);
 
     await expect(
       readVerifiedReleaseTransitionFromDirectory({
@@ -500,7 +500,7 @@ function testAuthority(): TestProbeReleaseAuthority {
 
 async function writeResignedContract(
   assetDir: string,
-  authority: TestProbeReleaseAuthority,
+  signingIdentity: TestProbeReleaseAuthority,
   contract: TamperedContract,
 ) {
   const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
@@ -511,7 +511,7 @@ async function writeResignedContract(
       sign(
         "RSA-SHA256",
         releaseTransitionContractSigningInput(bytes),
-        authority.privateKey,
+        signingIdentity.privateKey,
       ),
     ),
   ]);

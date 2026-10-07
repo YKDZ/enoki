@@ -4,6 +4,11 @@ import { createHash, createPublicKey } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
+import type {
+  ReleaseTransitionLegacyRelease,
+  ReleaseTransitionProbeComponent,
+} from "@enoki/probe-release";
+
 import { validateMigrationBaselineContents } from "./release-baseline-migration-lib.ts";
 import {
   inspectHubOciArchive,
@@ -396,6 +401,116 @@ export function assertReleaseBaselinePrecedesCandidate({
       `Release Baseline ${String(baselineTag)} must be lower than candidate ${String(candidateVersion)}`,
     );
   }
+}
+
+// 签名入口读取同运行真实 Release Baseline 的只读投影：普通 baseline 给出已验证
+// 资产集内的源 Probe 组件身份，迁移 baseline 给出既有根授权闭合与 legacy Release
+// 事实。两者都只读取本 bundle 中已被完整校验的内容，不重新物化任何签名。
+export type ReleaseBaselineTransitionSource =
+  | Readonly<{
+      baselineIsTrustEpochMigration: false;
+      sourceProbeComponents: readonly ReleaseTransitionProbeComponent[];
+      sourceVersion: string;
+    }>
+  | Readonly<{
+      authorizationBytes: Buffer;
+      authorizationSignature: Buffer;
+      baselineIsTrustEpochMigration: true;
+      legacyRelease: ReleaseTransitionLegacyRelease;
+      sourceAssetDir: string;
+      sourceVersion: string;
+    }>;
+
+export async function readReleaseBaselineTransitionSource(
+  bundleDir: string,
+  {
+    candidateVersion,
+    trustedRootPublicKeyPem,
+  }: {
+    candidateVersion: string;
+    trustedRootPublicKeyPem: Buffer | string;
+  },
+): Promise<ReleaseBaselineTransitionSource> {
+  const descriptor = objectView(
+    await validateResolvedReleaseBaseline(bundleDir, {
+      candidateVersion,
+      trustedRootPublicKeyPem,
+    }),
+  );
+  assertReleaseBaselinePrecedesCandidate({
+    baselineTag: descriptor.tag,
+    candidateVersion,
+  });
+  const sourceVersion = stringValue(descriptor.tag).slice(1);
+  if (descriptor.kind === "enoki-trust-epoch-migration-baseline") {
+    const legacyProbeAssets = objectView(descriptor.legacyProbeAssets);
+    const githubRelease = objectView(descriptor.githubRelease);
+    const hub = objectView(descriptor.hub);
+    return {
+      authorizationBytes: await readFile(
+        path.join(bundleDir, "trust-epoch-migration-authorization.json"),
+      ),
+      authorizationSignature: await readFile(
+        path.join(bundleDir, "trust-epoch-migration-authorization.json.sig"),
+      ),
+      baselineIsTrustEpochMigration: true,
+      legacyRelease: {
+        assets: legacyProbeAssetIdentities(legacyProbeAssets.files),
+        githubRelease: {
+          id: githubRelease.id as number,
+          peeledCommitSha: stringValue(githubRelease.peeledCommitSha),
+          repository: stringValue(githubRelease.repository),
+          tag: stringValue(descriptor.tag),
+          tagRefSha: stringValue(githubRelease.tagRefSha),
+          targetCommitish: stringValue(githubRelease.targetCommitish),
+        },
+        hub: {
+          digest: stringValue(hub.digest),
+          image: stringValue(hub.image),
+        },
+        legacySigningKeySha256: sha256(
+          await readFile(
+            path.join(bundleDir, "probe-assets", "signing-key.pem"),
+          ),
+        ),
+      },
+      sourceAssetDir: path.join(bundleDir, "probe-assets"),
+      sourceVersion,
+    };
+  }
+  const probeAssetSet = objectView(descriptor.probeAssetSet);
+  const inspected = await inspectProbeAssetSet(
+    path.join(bundleDir, "probe-assets"),
+    {
+      expectedVersion: stringValue(probeAssetSet.version),
+      requireEmbeddedProbeIdentity: false,
+      trustedRootPublicKeyPem,
+    },
+  );
+  return {
+    baselineIsTrustEpochMigration: false,
+    sourceProbeComponents: inspected.sourceProbeComponents,
+    sourceVersion: stringValue(probeAssetSet.version),
+  };
+}
+
+function legacyProbeAssetIdentities(
+  value: unknown,
+): ReleaseTransitionLegacyRelease["assets"] {
+  if (!isUnknownArray(value)) {
+    throw new Error("Release Baseline legacy Probe assets are invalid");
+  }
+  return value.map((asset) => {
+    const view = objectView(asset);
+    if (!isSafeInteger(view.size)) {
+      throw new Error("Release Baseline legacy Probe assets are invalid");
+    }
+    return {
+      name: stringValue(view.name),
+      sha256: stringValue(view.sha256),
+      size: view.size,
+    };
+  });
 }
 
 export function createReleaseCatalogSnapshot(

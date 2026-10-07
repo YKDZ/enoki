@@ -8,10 +8,7 @@ import {
   createTrustEpochMigrationAuthorization,
   probeTargets,
 } from "@enoki/probe-release";
-import {
-  createGenericReleaseTransitionContractFixture,
-  createSignedLegacyProbeAssetSetFixture,
-} from "@enoki/probe-release/test-fixture";
+import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 
 export type TestProbeReleaseAuthority = ReturnType<typeof testKeyPair>;
 
@@ -80,20 +77,26 @@ export async function writeSignedProbeAssetSet(
     ? await createTrustEpochMigrationFixture({
         authority,
         delegation,
+        release,
         manifest,
         targetVersion: input.targetVersion,
       })
     : null;
   const contract =
     trustEpoch?.contract ??
-    createGenericReleaseTransitionContractFixture({
-      authority,
+    (await createReleaseTransitionContract({
       candidateCommit: "a".repeat(40),
-      manifest,
-      sourceVersion: input.sourceVersion,
-      transition: input.transition,
+      delegationBytes: delegation.bytes,
+      delegationSignature: delegation.signature,
+      distribution: "enoki",
+      releasePrivateKeyPem: release.privateKey,
+      rootPublicKeyPem: authority.publicKey,
       sourceProbeComponents,
-    });
+      sourceVersion: input.sourceVersion,
+      targetManifestBytes: manifest,
+      targetVersion: input.targetVersion,
+      transition: input.transition,
+    }));
 
   await Promise.all([
     writeFile(path.join(assetDir, "manifest.json"), manifest),
@@ -139,6 +142,7 @@ export async function writeSignedProbeAssetSet(
   ]);
 
   return {
+    release,
     authority,
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
@@ -155,11 +159,13 @@ export async function writeSignedProbeAssetSet(
 async function createTrustEpochMigrationFixture({
   authority,
   delegation,
+  release,
   manifest,
   targetVersion,
 }: {
   authority: TestProbeReleaseAuthority;
   delegation: ReturnType<typeof createProbeTrustDelegation>;
+  release: TestProbeReleaseAuthority;
   manifest: Buffer;
   targetVersion: string;
 }) {
@@ -199,8 +205,9 @@ async function createTrustEpochMigrationFixture({
         candidateCommit: "a".repeat(40),
         delegationBytes: delegation.bytes,
         delegationSignature: delegation.signature,
+        distribution: "enoki",
         legacyRelease,
-        rootPrivateKeyPem: authority.privateKey,
+        releasePrivateKeyPem: release.privateKey,
         rootPublicKeyPem: authority.publicKey,
         sourceAssetDir: source.assetDir,
         targetManifestBytes: manifest,

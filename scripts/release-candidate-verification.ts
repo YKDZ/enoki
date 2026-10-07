@@ -13,6 +13,7 @@ import {
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
+  type ReleaseTransitionProbeComponent,
   verifyReleaseTransitionContract,
   verifyProbeTrustDelegation,
 } from "@enoki/probe-release";
@@ -463,6 +464,7 @@ export async function inspectProbeAssetSet(
     distribution: "enoki",
     rootKeyId: sha256(packagedRootPublicKey),
   };
+  const sourceProbeComponents: ReleaseTransitionProbeComponent[] = [];
 
   for (const [index, target] of probeTargets.entries()) {
     const asset = manifest.assets[index];
@@ -510,6 +512,12 @@ export async function inspectProbeAssetSet(
         `Probe Asset Set bundle manifest does not match ${asset.file}`,
       );
     }
+    sourceProbeComponents.push({
+      file: "enoki-probe",
+      role: "probe",
+      sha256: inspectedArchive.probeSha256,
+      target,
+    });
   }
 
   const publicKey = await readFile(path.join(assetDir, "signing-key.pem"));
@@ -639,6 +647,8 @@ export async function inspectProbeAssetSet(
       contractSignature: await readFile(
         path.join(assetDir, "release-transition-contract.json.sig"),
       ),
+      delegationBytes,
+      delegationSignature,
       expected: {
         classification: stringExpectation(contractView.transition),
         delegationGeneration: manifest.signature.delegationGeneration,
@@ -649,6 +659,7 @@ export async function inspectProbeAssetSet(
         targetAssetSetManifestSha256: sha256(manifestBytes),
         targetVersion: manifest.version,
       },
+      expectedDistribution: "enoki",
       rootPublicKeyPem: trustedRootPublicKey ?? canonicalRootPublicKey,
     });
   }
@@ -671,6 +682,7 @@ export async function inspectProbeAssetSet(
       publicKeyFile: "signing-key.pem",
       publicKeySha256,
     },
+    sourceProbeComponents,
     version: manifest.version,
   };
 }
@@ -761,7 +773,8 @@ export async function inspectProbeArchive(
         `Probe archive ${path.basename(archivePath)} bundle manifest must be a regular file`,
       );
     }
-    inspectProbeElf(await readFile(binaryPath), {
+    const probeBinary = await readFile(binaryPath);
+    inspectProbeElf(probeBinary, {
       requireEmbeddedProbeIdentity,
       target,
       version,
@@ -810,7 +823,10 @@ export async function inspectProbeArchive(
       target,
       version: version.slice(1),
     });
-    return { bundleManifestSha256: sha256(bundleManifest) };
+    return {
+      bundleManifestSha256: sha256(bundleManifest),
+      probeSha256: sha256(probeBinary),
+    };
   } finally {
     await rm(extractionDir, { force: true, recursive: true });
   }

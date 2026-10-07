@@ -423,30 +423,26 @@ with open(os.devnull, "rb") as input_stream:
       /workflow_call:[\s\S]*?secrets:[\s\S]*?probe_asset_signing_key_pem:[\s\S]*?required: true/,
     );
     expect(workflow).toContain("  validate-release-configuration:");
-    const preflight = workflow.slice(
+    const releaseConfiguration = workflow.slice(
       workflow.indexOf("  validate-release-configuration:"),
       workflow.indexOf("  resolve-release-baseline:"),
     );
-    expect(preflight).toContain(
-      "Validate public release migration configuration",
+    expect(releaseConfiguration).toContain("validate-signing-identity");
+    expect(releaseConfiguration).toContain(
+      "${{ secrets.probe_asset_signing_key_pem }}",
     );
-    expect(preflight.indexOf("release-transition-preflight.mjs")).toBeLessThan(
-      preflight.indexOf("${{ secrets.probe_asset_signing_key_pem }}"),
+    expect(releaseConfiguration).toContain(
+      "${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}",
     );
-    expect(preflight).toContain('--candidate-commit "${{ inputs.commit }}"');
     for (const variable of [
       "ENOKI_RELEASE_TRANSITION_CONTRACT_JSON",
       "ENOKI_RELEASE_TRANSITION_CONTRACT_SIGNATURE_BASE64",
       "ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON",
       "ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_SIGNATURE_BASE64",
+      "release-transition-preflight.mjs",
     ]) {
-      expect(preflight).toContain(variable);
+      expect(releaseConfiguration).not.toContain(variable);
     }
-    expect(preflight).toContain("validate-signing-identity");
-    expect(preflight).toContain("${{ secrets.probe_asset_signing_key_pem }}");
-    expect(preflight).toContain(
-      "${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}",
-    );
     expect(workflow).not.toContain("environment: release-signing");
     expect(workflow).not.toContain("secrets: inherit");
 
@@ -540,6 +536,14 @@ with open(os.devnull, "rb") as input_stream:
     expect(signJob).toContain(
       "--trust-delegation-signature trust-delegation.json.sig",
     );
+    expect(signJob).toContain(
+      "name: candidate-release-baseline-${{ github.run_id }}",
+    );
+    expect(signJob).toContain("--release-baseline release-baseline");
+    expect(signJob).toContain('--candidate-commit "${{ inputs.commit }}"');
+    expect(signJob).not.toContain("ENOKI_RELEASE_TRANSITION_CONTRACT_");
+    expect(signJob).not.toContain("ENOKI_TRUST_EPOCH_MIGRATION_");
+    expect(signJob).not.toContain("RELEASE_BASELINE_KIND");
     expect(signJob).not.toContain("ref: ${{ inputs.commit }}");
     expect(signJob).toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
     expect(downstreamJobs).not.toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
@@ -1061,8 +1065,9 @@ with open(os.devnull, "rb") as input_stream:
         delegationSignature: await readFile(
           path.join(fixture.outputDir, "trust-delegation.json.sig"),
         ),
+        distribution: "enoki",
         legacyRelease,
-        rootPrivateKeyPem: fixture.root.privateKey,
+        releasePrivateKeyPem: fixture.privateKey,
         rootPublicKeyPem: fixture.root.publicKey,
         sourceAssetDir: source.assetDir,
         targetManifestBytes,
@@ -1105,6 +1110,113 @@ with open(os.devnull, "rb") as input_stream:
           transition: "replacement-required",
           target: { version: "1.2.3" },
         },
+      });
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it("signs the manifest and the declared transition contract with one delegated identity", async () => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-sign-transition-set-"),
+    );
+    try {
+      const target = await createProbeAssetSetFixture(workDir, {
+        name: "sign-target-",
+        version: "v0.1.76",
+      });
+      const unsignedDir = path.join(workDir, "sign-target-unsigned");
+      await runCandidateCli(
+        [
+          "prepare-unsigned-probe-assets",
+          "--archives-dir",
+          target.archivesDir,
+          "--bootstrap-archives-dir",
+          target.bootstrapArchivesDir,
+          "--distribution",
+          "enoki",
+          "--output",
+          unsignedDir,
+          "--public-key-env",
+          "TEST_PUBLIC_KEY",
+          "--root-public-key-env",
+          "TEST_ROOT_PUBLIC_KEY",
+          "--trust-delegation",
+          target.delegationPath,
+          "--trust-delegation-signature",
+          target.delegationSignaturePath,
+          "--version",
+          "v0.1.76",
+        ],
+        {
+          TEST_PUBLIC_KEY: target.publicKey,
+          TEST_ROOT_PUBLIC_KEY: target.root.publicKey,
+        },
+      );
+      const outputDir = path.join(workDir, "sign-target-set");
+      const signArguments = [
+        "sign-probe-assets",
+        "--candidate-commit",
+        checkedOutCommit,
+        "--input",
+        unsignedDir,
+        "--output",
+        outputDir,
+        "--private-key-env",
+        "TEST_PRIVATE_KEY",
+        "--root-public-key-env",
+        "TEST_ROOT_PUBLIC_KEY",
+        "--trust-delegation",
+        target.delegationPath,
+        "--trust-delegation-signature",
+        target.delegationSignaturePath,
+      ];
+      const environment = {
+        TEST_PRIVATE_KEY: target.privateKey,
+        TEST_ROOT_PUBLIC_KEY: target.root.publicKey,
+      };
+      // 缺少同运行真实 baseline 时必须失败关闭，且不留下任何输出目录。
+      await expect(runCandidateCli(signArguments, environment)).rejects.toThrow(
+        "--release-baseline is required",
+      );
+      await expect(readdir(outputDir)).rejects.toThrow();
+
+      const releaseBaselineDir = await createReleaseBaselineFixture(workDir, {
+        root: target.root,
+        version: "v0.1.75",
+      });
+      const signed = await runCandidateCli(
+        [...signArguments, "--release-baseline", releaseBaselineDir],
+        environment,
+      );
+
+      expect(signed.stdout).toBe(
+        `signed Probe Asset Set v0.1.76 at ${outputDir}\n`,
+      );
+      const contractBytes = await readFile(
+        path.join(outputDir, "release-transition-contract.json"),
+      );
+      expect(JSON.parse(contractBytes).transition).toBe("compatible");
+      expect(
+        verifySignature(
+          "RSA-SHA256",
+          releaseTransitionContractSigningInput(contractBytes),
+          target.publicKey,
+          await readFile(
+            path.join(outputDir, "release-transition-contract.json.sig"),
+          ),
+        ),
+      ).toBe(true);
+      await expect(
+        inspectProbeAssetSet(outputDir, {
+          trustedRootPublicKeyPem: target.root.publicKey,
+        }),
+      ).resolves.toMatchObject({
+        releaseTransition: {
+          candidateCommit: checkedOutCommit,
+          transition: "compatible",
+        },
+        version: "0.1.76",
       });
     } finally {
       await rm(workDir, { force: true, recursive: true });
@@ -2350,6 +2462,8 @@ async function createProbeAssetSetFixture(
   return {
     archivesDir,
     bootstrapArchivesDir,
+    delegationPath,
+    delegationSignaturePath,
     outputDir,
     privateKey,
     publicKey,
@@ -2724,6 +2838,7 @@ async function createCandidateFixture(
   if (transitionCandidateCommit) {
     await writeOrdinaryTransitionContract({
       candidateCommit: transitionCandidateCommit,
+      privateKey,
       probeAssetSetDir,
       root,
     });
@@ -2812,7 +2927,7 @@ async function writeOrdinaryTransitionContract({
       signBytes(
         "RSA-SHA256",
         releaseTransitionContractSigningInput(bytes),
-        root.privateKey,
+        privateKey,
       ),
     ),
   ]);
@@ -2905,13 +3020,16 @@ async function assembleFixtureCandidate(workDir, probeAssetSetDir, hubOciPath) {
   ]);
 }
 
-async function createReleaseBaselineFixture(workDir, { root } = {}) {
+async function createReleaseBaselineFixture(
+  workDir,
+  { root, version = "v1.2.2" } = {},
+) {
   const releaseBaselineDir = path.join(workDir, "release-baseline-input");
   const { outputDir: probeAssetSetDir, root: baselineRoot } =
     await createProbeAssetSetFixture(workDir, {
       name: "baseline-",
       root,
-      version: "v1.2.2",
+      version,
     });
   const oci = await createOciFixture(workDir, probeAssetSetDir, {
     name: "baseline",
@@ -2919,7 +3037,7 @@ async function createReleaseBaselineFixture(workDir, { root } = {}) {
   const inspectedProbe = await inspectProbeAssetSet(probeAssetSetDir, {
     trustedRootPublicKeyPem: baselineRoot.publicKey,
   });
-  const archive = "hub/enoki-hub-v1.2.2.oci.tar";
+  const archive = `hub/enoki-hub-${version}.oci.tar`;
   const archiveBytes = await readFile(oci.archivePath);
   const sourceManifest = "hub-source-manifest.json";
   const release = {
@@ -2927,7 +3045,7 @@ async function createReleaseBaselineFixture(workDir, { root } = {}) {
     draft: false,
     id: 122,
     prerelease: false,
-    tagName: "v1.2.2",
+    tagName: version,
     targetCommitish: "main",
   };
   const descriptor = {
@@ -2954,14 +3072,16 @@ async function createReleaseBaselineFixture(workDir, { root } = {}) {
     },
     kind: "enoki-release-baseline",
     probeAssetSet: {
-      ...inspectedProbe,
       directory: "probe-assets",
+      files: inspectedProbe.files,
+      signingIdentity: inspectedProbe.signingIdentity,
       trustRoot: {
         publicKeySha256: sha256(Buffer.from(baselineRoot.publicKey)),
       },
+      version: inspectedProbe.version,
     },
     schemaVersion: 2,
-    tag: "v1.2.2",
+    tag: version,
   };
   await mkdir(path.join(releaseBaselineDir, "hub"), { recursive: true });
   await cp(probeAssetSetDir, path.join(releaseBaselineDir, "probe-assets"), {

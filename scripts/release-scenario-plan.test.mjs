@@ -1,6 +1,7 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import {
+  createProbeTrustDelegation,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
 } from "@enoki/probe-release";
@@ -222,12 +223,8 @@ describe("Release Scenario Planner", () => {
   });
 
   it("rejects a wrong contract signature across verification and planning before provisioning", async () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const contract = signedContractFixture(root.publicKey);
+    const authority = contractAuthority();
+    const contract = signedContractFixture(authority);
     const provision = vi.fn();
 
     await expect(
@@ -235,9 +232,9 @@ describe("Release Scenario Planner", () => {
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => {
           const releaseTransition = verifyReleaseTransitionContract({
+            ...authority.trust,
             contractBytes: Buffer.from(`${JSON.stringify(contract)}\n`),
             contractSignature: Buffer.alloc(256),
-            rootPublicKeyPem: root.publicKey,
           });
           return planner.compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
@@ -247,25 +244,23 @@ describe("Release Scenario Planner", () => {
         },
         provision,
       }),
-    ).rejects.toThrow(/root signature does not match/i);
+    ).rejects.toThrow(
+      /signature does not match the authorized Probe signing identity/i,
+    );
     expect(provision).not.toHaveBeenCalled();
   });
 
   it("rejects a signed same-version and same-assets contract for a different candidate commit before provisioning", async () => {
-    const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { format: "pem", type: "pkcs8" },
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const authority = contractAuthority();
     const contract = {
-      ...signedContractFixture(root.publicKey),
+      ...signedContractFixture(authority),
       candidateCommit: "b".repeat(40),
     };
     const contractBytes = Buffer.from(`${JSON.stringify(contract)}\n`);
     const contractSignature = sign(
       "RSA-SHA256",
       releaseTransitionContractSigningInput(contractBytes),
-      root.privateKey,
+      authority.release.privateKey,
     );
     const provision = vi.fn();
 
@@ -274,6 +269,7 @@ describe("Release Scenario Planner", () => {
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => {
           const releaseTransition = verifyReleaseTransitionContract({
+            ...authority.trust,
             contractBytes,
             contractSignature,
             expected: {
@@ -284,7 +280,6 @@ describe("Release Scenario Planner", () => {
                 contract.target.assetSetManifestSha256,
               targetVersion: "1.2.3",
             },
-            rootPublicKeyPem: root.publicKey,
           });
           return planner.compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
@@ -388,7 +383,37 @@ function supportedHostMatrix() {
   };
 }
 
-function signedContractFixture(rootPublicKeyPem) {
+function contractAuthority() {
+  const root = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const release = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const delegation = createProbeTrustDelegation({
+    distribution: "enoki",
+    generation: 1,
+    releasePublicKeyPem: release.publicKey,
+    rootPrivateKeyPem: root.privateKey,
+  });
+  return {
+    delegation,
+    release,
+    root,
+    trust: {
+      delegationBytes: delegation.bytes,
+      delegationSignature: delegation.signature,
+      expectedDistribution: "enoki",
+      rootPublicKeyPem: root.publicKey,
+    },
+  };
+}
+
+function signedContractFixture(authority) {
   const targets = [
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
@@ -399,7 +424,7 @@ function signedContractFixture(rootPublicKeyPem) {
     candidateCommit: "a".repeat(40),
     distribution: "enoki",
     kind: "enoki-release-transition-contract",
-    rootKeyId: createHash("sha256").update(rootPublicKeyPem).digest("hex"),
+    rootKeyId: authority.delegation.delegation.rootKeyId,
     schemaVersion: 1,
     source: {
       probeComponents: targets.map((target) => ({
@@ -420,7 +445,7 @@ function signedContractFixture(rootPublicKeyPem) {
       })),
       assetSetManifestSha256: "b".repeat(64),
       delegationGeneration: 1,
-      signingKeyId: "f".repeat(64),
+      signingKeyId: authority.delegation.delegation.signingIdentity.keyId,
       version: "1.2.3",
     },
     transition: "compatible",

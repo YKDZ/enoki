@@ -153,23 +153,75 @@ export function verifyProbeTrustDelegation(input: {
   signature: Uint8Array;
 }): ProbeTrustDelegation;
 
-export function createReleaseTransitionContract(
-  input: Record<string, unknown>,
-): Promise<SignedDocument<{ contract: Record<string, unknown> }>>;
-export function verifyReleaseTransitionContract(input: {
-  authorizationBytes?: Uint8Array;
-  authorizationSignature?: Uint8Array;
-  contractBytes: Uint8Array;
-  contractSignature: Uint8Array;
-  expected?: ReleaseTransitionContractExpectation;
+export type ReleaseTransitionLegacyRelease = Readonly<{
+  assets: readonly ReleaseTransitionLegacyAsset[];
+  githubRelease: Readonly<{
+    id: number;
+    peeledCommitSha: string;
+    repository: string;
+    tag: string;
+    tagRefSha: string;
+    targetCommitish: string;
+  }>;
+  hub: Readonly<{ digest: string; image: string }>;
+  legacySigningKeySha256: string;
+}>;
+
+type ReleaseTransitionContractCreationCommon = Readonly<{
+  candidateCommit: string;
+  delegationBytes: Uint8Array;
+  delegationSignature: Uint8Array;
+  distribution: string;
+  releasePrivateKeyPem: string | Buffer;
   rootPublicKeyPem: string | Buffer;
-}): ReleaseTransitionContract;
+  targetManifestBytes: Uint8Array;
+  targetVersion: string;
+}>;
+
+export type GenericReleaseTransitionContractCreationInput =
+  ReleaseTransitionContractCreationCommon &
+    Readonly<{
+      authorizationBytes?: undefined;
+      authorizationSignature?: undefined;
+      legacyRelease?: undefined;
+      sourceAssetDir?: undefined;
+      sourceProbeComponents: readonly ReleaseTransitionProbeComponent[];
+      sourceVersion: string;
+      transition: ReleaseTransitionClassification;
+    }>;
+
+export type TrustEpochMigrationContractCreationInput =
+  ReleaseTransitionContractCreationCommon &
+    Readonly<{
+      authorizationBytes: Uint8Array;
+      authorizationSignature: Uint8Array;
+      legacyRelease: ReleaseTransitionLegacyRelease;
+      sourceAssetDir: string;
+    }>;
+
+export type ReleaseTransitionContractCreationInput =
+  | GenericReleaseTransitionContractCreationInput
+  | TrustEpochMigrationContractCreationInput;
+
+export function createReleaseTransitionContract(
+  input: ReleaseTransitionContractCreationInput,
+): Promise<SignedDocument<{ contract: ReleaseTransitionContract }>>;
+export function verifyReleaseTransitionContract(
+  input: Readonly<{
+    authorizationBytes?: Uint8Array;
+    authorizationSignature?: Uint8Array;
+    contractBytes: Uint8Array;
+    contractSignature: Uint8Array;
+    delegationBytes: Uint8Array;
+    delegationSignature: Uint8Array;
+    expected?: ReleaseTransitionContractExpectation;
+    expectedDistribution: string;
+    rootPublicKeyPem: string | Buffer;
+  }>,
+): ReleaseTransitionContract;
 export function releaseTransitionContractSigningInput(
   bytes: Uint8Array,
 ): Buffer;
-export function preflightReleaseMigrationConfiguration(
-  input: Record<string, unknown>,
-): unknown;
 
 export function createTrustEpochMigrationAuthorization(input: {
   candidateVersion: string;
