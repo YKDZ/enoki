@@ -42,7 +42,7 @@ import {
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
 } from "./release-evidence-judgments.ts";
-import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.mjs";
+import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.ts";
 import { createMatrixGateResult } from "./release-verification-lib.ts";
 
 const execFileAsync = promisify(execFile);

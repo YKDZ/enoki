@@ -1,3 +1,94 @@
+// Installed Bundle Failure Repair Host driver and its direct proof, migrated
+// verbatim from release-installed-bundle-failure-repair.mjs to strictly typed,
+// erasable TypeScript so the Probe Host Harness can call the single typed
+// implementation. Behavior, ordering, evidence attribution and original failure
+// diagnostics are unchanged; only parameter/return types are added.
+
+import { regexInput, stringValue } from "./release-json-guards.ts";
+
+export type CommandResult = {
+  code: number;
+  stderr: string;
+  stdout: string;
+};
+
+export type CommandOptions = {
+  root?: boolean;
+  sensitive?: boolean;
+};
+
+export type CommandExecutor = (
+  script: string,
+  options?: CommandOptions,
+) => Promise<CommandResult>;
+
+export type OwnedRunAssertion = (runId: string) => void;
+
+export type FailureEvidence = {
+  activeState: string;
+  bundle: {
+    installStateSha256: string;
+    manifestSha256: string;
+    runtimeFaultSha256: string;
+    runtimeSha256: string;
+    version: string;
+  };
+  failureEpoch: {
+    bootId: string;
+    generation: string;
+    hostId: string;
+    identityReceiptSha256: string;
+    links: number;
+    mode: string;
+    ownerUid: number;
+    probeId: string;
+  };
+  latch: {
+    generation: string;
+    links: number;
+    mode: string;
+    ownerUid: number;
+  };
+  recoveryBudget: {
+    observedStarts: number;
+    startLimitBurst: number;
+    startLimitIntervalSeconds: number;
+  };
+  result: string;
+  role: string;
+  status: string;
+  unit: string;
+  unitSha256: string;
+};
+
+export type RepairEvidence = {
+  failureEpochRemoved: boolean;
+  faultRemoved: boolean;
+  latchRemoved: boolean;
+  output: string;
+  runtimeSha256: string;
+  sameBundle: boolean;
+  unit: string;
+};
+
+export type ProbeIdentityEvidence = {
+  identitySha256: string;
+  probeId: string;
+};
+
+export type InstalledBundleFailureRepair = {
+  failure: FailureEvidence;
+  repair: RepairEvidence;
+};
+
+export type InstalledBundleFailureRepairDriver = {
+  cleanup(runId: string): Promise<{ clean: true }>;
+  repair(
+    runId: string,
+    expectedBundleVersion: string,
+  ): Promise<InstalledBundleFailureRepair>;
+};
+
 const observationRuntimeUnit = "enoki-observation-runtime.service";
 const observationRuntimeRole = "observation_runtime";
 
@@ -5,7 +96,11 @@ export function createInstalledBundleFailureRepairHostDriver({
   assertOwnedRun,
   execute,
   ownershipToken,
-}) {
+}: {
+  assertOwnedRun: OwnedRunAssertion;
+  execute: CommandExecutor;
+  ownershipToken: string;
+}): InstalledBundleFailureRepairDriver {
   if (
     typeof assertOwnedRun !== "function" ||
     typeof execute !== "function" ||
@@ -16,7 +111,7 @@ export function createInstalledBundleFailureRepairHostDriver({
   let faultMayBeActive = false;
 
   return Object.freeze({
-    async cleanup(runId) {
+    async cleanup(runId: string): Promise<{ clean: true }> {
       assertOwnedRun(runId);
       const result = await execute(
         cleanupObservationRuntimeFailureScript(runId, ownershipToken),
@@ -31,7 +126,10 @@ export function createInstalledBundleFailureRepairHostDriver({
       return { clean: true };
     },
 
-    async repair(runId, expectedBundleVersion) {
+    async repair(
+      runId: string,
+      expectedBundleVersion: string,
+    ): Promise<InstalledBundleFailureRepair> {
       assertOwnedRun(runId);
       assertProbeVersion(expectedBundleVersion);
       if (faultMayBeActive) {
@@ -79,6 +177,18 @@ export function createInstalledBundleFailureRepairHostDriver({
   });
 }
 
+export type InstalledBundleFailureRepairHost = {
+  assertInstalled(
+    runId: string,
+    expectedProbeVersion: string,
+  ): Promise<unknown>;
+  readProbeIdentity(runId: string): Promise<ProbeIdentityEvidence>;
+  repairInstalledBundleFailure(
+    runId: string,
+    expectedBundleVersion: string,
+  ): Promise<InstalledBundleFailureRepair>;
+};
+
 export async function proveInstalledBundleFailureRepair({
   expectedBundleVersion,
   host,
@@ -86,6 +196,13 @@ export async function proveInstalledBundleFailureRepair({
   identityBefore,
   observeReadyHost,
   runId,
+}: {
+  expectedBundleVersion: string;
+  host: InstalledBundleFailureRepairHost;
+  hostId: number;
+  identityBefore: ProbeIdentityEvidence | null;
+  observeReadyHost: () => Promise<{ id?: unknown } | null>;
+  runId: string;
 }) {
   if (
     !Number.isSafeInteger(hostId) ||
@@ -138,7 +255,10 @@ export async function proveInstalledBundleFailureRepair({
   };
 }
 
-function parseFailureEvidence(stdout, expectedBundleVersion) {
+function parseFailureEvidence(
+  stdout: string,
+  expectedBundleVersion: string,
+): FailureEvidence {
   let values;
   try {
     values = exactKeyValues(stdout, [
@@ -212,26 +332,26 @@ function parseFailureEvidence(stdout, expectedBundleVersion) {
     );
   }
   return {
-    activeState: values.activeState,
+    activeState: stringValue(values.activeState),
     bundle: {
-      installStateSha256: values.installStateSha256,
-      manifestSha256: values.manifestSha256,
-      runtimeFaultSha256: values.runtimeFaultSha256,
-      runtimeSha256: values.runtimeSha256,
+      installStateSha256: stringValue(values.installStateSha256),
+      manifestSha256: stringValue(values.manifestSha256),
+      runtimeFaultSha256: stringValue(values.runtimeFaultSha256),
+      runtimeSha256: stringValue(values.runtimeSha256),
       version: values.bundleVersion,
     },
     failureEpoch: {
-      bootId: values.bootId,
-      generation: values.epochGeneration,
-      hostId: values.hostId,
-      identityReceiptSha256: values.identityReceiptSha256,
+      bootId: stringValue(values.bootId),
+      generation: stringValue(values.epochGeneration),
+      hostId: stringValue(values.hostId),
+      identityReceiptSha256: stringValue(values.identityReceiptSha256),
       links: 1,
       mode: "0600",
       ownerUid: 0,
-      probeId: values.probeId,
+      probeId: stringValue(values.probeId),
     },
     latch: {
-      generation: values.latchGeneration,
+      generation: stringValue(values.latchGeneration),
       links: 1,
       mode: "0600",
       ownerUid: 0,
@@ -245,15 +365,15 @@ function parseFailureEvidence(stdout, expectedBundleVersion) {
     role: values.role,
     status: "latched",
     unit: values.unit,
-    unitSha256: values.unitSha256,
+    unitSha256: stringValue(values.unitSha256),
   };
 }
 
 function parseRepairEvidence(
-  stdout,
-  expectedBundleVersion,
-  originalRuntimeSha256,
-) {
+  stdout: string,
+  expectedBundleVersion: string,
+  originalRuntimeSha256: string,
+): RepairEvidence {
   let values;
   try {
     values = exactKeyValues(stdout, [
@@ -285,15 +405,18 @@ function parseRepairEvidence(
     failureEpochRemoved: true,
     faultRemoved: true,
     latchRemoved: true,
-    output: values.repairOutput,
-    runtimeSha256: values.runtimeSha256,
+    output: stringValue(values.repairOutput),
+    runtimeSha256: stringValue(values.runtimeSha256),
     sameBundle: true,
-    unit: values.unit,
+    unit: stringValue(values.unit),
   };
 }
 
-function exactKeyValues(stdout, expectedKeys) {
-  const values = {};
+function exactKeyValues(
+  stdout: string,
+  expectedKeys: readonly string[],
+): Record<string, string> {
+  const values: Record<string, string> = {};
   for (const line of stdout.split("\n")) {
     if (!line) continue;
     const separator = line.indexOf("=");
@@ -313,10 +436,10 @@ function exactKeyValues(stdout, expectedKeys) {
 }
 
 function exhaustObservationRuntimeBudgetScript(
-  runId,
-  ownershipToken,
-  expectedBundleVersion,
-) {
+  runId: string,
+  ownershipToken: string,
+  expectedBundleVersion: string,
+): string {
   return `# enoki-release-e2e:exhaust-observation-runtime-budget
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
@@ -401,10 +524,10 @@ printf 'activeState=%s\nbootId=%s\nbundleVersion=%s\nepochGeneration=%s\nepochLi
 }
 
 function repairObservationRuntimeFailureScript(
-  runId,
-  ownershipToken,
-  expectedBundleVersion,
-) {
+  runId: string,
+  ownershipToken: string,
+  expectedBundleVersion: string,
+): string {
   return `# enoki-release-e2e:repair-observation-runtime-failure
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
@@ -432,7 +555,10 @@ printf 'bundleVersion=%s\nepochExists=0\nfaultBackupExists=0\nlatchExists=0\nrep
 `;
 }
 
-function cleanupObservationRuntimeFailureScript(runId, ownershipToken) {
+function cleanupObservationRuntimeFailureScript(
+  runId: string,
+  ownershipToken: string,
+): string {
   return `# enoki-release-e2e:cleanup-observation-runtime-failure
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
@@ -463,20 +589,20 @@ printf 'cleaned\n'
 `;
 }
 
-function assertProbeVersion(version) {
+function assertProbeVersion(version: string): void {
   if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version ?? "")) {
     throw new Error("Installed Bundle Failure Repair version is invalid");
   }
 }
 
-function isSha256(value) {
-  return /^[0-9a-f]{64}$/.test(value ?? "");
+function isSha256(value: unknown): boolean {
+  return /^[0-9a-f]{64}$/.test(regexInput(value));
 }
 
-function validIdentifier(value) {
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value ?? "");
+function validIdentifier(value: unknown): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(regexInput(value));
 }
 
-function shellSingleQuote(value) {
+function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
