@@ -9,8 +9,7 @@ blob-report
 
 .agents
 AGENTS.md
-CONTEXT.md
-CONTEXT-MAP.md
+GLOSSARY*.md
 .scratch
 .mcp.json
 /docs

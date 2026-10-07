@@ -1,11 +1,10 @@
-ARG NODE_VERSION=24
+ARG NODE_VERSION=24.21.0
 FROM node:${NODE_VERSION}-bookworm-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG PACKAGE_MANAGER_PIN=pnpm@11.11.0
 ARG PLAYWRIGHT_CLI_PACKAGE=@playwright/test@1.61.1
-ARG RUST_TOOLCHAIN=stable
+ARG RUST_TOOLCHAIN=1.97.1
 
 ENV COREPACK_HOME="/corepack"
 ENV PNPM_HOME="/pnpm"
@@ -18,7 +17,6 @@ RUN apt-get update \
       build-essential \
       ca-certificates \
       curl \
-      gh \
       git \
       git-lfs \
       jq \
@@ -35,8 +33,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0755 "${COREPACK_HOME}" "${PNPM_HOME}" \
     && corepack enable --install-directory "${PNPM_HOME}" \
-    && corepack prepare "${PACKAGE_MANAGER_PIN}" --activate \
     && chmod -R a+rX "${COREPACK_HOME}" "${PNPM_HOME}" \
+    && install -d -m 0755 /root/.config/pnpm \
+    && printf '%s\n' 'store-dir: /pnpm/store' > /root/.config/pnpm/config.yaml \
     && printf '%s\n' 'export PATH="/usr/local/cargo/bin:/pnpm:${PATH}"' > /etc/profile.d/enoki-toolchain.sh
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -44,5 +43,13 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     && rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy \
     && rustup default "${RUST_TOOLCHAIN}" \
     && chmod -R a+w "${RUSTUP_HOME}" "${CARGO_HOME}"
+
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npx --yes --package "${PLAYWRIGHT_CLI_PACKAGE}" playwright install-deps chromium

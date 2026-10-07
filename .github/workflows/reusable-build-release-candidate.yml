@@ -58,7 +58,7 @@ jobs:
           echo "sha=$workflow_sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout exact candidate commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: candidate-source
@@ -66,7 +66,7 @@ jobs:
           ref: ${{ inputs.commit }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: candidate-source/package.json
 
@@ -88,7 +88,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout immutable release preflight
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -97,7 +97,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -156,7 +156,7 @@ jobs:
             --output standard-ci-evidence.json
 
       - name: Upload exact standard CI evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-standard-ci-${{ github.run_id }}
           path: standard-ci-evidence.json
@@ -172,7 +172,7 @@ jobs:
       baseline-kind: ${{ steps.baseline-identity.outputs.kind }}
     steps:
       - name: Checkout immutable baseline resolver
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -181,7 +181,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -208,7 +208,7 @@ jobs:
         run: echo "kind=$(jq -r .kind release-baseline/release-baseline.json)" >> "$GITHUB_OUTPUT"
 
       - name: Upload one pinned baseline resolution
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-release-baseline-${{ github.run_id }}
           path: release-baseline
@@ -251,7 +251,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout candidate data without signing credentials
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: candidate-source
@@ -259,19 +259,19 @@ jobs:
           ref: ${{ inputs.commit }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: candidate-source/package.json
 
       - name: Download all Probe target builds
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: enoki-probe-*-${{ github.run_id }}
           path: probe-builds
           merge-multiple: true
 
       - name: Download all constrained Bootstrap target builds
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
           path: probe-bootstrap-builds
@@ -297,7 +297,7 @@ jobs:
             --trust-delegation-signature trust-delegation.json.sig
 
       - name: Upload exact unsigned signing input
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-unsigned-probe-assets-${{ github.run_id }}
           path: unsigned-probe-assets
@@ -317,7 +317,7 @@ jobs:
     steps:
       # Candidate source is data; no candidate-controlled script runs here.
       - name: Checkout protected trusted signer
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-signer
@@ -332,12 +332,12 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$TRUSTED_SIGNER_COMMIT"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-signer/package.json
 
       - name: Download exact unsigned signing input
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-unsigned-probe-assets-${{ github.run_id }}
           path: unsigned-probe-assets
@@ -394,7 +394,7 @@ jobs:
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Upload signed Probe Asset Set
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: probe-assets
@@ -433,7 +433,7 @@ jobs:
       artifact-name: ${{ steps.identity.outputs.artifact-name }}
     steps:
       - name: Checkout exact candidate source for provenance binding
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: candidate-source
@@ -441,7 +441,7 @@ jobs:
           ref: ${{ inputs.commit }}
 
       - name: Checkout immutable trusted assembly tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -450,24 +450,24 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
 
       - name: Download signed Probe Asset Set
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: candidate-inputs/probe-assets
 
       - name: Download Hub OCI archive
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-hub-oci-${{ github.run_id }}
           path: candidate-inputs/hub
 
       - name: Download pinned Release Baseline
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-release-baseline-${{ github.run_id }}
           path: candidate-inputs/release-baseline
@@ -519,7 +519,7 @@ jobs:
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Attest immutable candidate provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: candidate.tar.gz
 
@@ -530,7 +530,7 @@ jobs:
         run: echo "artifact-name=enoki-release-candidate-${CANDIDATE_VERSION}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable Enoki Release Candidate
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ steps.identity.outputs.artifact-name }}
           path: candidate.tar.gz
@@ -546,7 +546,7 @@ jobs:
       matrix: ${{ steps.release-e2e-matrix.outputs.matrix }}
     steps:
       - name: Checkout immutable Release E2E tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -555,12 +555,12 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
 
       - name: Download the immutable candidate before planning Host jobs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -597,7 +597,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout immutable Release E2E tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -606,7 +606,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -614,7 +614,7 @@ jobs:
         uses: ./trusted-tool/.github/actions/setup-release-runtime
 
       - name: Download the immutable candidate
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -680,7 +680,7 @@ jobs:
 
       - name: Upload run manifest and lifecycle evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-e2e-${{ matrix.cellId }}-${{ github.run_id }}
           path: |
@@ -712,7 +712,7 @@ jobs:
 
       - name: Checkout immutable UI Contract tooling
         id: checkout-tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -726,7 +726,7 @@ jobs:
 
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
           cache: pnpm
@@ -747,7 +747,7 @@ jobs:
 
       - name: Download the immutable candidate
         id: download-candidate
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -828,7 +828,7 @@ jobs:
 
       - name: Upload candidate-image UI Contract evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-ui-contract-${{ github.run_id }}
           path: |
@@ -866,7 +866,7 @@ jobs:
       artifact-name: ${{ steps.summary-identity.outputs.artifact-name }}
     steps:
       - name: Checkout immutable verification finalizer
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -875,14 +875,14 @@ jobs:
           ref: ${{ github.workflow_sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
 
       - name: Download the one assembled candidate
         id: download-candidate
         if: ${{ always() && needs.assemble-candidate.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -895,42 +895,42 @@ jobs:
 
       - name: Download the available Release Baseline identity
         if: ${{ always() && needs.resolve-release-baseline.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-release-baseline-${{ github.run_id }}
           path: attempt-inputs/release-baseline
 
       - name: Download the exact standard CI evidence
         if: ${{ always() && needs.validate-release-configuration.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-standard-ci-${{ github.run_id }}
           path: attempt-inputs/standard-ci
 
       - name: Download the available signed Probe Asset Set identity
         if: ${{ always() && needs.sign-probe-assets.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: attempt-inputs/probe-assets
 
       - name: Download the available Hub OCI identity
         if: ${{ always() && needs.build-hub-oci.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-hub-oci-${{ github.run_id }}
           path: attempt-inputs/hub
 
       - name: Download every Host evidence bundle
         if: ${{ always() && needs.candidate-release-e2e.result != 'skipped' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-e2e-*-${{ github.run_id }}
           path: release-e2e-gates
 
       - name: Download candidate-image UI Contract evidence
         if: ${{ always() && needs.candidate-ui-contract.result != 'skipped' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-ui-contract-${{ github.run_id }}
           path: release-ui-contract-gate
@@ -1022,7 +1022,7 @@ jobs:
 
       - name: Upload the authoritative verification evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ steps.summary-identity.outputs.artifact-name }}
           path: |
