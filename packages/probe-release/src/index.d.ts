@@ -127,6 +127,14 @@ export const probeBundleComponentProfiles: Readonly<
 export const probeBundledBootstrapAssets: readonly ProbeBundledBootstrapAsset[];
 export const probeTargets: readonly string[];
 
+export function inspectProbeElf(
+  binary: Buffer,
+  options: {
+    requireEmbeddedProbeIdentity?: boolean;
+    target: string;
+    version: string;
+  },
+): void;
 export function canonicalPublicKeyPem(value: string | Buffer): Buffer;
 export function createProbeTrustDelegation(input: {
   distribution: string;

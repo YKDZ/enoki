@@ -24,6 +24,19 @@ export function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+export function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+export function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+// 与 RegExp.test(value ?? "") 的 JavaScript 强制转换完全一致：只有 null/undefined 变为空串。
+export function regexInput(value: unknown): string {
+  return value == null ? "" : String(value);
+}
+
 export function assertPlainObject(
   value: unknown,
   description: string,

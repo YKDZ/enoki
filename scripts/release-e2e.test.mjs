@@ -43,7 +43,7 @@ import {
   isCandidateHostReady,
 } from "./release-evidence-judgments.ts";
 import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.mjs";
-import { createMatrixGateResult } from "./release-verification-lib.mjs";
+import { createMatrixGateResult } from "./release-verification-lib.ts";
 
 const execFileAsync = promisify(execFile);
 

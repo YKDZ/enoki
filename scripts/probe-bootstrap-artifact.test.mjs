@@ -7,13 +7,13 @@ import { gunzipSync, gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import {
   inspectProbeBootstrapArtifact,
   inspectProbeBootstrapBinary,
-  packageProbeBootstrapArtifact,
   withVerifiedProbeBootstrapArchive,
   withVerifiedProbeBootstrapArtifact,
-} from "./probe-bootstrap-artifact.mjs";
+} from "./probe-bootstrap-inspection.ts";
 
 const execFileAsync = promisify(execFile);
 const identity = {

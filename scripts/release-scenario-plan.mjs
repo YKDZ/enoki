@@ -6,130 +6,19 @@ import { pathToFileURL } from "node:url";
 import {
   releaseTransitionForValidatedCandidate,
   validateReleaseCandidate,
-} from "./release-candidate-lib.mjs";
+} from "./release-candidate-verification.ts";
+import { readSupportedHostMatrix } from "./release-e2e-matrix.ts";
 import {
-  readSupportedHostMatrix,
-  supportedHostEnvironments,
-} from "./release-e2e-matrix.ts";
+  compileReleaseScenarioPlan,
+  createGitHubActionsScenarioMatrix,
+  resolveReleaseScenarioPlanCell,
+} from "./release-scenario-plan-compile.ts";
 
-const sharedCandidateScenario = Object.freeze({
-  capabilities: Object.freeze([
-    "fresh-install",
-    "installed-bundle-failure-repair",
-    "canonical-report-response-loss",
-    "final-uninstall",
-  ]),
-  id: "fresh-install-uninstall",
-});
-
-const compatibleScenarios = Object.freeze([
-  Object.freeze({
-    capabilities: Object.freeze([
-      "baseline-forward-communication",
-      "identity-preserving-upgrade",
-      "final-uninstall",
-    ]),
-    id: "compatible-upgrade-uninstall",
-  }),
-  sharedCandidateScenario,
-  Object.freeze({
-    capabilities: Object.freeze([
-      "failed-upgrade-repair",
-      "identity-preserving-repair",
-      "final-uninstall",
-    ]),
-    id: "post-replacement-repair-uninstall",
-  }),
-  Object.freeze({
-    capabilities: Object.freeze([
-      "baseline-forward-communication",
-      "identity-preserving-upgrade",
-      "hub-restore-compatible-identity",
-    ]),
-    designatedEnvironmentId: "ubuntu-24.04-x86_64",
-    id: "hub-restore-compatibility-window",
-  }),
-]);
-
-const replacementScenarios = Object.freeze([
-  Object.freeze({
-    capabilities: Object.freeze([
-      "baseline-forward-communication",
-      "manual-reinstall",
-      "host-history-preservation",
-      "probe-identity-replacement",
-      "old-installation-no-residue",
-      "new-identity-readiness",
-      "final-uninstall",
-    ]),
-    id: "replacement-migration-uninstall",
-  }),
-  sharedCandidateScenario,
-]);
-
-export function compileReleaseScenarioPlan({
-  candidateManifest,
-  releaseTransition,
-  supportedHostMatrix,
-}) {
-  const candidate = validateVerifiedCandidateIdentity(candidateManifest);
-  const transition = validateVerifiedTransition(
-    releaseTransition,
-    candidateManifest,
-  );
-  const environments = supportedHostEnvironments(supportedHostMatrix);
-  const scenarios =
-    transition.classification === "compatible"
-      ? compatibleScenarios
-      : replacementScenarios;
-  const cells = scenarios.flatMap((scenario) =>
-    environments
-      .filter(
-        (environment) =>
-          !scenario.designatedEnvironmentId ||
-          environment.id === scenario.designatedEnvironmentId,
-      )
-      .map((environment) => ({
-        architecture: environment.architecture,
-        capabilities: [...scenario.capabilities],
-        cellId: `${environment.id}--${scenario.id}`,
-        environmentId: environment.id,
-        hostAdapter: environment.hostAdapter,
-        operatingSystem: environment.operatingSystem,
-        operatingSystemVersion: environment.operatingSystemVersion,
-        provider: environment.provider,
-        runner: environment.runner,
-        scenarioId: scenario.id,
-        transitionClassification: transition.classification,
-      })),
-  );
-  if (
-    cells.length === 0 ||
-    cells.length !== new Set(cells.map(({ cellId }) => cellId)).size
-  ) {
-    throw new Error("Release Scenario Plan cells are incomplete or duplicated");
-  }
-  if (
-    scenarios.some(
-      ({ designatedEnvironmentId }) =>
-        designatedEnvironmentId &&
-        !environments.some(({ id }) => id === designatedEnvironmentId),
-    )
-  ) {
-    throw new Error("Release Scenario Plan designated Host is unsupported");
-  }
-  return deepFreeze({
-    candidate,
-    cells,
-    kind: "enoki-release-scenario-plan",
-    schemaVersion: 1,
-    scenarios: scenarios.map((scenario) => ({
-      capabilities: [...scenario.capabilities],
-      id: scenario.id,
-    })),
-    transition,
-  });
-}
+export {
+  compileReleaseScenarioPlan,
+  createGitHubActionsScenarioMatrix,
+  resolveReleaseScenarioPlanCell,
+};
 
 export async function compileVerifiedReleaseScenarioPlan({
   candidateManifestPath,
@@ -156,20 +45,6 @@ export async function compileVerifiedReleaseScenarioPlan({
     releaseTransition,
     supportedHostMatrix,
   });
-}
-
-export function createGitHubActionsScenarioMatrix(plan) {
-  validateCompiledPlan(plan);
-  return { include: plan.cells.map((cell) => structuredClone(cell)) };
-}
-
-export function resolveReleaseScenarioPlanCell(plan, cellId) {
-  validateCompiledPlan(plan);
-  const cell = plan.cells.find((entry) => entry.cellId === cellId);
-  if (!cell) {
-    throw new Error(`Release Scenario Plan cell is not declared: ${cellId}`);
-  }
-  return structuredClone(cell);
 }
 
 export async function prepareReleaseScenarioCell({
@@ -212,113 +87,6 @@ export async function prepareReleaseScenarioCell({
     }
     throw error;
   }
-}
-
-function validateVerifiedCandidateIdentity(manifest) {
-  if (
-    !manifest ||
-    typeof manifest !== "object" ||
-    Array.isArray(manifest) ||
-    manifest.kind !== "enoki-release-candidate" ||
-    manifest.schemaVersion !== 4 ||
-    !/^[0-9a-f]{40}$/.test(manifest.candidate?.commit ?? "") ||
-    !/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-      manifest.candidate?.version ?? "",
-    ) ||
-    manifest.probeAssetSet?.version !== manifest.candidate.version.slice(1)
-  ) {
-    throw new Error("verified Candidate Manifest is invalid");
-  }
-  return {
-    commit: manifest.candidate.commit,
-    version: manifest.candidate.version,
-  };
-}
-
-function validateVerifiedTransition(contract, manifest) {
-  if (contract?.candidateCommit !== manifest.candidate.commit) {
-    throw new Error("Release Transition Contract candidate does not match");
-  }
-  const classification = contract?.transition ?? contract?.classification;
-  const sourceVersion =
-    contract?.source?.version ??
-    contract?.sourceProbeVersion ??
-    contract?.source?.tag?.replace(/^v/, "");
-  const targetVersion =
-    contract?.target?.version ?? contract?.targetProbeVersion;
-  const targetAssetSetManifestSha256 =
-    contract?.target?.assetSetManifestSha256 ??
-    contract?.targetAssetSetDigest?.replace(/^sha256:/, "");
-  if (
-    !["compatible", "replacement-required"].includes(classification) ||
-    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-      sourceVersion ?? "",
-    ) ||
-    targetVersion !== manifest.probeAssetSet.version ||
-    !/^[0-9a-f]{64}$/.test(targetAssetSetManifestSha256 ?? "")
-  ) {
-    throw new Error("verified Release Transition Contract is invalid");
-  }
-  const baselineVersion =
-    manifest.releaseBaseline?.kind === "enoki-release-baseline"
-      ? manifest.releaseBaseline.probeAssetSet?.version
-      : manifest.releaseBaseline?.tag?.replace(/^v/, "");
-  if (sourceVersion !== baselineVersion) {
-    throw new Error("Release Transition Contract candidate does not match");
-  }
-  return {
-    classification,
-    sourceProbeVersion: sourceVersion,
-    targetAssetSetDigest: `sha256:${targetAssetSetManifestSha256}`,
-    targetProbeVersion: targetVersion,
-  };
-}
-
-function validateCompiledPlan(plan) {
-  const scenarios =
-    plan?.transition?.classification === "compatible"
-      ? compatibleScenarios
-      : plan?.transition?.classification === "replacement-required"
-        ? replacementScenarios
-        : null;
-  if (
-    plan?.kind !== "enoki-release-scenario-plan" ||
-    plan.schemaVersion !== 1 ||
-    !scenarios ||
-    !Array.isArray(plan.cells) ||
-    plan.cells.length === 0 ||
-    !Array.isArray(plan.scenarios) ||
-    JSON.stringify(plan.scenarios) !==
-      JSON.stringify(
-        scenarios.map(({ capabilities, id }) => ({ capabilities, id })),
-      ) ||
-    new Set(plan.cells.map(({ cellId }) => cellId)).size !==
-      plan.cells.length ||
-    plan.cells.some((cell) => {
-      const scenario = scenarios.find(({ id }) => id === cell?.scenarioId);
-      return (
-        !scenario ||
-        cell.transitionClassification !== plan.transition.classification ||
-        cell.cellId !== `${cell.environmentId}--${cell.scenarioId}` ||
-        JSON.stringify(cell.capabilities) !==
-          JSON.stringify(scenario.capabilities)
-      );
-    }) ||
-    scenarios.some(
-      ({ id }) => !plan.cells.some(({ scenarioId }) => scenarioId === id),
-    )
-  ) {
-    throw new Error("compiled Release Scenario Plan is invalid");
-  }
-  return plan;
-}
-
-function deepFreeze(value) {
-  if (value && typeof value === "object" && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const child of Object.values(value)) deepFreeze(child);
-  }
-  return value;
 }
 
 if (

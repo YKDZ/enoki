@@ -13,7 +13,7 @@ import {
   createReleaseVerificationSummary,
   createUiGateResult,
   renderReleaseVerificationEvidenceMarkdown,
-} from "./release-verification-lib.mjs";
+} from "./release-verification-lib.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -159,8 +159,8 @@ describe("verify-only release workflow", () => {
     expect(workflow).toContain("record-ui-gate");
     expect(workflow).toContain("  finalize-verification:");
     expect(workflow).toContain("if: ${{ always() }}");
-    expect(workflow).toContain("release-verification.mjs summarize");
-    expect(workflow).toContain("release-verification.mjs assert-verified");
+    expect(workflow).toContain("release-verification.ts summarize");
+    expect(workflow).toContain("release-verification.ts assert-verified");
     expect(workflow).toContain("release-verification-summary.json");
     expect(workflow).toContain("$GITHUB_STEP_SUMMARY");
     expect(workflow).toContain("pattern: release-e2e-*");
@@ -310,7 +310,7 @@ describe("verify-only release workflow", () => {
       await writeFile(summaryPath, `${JSON.stringify(summary)}\n`);
       await expect(
         execFileAsync(process.execPath, [
-          "scripts/release-verification.mjs",
+          "scripts/release-verification.ts",
           "assert-verified",
           "--summary",
           summaryPath,
@@ -499,7 +499,7 @@ describe("verify-only release workflow", () => {
       await execFileAsync(
         process.execPath,
         [
-          "scripts/release-verification.mjs",
+          "scripts/release-verification.ts",
           "summarize",
           "--candidate-dir",
           path.join(workDir, "missing-candidate"),
@@ -558,7 +558,7 @@ describe("verify-only release workflow", () => {
       expect(summary.failureReasons.join("\n")).toContain("Candidate Manifest");
       await expect(
         execFileAsync(process.execPath, [
-          "scripts/release-verification.mjs",
+          "scripts/release-verification.ts",
           "assert-verified",
           "--summary",
           summaryPath,
@@ -1753,7 +1753,7 @@ describe("verify-only release workflow", () => {
     const output = path.join(workDir, "gate-result.json");
     try {
       await execFileAsync(process.execPath, [
-        "scripts/release-verification.mjs",
+        "scripts/release-verification.ts",
         "record-ui-gate",
         "--candidate-manifest",
         path.join(workDir, "missing-candidate-manifest.json"),

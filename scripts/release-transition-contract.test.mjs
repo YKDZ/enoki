@@ -11,7 +11,7 @@ import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
+import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.ts";
 
 describe("Trust Epoch release transition", () => {
   let fixture;

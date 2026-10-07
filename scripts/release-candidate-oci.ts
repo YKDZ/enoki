@@ -94,9 +94,7 @@ export async function inspectHubOciArchive({
     }
 
     const index = await readJson(path.join(extractionDir, "index.json"));
-    const manifests = isUnknownArray(index.manifests)
-      ? index.manifests
-      : null;
+    const manifests = isUnknownArray(index.manifests) ? index.manifests : null;
     if (index.schemaVersion !== 2 || !manifests || manifests.length !== 1) {
       throw new Error(
         "Hub OCI archive must contain exactly one image manifest",
@@ -254,9 +252,7 @@ async function verifyDescriptor(
     throw new Error(`Hub OCI blob size does not match ${descriptor.digest}`);
   }
   if ((await fileSha256(blobPath)) !== digestHex) {
-    throw new Error(
-      `Hub OCI blob digest does not match ${descriptor.digest}`,
-    );
+    throw new Error(`Hub OCI blob digest does not match ${descriptor.digest}`);
   }
 
   referencedBlobs.add(digestHex);
@@ -351,9 +347,7 @@ async function applyProbeAssetsFromLayer(
     }
     const file = entry.path.slice(prefix.length);
     if (!file || file.includes("/")) {
-      throw new Error(
-        `Hub OCI Probe Asset Set contains nested path ${file}`,
-      );
+      throw new Error(`Hub OCI Probe Asset Set contains nested path ${file}`);
     }
     rootfs.appType = "d";
     rootfs.probeAssetsType = "d";
@@ -438,7 +432,10 @@ function assertEmbeddedProbeFiles(
   }
 }
 
-function applyRelevantWhiteout(entryPath: string, rootfs: LayerRootfsState): void {
+function applyRelevantWhiteout(
+  entryPath: string,
+  rootfs: LayerRootfsState,
+): void {
   const base = pathBase(entryPath);
   if (!base.startsWith(".wh.")) {
     return;

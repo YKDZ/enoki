@@ -111,7 +111,7 @@ jobs:
             --arg version "$CANDIDATE_VERSION" \
             '.candidate.commit == $commit and .candidate.version == $version' \
             candidate/candidate-manifest.json >/dev/null
-          node trusted-tool/scripts/release-verification.mjs assert-verified \
+          node trusted-tool/scripts/release-verification.ts assert-verified \
             --summary verification/release-verification-summary.json
 
       - name: Login to GHCR for versioned publication

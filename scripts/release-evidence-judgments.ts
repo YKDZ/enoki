@@ -47,7 +47,9 @@ function normalizedProbeVersion(value: unknown): string {
 export function isSupportedReleaseTestHostVirtualization(
   value: unknown,
 ): boolean {
-  return typeof value === "string" && supportedReleaseTestHostVmTypes.has(value);
+  return (
+    typeof value === "string" && supportedReleaseTestHostVmTypes.has(value)
+  );
 }
 
 export function isCandidateHostReady(

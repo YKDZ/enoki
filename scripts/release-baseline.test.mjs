@@ -115,7 +115,7 @@ describe("Release Baseline resolution", () => {
         "scripts/release-baseline-lib.mjs",
         "scripts/release-candidate-lib.mjs",
         "scripts/release-e2e-lib.mjs",
-        "scripts/release-verification-lib.mjs",
+        "scripts/release-verification-lib.ts",
       ].map((file) => readFile(file, "utf8")),
     );
     expect(files.join("\n")).not.toContain(

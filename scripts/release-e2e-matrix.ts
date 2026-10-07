@@ -113,9 +113,7 @@ function validateMatrix(
   );
 }
 
-function validateProvider(
-  provider: unknown,
-): asserts provider is HostProvider {
+function validateProvider(provider: unknown): asserts provider is HostProvider {
   assertPlainObject(provider, "supported Host provider");
   assertExactKeys(provider, [
     "capabilities",
@@ -134,7 +132,10 @@ function validateProvider(
       "supported Host provider must use a stable provider ID, host systemd, and the CI adapter",
     );
   }
-  if (!isUnknownArray(provider.capabilities) || provider.capabilities.length === 0) {
+  if (
+    !isUnknownArray(provider.capabilities) ||
+    provider.capabilities.length === 0
+  ) {
     throw new Error("supported Host provider must declare capabilities");
   }
   const capabilities: HostProviderCapability[] = [];
@@ -156,7 +157,9 @@ function validateProviderCapability(
     "operatingSystemVersion",
     "runner",
   ]);
-  if (!/^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(String(capability.architecture ?? ""))) {
+  if (
+    !/^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(String(capability.architecture ?? ""))
+  ) {
     throw new Error("supported Host capability architecture is invalid");
   }
   if (!isStableId(capability.operatingSystem)) {
@@ -175,7 +178,10 @@ function validateProviderCapability(
   if (capability.id !== expectedId) {
     throw new Error(`supported Host capability id must be ${expectedId}`);
   }
-  if (typeof capability.runner !== "string" || capability.runner.trim() === "") {
+  if (
+    typeof capability.runner !== "string" ||
+    capability.runner.trim() === ""
+  ) {
     throw new Error("supported Host capability runner is invalid");
   }
 }

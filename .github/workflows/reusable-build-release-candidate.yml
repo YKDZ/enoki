@@ -669,7 +669,7 @@ jobs:
           SCENARIO_OUTCOME: ${{ steps.scenario.outcome }}
           VERIFY_CLEAN_OUTCOME: ${{ steps.verify-clean.outcome }}
         run: >-
-          node trusted-tool/scripts/release-verification.mjs record-matrix-gate
+          node trusted-tool/scripts/release-verification.ts record-matrix-gate
           --candidate-manifest candidate/candidate-manifest.json
           --evidence "release-e2e-evidence/$MATRIX_CELL/evidence.json"
           --cell-id "$MATRIX_CELL"
@@ -808,8 +808,8 @@ jobs:
           PLAYWRIGHT_OUTCOME: ${{ steps.candidate-playwright.outcome }}
         run: |
           mkdir -p release-ui-contract-evidence
-          if test -f trusted-tool/scripts/release-verification.mjs && \
-            node trusted-tool/scripts/release-verification.mjs record-ui-gate \
+          if test -f trusted-tool/scripts/release-verification.ts && \
+            node trusted-tool/scripts/release-verification.ts record-ui-gate \
               --candidate-manifest "$CANDIDATE_MANIFEST" \
               --candidate-commit "$CANDIDATE_COMMIT" \
               --candidate-version "$CANDIDATE_VERSION" \
@@ -991,7 +991,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: >-
-          node trusted-tool/scripts/release-verification.mjs summarize
+          node trusted-tool/scripts/release-verification.ts summarize
           --candidate-dir candidate
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           --release-baseline-dir attempt-inputs/release-baseline
@@ -1035,5 +1035,5 @@ jobs:
       - name: Require every verification gate to have succeeded
         if: ${{ always() }}
         run: >-
-          node trusted-tool/scripts/release-verification.mjs assert-verified
+          node trusted-tool/scripts/release-verification.ts assert-verified
           --summary release-verification-summary.json
