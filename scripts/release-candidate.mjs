@@ -9,18 +9,19 @@ import {
   compareHubOciBuilds,
   parseCommandLine,
   prepareProbeAssetSet,
-  prepareUnsignedProbeAssetSet,
-  inspectProbeAssetSet,
   packageProbeArchive,
   packageReleaseCandidate,
   requiredOption,
-  signProbeAssetSet,
   validateCandidateIdentity,
-  validateDelegatedProbeSigningIdentity,
-  validateProbeSigningIdentity,
   validateReleaseCandidate,
   writeProbeBootstrapPublication,
 } from "./release-candidate-lib.mjs";
+import {
+  runPrepareUnsignedProbeAssetsCommand,
+  runSignProbeAssetsCommand,
+  runValidateProbeAssetsCommand,
+  runValidateSigningIdentityCommand,
+} from "./release-candidate-signing.ts";
 
 try {
   const arguments_ = process.argv.slice(2);
@@ -41,16 +42,11 @@ try {
   }
 
   if (arguments_[0] === "validate-probe-assets") {
-    if (arguments_.length !== 4 || arguments_[2] !== "--root-public-key-env") {
-      throw new Error(
-        "validate-probe-assets requires an Asset Set directory and --root-public-key-env",
-      );
-    }
-    const probe = await inspectProbeAssetSet(arguments_[1], {
-      trustedRootPublicKeyPem: process.env[arguments_[3]],
-    });
     process.stdout.write(
-      `Probe Asset Set is valid: ${probe.version} ${probe.signingIdentity.publicKeySha256}\n`,
+      `${await runValidateProbeAssetsCommand({
+        argv: arguments_,
+        environment: process.env,
+      })}\n`,
     );
     process.exit(0);
   }
@@ -58,31 +54,11 @@ try {
   const { command, options } = parseCommandLine(arguments_);
 
   if (command === "validate-signing-identity") {
-    assertAllowedOptions(command, options, [
-      "--private-key-env",
-      "--public-key-env",
-      "--root-public-key-env",
-      "--distribution",
-      "--trust-delegation",
-      "--trust-delegation-signature",
-    ]);
-    const privateKeyEnvironment = requiredOption(options, "--private-key-env");
-    const publicKeyEnvironment = requiredOption(options, "--public-key-env");
-    const identity = validateDelegatedProbeSigningIdentity({
-      delegationBytes: await readFile(
-        requiredOption(options, "--trust-delegation"),
-      ),
-      delegationSignature: await readFile(
-        requiredOption(options, "--trust-delegation-signature"),
-      ),
-      distribution: requiredOption(options, "--distribution"),
-      privateKeyPem: process.env[privateKeyEnvironment],
-      publicKeyPem: process.env[publicKeyEnvironment],
-      rootPublicKeyPem:
-        process.env[requiredOption(options, "--root-public-key-env")],
-    });
     process.stdout.write(
-      `Probe asset signing identity is valid: ${identity.publicKeySha256}\n`,
+      `${await runValidateSigningIdentityCommand({
+        argv: arguments_,
+        environment: process.env,
+      })}\n`,
     );
   } else if (command === "validate-inputs") {
     assertAllowedOptions(command, options, [
@@ -174,62 +150,18 @@ try {
       `signed Probe Asset Set ${result.version} at ${result.outputDir}\n`,
     );
   } else if (command === "prepare-unsigned-probe-assets") {
-    assertAllowedOptions(command, options, [
-      "--archives-dir",
-      "--bootstrap-archives-dir",
-      "--output",
-      "--public-key-env",
-      "--root-public-key-env",
-      "--distribution",
-      "--trust-delegation",
-      "--trust-delegation-signature",
-      "--version",
-    ]);
-    const publicKeyEnvironment = requiredOption(options, "--public-key-env");
-    const result = await prepareUnsignedProbeAssetSet({
-      archivesDir: requiredOption(options, "--archives-dir"),
-      bootstrapArchivesDir: requiredOption(options, "--bootstrap-archives-dir"),
-      delegationBytes: await readFile(
-        requiredOption(options, "--trust-delegation"),
-      ),
-      delegationSignature: await readFile(
-        requiredOption(options, "--trust-delegation-signature"),
-      ),
-      distribution: requiredOption(options, "--distribution"),
-      outputDir: requiredOption(options, "--output"),
-      publicKeyPem: process.env[publicKeyEnvironment],
-      rootPublicKeyPem:
-        process.env[requiredOption(options, "--root-public-key-env")],
-      version: requiredOption(options, "--version"),
-    });
     process.stdout.write(
-      `prepared unsigned Probe Asset Set ${result.version} at ${result.outputDir}\n`,
+      `${await runPrepareUnsignedProbeAssetsCommand({
+        argv: arguments_,
+        environment: process.env,
+      })}\n`,
     );
   } else if (command === "sign-probe-assets") {
-    assertAllowedOptions(command, options, [
-      "--input",
-      "--output",
-      "--private-key-env",
-      "--root-public-key-env",
-      "--trust-delegation",
-      "--trust-delegation-signature",
-    ]);
-    const privateKeyEnvironment = requiredOption(options, "--private-key-env");
-    const result = await signProbeAssetSet({
-      expectedDelegationBytes: await readFile(
-        requiredOption(options, "--trust-delegation"),
-      ),
-      expectedDelegationSignature: await readFile(
-        requiredOption(options, "--trust-delegation-signature"),
-      ),
-      outputDir: requiredOption(options, "--output"),
-      privateKeyPem: process.env[privateKeyEnvironment],
-      trustedRootPublicKeyPem:
-        process.env[requiredOption(options, "--root-public-key-env")],
-      unsignedAssetDir: requiredOption(options, "--input"),
-    });
     process.stdout.write(
-      `signed Probe Asset Set ${result.version} at ${result.outputDir}\n`,
+      `${await runSignProbeAssetsCommand({
+        argv: arguments_,
+        environment: process.env,
+      })}\n`,
     );
   } else if (command === "compare-hub-builds") {
     assertAllowedOptions(command, options, [

@@ -41,9 +41,11 @@ import {
   inspectProbeAssetSet,
   releaseTransitionForValidatedCandidate,
   validateReleaseCandidate,
+} from "./release-candidate-lib.mjs";
+import {
   validateDelegatedProbeSigningIdentity,
   validateProbeSigningIdentity,
-} from "./release-candidate-lib.mjs";
+} from "./release-candidate-signing.ts";
 import {
   loadValidatedCandidate,
   verifyActiveHubBootstrapRecipeProvenance,

@@ -1,10 +1,5 @@
 import { execFile } from "node:child_process";
-import {
-  createPrivateKey,
-  createPublicKey,
-  randomUUID,
-  sign,
-} from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -12,7 +7,6 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  readdir,
   rename,
   rm,
   stat,
@@ -30,17 +24,16 @@ import {
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
-  verifyProbeTrustDelegation,
 } from "@enoki/probe-release";
 
-import {
-  probeBootstrapTargets,
-  withVerifiedProbeBootstrapArtifact,
-} from "./probe-bootstrap-inspection.ts";
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.ts";
 import { inspectHubOciArchive } from "./release-candidate-oci.ts";
 import {
-  assertSameFileNames,
+  prepareUnsignedProbeAssetSet,
+  renderProbeBundleComponentsFromDetails,
+  signProbeAssetSet,
+} from "./release-candidate-signing.ts";
+import {
   bootstrapRecipeFile,
   bootstrapRecipeRecordFile,
   fileSha256,
@@ -60,6 +53,12 @@ export {
   validateCandidateIdentity,
   validateReleaseCandidate,
 };
+
+export {
+  assertAllowedOptions,
+  parseCommandLine,
+  requiredOption,
+} from "./release-json-guards.ts";
 
 const execFileAsync = promisify(execFile);
 export function createReleaseCandidateManifest({
@@ -169,87 +168,6 @@ export async function writeProbeBootstrapPublication({
   return publication.record;
 }
 
-export function validateProbeSigningIdentity({ privateKeyPem, publicKeyPem }) {
-  if (!privateKeyPem) {
-    throw new Error("Probe asset signing private key is required");
-  }
-  if (!publicKeyPem) {
-    throw new Error("Probe asset signing public key is required");
-  }
-
-  assertSigningKeyPair(privateKeyPem, publicKeyPem);
-  const publicKeyText = Buffer.from(publicKeyPem).toString("utf8");
-  const normalizedPublicKey = Buffer.from(
-    publicKeyText.endsWith("\n") ? publicKeyText : `${publicKeyText}\n`,
-  );
-
-  return { publicKeySha256: sha256(normalizedPublicKey) };
-}
-
-export function validateDelegatedProbeSigningIdentity({
-  delegationBytes,
-  delegationSignature,
-  distribution,
-  highestAcceptedGeneration,
-  privateKeyPem,
-  publicKeyPem,
-  rootPublicKeyPem,
-}) {
-  const delegation = verifyProbeTrustDelegation({
-    bytes: delegationBytes,
-    expectedDistribution: distribution,
-    highestAcceptedGeneration,
-    rootPublicKeyPem,
-    signature: delegationSignature,
-  });
-  const identity = validateProbeSigningIdentity({
-    privateKeyPem,
-    publicKeyPem,
-  });
-  if (delegation.signingIdentity.keyId !== identity.publicKeySha256) {
-    throw new Error(
-      "Probe asset signing identity is not authorized by the Probe Trust Delegation",
-    );
-  }
-  return { ...identity, delegation };
-}
-
-export function parseCommandLine(arguments_) {
-  const [command, ...tokens] = arguments_;
-  const options = new Map();
-
-  for (let index = 0; index < tokens.length; index += 2) {
-    const name = tokens[index];
-    const value = tokens[index + 1];
-    if (!name?.startsWith("--") || value === undefined) {
-      throw new Error(`invalid command-line argument: ${name ?? "<missing>"}`);
-    }
-    if (options.has(name)) {
-      throw new Error(`duplicate command-line argument: ${name}`);
-    }
-    options.set(name, value);
-  }
-
-  return { command, options };
-}
-
-export function requiredOption(options, name) {
-  const value = options.get(name);
-  if (!value) {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
-export function assertAllowedOptions(command, options, allowedNames) {
-  const allowed = new Set(allowedNames);
-  for (const name of options.keys()) {
-    if (!allowed.has(name)) {
-      throw new Error(`unknown option for ${command}: ${name}`);
-    }
-  }
-}
-
 export async function packageProbeArchive({
   binaryPath,
   outputDir,
@@ -339,117 +257,6 @@ export async function packageProbeArchive({
   }
 }
 
-// Bootstrap 的受限 producer 与普通 Probe producer 在此合成唯一公开归档。
-// Bootstrap 输入先绑定精确 size+sha256 快照，再从该私有快照提取固定角色；
-// compose 之后不存在第二个可发布 Bootstrap archive。
-async function composeProbeArchive({
-  bootstrapArchivePath,
-  bootstrapExpectedArchive,
-  distribution,
-  outputPath,
-  rootKeyId,
-  runtimeArchivePath,
-  sourceDateEpoch,
-  target,
-  version,
-}) {
-  await inspectProbeArchive(runtimeArchivePath, { target, version });
-  const stagingDir = await mkdtemp(
-    path.join(tmpdir(), "enoki-probe-bundle-compose-"),
-  );
-  try {
-    await execFileAsync(
-      "tar",
-      [
-        "--extract",
-        "--gzip",
-        "--file",
-        runtimeArchivePath,
-        "--directory",
-        stagingDir,
-        "--no-same-owner",
-      ],
-      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-    );
-    await mkdir(path.join(stagingDir, "bootstrap"), { recursive: true });
-    await withVerifiedProbeBootstrapArtifact(
-      {
-        archivePath: bootstrapArchivePath,
-        distribution,
-        expectedArchive: bootstrapExpectedArchive,
-        rootKeyId,
-        target,
-        version,
-      },
-      async ({ extractedRoles }) => {
-        for (const asset of probeBundledBootstrapAssets) {
-          const destination = path.join(stagingDir, asset.archivePath);
-          await copyFile(extractedRoles[asset.key].binaryPath, destination);
-          await chmod(destination, 0o755);
-        }
-      },
-    );
-    const componentDetails = await readProbeBundleComponentDetails(
-      stagingDir,
-      probeBundleComponentProfiles,
-    );
-    const bootstrapDetails = await readProbeBundleComponentDetails(
-      stagingDir,
-      Object.fromEntries(
-        probeBundledBootstrapAssets.map((asset) => [
-          asset.role,
-          { path: asset.archivePath },
-        ]),
-      ),
-    );
-    await writeFile(
-      path.join(stagingDir, "bundle-manifest.json"),
-      `${JSON.stringify(
-        {
-          bootstrapAssets: renderBundledBootstrapAssets({
-            componentDetails: bootstrapDetails,
-            version: version.slice(1),
-          }),
-          components: renderProbeBundleComponentsFromDetails({
-            componentDetails,
-            version: version.slice(1),
-          }),
-          kind: "enoki-probe-bundle",
-          target,
-          version: version.slice(1),
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    await mkdir(path.dirname(outputPath), { recursive: true });
-    await execFileAsync(
-      "tar",
-      [
-        "--create",
-        "--gzip",
-        "--sort=name",
-        "--owner=0",
-        "--group=0",
-        "--numeric-owner",
-        "--blocking-factor=1",
-        `--mtime=@${sourceDateEpoch}`,
-        "--format=gnu",
-        "--file",
-        outputPath,
-        "--directory",
-        stagingDir,
-        "bundle-manifest.json",
-        ...Object.values(probeBundleComponentProfiles).map(({ path }) => path),
-        ...probeBundledBootstrapAssets.map(({ archivePath }) => archivePath),
-      ],
-      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-    );
-  } finally {
-    await rm(stagingDir, { force: true, recursive: true });
-  }
-}
-
 export async function packageReleaseCandidate({
   candidateDir,
   outputPath,
@@ -532,244 +339,6 @@ export async function prepareProbeAssetSet({
   } finally {
     await rm(unsignedDir, { force: true, recursive: true });
   }
-}
-
-export async function prepareUnsignedProbeAssetSet({
-  archivesDir,
-  bootstrapArchivesDir,
-  delegationSignature,
-  delegationBytes,
-  distribution,
-  outputDir,
-  publicKeyPem,
-  rootPublicKeyPem,
-  version,
-}) {
-  const { version: stableVersion } = validateCandidateIdentity({
-    commit: "0".repeat(40),
-    version,
-  });
-  if (!publicKeyPem) {
-    throw new Error("Probe asset signing public key is required");
-  }
-  assertSigningPublicKey(publicKeyPem);
-  const delegation = verifyProbeTrustDelegation({
-    bytes: delegationBytes,
-    expectedDistribution: distribution,
-    rootPublicKeyPem,
-    signature: delegationSignature,
-  });
-
-  const expectedInputs = probeTargets
-    .flatMap((target) => {
-      const archive = `enoki-probe-${target}.tar.gz`;
-      return [archive, `${archive}.sha256`];
-    })
-    .sort();
-  const actualInputs = (await readdir(archivesDir)).sort();
-  assertSameFileNames(
-    actualInputs,
-    expectedInputs,
-    "Probe build artifact directory",
-  );
-
-  if (!bootstrapArchivesDir) {
-    throw new Error("Probe Bootstrap build artifact directory is required");
-  }
-  const expectedBootstrapInputs = probeBootstrapTargets
-    .flatMap((target) => {
-      const archive = `enoki-probe-bootstrap-${target}.tar.gz`;
-      return [archive, `${archive}.sha256`];
-    })
-    .sort();
-  assertSameFileNames(
-    (await readdir(bootstrapArchivesDir)).sort(),
-    expectedBootstrapInputs,
-    "Probe Bootstrap build artifact directory",
-  );
-
-  const rootPublicKey = canonicalPublicKeyPem(rootPublicKeyPem);
-  const rootKeyId = sha256(rootPublicKey);
-  const bundledArchivesDir = await mkdtemp(
-    path.join(tmpdir(), "enoki-probe-bundled-archives-"),
-  );
-
-  const assets = [];
-  for (const target of probeTargets) {
-    const file = `enoki-probe-${target}.tar.gz`;
-    const archive = await readFile(path.join(archivesDir, file));
-    const archiveSha256 = sha256(archive);
-    const checksum = await readFile(
-      path.join(archivesDir, `${file}.sha256`),
-      "utf8",
-    );
-    if (checksum !== `${archiveSha256}  ${file}\n`) {
-      throw new Error(`Probe checksum sidecar does not match ${file}`);
-    }
-    const bootstrapFile = `enoki-probe-bootstrap-${target}.tar.gz`;
-    const bootstrapArchivePath = path.join(bootstrapArchivesDir, bootstrapFile);
-    const bootstrapArchive = await readFile(bootstrapArchivePath);
-    const bootstrapChecksum = await readFile(
-      `${bootstrapArchivePath}.sha256`,
-      "utf8",
-    );
-    const bootstrapSha256 = sha256(bootstrapArchive);
-    if (bootstrapChecksum !== `${bootstrapSha256}  ${bootstrapFile}\n`) {
-      throw new Error(
-        `Probe Bootstrap checksum sidecar does not match ${bootstrapFile}`,
-      );
-    }
-    const bundledArchivePath = path.join(bundledArchivesDir, file);
-    await composeProbeArchive({
-      bootstrapArchivePath,
-      bootstrapExpectedArchive: {
-        sha256: bootstrapSha256,
-        size: bootstrapArchive.byteLength,
-      },
-      distribution,
-      outputPath: bundledArchivePath,
-      rootKeyId,
-      runtimeArchivePath: path.join(archivesDir, file),
-      sourceDateEpoch: "0",
-      target,
-      version: stableVersion,
-    });
-    const bundledArchive = await readFile(bundledArchivePath);
-    const bundledArchiveSha256 = sha256(bundledArchive);
-    await writeFile(
-      `${bundledArchivePath}.sha256`,
-      `${bundledArchiveSha256}  ${file}\n`,
-    );
-    const inspectedArchive = await inspectProbeArchive(bundledArchivePath, {
-      bundledBootstrap: { distribution, rootKeyId },
-      target,
-      version: stableVersion,
-    });
-    assets.push({
-      bundleManifestSha256: inspectedArchive.bundleManifestSha256,
-      file,
-      sha256: bundledArchiveSha256,
-      size: bundledArchive.byteLength,
-      target,
-    });
-  }
-
-  const publicKeyText = Buffer.from(publicKeyPem).toString("utf8");
-  const publicKey = Buffer.from(
-    publicKeyText.endsWith("\n") ? publicKeyText : `${publicKeyText}\n`,
-  );
-  const publicKeySha256 = sha256(publicKey);
-  if (delegation.signingIdentity.keyId !== publicKeySha256) {
-    throw new Error(
-      "Probe asset signing identity is not authorized by the Probe Trust Delegation",
-    );
-  }
-  const manifest = `${JSON.stringify(
-    {
-      assets,
-      kind: "enoki-probe-assets",
-      signature: {
-        algorithm: "rsa-sha256",
-        delegationGeneration: delegation.generation,
-        delegationKeyId: delegation.signingIdentity.keyId,
-        file: "manifest.json.sig",
-        publicKey: "signing-key.pem",
-      },
-      version: stableVersion.slice(1),
-    },
-    null,
-    2,
-  )}\n`;
-  const manifestBytes = Buffer.from(manifest);
-  const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
-
-  try {
-    await mkdir(stagingDir, { recursive: false });
-    for (const file of expectedInputs) {
-      await copyFile(
-        path.join(bundledArchivesDir, file),
-        path.join(stagingDir, file),
-      );
-    }
-    await writeFile(path.join(stagingDir, "manifest.json"), manifestBytes);
-    await writeFile(path.join(stagingDir, "root-key.pem"), rootPublicKey);
-    await writeFile(path.join(stagingDir, "signing-key.pem"), publicKey);
-    await writeFile(
-      path.join(stagingDir, "trust-delegation.json"),
-      delegationBytes,
-    );
-    await writeFile(
-      path.join(stagingDir, "trust-delegation.json.sig"),
-      delegationSignature,
-    );
-    await rename(stagingDir, outputDir);
-  } catch (error) {
-    await rm(stagingDir, { force: true, recursive: true });
-    throw error;
-  } finally {
-    await rm(bundledArchivesDir, { force: true, recursive: true });
-  }
-
-  return { outputDir, publicKeySha256, version: stableVersion };
-}
-
-export async function signProbeAssetSet({
-  expectedDelegationBytes,
-  expectedDelegationSignature,
-  outputDir,
-  privateKeyPem,
-  trustedRootPublicKeyPem,
-  unsignedAssetDir,
-}) {
-  if (!privateKeyPem) {
-    throw new Error("Probe asset signing private key is required");
-  }
-  if (
-    !trustedRootPublicKeyPem ||
-    !expectedDelegationBytes ||
-    !expectedDelegationSignature
-  ) {
-    throw new Error(
-      "Probe Asset Set signing requires an external Probe Distribution Trust Root and exact Probe Trust Delegation",
-    );
-  }
-  const inspected = await inspectProbeAssetSet(unsignedAssetDir, {
-    expectedDelegationBytes,
-    expectedDelegationSignature,
-    trustedRootPublicKeyPem,
-    unsigned: true,
-  });
-  const publicKey = await readFile(
-    path.join(unsignedAssetDir, "signing-key.pem"),
-    "utf8",
-  );
-  assertSigningKeyPair(privateKeyPem, publicKey);
-  const manifestBytes = await readFile(
-    path.join(unsignedAssetDir, "manifest.json"),
-  );
-  const signature = sign("RSA-SHA256", manifestBytes, privateKeyPem);
-  const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
-
-  try {
-    await cp(unsignedAssetDir, stagingDir, { recursive: true });
-    await writeFile(path.join(stagingDir, "manifest.json.sig"), signature);
-    await inspectProbeAssetSet(stagingDir, {
-      expectedDelegationBytes,
-      expectedDelegationSignature,
-      expectedVersion: inspected.version,
-      trustedRootPublicKeyPem,
-    });
-    await rename(stagingDir, outputDir);
-  } catch (error) {
-    await rm(stagingDir, { force: true, recursive: true });
-    throw error;
-  }
-
-  return {
-    outputDir,
-    publicKeySha256: inspected.signingIdentity.publicKeySha256,
-    version: `v${inspected.version}`,
-  };
 }
 
 export async function assembleReleaseCandidate({
@@ -907,60 +476,4 @@ export async function compareHubOciBuilds({
     );
   }
   return { digest: first.digest };
-}
-
-function assertSigningPublicKey(publicKeyPem) {
-  try {
-    createPublicKey(publicKeyPem);
-  } catch {
-    throw new Error("Probe asset signing public key is malformed");
-  }
-}
-
-function renderProbeBundleComponentsFromDetails({ componentDetails, version }) {
-  return Object.entries(probeBundleComponentProfiles).map(
-    ([role, profile]) => ({
-      ...profile,
-      role,
-      sha256: componentDetails.get(profile.path).sha256,
-      size: componentDetails.get(profile.path).size,
-      version,
-    }),
-  );
-}
-
-function renderBundledBootstrapAssets({ componentDetails, version }) {
-  return probeBundledBootstrapAssets.map(
-    ({ archivePath, permissionProfile, role }) => ({
-      path: archivePath,
-      permissionProfile,
-      role,
-      sha256: componentDetails.get(archivePath).sha256,
-      size: componentDetails.get(archivePath).size,
-      version,
-    }),
-  );
-}
-
-function assertSigningKeyPair(privateKeyPem, publicKeyPem) {
-  let derivedPublicKey;
-  let declaredPublicKey;
-  try {
-    derivedPublicKey = createPublicKey(createPrivateKey(privateKeyPem)).export({
-      format: "der",
-      type: "spki",
-    });
-    declaredPublicKey = createPublicKey(publicKeyPem).export({
-      format: "der",
-      type: "spki",
-    });
-  } catch {
-    throw new Error("Probe asset signing key material is malformed");
-  }
-
-  if (!derivedPublicKey.equals(declaredPublicKey)) {
-    throw new Error(
-      "Probe asset signing public key does not match private key",
-    );
-  }
 }
