@@ -565,7 +565,7 @@ mod tests {
     };
 
     use crate::runtime_failure::{
-        InstalledBundleRepairProgress, RuntimeFailureSystemd, RuntimeUnitState,
+        InstalledBundleRepairProgress, RuntimeFailureSystemd,
         installed_bundle_failure_is_current_at, resume_installed_bundle_repair_at,
         tests::{repair_completion_fixture, repair_test_bundle},
     };
@@ -573,11 +573,16 @@ mod tests {
     struct TerminalRuntime;
 
     impl RuntimeFailureSystemd for TerminalRuntime {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            })
+        fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+            Err(std::io::Error::other("observation runtime active"))
+        }
+
+        fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+            Err(std::io::Error::other("observation runtime active"))
+        }
+
+        fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+            Err(std::io::Error::other("observation runtime active"))
         }
     }
 

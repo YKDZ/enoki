@@ -1,11 +1,14 @@
 //! Observation Runtime 启动预算耗尽的固定 recorder 与终止性 latch。
 
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
+    thread,
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -18,13 +21,54 @@ use enoki_probe_bootstrap::lifecycle::{
 use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
+const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
 const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
+const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
+
+/// manager 必须实际加载的固定恢复预算：`Restart=on-failure`、`RestartSec=5s`、`3 次/60s`。
+const FIXED_RESTART: &str = "on-failure";
+const FIXED_RESTART_USEC: &str = "5s";
+const FIXED_START_LIMIT_BURST: &str = "3";
+const FIXED_START_LIMIT_INTERVAL_USEC: &str = "1min";
+const FIXED_RESTART_INTERVAL_MONOTONIC_USEC: u64 = 5_000_000;
+const FIXED_START_LIMIT_INTERVAL_MONOTONIC_USEC: u64 = 60_000_000;
+
+const RECORDER_PROPERTIES: [&str; 6] = [
+    "InvocationID",
+    "MainPID",
+    "FragmentPath",
+    "DropInPaths",
+    "NeedDaemonReload",
+    "RefuseManualStart",
+];
+const RUNTIME_PROPERTIES: [&str; 20] = [
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "Result",
+    "NRestarts",
+    "MainPID",
+    "ControlPID",
+    "Job",
+    "InvocationID",
+    "StateChangeTimestampMonotonic",
+    "ExecMainStartTimestampMonotonic",
+    "ExecMainExitTimestampMonotonic",
+    "FragmentPath",
+    "DropInPaths",
+    "NeedDaemonReload",
+    "Restart",
+    "RestartUSec",
+    "StartLimitBurst",
+    "StartLimitIntervalUSec",
+    "OnFailure",
+];
 
 mod installed_bundle_repair;
 use installed_bundle_repair::write_installed_bundle_repair_status;
@@ -42,50 +86,383 @@ pub(crate) use installed_bundle_repair::{
     drive_live_installed_bundle_repair, resume_installed_bundle_repair,
 };
 
+/// manager 交出的一份 recorder 完整 property closure。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeUnitState {
-    pub active_state: String,
-    pub result: String,
+pub(crate) struct RecorderUnitSnapshot {
+    invocation_id: String,
+    main_pid: String,
+    fragment_path: String,
+    drop_in_paths: String,
+    need_daemon_reload: String,
+    refuse_manual_start: String,
 }
 
-pub trait RuntimeFailureSystemd {
-    fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState>;
+/// manager 交出的一份 Runtime 完整 property closure。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeUnitSnapshot {
+    load_state: String,
+    active_state: String,
+    sub_state: String,
+    result: String,
+    restart_count: String,
+    main_pid: String,
+    control_pid: String,
+    job: String,
+    invocation_id: String,
+    state_change_monotonic: String,
+    exec_start_monotonic: String,
+    exec_exit_monotonic: String,
+    fragment_path: String,
+    drop_in_paths: String,
+    need_daemon_reload: String,
+    restart: String,
+    restart_usec: String,
+    start_limit_burst: String,
+    start_limit_interval_usec: String,
+    on_failure: String,
+}
+
+/// 同一轮观察：两份完整 closure 加上观察时刻。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeFailureSnapshot {
+    recorder: RecorderUnitSnapshot,
+    runtime: RuntimeUnitSnapshot,
+    observed_monotonic_usec: u64,
+}
+
+/// 资格只在本次调用内存活：不可序列化、字段私有，调用方与测试都无法构造。
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ConfirmedFixedRuntimeBudgetExhaustion {
+    result: String,
+}
+
+/// raw observation seam：只交出 `systemctl show` 原始文本与观察时刻；解析、固定闭包、
+/// 终态形状与跨 horizon 判定全部留在本模块，fake 无法直接交出结论。
+pub(crate) trait RuntimeFailureSystemd {
+    fn recorder_unit_show(&mut self) -> std::io::Result<String>;
+    fn runtime_unit_show(&mut self) -> std::io::Result<String>;
+    fn observe_monotonic_usec(&mut self) -> std::io::Result<u64>;
+
+    fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+        thread::sleep(Duration::from_micros(FIXED_RESTART_INTERVAL_MONOTONIC_USEC));
+        Ok(())
+    }
 }
 
 pub struct SystemRuntimeFailureSystemd;
 
 impl RuntimeFailureSystemd for SystemRuntimeFailureSystemd {
-    fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-        let output = Command::new("/usr/bin/systemctl")
-            .args(["show", RUNTIME_UNIT, "--property=ActiveState,Result"])
-            .output()?;
-        if !output.status.success() || !output.stderr.is_empty() {
-            return Err(std::io::Error::other("systemd state unavailable"));
-        }
-        let text = std::str::from_utf8(&output.stdout)
-            .map_err(|_| std::io::Error::other("systemd state invalid"))?;
-        let mut active_state = None;
-        let mut result = None;
-        for line in text.lines() {
-            if let Some(value) = line.strip_prefix("ActiveState=") {
-                active_state = Some(value.to_owned());
-            } else if let Some(value) = line.strip_prefix("Result=") {
-                result = Some(value.to_owned());
-            } else {
-                return Err(std::io::Error::other("systemd state invalid"));
-            }
-        }
-        let active_state = active_state
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| std::io::Error::other("systemd state invalid"))?;
-        let result = result
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| std::io::Error::other("systemd state invalid"))?;
-        Ok(RuntimeUnitState {
-            active_state,
-            result,
-        })
+    fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+        systemctl_show(RECORDER_UNIT, &RECORDER_PROPERTIES)
     }
+
+    fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+        systemctl_show(RUNTIME_UNIT, &RUNTIME_PROPERTIES)
+    }
+
+    fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+        monotonic_usec()
+    }
+}
+
+fn systemctl_show(unit: &str, properties: &[&str]) -> std::io::Result<String> {
+    let mut arguments = vec!["show", unit];
+    for property in properties {
+        arguments.push("--property");
+        arguments.push(property);
+    }
+    let output = Command::new("/usr/bin/systemctl")
+        .args(arguments)
+        .output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(std::io::Error::other("systemd state unavailable"));
+    }
+    String::from_utf8(output.stdout).map_err(|_| std::io::Error::other("systemd state invalid"))
+}
+
+fn fixed_snapshot(
+    systemd: &mut impl RuntimeFailureSystemd,
+) -> std::io::Result<RuntimeFailureSnapshot> {
+    let recorder = parse_recorder_unit_snapshot(&systemd.recorder_unit_show()?)?;
+    let runtime = parse_runtime_unit_snapshot(&systemd.runtime_unit_show()?)?;
+    Ok(RuntimeFailureSnapshot {
+        recorder,
+        runtime,
+        observed_monotonic_usec: systemd.observe_monotonic_usec()?,
+    })
+}
+
+/// 完整 property closure 的逐 key 解析；缺、重、额外 key 或无法拆分的行都 fail closed。
+fn exact_systemd_properties<'a>(
+    text: &'a str,
+    expected: &[&str],
+) -> std::io::Result<BTreeMap<&'a str, &'a str>> {
+    let mut values = BTreeMap::new();
+    for line in text.lines() {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| std::io::Error::other("systemd state invalid"))?;
+        if !expected.contains(&key) || values.insert(key, value).is_some() {
+            return Err(std::io::Error::other("systemd state invalid"));
+        }
+    }
+    if values.len() != expected.len() {
+        return Err(std::io::Error::other("systemd state invalid"));
+    }
+    Ok(values)
+}
+
+fn property(values: &BTreeMap<&str, &str>, name: &str) -> std::io::Result<String> {
+    values
+        .get(name)
+        .map(|value| (*value).to_owned())
+        .ok_or_else(|| std::io::Error::other("systemd state invalid"))
+}
+
+fn parse_recorder_unit_snapshot(text: &str) -> std::io::Result<RecorderUnitSnapshot> {
+    let values = exact_systemd_properties(text, &RECORDER_PROPERTIES)?;
+    Ok(RecorderUnitSnapshot {
+        invocation_id: property(&values, "InvocationID")?,
+        main_pid: property(&values, "MainPID")?,
+        fragment_path: property(&values, "FragmentPath")?,
+        drop_in_paths: property(&values, "DropInPaths")?,
+        need_daemon_reload: property(&values, "NeedDaemonReload")?,
+        refuse_manual_start: property(&values, "RefuseManualStart")?,
+    })
+}
+
+fn parse_runtime_unit_snapshot(text: &str) -> std::io::Result<RuntimeUnitSnapshot> {
+    let values = exact_systemd_properties(text, &RUNTIME_PROPERTIES)?;
+    Ok(RuntimeUnitSnapshot {
+        load_state: property(&values, "LoadState")?,
+        active_state: property(&values, "ActiveState")?,
+        sub_state: property(&values, "SubState")?,
+        result: property(&values, "Result")?,
+        restart_count: property(&values, "NRestarts")?,
+        main_pid: property(&values, "MainPID")?,
+        control_pid: property(&values, "ControlPID")?,
+        job: property(&values, "Job")?,
+        invocation_id: property(&values, "InvocationID")?,
+        state_change_monotonic: property(&values, "StateChangeTimestampMonotonic")?,
+        exec_start_monotonic: property(&values, "ExecMainStartTimestampMonotonic")?,
+        exec_exit_monotonic: property(&values, "ExecMainExitTimestampMonotonic")?,
+        fragment_path: property(&values, "FragmentPath")?,
+        drop_in_paths: property(&values, "DropInPaths")?,
+        need_daemon_reload: property(&values, "NeedDaemonReload")?,
+        restart: property(&values, "Restart")?,
+        restart_usec: property(&values, "RestartUSec")?,
+        start_limit_burst: property(&values, "StartLimitBurst")?,
+        start_limit_interval_usec: property(&values, "StartLimitIntervalUSec")?,
+        on_failure: property(&values, "OnFailure")?,
+    })
+}
+
+fn monotonic_usec() -> std::io::Result<u64> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    u64::try_from(value.tv_sec)
+        .ok()
+        .and_then(|seconds| {
+            u64::try_from(value.tv_nsec)
+                .ok()
+                .map(|nanos| seconds * 1_000_000 + nanos / 1_000)
+        })
+        .ok_or_else(|| std::io::Error::other("monotonic clock invalid"))
+}
+
+/// OBS-0002：受支持主机在 `3/60/5` 上的真实终态 Result 是 `exit-code`；
+/// `start-limit-hit` 从未出现，与 `success`、`exec-condition` 一样不构成耗尽资格。
+fn restart_eligible_result(value: &str) -> bool {
+    matches!(
+        value,
+        "exit-code"
+            | "signal"
+            | "core-dump"
+            | "watchdog"
+            | "timeout"
+            | "protocol"
+            | "resources"
+            | "oom-kill"
+    )
+}
+
+fn canonical_u64(value: &str) -> Option<u64> {
+    if value == "0"
+        || (!value.is_empty()
+            && !value.starts_with('0')
+            && value.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        value.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn canonical_invocation_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn fixed_runtime_unit_bytes() -> std::io::Result<Vec<u8>> {
+    enoki_probe_bootstrap::install::fixed_execution_role_units()
+        .into_iter()
+        .find_map(|(role, bytes)| (role == "observation-runtime-v4").then_some(bytes))
+        .ok_or_else(|| std::io::Error::other("fixed runtime unit unavailable"))
+}
+
+fn fixed_recorder_unit_bytes() -> std::io::Result<Vec<u8>> {
+    enoki_probe_bootstrap::install::fixed_observation_unit_contents()
+        .into_iter()
+        .find(|unit| {
+            unit.starts_with(b"[Unit]\nDescription=Enoki Observation Runtime failure recorder\n")
+        })
+        .ok_or_else(|| std::io::Error::other("fixed recorder unit unavailable"))
+}
+
+/// manager 实际加载的固定 unit 与配置闭包，并且磁盘 fragment 逐 byte 等于本 build 渲染值。
+fn valid_fixed_unit_closure(
+    root: &Path,
+    expected_uid: u32,
+    snapshot: &RuntimeFailureSnapshot,
+) -> std::io::Result<()> {
+    if snapshot.recorder.fragment_path != RECORDER_UNIT_PATH
+        || !snapshot.recorder.drop_in_paths.is_empty()
+        || snapshot.recorder.need_daemon_reload != "no"
+        || snapshot.recorder.refuse_manual_start != "yes"
+        || snapshot.runtime.fragment_path != UNIT_PATH
+        || !snapshot.runtime.drop_in_paths.is_empty()
+        || snapshot.runtime.need_daemon_reload != "no"
+        || snapshot.runtime.load_state != "loaded"
+        || snapshot.runtime.restart != FIXED_RESTART
+        || snapshot.runtime.restart_usec != FIXED_RESTART_USEC
+        || snapshot.runtime.start_limit_burst != FIXED_START_LIMIT_BURST
+        || snapshot.runtime.start_limit_interval_usec != FIXED_START_LIMIT_INTERVAL_USEC
+        || snapshot.runtime.on_failure != RECORDER_UNIT
+    {
+        return Err(std::io::Error::other("fixed systemd closure invalid"));
+    }
+    if trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)? != fixed_runtime_unit_bytes()?
+        || trusted_file(&rooted(root, RECORDER_UNIT_PATH), expected_uid, 0o644)?
+            != fixed_recorder_unit_bytes()?
+    {
+        return Err(std::io::Error::other("fixed systemd unit binding invalid"));
+    }
+    Ok(())
+}
+
+/// 一份 snapshot 的终态形状与 freshness；时间戳非法仍 fail closed。
+fn valid_fixed_terminal_snapshot(
+    root: &Path,
+    expected_uid: u32,
+    snapshot: &RuntimeFailureSnapshot,
+) -> std::io::Result<bool> {
+    valid_fixed_unit_closure(root, expected_uid, snapshot)?;
+    let runtime = &snapshot.runtime;
+    let state_change = canonical_u64(&runtime.state_change_monotonic)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| std::io::Error::other("runtime timestamp invalid"))?;
+    for timestamp in [&runtime.exec_start_monotonic, &runtime.exec_exit_monotonic] {
+        if canonical_u64(timestamp)
+            .filter(|value| *value > 0)
+            .is_none()
+        {
+            return Err(std::io::Error::other("runtime timestamp invalid"));
+        }
+    }
+    if snapshot.observed_monotonic_usec < state_change
+        || snapshot.observed_monotonic_usec - state_change
+            >= FIXED_START_LIMIT_INTERVAL_MONOTONIC_USEC
+        || runtime.active_state != "failed"
+        || runtime.sub_state != "failed"
+        || runtime.main_pid != "0"
+        || runtime.control_pid != "0"
+        || !runtime.job.is_empty()
+        || runtime.restart_count != FIXED_START_LIMIT_BURST
+        || !restart_eligible_result(&runtime.result)
+        || !canonical_invocation_id(&runtime.invocation_id)
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// 唯一的复合资格判定：来源自证、固定闭包、终态形状、freshness 与跨 RestartSec 稳定。
+fn confirm_fixed_runtime_budget_exhaustion(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    recorder_invocation_id: &str,
+    recorder_pid: u32,
+) -> std::io::Result<Option<ConfirmedFixedRuntimeBudgetExhaustion>> {
+    if !canonical_invocation_id(recorder_invocation_id) {
+        return Ok(None);
+    }
+    let first = fixed_snapshot(systemd)?;
+    if !valid_fixed_terminal_snapshot(root, expected_uid, &first)? {
+        return Ok(None);
+    }
+    if first.recorder.invocation_id != recorder_invocation_id
+        || first.recorder.main_pid != recorder_pid.to_string()
+        || !canonical_invocation_id(&first.recorder.invocation_id)
+    {
+        return Ok(None);
+    }
+    systemd.wait_for_fixed_restart_interval()?;
+    let second = fixed_snapshot(systemd)?;
+    if !valid_fixed_terminal_snapshot(root, expected_uid, &second)? {
+        return Ok(None);
+    }
+    if second.recorder != first.recorder
+        || second.runtime != first.runtime
+        || second.observed_monotonic_usec < first.observed_monotonic_usec
+        || second.observed_monotonic_usec - first.observed_monotonic_usec
+            < FIXED_RESTART_INTERVAL_MONOTONIC_USEC
+    {
+        return Ok(None);
+    }
+    Ok(Some(ConfirmedFixedRuntimeBudgetExhaustion {
+        result: second.runtime.result,
+    }))
+}
+
+/// 消费端只做当前性复核：固定闭包、failed 无 PID 无 job、Result 与 durable epoch 一致。
+fn valid_current_failure_evidence_snapshot(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    epoch_result: &str,
+) -> std::io::Result<()> {
+    let snapshot = fixed_snapshot(systemd)?;
+    valid_fixed_unit_closure(root, expected_uid, &snapshot)?;
+    let runtime = &snapshot.runtime;
+    if runtime.active_state != "failed"
+        || runtime.sub_state != "failed"
+        || runtime.main_pid != "0"
+        || runtime.control_pid != "0"
+        || !runtime.job.is_empty()
+        || runtime.result != epoch_result
+        || !restart_eligible_result(&runtime.result)
+    {
+        return Err(std::io::Error::other("failure epoch is no longer current"));
+    }
+    Ok(())
+}
+
+/// OnFailure recorder 只能由 manager 自己拉起的 invocation 调用。
+fn recorder_caller_identity() -> std::io::Result<(String, u32)> {
+    let invocation_id = std::env::var("INVOCATION_ID")
+        .map_err(|_| std::io::Error::other("recorder invocation unavailable"))?;
+    if !canonical_invocation_id(&invocation_id) {
+        return Err(std::io::Error::other("recorder invocation invalid"));
+    }
+    Ok((invocation_id, std::process::id()))
 }
 
 pub trait RuntimeRetrySystemd {
@@ -206,11 +583,14 @@ pub fn record_runtime_failure() -> std::io::Result<RuntimeFailureRecordOutcome> 
             "root required",
         ));
     }
+    let (recorder_invocation_id, recorder_pid) = recorder_caller_identity()?;
     record_runtime_failure_at(
         Path::new("/"),
         0,
         &mut SystemRuntimeFailureSystemd,
         &mut KernelFailureGenerationSource,
+        &recorder_invocation_id,
+        recorder_pid,
     )
 }
 
@@ -272,11 +652,8 @@ fn issue_installed_bundle_failure_evidence_at(
     {
         return Err(std::io::Error::other("failure evidence lifetime invalid"));
     }
-    let state = systemd.fixed_runtime_state()?;
-    if state.active_state != "failed" || state.result != "start-limit-hit" {
-        return Err(std::io::Error::other("failure epoch is no longer current"));
-    }
     let (epoch, metadata) = current_epoch_at(root, expected_uid)?;
+    valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result)?;
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
         .ok_or_else(|| std::io::Error::other("install authority unavailable"))?;
@@ -387,7 +764,7 @@ fn current_epoch_at(
     )
     .map_err(|_| std::io::Error::other("identity receipt invalid"))?;
     if epoch.schema_version != 1
-        || epoch.result != "start-limit-hit"
+        || !restart_eligible_result(&epoch.result)
         || epoch.unit != RUNTIME_UNIT
         || latch != epoch.generation.as_bytes()
         || epoch.boot_id != boot_id.trim()
@@ -413,11 +790,9 @@ fn record_runtime_failure_at(
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
     generations: &mut impl FailureGenerationSource,
+    recorder_invocation_id: &str,
+    recorder_pid: u32,
 ) -> std::io::Result<RuntimeFailureRecordOutcome> {
-    let state = systemd.fixed_runtime_state()?;
-    if state.active_state != "failed" || state.result != "start-limit-hit" {
-        return Ok(RuntimeFailureRecordOutcome::Ignored);
-    }
     let failure_dir = rooted(root, FAILURE_DIR);
     let epoch_path = rooted(root, EPOCH_PATH);
     let latch_path = rooted(root, LATCH_PATH);
@@ -429,6 +804,16 @@ fn record_runtime_failure_at(
         current_epoch_at(root, expected_uid)?;
         return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
     }
+    let Some(exhaustion) = confirm_fixed_runtime_budget_exhaustion(
+        root,
+        expected_uid,
+        systemd,
+        recorder_invocation_id,
+        recorder_pid,
+    )?
+    else {
+        return Ok(RuntimeFailureRecordOutcome::Ignored);
+    };
 
     if failure_dir.exists() {
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
@@ -489,7 +874,7 @@ fn record_runtime_failure_at(
         install_state_sha256: string(&metadata, "install_state_sha256")?,
         manifest_sha256: string(&metadata, "target_manifest_sha256")?,
         bundle_version: string(&metadata, "bundle_version")?,
-        result: state.result,
+        result: exhaustion.result,
     };
     let encoded =
         toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
@@ -638,14 +1023,289 @@ fn valid_identifier(value: &str) -> bool {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{collections::VecDeque, os::unix::fs::PermissionsExt};
 
-    struct State(RuntimeUnitState);
-    impl RuntimeFailureSystemd for State {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(self.0.clone())
+    const RECORDER_INVOCATION: &str = "0123456789abcdef0123456789abcdef";
+    const RUNTIME_INVOCATION: &str = "fedcba9876543210fedcba9876543210";
+    const TERMINAL_STATE_CHANGE_USEC: u64 = 7_000_000_000;
+    const TERMINAL_OBSERVED_USEC: u64 = 7_000_200_000;
+
+    fn show(properties: &[(&str, &str)]) -> String {
+        properties
+            .iter()
+            .map(|(key, value)| format!("{key}={value}\n"))
+            .collect()
+    }
+
+    /// 固定 recorder 的 manager property closure。
+    #[derive(Clone, Debug)]
+    struct RecorderView {
+        invocation_id: String,
+        main_pid: String,
+        fragment_path: String,
+        drop_in_paths: String,
+        need_daemon_reload: String,
+        refuse_manual_start: String,
+    }
+
+    impl RecorderView {
+        fn terminal() -> Self {
+            Self {
+                invocation_id: RECORDER_INVOCATION.to_owned(),
+                main_pid: std::process::id().to_string(),
+                fragment_path: RECORDER_UNIT_PATH.to_owned(),
+                drop_in_paths: String::new(),
+                need_daemon_reload: "no".to_owned(),
+                refuse_manual_start: "yes".to_owned(),
+            }
+        }
+
+        fn show(&self) -> String {
+            show(&[
+                ("InvocationID", self.invocation_id.as_str()),
+                ("MainPID", self.main_pid.as_str()),
+                ("FragmentPath", self.fragment_path.as_str()),
+                ("DropInPaths", self.drop_in_paths.as_str()),
+                ("NeedDaemonReload", self.need_daemon_reload.as_str()),
+                ("RefuseManualStart", self.refuse_manual_start.as_str()),
+            ])
         }
     }
+
+    /// Runtime 的 manager property closure。
+    #[derive(Clone, Debug)]
+    struct RuntimeView {
+        load_state: String,
+        active_state: String,
+        sub_state: String,
+        result: String,
+        restart_count: String,
+        main_pid: String,
+        control_pid: String,
+        job: String,
+        invocation_id: String,
+        state_change_monotonic: String,
+        exec_start_monotonic: String,
+        exec_exit_monotonic: String,
+        fragment_path: String,
+        drop_in_paths: String,
+        need_daemon_reload: String,
+        restart: String,
+        restart_usec: String,
+        start_limit_burst: String,
+        start_limit_interval_usec: String,
+        on_failure: String,
+    }
+
+    impl RuntimeView {
+        fn terminal() -> Self {
+            Self {
+                load_state: "loaded".to_owned(),
+                active_state: "failed".to_owned(),
+                sub_state: "failed".to_owned(),
+                result: "exit-code".to_owned(),
+                restart_count: FIXED_START_LIMIT_BURST.to_owned(),
+                main_pid: "0".to_owned(),
+                control_pid: "0".to_owned(),
+                job: String::new(),
+                invocation_id: RUNTIME_INVOCATION.to_owned(),
+                state_change_monotonic: TERMINAL_STATE_CHANGE_USEC.to_string(),
+                exec_start_monotonic: (TERMINAL_STATE_CHANGE_USEC - 2_000_000).to_string(),
+                exec_exit_monotonic: (TERMINAL_STATE_CHANGE_USEC - 1_000_000).to_string(),
+                fragment_path: UNIT_PATH.to_owned(),
+                drop_in_paths: String::new(),
+                need_daemon_reload: "no".to_owned(),
+                restart: FIXED_RESTART.to_owned(),
+                restart_usec: FIXED_RESTART_USEC.to_owned(),
+                start_limit_burst: FIXED_START_LIMIT_BURST.to_owned(),
+                start_limit_interval_usec: FIXED_START_LIMIT_INTERVAL_USEC.to_owned(),
+                on_failure: RECORDER_UNIT.to_owned(),
+            }
+        }
+
+        fn show(&self) -> String {
+            show(&[
+                ("LoadState", self.load_state.as_str()),
+                ("ActiveState", self.active_state.as_str()),
+                ("SubState", self.sub_state.as_str()),
+                ("Result", self.result.as_str()),
+                ("NRestarts", self.restart_count.as_str()),
+                ("MainPID", self.main_pid.as_str()),
+                ("ControlPID", self.control_pid.as_str()),
+                ("Job", self.job.as_str()),
+                ("InvocationID", self.invocation_id.as_str()),
+                (
+                    "StateChangeTimestampMonotonic",
+                    self.state_change_monotonic.as_str(),
+                ),
+                (
+                    "ExecMainStartTimestampMonotonic",
+                    self.exec_start_monotonic.as_str(),
+                ),
+                (
+                    "ExecMainExitTimestampMonotonic",
+                    self.exec_exit_monotonic.as_str(),
+                ),
+                ("FragmentPath", self.fragment_path.as_str()),
+                ("DropInPaths", self.drop_in_paths.as_str()),
+                ("NeedDaemonReload", self.need_daemon_reload.as_str()),
+                ("Restart", self.restart.as_str()),
+                ("RestartUSec", self.restart_usec.as_str()),
+                ("StartLimitBurst", self.start_limit_burst.as_str()),
+                (
+                    "StartLimitIntervalUSec",
+                    self.start_limit_interval_usec.as_str(),
+                ),
+                ("OnFailure", self.on_failure.as_str()),
+            ])
+        }
+    }
+
+    /// 一份完整观察：两份 closure 加上观察时刻。
+    #[derive(Clone, Debug)]
+    struct Observation {
+        recorder: RecorderView,
+        runtime: RuntimeView,
+        observed_usec: u64,
+    }
+
+    impl Observation {
+        fn terminal() -> Self {
+            Self {
+                recorder: RecorderView::terminal(),
+                runtime: RuntimeView::terminal(),
+                observed_usec: TERMINAL_OBSERVED_USEC,
+            }
+        }
+
+        /// 第 `index` 份稳定观察：与第一份相隔 `index * RestartSec`，其余逐字段相同。
+        fn stable(index: usize) -> Self {
+            Self {
+                observed_usec: TERMINAL_OBSERVED_USEC
+                    + index as u64 * FIXED_RESTART_INTERVAL_MONOTONIC_USEC,
+                ..Self::terminal()
+            }
+        }
+    }
+
+    /// 按顺序交出预置 raw 观察的替身；一轮观察在交出观察时刻后结束。
+    struct Snapshots {
+        rounds: VecDeque<(String, String, u64)>,
+        waits: usize,
+    }
+
+    impl Snapshots {
+        fn observations(observations: impl IntoIterator<Item = Observation>) -> Self {
+            Self {
+                rounds: observations
+                    .into_iter()
+                    .map(|observation| {
+                        (
+                            observation.recorder.show(),
+                            observation.runtime.show(),
+                            observation.observed_usec,
+                        )
+                    })
+                    .collect(),
+                waits: 0,
+            }
+        }
+
+        fn terminal(count: usize) -> Self {
+            Self::observations((0..count).map(Observation::stable))
+        }
+
+        fn raw(rounds: impl IntoIterator<Item = (String, String)>) -> Self {
+            Self {
+                rounds: rounds
+                    .into_iter()
+                    .map(|(recorder, runtime)| (recorder, runtime, TERMINAL_OBSERVED_USEC))
+                    .collect(),
+                waits: 0,
+            }
+        }
+    }
+
+    impl RuntimeFailureSystemd for Snapshots {
+        fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+            self.rounds
+                .front()
+                .map(|(recorder, ..)| recorder.clone())
+                .ok_or_else(|| std::io::Error::other("snapshot unavailable"))
+        }
+
+        fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+            self.rounds
+                .front()
+                .map(|(_, runtime, _)| runtime.clone())
+                .ok_or_else(|| std::io::Error::other("snapshot unavailable"))
+        }
+
+        fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+            self.rounds
+                .pop_front()
+                .map(|(_, _, observed)| observed)
+                .ok_or_else(|| std::io::Error::other("snapshot unavailable"))
+        }
+
+        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
+            self.waits += 1;
+            Ok(())
+        }
+    }
+
+    /// 消费端替身：持续交出同一份当前观察；`retry_fails` 保留 Repair 被拒绝的行为。
+    #[derive(Clone, Debug)]
+    struct ObservationFake {
+        recorder: RecorderView,
+        runtime: RuntimeView,
+        retry_fails: bool,
+        retry_calls: usize,
+    }
+
+    impl ObservationFake {
+        fn terminal() -> Self {
+            let observation = Observation::terminal();
+            Self {
+                recorder: observation.recorder,
+                runtime: observation.runtime,
+                retry_fails: false,
+                retry_calls: 0,
+            }
+        }
+
+        fn repair_rejected() -> Self {
+            Self {
+                retry_fails: true,
+                ..Self::terminal()
+            }
+        }
+    }
+
+    impl RuntimeFailureSystemd for ObservationFake {
+        fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+            Ok(self.recorder.show())
+        }
+
+        fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+            Ok(self.runtime.show())
+        }
+
+        fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+            Ok(TERMINAL_OBSERVED_USEC)
+        }
+    }
+
+    impl RuntimeRetrySystemd for ObservationFake {
+        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
+            self.retry_calls += 1;
+            if self.retry_fails {
+                return Err(std::io::Error::other("完整 Bundle 恢复失败"));
+            }
+            Ok(())
+        }
+    }
+
     struct Generation(u8);
     impl FailureGenerationSource for Generation {
         fn fill_generation(&mut self, bytes: &mut [u8; 32]) -> std::io::Result<()> {
@@ -661,34 +1321,42 @@ pub(super) mod tests {
             Ok(())
         }
     }
-    struct FailedRuntime(usize);
-    impl RuntimeFailureSystemd for FailedRuntime {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            })
-        }
+
+    /// 正式 record 入口：固定 recorder 身份加两份跨 RestartSec 的稳定观察。
+    fn record_terminal(
+        root: &Path,
+        generation_byte: u8,
+    ) -> std::io::Result<RuntimeFailureRecordOutcome> {
+        record_runtime_failure_at(
+            root,
+            unsafe { libc::geteuid() },
+            &mut Snapshots::terminal(2),
+            &mut Generation(generation_byte),
+            RECORDER_INVOCATION,
+            std::process::id(),
+        )
     }
-    impl RuntimeRetrySystemd for FailedRuntime {
-        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
-            self.0 += 1;
-            Ok(())
-        }
+
+    fn record_with(
+        root: &Path,
+        observations: impl IntoIterator<Item = Observation>,
+        generation_byte: u8,
+    ) -> std::io::Result<RuntimeFailureRecordOutcome> {
+        record_runtime_failure_at(
+            root,
+            unsafe { libc::geteuid() },
+            &mut Snapshots::observations(observations),
+            &mut Generation(generation_byte),
+            RECORDER_INVOCATION,
+            std::process::id(),
+        )
     }
-    struct RejectedRepair;
-    impl RuntimeFailureSystemd for RejectedRepair {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            })
-        }
-    }
-    impl RuntimeRetrySystemd for RejectedRepair {
-        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("完整 Bundle 恢复失败"))
-        }
+
+    fn record_latched(root: &Path, generation_byte: u8) {
+        assert_eq!(
+            record_terminal(root, generation_byte).unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
     }
 
     pub(super) fn repair_test_bundle() -> enoki_probe_bootstrap::verifier::VerifiedBundle {
@@ -726,12 +1394,18 @@ pub(super) mod tests {
         );
         write_fixture(root.path(), METADATA_PATH, metadata.as_bytes(), 0o600);
         write_fixture(root.path(), IDENTITY_PATH, identity.as_bytes(), 0o600);
-        let unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
-            .into_iter()
-            .find(|(role, _)| *role == "observation-runtime-v4")
-            .unwrap()
-            .1;
-        write_fixture(root.path(), UNIT_PATH, &unit, 0o644);
+        write_fixture(
+            root.path(),
+            UNIT_PATH,
+            &fixed_runtime_unit_bytes().unwrap(),
+            0o644,
+        );
+        write_fixture(
+            root.path(),
+            RECORDER_UNIT_PATH,
+            &fixed_recorder_unit_bytes().unwrap(),
+            0o644,
+        );
         write_fixture(root.path(), BOOT_ID_PATH, b"boot-01\n", 0o444);
         root
     }
@@ -745,17 +1419,25 @@ pub(super) mod tests {
     #[test]
     fn systemd_249_intermediate_on_failure_does_not_write_an_epoch() {
         let root = fixture();
-        let outcome = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "activating".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(1),
-        )
-        .unwrap();
-        assert_eq!(outcome, RuntimeFailureRecordOutcome::Ignored);
+        // 中间态 OnFailure 通知：预算尚未耗尽，普通通知不产生 durable authority。
+        let mut intermediate = RuntimeView::terminal();
+        intermediate.active_state = "activating".into();
+        intermediate.sub_state = "start".into();
+        intermediate.main_pid = "4242".into();
+        intermediate.job = "12 enoki-observation-runtime.service/start".into();
+        intermediate.restart_count = "1".into();
+        assert_eq!(
+            record_with(
+                root.path(),
+                [Observation {
+                    runtime: intermediate,
+                    ..Observation::terminal()
+                }],
+                1,
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
     }
@@ -769,18 +1451,7 @@ pub(super) mod tests {
             b"hub_url = \"https://hub.example\"\nprobe_id = \"probe_01\"\n",
             0o600,
         );
-        assert!(
-            record_runtime_failure_at(
-                root.path(),
-                unsafe { libc::geteuid() },
-                &mut State(RuntimeUnitState {
-                    active_state: "failed".into(),
-                    result: "start-limit-hit".into(),
-                }),
-                &mut Generation(2),
-            )
-            .is_err()
-        );
+        assert!(record_terminal(root.path(), 2).is_err());
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
     }
@@ -788,16 +1459,7 @@ pub(super) mod tests {
     #[test]
     fn failure_epoch_rejects_a_later_identity_with_a_different_host_id() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(3),
-        )
-        .unwrap();
+        record_latched(root.path(), 3);
         write_fixture(
             root.path(),
             IDENTITY_PATH,
@@ -808,7 +1470,7 @@ pub(super) mod tests {
             issue_installed_bundle_failure_evidence_at(
                 root.path(),
                 unsafe { libc::geteuid() },
-                &mut FailedRuntime(0),
+                &mut ObservationFake::terminal(),
                 100,
                 60_100,
                 "request_nonce_wrong_host",
@@ -817,64 +1479,553 @@ pub(super) mod tests {
         );
     }
 
+    type RuntimeDeviation = (&'static str, fn(&mut RuntimeView));
+    type ClosureDeviation = (&'static str, fn(&mut RecorderView, &mut RuntimeView));
+
+    fn assert_no_pair(root: &Path) {
+        assert!(!rooted(root, EPOCH_PATH).exists());
+        assert!(!rooted(root, LATCH_PATH).exists());
+    }
+
     #[test]
-    fn systemd_255_only_latches_the_terminal_start_limit_hit() {
+    fn two_stable_terminal_observations_with_the_real_result_latch_the_exact_pair() {
         let root = fixture();
-        let ignored = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(1),
-        )
-        .unwrap();
-        assert_eq!(ignored, RuntimeFailureRecordOutcome::Ignored);
-        let latched = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(2),
-        )
-        .unwrap();
-        assert_eq!(latched, RuntimeFailureRecordOutcome::Latched);
-        assert!(rooted(root.path(), EPOCH_PATH).exists());
+        assert_eq!(
+            record_terminal(root.path(), 1).unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        let epoch = fs::read_to_string(rooted(root.path(), EPOCH_PATH)).unwrap();
+        assert!(
+            epoch.contains("result = \"exit-code\""),
+            "epoch 必须记录 manager 交出的真实 Result：{epoch}"
+        );
         assert_eq!(
             fs::read_to_string(rooted(root.path(), LATCH_PATH)).unwrap(),
-            "02".repeat(32)
+            "01".repeat(32)
         );
-        let before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
-        let repeated = record_runtime_failure_at(
+    }
+
+    #[test]
+    fn eligibility_consumes_two_observations_one_restart_interval_apart() {
+        let root = fixture();
+        let mut systemd = Snapshots::terminal(2);
+        assert_eq!(
+            record_runtime_failure_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                &mut Generation(1),
+                RECORDER_INVOCATION,
+                std::process::id(),
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        assert_eq!(systemd.waits, 1, "两份观察之间必须等待一个 RestartSec");
+        assert!(systemd.rounds.is_empty(), "两份完整观察都要被消费");
+    }
+
+    #[test]
+    fn a_single_terminal_notification_does_not_establish_eligibility() {
+        let root = fixture();
+        // 第二份观察时预算仍在推进：单次通知跨不过 RestartSec。
+        let mut advancing = Observation::stable(1);
+        advancing.runtime.restart_count = "2".into();
+        assert_eq!(
+            record_with(root.path(), [Observation::terminal(), advancing], 1).unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert_no_pair(root.path());
+    }
+
+    #[test]
+    fn observations_closer_than_the_restart_interval_are_not_eligible() {
+        let root = fixture();
+        let mut too_close = Observation::terminal();
+        too_close.observed_usec = TERMINAL_OBSERVED_USEC + 1_000_000;
+        assert_eq!(
+            record_with(root.path(), [Observation::terminal(), too_close], 1).unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert_no_pair(root.path());
+    }
+
+    #[test]
+    fn a_single_property_deviation_never_establishes_eligibility() {
+        let deviations: [RuntimeDeviation; 9] = [
+            ("start-limit-hit 从未在受支持主机出现", |runtime| {
+                runtime.result = "start-limit-hit".into()
+            }),
+            ("成功结束", |runtime| runtime.result = "success".into()),
+            ("ExecCondition 拒绝", |runtime| {
+                runtime.result = "exec-condition".into()
+            }),
+            ("预算未用满", |runtime| {
+                runtime.restart_count = "2".into()
+            }),
+            ("仍有主进程", |runtime| {
+                runtime.main_pid = "4242".into()
+            }),
+            ("仍有控制进程", |runtime| {
+                runtime.control_pid = "4243".into()
+            }),
+            ("仍有排队 job", |runtime| {
+                runtime.job = "21 enoki-observation-runtime.service/start".into()
+            }),
+            ("终态观察已过期", |runtime| {
+                runtime.state_change_monotonic = (TERMINAL_OBSERVED_USEC
+                    - FIXED_START_LIMIT_INTERVAL_MONOTONIC_USEC)
+                    .to_string();
+            }),
+            ("invocation 非 canonical", |runtime| {
+                runtime.invocation_id = "nope".into()
+            }),
+        ];
+        for (case, mutate) in deviations {
+            let root = fixture();
+            let mut first = Observation::terminal();
+            mutate(&mut first.runtime);
+            let mut second = first.clone();
+            second.observed_usec += FIXED_RESTART_INTERVAL_MONOTONIC_USEC;
+            assert_eq!(
+                record_with(root.path(), [first, second], 1).unwrap(),
+                RuntimeFailureRecordOutcome::Ignored,
+                "{case}"
+            );
+            assert_no_pair(root.path());
+        }
+    }
+
+    #[test]
+    fn a_caller_that_is_not_the_managers_recorder_is_not_eligible() {
+        let root = fixture();
+        let cases: [(&str, &str, u32); 3] = [
+            (
+                "invocation 与 manager 不同",
+                "99999999999999999999999999999999",
+                std::process::id(),
+            ),
+            ("invocation 缺失", "", std::process::id()),
+            (
+                "pid 与 recorder 主进程不同",
+                RECORDER_INVOCATION,
+                std::process::id() + 1,
+            ),
+        ];
+        for (case, invocation_id, pid) in cases {
+            assert_eq!(
+                record_runtime_failure_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut Snapshots::terminal(2),
+                    &mut Generation(1),
+                    invocation_id,
+                    pid,
+                )
+                .unwrap(),
+                RuntimeFailureRecordOutcome::Ignored,
+                "{case}"
+            );
+        }
+        assert_no_pair(root.path());
+    }
+
+    #[test]
+    fn a_deviated_manager_closure_or_stale_fragment_fails_closed() {
+        let deviations: [ClosureDeviation; 11] = [
+            ("Runtime 有 drop-in", |_, runtime| {
+                runtime.drop_in_paths =
+                    "/etc/systemd/system/enoki-observation-runtime.service.d/override.conf".into();
+            }),
+            ("Runtime 未加载", |_, runtime| {
+                runtime.load_state = "masked".into()
+            }),
+            ("Restart 被改", |_, runtime| {
+                runtime.restart = "always".into()
+            }),
+            ("RestartSec 被改", |_, runtime| {
+                runtime.restart_usec = "10s".into()
+            }),
+            ("burst 被改", |_, runtime| {
+                runtime.start_limit_burst = "10".into()
+            }),
+            ("interval 被改", |_, runtime| {
+                runtime.start_limit_interval_usec = "2min".into()
+            }),
+            ("OnFailure 被改", |_, runtime| {
+                runtime.on_failure = "other.service".into()
+            }),
+            ("fragment 等待 reload", |_, runtime| {
+                runtime.need_daemon_reload = "yes".into()
+            }),
+            ("Runtime fragment 路径被换", |_, runtime| {
+                runtime.fragment_path = "/run/other.service".into()
+            }),
+            ("recorder 允许手工启动", |recorder, _| {
+                recorder.refuse_manual_start = "no".into()
+            }),
+            ("recorder 有 drop-in", |recorder, _| {
+                recorder.drop_in_paths =
+                    "/etc/systemd/system/enoki-observation-runtime-failure.service.d/override.conf"
+                        .into();
+            }),
+        ];
+        for (case, mutate) in deviations {
+            let root = fixture();
+            let mut first = Observation::terminal();
+            mutate(&mut first.recorder, &mut first.runtime);
+            let mut second = first.clone();
+            second.observed_usec += FIXED_RESTART_INTERVAL_MONOTONIC_USEC;
+            assert!(
+                record_with(root.path(), [first, second], 1).is_err(),
+                "{case} 必须 fail closed"
+            );
+            assert_no_pair(root.path());
+        }
+        let root = fixture();
+        write_fixture(
+            root.path(),
+            RECORDER_UNIT_PATH,
+            b"[Unit]\nDescription=stale recorder\n\n[Service]\n",
+            0o644,
+        );
+        assert!(record_terminal(root.path(), 1).is_err());
+        assert_no_pair(root.path());
+    }
+
+    #[test]
+    fn malformed_property_closures_fail_closed() {
+        let recorder = RecorderView::terminal().show();
+        let runtime = RuntimeView::terminal().show();
+        let anomalies: [(&str, String, String); 5] = [
+            (
+                "缺少 Result",
+                recorder.clone(),
+                runtime.replace("Result=exit-code\n", ""),
+            ),
+            (
+                "重复 ActiveState",
+                recorder.clone(),
+                runtime.replace("Job=\n", "Job=\nActiveState=failed\n"),
+            ),
+            ("额外 key", recorder.clone(), format!("{runtime}Foo=bar\n")),
+            (
+                "无法拆分的行",
+                recorder.clone(),
+                "no-separator\n".to_owned(),
+            ),
+            (
+                "recorder 缺 RefuseManualStart",
+                recorder.replace("RefuseManualStart=yes\n", ""),
+                runtime,
+            ),
+        ];
+        for (case, recorder_text, runtime_text) in anomalies {
+            let root = fixture();
+            let rounds = vec![
+                (recorder_text.clone(), runtime_text.clone()),
+                (recorder_text, runtime_text),
+            ];
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut Snapshots::raw(rounds),
+                    &mut Generation(1),
+                    RECORDER_INVOCATION,
+                    std::process::id(),
+                )
+                .is_err(),
+                "{case} 必须 fail closed"
+            );
+            assert_no_pair(root.path());
+        }
+    }
+
+    #[test]
+    fn a_repeat_notification_after_latching_keeps_the_exact_pair_unconfirmed() {
+        let root = fixture();
+        record_latched(root.path(), 1);
+        let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+        let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+        // 60s 窗口过期或 reset-failed 后计数归零：latch 仍在，record 不重跑确认、不产生新 generation。
+        let mut expired = RuntimeView::terminal();
+        expired.restart_count = "0".into();
+        let mut systemd = Snapshots::observations([Observation {
+            runtime: expired,
+            ..Observation::terminal()
+        }]);
+        assert_eq!(
+            record_runtime_failure_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                &mut Generation(9),
+                RECORDER_INVOCATION,
+                std::process::id(),
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::AlreadyLatched
+        );
+        assert_eq!(systemd.waits, 0);
+        assert_eq!(
+            systemd.rounds.len(),
+            1,
+            "已有精确 pair 时不得再次查询 manager"
+        );
+        assert_eq!(
+            fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
+            epoch_before
+        );
+        assert_eq!(
+            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
+            latch_before
+        );
+    }
+
+    #[test]
+    fn an_interrupted_publication_is_not_authority() {
+        for (case, missing) in [("缺 latch", LATCH_PATH), ("缺 epoch", EPOCH_PATH)] {
+            let root = fixture();
+            record_latched(root.path(), 2);
+            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+            fs::remove_file(rooted(root.path(), missing)).unwrap();
+            let remaining = if missing == LATCH_PATH {
+                EPOCH_PATH
+            } else {
+                LATCH_PATH
+            };
+            assert!(
+                record_terminal(root.path(), 3).is_err(),
+                "{case} 的半途状态必须被拒绝"
+            );
+            assert!(
+                !rooted(root.path(), missing).exists(),
+                "{case} 不得被补全或产生新 authority"
+            );
+            let remaining_bytes = fs::read(rooted(root.path(), remaining)).unwrap();
+            if missing == LATCH_PATH {
+                assert_eq!(remaining_bytes, epoch_before);
+            } else {
+                assert_eq!(remaining_bytes, latch_before);
+            }
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut ObservationFake::terminal(),
+                    100,
+                    60_100,
+                    "request_nonce_partial",
+                )
+                .is_err(),
+                "{case} 不能签发 Evidence"
+            );
+            assert!(
+                !installed_bundle_failure_is_current_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut ObservationFake::terminal(),
+                ),
+                "{case} 不能授权 Repair"
+            );
+            let mut retry = RetrySystemd::default();
+            assert!(
+                retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut retry).is_err(),
+                "{case} 的 Local Retry 必须 fail closed"
+            );
+            assert_eq!(retry.0, 0, "{case} 不得触发任何 systemd 动作");
+        }
+    }
+
+    #[test]
+    fn a_changed_install_receipt_invalidates_the_latched_pair() {
+        let root = fixture();
+        record_latched(root.path(), 4);
+        let metadata = fs::read_to_string(rooted(root.path(), METADATA_PATH))
+            .unwrap()
+            .replace("bundle_version = \"1.2.3\"", "bundle_version = \"9.9.9\"");
+        write_fixture(root.path(), METADATA_PATH, metadata.as_bytes(), 0o600);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut ObservationFake::terminal(),
+                100,
+                60_100,
+                "request_nonce_reinstall",
+            )
+            .is_err()
+        );
+        assert!(!installed_bundle_failure_is_current_at(
             root.path(),
             unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(3),
+            &mut ObservationFake::terminal(),
+        ));
+        assert!(record_terminal(root.path(), 5).is_err());
+    }
+
+    #[test]
+    fn evidence_issuance_revalidates_the_current_shape_instead_of_historical_counts() {
+        let root = fixture();
+        record_latched(root.path(), 5);
+        let mut systemd = ObservationFake::terminal();
+        let signed = issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+            100,
+            60_100,
+            "request_nonce_current",
         )
         .unwrap();
-        assert_eq!(repeated, RuntimeFailureRecordOutcome::AlreadyLatched);
-        assert_eq!(fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(), before);
+        assert_eq!(signed.evidence.generation, "05".repeat(32));
+        // 60s 窗口过期后计数归零：同一终态形状的 durable authority 保持。
+        let mut expired = ObservationFake::terminal();
+        expired.runtime.restart_count = "0".into();
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut expired,
+                100,
+                60_100,
+                "request_nonce_expired",
+            )
+            .is_ok()
+        );
+        // 签发只做当前性复核：不重演跨 RestartSec 的两份观察。
+        let mut single = Snapshots::terminal(1);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut single,
+                100,
+                60_100,
+                "request_nonce_single",
+            )
+            .is_ok()
+        );
+        assert_eq!(single.waits, 0);
+        assert!(single.rounds.is_empty());
+        let non_current: [RuntimeDeviation; 3] = [
+            ("Runtime 已成功启动", |runtime| {
+                runtime.active_state = "active".into();
+                runtime.sub_state = "running".into();
+                runtime.main_pid = "4242".into();
+            }),
+            ("reset-failed 清除了 Result", |runtime| {
+                runtime.result = "success".into();
+                runtime.restart_count = "0".into();
+            }),
+            ("仍有排队 job", |runtime| {
+                runtime.job = "21 enoki-observation-runtime.service/start".into()
+            }),
+        ];
+        for (case, mutate) in non_current {
+            let mut stale = ObservationFake::terminal();
+            mutate(&mut stale.runtime);
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut stale,
+                    100,
+                    60_100,
+                    "request_nonce_stale",
+                )
+                .is_err(),
+                "{case} 时旧资格不可用"
+            );
+            assert!(
+                !installed_bundle_failure_is_current_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut stale,
+                ),
+                "{case} 时 Repair 不得认为资格当前"
+            );
+        }
+    }
+
+    #[test]
+    fn local_retry_invalidates_the_generation_and_a_later_failure_starts_over() {
+        let root = fixture();
+        record_latched(root.path(), 6);
+        let mut systemd = ObservationFake::terminal();
+        let signed = issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+            100,
+            60_100,
+            "request_nonce_before",
+        )
+        .unwrap();
+        let authority = installed_authority(&signed, "46");
+        let signature = test_hmac(
+            &[0x11; 32],
+            b"enoki/installed-bundle-repair-authority/hmac-sha256/v1\0",
+            &authority.canonical_bytes(),
+        );
+        let mut retry = RetrySystemd::default();
+        retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut retry).unwrap();
+        assert_eq!(retry.0, 1);
+        assert!(!installed_bundle_failure_is_current_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+        ));
+        assert!(matches!(
+            validate_installed_bundle_repair_authority_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                &signed,
+                &authority,
+                &signature,
+                101,
+            ),
+            Err(InstalledBundleRepairError::InvalidBoundary)
+        ));
+        // 清除后的一次启动失败不会复活旧 generation：必须重新走完整确认。
+        let mut partial = Observation::terminal();
+        partial.runtime.restart_count = "1".into();
+        assert_eq!(
+            record_with(root.path(), [partial, Observation::stable(1)], 7).unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                100,
+                60_100,
+                "request_nonce_after",
+            )
+            .is_err()
+        );
+        record_latched(root.path(), 8);
+        let reissued = issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+            100,
+            60_100,
+            "request_nonce_new",
+        )
+        .unwrap();
+        assert_eq!(reissued.evidence.generation, "08".repeat(32));
+        assert_ne!(reissued.evidence.generation, signed.evidence.generation);
     }
 
     #[test]
     fn typed_local_retry_consumes_the_latch_before_one_fixed_retry() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(4),
-        )
-        .unwrap();
+        record_latched(root.path(), 4);
         let mut systemd = RetrySystemd::default();
         retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut systemd).unwrap();
         assert_eq!(systemd.0, 1);
@@ -885,17 +2036,8 @@ pub(super) mod tests {
     #[test]
     fn signed_installed_bundle_authority_consumes_only_the_current_generation() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(5),
-        )
-        .unwrap();
-        let mut systemd = FailedRuntime(0);
+        record_latched(root.path(), 5);
+        let mut systemd = ObservationFake::terminal();
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -1008,7 +2150,7 @@ pub(super) mod tests {
             grant.authority(),
         )
         .unwrap();
-        assert_eq!(systemd.0, 0);
+        assert_eq!(systemd.retry_calls, 0, "成功恢复链路不得再触发固定 Retry");
         assert!(!rooted(root.path(), LATCH_PATH).exists());
         assert_eq!(
             fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH)).unwrap(),
@@ -1019,19 +2161,10 @@ pub(super) mod tests {
     #[test]
     fn failed_installed_bundle_repair_keeps_the_exact_epoch_latched_and_unresolved() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(6),
-        )
-        .unwrap();
+        record_latched(root.path(), 6);
         let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
         let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-        let mut systemd = RejectedRepair;
+        let mut systemd = ObservationFake::repair_rejected();
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -1081,17 +2214,8 @@ pub(super) mod tests {
     #[test]
     fn admitted_installed_bundle_repair_resumes_without_new_authority() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(7),
-        )
-        .unwrap();
-        let mut systemd = FailedRuntime(0);
+        record_latched(root.path(), 7);
+        let mut systemd = ObservationFake::terminal();
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -1564,20 +2688,11 @@ pub(super) mod tests {
         generation_byte: u8,
     ) -> (tempfile::TempDir, InstalledBundleRepairAuthorityV1) {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(generation_byte),
-        )
-        .unwrap();
+        record_latched(root.path(), generation_byte);
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
-            &mut FailedRuntime(0),
+            &mut ObservationFake::terminal(),
             100,
             60_100,
             "request_nonce_04",

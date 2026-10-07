@@ -2929,6 +2929,10 @@ mod tests {
         ] {
             assert!(runtime.contains(property), "Runtime 缺少 {property}");
         }
+        assert!(
+            runtime.contains("ConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch"),
+            "latch 存在时 Runtime 不得再生成进程"
+        );
     }
 
     #[test]
@@ -2953,6 +2957,11 @@ mod tests {
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
+        assert!(recorder.contains("RefuseManualStart=yes"));
+        assert!(
+            recorder.contains("/etc/systemd/system/enoki-observation-runtime-failure.service"),
+            "recorder 必须能读到自己的固定 unit 内容"
+        );
         assert!(!recorder.contains("Environment="));
         assert!(!recorder.contains("StandardInput=socket"));
     }
