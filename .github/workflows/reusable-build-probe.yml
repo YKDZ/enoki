@@ -76,6 +76,10 @@ jobs:
         with:
           node-version-file: package.json
 
+      - name: Set up the release tool runtime
+        if: inputs.package-artifacts
+        uses: ./.github/actions/setup-release-tool
+
       - name: Cache Rust build
         if: ${{ !inputs.verify-reproducible }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

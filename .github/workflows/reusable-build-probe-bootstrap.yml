@@ -51,6 +51,11 @@ jobs:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
         run: test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
 
+      - name: Set up Node.js for artifact packaging
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: package.json
+
       - name: Require the public Probe Distribution Trust Root
         id: trust-root
         env:

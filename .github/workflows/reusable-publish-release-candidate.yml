@@ -81,6 +81,11 @@ jobs:
         with:
           node-version-file: trusted-tool/package.json
 
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
+
       - name: Install the content-preserving registry transport
         run: sudo apt-get update && sudo apt-get install --yes skopeo
 
