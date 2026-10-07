@@ -6854,4 +6854,131 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
+
+    fn fresh_parents_ready(root: &Path) {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(root.join(parent)).unwrap();
+        }
+        write_bootstrap_roles(root);
+    }
+
+    fn run_fresh_install(
+        root: &Path,
+        component: &mut File,
+        accounts: &mut Accounts,
+        systemd: &mut Systemd,
+    ) -> Result<(), InstallError> {
+        activate_layout_without_roles_for_test(
+            component,
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(root),
+            accounts,
+            systemd,
+        )
+    }
+
+    #[test]
+    fn fresh_install_retires_a_proven_empty_ordinary_state_shell_before_the_new_journal() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let state = root.join("var/lib/enoki-probe");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        run_fresh_install(root, &mut component, &mut accounts, &mut systemd).unwrap();
+
+        let config = fs::read_to_string(state.join("identity/probe-bootstrap.toml")).unwrap();
+        assert!(config.contains("hub_url = \"https://hub.example\""));
+        assert_eq!(fs::metadata(&state).unwrap().mode() & 0o777, 0o750);
+        assert!(!fs::symlink_metadata(&state).unwrap().file_type().is_symlink());
+        assert_eq!(accounts.calls, ["absent", "create"]);
+        assert_eq!(
+            systemd.calls,
+            ["absent", "reload", "enable", "start", "ready"]
+        );
+    }
+
+    #[test]
+    fn fresh_install_retires_a_proven_empty_canonical_state_shell_before_the_new_journal() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let state = root.join("var/lib/enoki-probe");
+        let private_root = root.join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private_root).unwrap();
+        fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750)).unwrap();
+        std::os::unix::fs::symlink("private/enoki-probe", &state).unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        run_fresh_install(root, &mut component, &mut accounts, &mut systemd).unwrap();
+
+        let config = fs::read_to_string(state.join("identity/probe-bootstrap.toml")).unwrap();
+        assert!(config.contains("hub_url = \"https://hub.example\""));
+        assert!(!fs::symlink_metadata(&state).unwrap().file_type().is_symlink());
+        assert!(!private_root.exists(), "空 private 壳在 journal 前退休");
+    }
+
+    #[test]
+    fn fresh_install_refuses_a_non_empty_state_shell_without_touching_the_data() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let state = root.join("var/lib/enoki-probe");
+        fs::create_dir_all(state.join("audit")).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(state.join("audit/evidence.json"), "install data").unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            run_fresh_install(root, &mut component, &mut accounts, &mut systemd),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(
+            state.join("audit/evidence.json").exists(),
+            "非空旧数据不被新安装接管或删除"
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[test]
+    fn fresh_install_does_not_accept_private_state_data_behind_an_absent_public_root() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let private_root = root.join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private_root).unwrap();
+        fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(private_root.join("payload"), "install data").unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            run_fresh_install(root, &mut component, &mut accounts, &mut systemd),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(
+            private_root.join("payload").exists(),
+            "public absent 不掩盖 private 数据"
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
 }

@@ -13,6 +13,7 @@ mod filesystem;
 mod installed_layout;
 mod replacement_finalize;
 mod replacement_registration;
+mod state_root;
 mod systemd;
 mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
@@ -971,6 +972,28 @@ fn activate_verified_install_layout(
     )
 }
 
+/// fresh 没有旧内容删除授权：只接受已重新证明为空的固定 state 壳，在新 journal 之前
+/// 退壳，再继续原严格 preflight 与普通创建。非空旧数据或不可信形态一律拒绝且不接管。
+fn retire_proven_empty_state_shell(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    let Some(state_root) =
+        ProbeStateRoot::resolve(&paths.state()).map_err(state_root_admission_error)?
+    else {
+        return Ok(());
+    };
+    state_root
+        .remove_empty_shell()
+        .map_err(state_root_admission_error)
+}
+
+fn state_root_admission_error(error: ProbeStateRootError) -> InstallError {
+    match error {
+        ProbeStateRootError::Untrusted | ProbeStateRootError::HoldsData => {
+            InstallError::ExistingResidue
+        }
+        ProbeStateRootError::Io(_) => InstallError::Io,
+    }
+}
+
 fn verify_fresh_install_inputs(
     component: &mut File,
     observation_components: Option<&mut (&mut File, &mut File, &mut File, &mut File)>,
@@ -1038,6 +1061,7 @@ fn activate_verified_fresh_install(
     let is_committed_resume = resumed_journal.is_some();
     if !is_committed_resume {
         preflight_parent_chains(paths)?;
+        retire_proven_empty_state_shell(paths)?;
         preflight_files(paths)?;
         preflight_fixed_metadata_directory(&paths.etc_enoki())?;
         if bootstrap_components.is_some() {
@@ -2012,6 +2036,7 @@ use account::create_static_service_identity_with_commands;
 #[cfg(feature = "acquirer")]
 pub use compatible_upgrade::run_compatible_upgrade;
 use filesystem::*;
+pub use state_root::{ProbeStateRoot, ProbeStateRootError};
 pub use systemd::SystemSystemd;
 #[cfg(feature = "acquirer")]
 pub(crate) use upgrade::{

@@ -1642,3 +1642,233 @@ fn committed_resume_accepts_a_retained_shell_and_refuses_unproven_state_roots() 
     );
     assert!(systemd.calls.is_empty());
 }
+
+/// 把 fixture 的 ordinary state 根换成生产 DynamicUser 形态：public 为 exact 单链，
+/// 实际本机 state 位于固定 private 投影。
+fn project_state_root_to_canonical(root: &Path, state_dir: &Path) -> PathBuf {
+    let private_root = root.join("var/lib/private/enoki-probe");
+    fs::create_dir_all(private_root.parent().expect("private parent"))
+        .expect("private parent directory");
+    fs::rename(state_dir, &private_root).expect("project state root");
+    fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750)).expect("private mode");
+    symlink(Path::new("private/enoki-probe"), state_dir).expect("canonical public link");
+    private_root
+}
+
+fn canonical_local_uninstall_fixture(root: &Path) -> (UninstallCoordinatorFixture, PathBuf) {
+    let fixture = uninstall_coordinator_fixture(root);
+    let private_root = project_state_root_to_canonical(root, &fixture.metadata.state_dir);
+    fs::create_dir_all(private_root.join("upgrade-stages/stage")).expect("upgrade stage");
+    fs::write(
+        private_root.join("upgrade-stages/stage/payload"),
+        "install stage",
+    )
+    .expect("stage payload");
+    (fixture, private_root)
+}
+
+#[test]
+fn authorized_uninstall_clears_a_canonical_state_root_without_following_internal_links() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let (fixture, private_root) = canonical_local_uninstall_fixture(root);
+    let outside = root.join("var/lib/outside/payload");
+    fs::create_dir_all(outside.parent().expect("outside parent")).expect("outside parent");
+    fs::write(&outside, "external").expect("external payload");
+    symlink(
+        Path::new("../../outside/payload"),
+        private_root.join("evidence-link"),
+    )
+    .expect("internal link");
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+
+    assert_eq!(
+        run_uninstall_lifecycle_adapter(
+            &request,
+            &fixture.metadata,
+            &identity,
+            &fixture.metadata_path,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::succeeded()
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.metadata.state_dir).is_err(),
+        "canonical public 链随空壳一起退休"
+    );
+    assert!(!private_root.exists(), "canonical 实际数据必须清空");
+    assert!(
+        outside.exists(),
+        "根内 symlink 只 unlink 自身，不递归访问外部 target"
+    );
+    assert!(!fixture.metadata_path.exists());
+}
+
+#[test]
+fn an_unremovable_canonical_shell_still_completes_once_its_data_is_cleared() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let (fixture, private_root) = canonical_local_uninstall_fixture(root);
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    inject_state_root_removal_fault(Some(StateRootRemovalFault::ContentsCleared));
+
+    let response = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    );
+    inject_state_root_removal_fault(None);
+
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(
+        fixture.metadata.state_dir.is_symlink(),
+        "无法删除的 exact public 链可保留"
+    );
+    assert!(private_root.is_dir());
+    assert_eq!(
+        fs::read_dir(&private_root)
+            .expect("enumerate canonical shell")
+            .count(),
+        0,
+        "保留的 canonical 根必须已证明没有任何 child"
+    );
+}
+
+#[test]
+fn an_absent_public_root_does_not_mask_private_data_from_the_no_capsule_proof() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let metadata_path = root.join("etc/enoki/probe-install.toml");
+    let state_dir = root.join("var/lib/enoki-probe");
+    let binary = root.join("usr/local/bin/enoki-probe-lifecycle-companion");
+    let private_root = root.join("var/lib/private/enoki-probe");
+    fs::create_dir_all(&private_root).expect("private root");
+    fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750)).expect("private mode");
+    fs::write(private_root.join("payload"), "install data").expect("private payload");
+    fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary parent directory");
+    fs::write(&binary, "companion").expect("companion binary");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("companion mode");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+
+    assert_eq!(
+        resume_lifecycle_companion_at(
+            &metadata_path,
+            &state_dir,
+            &binary,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(
+        private_root.join("payload").exists(),
+        "public absent 不掩盖 private 数据，只读入口也不删除它"
+    );
+    assert!(systemd.calls.is_empty());
+}
+
+/// 归属未确认的 state 根不取得删除权：未知根本体与实际数据逐字节保留。两种入口都只如实
+/// 拒绝，不接管、不清理未知对象。
+#[test]
+fn an_untrusted_state_root_form_does_not_take_on_removal_authority() {
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: "https://hub.example".to_owned(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let request =
+        LifecycleRequest::local_uninstall("probe_01", &"b".repeat(64), &"c".repeat(64), "1.2.3")
+            .expect("bound local uninstall request");
+
+    // 一、可信 metadata 与 identity 均可正常读取，只有根归属不属于本安装：拒绝发生在共同
+    // state 根退休接缝，未知对象不被清理。
+    let proven_metadata = tempfile::tempdir().expect("temporary directory");
+    let root = proven_metadata.path();
+    let fixture = uninstall_coordinator_fixture(root);
+    std::os::unix::fs::chown(&fixture.metadata.state_dir, Some(1000), Some(1000))
+        .expect("relinquish root");
+    fs::write(
+        fixture.metadata.state_dir.join("unknown-payload"),
+        "unknown data",
+    )
+    .expect("unknown payload");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    assert_eq!(
+        run_uninstall_lifecycle_adapter(
+            &request,
+            &fixture.metadata,
+            &identity,
+            &fixture.metadata_path,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::failed("probe_uninstall_state_residue")
+    );
+    assert_eq!(
+        fs::read(fixture.metadata.state_dir.join("unknown-payload")).expect("unknown payload"),
+        b"unknown data",
+        "归属未确认时不删除未知对象"
+    );
+    assert!(fixture.metadata.state_dir.is_dir(), "未知根本体不被退休");
+
+    // 二、public 根是指向未知目标的近似链：可信 identity 读端先一步拒绝，因此没有任何退休
+    // 动作发生，链与其外部数据完整保留。
+    let unresolvable = tempfile::tempdir().expect("temporary directory");
+    let root = unresolvable.path();
+    let fixture = uninstall_coordinator_fixture(root);
+    let private_root = root.join("var/lib/private/enoki-probe");
+    fs::create_dir_all(&private_root).expect("private root");
+    fs::write(private_root.join("payload"), "install data").expect("private payload");
+    fs::remove_dir_all(&fixture.metadata.state_dir).expect("remove ordinary root");
+    symlink(
+        Path::new("../../private/enoki-probe"),
+        &fixture.metadata.state_dir,
+    )
+    .expect("approximate target link");
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    assert_eq!(
+        run_uninstall_lifecycle_adapter(
+            &request,
+            &fixture.metadata,
+            &identity,
+            &fixture.metadata_path,
+            &mut transport,
+            &mut systemd
+        ),
+        LifecycleResponse::failed("probe_uninstall_failed")
+    );
+    assert!(
+        fixture.metadata.state_dir.is_symlink(),
+        "近似 target 的链不取得删除权"
+    );
+    assert!(
+        private_root.join("payload").exists(),
+        "形态未确认时不删除未知对象"
+    );
+    assert!(
+        fixture.metadata_path.exists(),
+        "更早的可信读端拒绝时尚未退休任何必要资源"
+    );
+}

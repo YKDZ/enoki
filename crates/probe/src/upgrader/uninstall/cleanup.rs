@@ -9,8 +9,9 @@ use crate::upgrader::{
     is_lifecycle_companion_service, observation_services, preflight_rooted_path,
     read_trusted_probe_install_metadata_read_only, read_trusted_probe_install_preflight,
     rebase_trusted_install_metadata_paths, remove_empty_parent_dir, remove_path_if_exists,
-    verify_path_absent,
+    uninstall_cleanup_failure, verify_path_absent,
 };
+use enoki_probe_bootstrap::install::{ProbeStateRoot, ProbeStateRootError};
 use enoki_probe_bootstrap::replacement::{
     ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
     commit_and_cleanup_replacement,
@@ -578,56 +579,74 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
     verify_uninstall_residue_absent(plan, systemd)
 }
 
-/// 尽力退休可信 state 根。只有删除失败且内容已清空、只剩本安装的 root 拥有空根时，
-/// 才按 ADR-0098 保留无害空壳；否则如实上抛原始删除错误，不吞掉实际数据失败。
+/// 尽力退休可信 state 根。先清空本安装的实际 state 内容，再尽力删除壳；只有内容确已清空、
+/// 剩余对象仍是已证明无害的空壳时才按 ADR-0098 容许保留，否则如实上抛主错误，不吞掉数据失败。
 fn retire_uninstall_state_root(path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    let removal_error = match remove_state_root(path) {
+    let Some(state_root) =
+        ProbeStateRoot::resolve(path).map_err(|error| state_root_removal_error(path, error))?
+    else {
+        return Ok(());
+    };
+    let removal_error = match remove_state_root(path, &state_root) {
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    if state_root_is_retired(path)? {
-        Ok(())
-    } else {
-        Err(removal_error)
+    // 无法证明剩余壳无害时保持未完成，并如实上抛首次删除错误，不用次要观测吞掉主错误。
+    match state_root_is_retired(path) {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(removal_error),
     }
 }
 
-fn remove_state_root(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+fn remove_state_root(
+    path: &Path,
+    state_root: &ProbeStateRoot,
+) -> Result<(), ProbeUpgraderRunError> {
     #[cfg(test)]
     if let Some(fault) = STATE_ROOT_REMOVAL_FAULT.with(Cell::get) {
         if matches!(fault, StateRootRemovalFault::ContentsCleared) {
-            clear_state_root_contents(path)?;
+            state_root
+                .clear_authorized_contents()
+                .map_err(|error| state_root_removal_error(path, error))?;
         }
         return Err(ProbeUpgraderRunError::Io(
             std::io::Error::from_raw_os_error(libc::EPERM),
         ));
     }
-    remove_path_if_exists(path)
+    state_root
+        .clear_authorized_contents()
+        .map_err(|error| state_root_removal_error(path, error))?;
+    state_root
+        .remove_empty_shell()
+        .map_err(|error| state_root_removal_error(path, error))
 }
 
-/// state 根已退休：根不存在，或已证明是不跟随链接、root 拥有且枚举后没有任何 child 的空目录。
-/// 任何 child（含在用锁文件）或不可确认的归属与形态都不算退休。
+/// state 根已退休：两个固定投影均不存在，或已证明是不跟随链接且枚举后没有任何 child 的空壳。
+/// 任何 child（含在用锁文件）、private 残余数据或不可确认的归属与形态都不算退休。
 pub(super) fn state_root_is_retired(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
-    let entry = match fs::symlink_metadata(path) {
-        Ok(entry) => entry,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-        Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
-    };
-    if entry.file_type().is_symlink() || !entry.is_dir() || entry.uid() != 0 {
-        return Ok(false);
+    match ProbeStateRoot::resolve(path) {
+        Ok(None) => Ok(true),
+        Ok(Some(state_root)) => match state_root.is_proven_empty() {
+            Ok(empty) => Ok(empty),
+            Err(ProbeStateRootError::Io(error)) => Err(ProbeUpgraderRunError::Io(error)),
+            Err(ProbeStateRootError::Untrusted | ProbeStateRootError::HoldsData) => Ok(false),
+        },
+        Err(ProbeStateRootError::Io(error)) => Err(ProbeUpgraderRunError::Io(error)),
+        Err(ProbeStateRootError::Untrusted | ProbeStateRootError::HoldsData) => Ok(false),
     }
-    fs::read_dir(path)
-        .map_err(ProbeUpgraderRunError::Io)
-        .map(|mut children| children.next().is_none())
 }
 
-#[cfg(test)]
-fn clear_state_root_contents(path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
-        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
-        remove_path_if_exists(&entry.path())?;
+fn state_root_removal_error(path: &Path, error: ProbeStateRootError) -> ProbeUpgraderRunError {
+    match error {
+        ProbeStateRootError::Io(error) => ProbeUpgraderRunError::Io(error),
+        ProbeStateRootError::Untrusted | ProbeStateRootError::HoldsData => {
+            uninstall_cleanup_failure(
+                "probe_uninstall_state_residue",
+                "retiring Probe state root",
+                format!("{} is not a retired Probe state root", path.display()),
+            )
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -771,11 +790,11 @@ fn verify_state_root_retired(path: &Path) -> Result<(), ProbeUpgraderRunError> {
     if state_root_is_retired(path)? {
         return Ok(());
     }
-    verify_path_absent(
-        path,
+    Err(uninstall_cleanup_failure(
         "probe_uninstall_state_residue",
         "verifying Probe state is retired",
-    )
+        format!("{} still holds Probe state", path.display()),
+    ))
 }
 
 pub(super) fn verify_lifecycle_companion_binary_absent(
