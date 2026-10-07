@@ -288,6 +288,447 @@ function requestWithStreamBody(
   } as RequestInit & { duplex: "half" });
 }
 
+// 09 结案判据的正式领域准备：两种既有资格都只经正常入口生成独立 Repair，
+// 并由签名报告推进到 running；任何状态都不直接写数据库。
+async function createRepairClosureHarness(input: {
+  eligibility: "failed_upgrade" | "installed_bundle_failure";
+}) {
+  const nowMs = 1_725_000_010_000;
+  const installedBundleFailure =
+    input.eligibility === "installed_bundle_failure";
+  // Installed Bundle Failure 的资格版本必须同时等于主机已装概况版本与当前资产集版本。
+  const sourceVersion = installedBundleFailure ? "0.0.9" : "1.3.0";
+  const targetVersion = installedBundleFailure ? "0.1.0" : "1.4.0";
+  const failureBoot = "repair-failure-boot";
+  const closureBoot = "repair-closure-boot";
+  const database = await createTemporaryDatabase();
+  const assetDir = await mkdtemp(
+    path.join(os.tmpdir(), "enoki-repair-closure-assets-"),
+  );
+  tempRoots.push(assetDir);
+  const release = await writeSignedProbeAssetSet(assetDir, {
+    sourceVersion,
+    targetVersion,
+    transition: "compatible",
+  });
+  const app = createHubApp({
+    auth: {
+      failureDelayMs: 0,
+      ownerPassword: "correct horse battery staple",
+      sessionCookieName: "enoki_owner_session",
+    },
+    database,
+    now: () => nowMs,
+    probeApiOrigin: "https://hub.example",
+    probeAssets: {
+      assetDir,
+      trustedRootPublicKeyPem: release.rootPublicKeyPem,
+    },
+    probeOperationTokenSecret: "configured-token-signing-secret",
+  });
+  const ownerSession = await loginOwner(app);
+  const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+  const registration = await registerProbe(app, enrollmentToken);
+  const host = database.hosts.findByProbeId(registration.probeId);
+  if (!host) throw new Error("registered Probe Host is missing");
+  const installKey = deriveLifecycleAuthorityKey(
+    createHash("sha256").update(enrollmentToken).digest(),
+    "https://hub.example",
+  );
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  type HarnessProbe = { privateKeyPem: string; probeId: string };
+
+  const sendReport = (
+    fields: root.enoki.v1.IProbeReportRequest,
+    probe: HarnessProbe = registration,
+  ) =>
+    app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        probe,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({ ...fields, probeId: probe.probeId }),
+        ).finish(),
+      ),
+    );
+  const postSignedJson = async (requestPath: string, body: string) =>
+    app.request(requestPath, {
+      body,
+      headers: signedJsonProbeHeaders({
+        body,
+        pathAndQuery: `https://hub.example${requestPath}`,
+        privateKeyPem: registration.privateKeyPem,
+        probeId: registration.probeId,
+      }),
+      method: "POST",
+    });
+
+  const targetProfile = sampleHostProfileSnapshot({
+    probeAssetBundleVersion: targetVersion,
+    probeVersion: targetVersion,
+  });
+  const legacyProfile = sampleHostProfileSnapshot({
+    probeAssetBundleVersion: sourceVersion,
+    probeVersion: sourceVersion,
+  });
+  const profileSnapshot = (hostProfile: root.enoki.v1.IHostProfileSnapshot) => [
+    {
+      collectorId: "official.host-profile",
+      hostProfile,
+      snapshotHash: hashStableHostProfile(hostProfile),
+    },
+  ];
+
+  // 旧式完整 Startup：seq 1 携带完整概况与配置版本，但没有任何 Metrics 结果。
+  const startupReport = (
+    bootId: string,
+    hostProfile: root.enoki.v1.IHostProfileSnapshot = targetProfile,
+    probe?: HarnessProbe,
+  ) =>
+    sendReport(
+      {
+        bootId,
+        metrics: [],
+        probeAssetBundleVersion: hostProfile.probeAssetBundleVersion,
+        probeConfigurationVersion: "default-v1",
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: profileSnapshot(hostProfile),
+      },
+      probe ?? registration,
+    );
+
+  // 成功观测窗口：host-profile 结果 state 1，即 Produced 当前主机概况。
+  const producedReport = (bootId: string, sequence: number) =>
+    sendReport({
+      bootId,
+      metrics: [
+        {
+          collectedAtMs: nowMs,
+          collectorOutcomes: [
+            { collectorId: "official.host-profile", state: 1 },
+          ],
+          sequence,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+      snapshots: profileSnapshot(targetProfile),
+    });
+  const noDataWindowReport = (bootId: string, sequence: number) =>
+    sendReport({
+      bootId,
+      metrics: [
+        {
+          collectedAtMs: nowMs,
+          collectorOutcomes: [
+            { collectorId: "official.host-profile", state: 2 },
+          ],
+          sequence,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+    });
+  const failedWindowReport = (bootId: string, sequence: number) =>
+    sendReport({
+      bootId,
+      metrics: [
+        {
+          collectedAtMs: nowMs,
+          collectorOutcomes: [
+            {
+              collectorId: "official.host-profile",
+              failure: {
+                code: "official.host-profile.resource-unavailable",
+                phase: 2,
+              },
+              state: 3,
+            },
+          ],
+          sequence,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+    });
+  const wholeWindowFailureReport = (bootId: string, sequence: number) =>
+    sendReport({
+      bootId,
+      observationWindowFailure: {
+        reason:
+          root.enoki.v1.ObservationWindowFailureReason
+            .OBSERVATION_RUNTIME_UNAVAILABLE,
+      },
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+    });
+
+  const createFailedUpgradeRepair = async () => {
+    const upgrade = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: sourceVersion,
+        hostId: host.id,
+        nowMs: nowMs - 2_000,
+        target: {
+          assetSetDigest: release.targetAssetSetDigest,
+          version: targetVersion,
+        },
+      }).operation,
+    );
+    const admitted = await postSignedJson(
+      `/api/probe/operations/${upgrade.id}/upgrade-stage/admit`,
+      JSON.stringify({
+        sourceBundleVersion: sourceVersion,
+        sourceInstallStateSha256: "a".repeat(64),
+        sourceManifestSha256: "b".repeat(64),
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetBundleVersion: targetVersion,
+        targetManifestSha256: "3".repeat(64),
+        token: issueProbeOperationToken({
+          expiresAtMs: nowMs + 10_000,
+          operation: upgrade,
+          probeId: registration.probeId,
+          secret: "configured-token-signing-secret",
+        }),
+        verifiedStageSha256: "c".repeat(64),
+      }),
+    );
+    expect(admitted.status).toBe(200);
+    const authority = (
+      (await admitted.json()) as { authority: LifecycleUpgradeAuthority }
+    ).authority;
+    const eligibility = {
+      activatedTargets: 3,
+      failedAuthoritySha256: createHash("sha256")
+        .update(canonicalLifecycleUpgradeAuthority(authority))
+        .digest("hex"),
+      failedOperationId: String(upgrade.id),
+      finalizedTargets: 0,
+      hostId: String(host.id),
+      hubOrigin: "https://hub.example",
+      journalPhase: "repair-required" as const,
+      journalSha256: "e".repeat(64),
+      probeId: registration.probeId,
+      schemaVersion: 1 as const,
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetBundleVersion: targetVersion,
+      targetManifestSha256: "3".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+    };
+    const canonicalEligibility = canonicalProbeRepairEligibility(
+      eligibility,
+    ) as Buffer;
+    const failureReport = await sendReport({
+      bootId: failureBoot,
+      operationStatuses: [
+        {
+          failed: {
+            errorCode: "lifecycle.upgrade_repair_required",
+            message: "root status",
+            repairEligibilityEvidence: canonicalEligibility.toString("utf8"),
+            repairEligibilitySignature: signProbeRepairEligibility(
+              canonicalEligibility,
+              installKey,
+            ),
+          },
+          operationId: String(upgrade.id),
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: 1,
+      sequenceStart: 1,
+    });
+    expect(failureReport.status).toBe(200);
+    const evidence = {
+      ...eligibility,
+      expiresAtMs: nowMs + 60_000,
+      issuedAtMs: nowMs,
+      requestNonce: "closure-harness-eligibility-nonce",
+    };
+    const authorized = await app.request(
+      `/api/probe/operations/${upgrade.id}/repair-authorize`,
+      {
+        body: JSON.stringify({
+          evidence,
+          evidenceSignature: signProbeRepairEvidence(
+            canonicalProbeRepairEvidence(evidence) as Buffer,
+            installKey,
+          ),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(authorized.status).toBe(200);
+    return {
+      failedEligibilityJson: canonicalEligibility.toString("utf8"),
+      failedOperationId: Number(upgrade.id),
+      failureGeneration: null as string | null,
+      repairId: Number(
+        (
+          (await authorized.json()) as {
+            authority: { repairOperationId: string };
+          }
+        ).authority.repairOperationId,
+      ),
+    };
+  };
+  const createInstalledBundleFailureRepair = async () => {
+    const evidence = {
+      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+      bundleVersion: targetVersion,
+      expiresAtMs: nowMs + 60_000,
+      generation: "a".repeat(64),
+      hostId: String(host.id),
+      hubOrigin: "https://hub.example",
+      identityReceiptSha256: "c".repeat(64),
+      installStateSha256: "d".repeat(64),
+      issuedAtMs: nowMs,
+      kind: "installed_bundle_failure" as const,
+      manifestSha256: release.targetBundles[0]!.bundleManifestSha256,
+      probeId: registration.probeId,
+      requestNonce: "closure-harness-installed-nonce",
+      schemaVersion: 1 as const,
+      unit: "enoki-observation-runtime.service" as const,
+      unitSha256: "b".repeat(64),
+    };
+    const authorized = await app.request(
+      `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`,
+      {
+        body: JSON.stringify({
+          evidence,
+          evidenceSignature: signInstalledBundleFailureEvidence(
+            canonicalInstalledBundleFailureEvidence(evidence) as Buffer,
+            installKey,
+          ),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      },
+    );
+    expect(authorized.status).toBe(200);
+    return {
+      failedEligibilityJson: null as string | null,
+      failedOperationId: null as number | null,
+      failureGeneration: evidence.generation,
+      repairId: Number(
+        (
+          (await authorized.json()) as {
+            authority: { repairOperationId: string };
+          }
+        ).authority.repairOperationId,
+      ),
+    };
+  };
+
+  const created = installedBundleFailure
+    ? await createInstalledBundleFailureRepair()
+    : await createFailedUpgradeRepair();
+  const {
+    failedEligibilityJson,
+    failedOperationId,
+    failureGeneration,
+    repairId,
+  } = created;
+
+  // 正常领域入口只生成一条独立的 accepted Repair；两种资格都在这里交出操作行。
+  const acceptedOperation = database.probeOperations.findById(repairId)!;
+  expect(acceptedOperation).toEqual(
+    expect.objectContaining({
+      hostId: host.id,
+      kind: "probe_repair",
+      repairEligibilityKind: input.eligibility,
+      state: "accepted",
+    }),
+  );
+
+  const startReport = await sendReport({
+    bootId: failureBoot,
+    operationAcknowledgements: [{ operationId: String(repairId) }],
+    operationStatuses: [{ operationId: String(repairId), running: {} }],
+    probeConfigurationVersion: "default-v1",
+    sequenceEnd: 2,
+    sequenceStart: 2,
+  });
+  expect(startReport.status).toBe(200);
+
+  const repairRow = () => database.probeOperations.findById(repairId)!;
+  const repairState = () => repairRow().state;
+  const repairCount = () =>
+    (
+      database.sqlite
+        .prepare(
+          "select count(*) as count from probe_operations where kind = 'probe_repair'",
+        )
+        .get() as { count: number }
+    ).count;
+  const observationCount = (bootId: string, sequence: number) =>
+    (
+      database.sqlite
+        .prepare(
+          "select count(*) as count from report_observations where probe_id = ? and boot_id = ? and sequence = ?",
+        )
+        .get(registration.probeId, bootId, sequence) as { count: number }
+    ).count;
+  const hostRow = () =>
+    database.hosts.findByProbeId(registration.probeId) ?? null;
+  const claimSuccessViaStatus = () =>
+    postSignedJson(
+      `/api/probe/operations/${repairId}/status`,
+      JSON.stringify({
+        status: "succeeded",
+        token: issueProbeOperationToken({
+          expiresAtMs: nowMs + 10_000,
+          operation: repairRow(),
+          probeId: registration.probeId,
+          secret: "configured-token-signing-secret",
+        }),
+      }),
+    );
+  const registerSecondProbe = async () =>
+    registerProbe(app, await createEnrollmentToken(app, ownerSession));
+
+  return {
+    app,
+    acceptedOperation,
+    claimSuccessViaStatus,
+    closureBoot,
+    created,
+    database,
+    failedEligibilityJson,
+    failedOperationId,
+    failureBoot,
+    failureGeneration,
+    failedWindowReport,
+    host,
+    hostRow,
+    legacyProfile,
+    noDataWindowReport,
+    nowMs,
+    observationCount,
+    ownerSession,
+    producedReport,
+    registerSecondProbe,
+    registration,
+    repairCount,
+    repairId,
+    repairRow,
+    repairState,
+    sendReport,
+    startupReport,
+    targetProfile,
+    targetVersion,
+    wholeWindowFailureReport,
+  };
+}
+
 describe("Probe report API", () => {
   afterEach(async () => {
     await Promise.all(
@@ -4819,6 +5260,515 @@ describe("Probe report API", () => {
     );
 
     database.close();
+  });
+
+  it("closes a Failed Upgrade Repair only from a Produced current Host Profile in the retained Boot", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-repair-closure-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+      probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) throw new Error("registered Probe Host is missing");
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const sendReport = (fields: root.enoki.v1.IProbeReportRequest) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "https://hub.example/api/probe/report",
+          ReportRequest.encode(ReportRequest.create(fields)).finish(),
+        ),
+      );
+    const postSignedJson = async (requestPath: string, body: string) =>
+      app.request(requestPath, {
+        body,
+        headers: signedJsonProbeHeaders({
+          body,
+          pathAndQuery: `https://hub.example${requestPath}`,
+          privateKeyPem: registration.privateKeyPem,
+          probeId: registration.probeId,
+        }),
+        method: "POST",
+      });
+
+    const upgrade = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "1.3.0",
+        hostId: host.id,
+        nowMs: nowMs - 2_000,
+        target: {
+          assetSetDigest: release.targetAssetSetDigest,
+          version: "1.4.0",
+        },
+      }).operation,
+    );
+
+    const admitPath = `/api/probe/operations/${upgrade.id}/upgrade-stage/admit`;
+    const admitted = await postSignedJson(
+      admitPath,
+      JSON.stringify({
+        sourceBundleVersion: "1.3.0",
+        sourceInstallStateSha256: "a".repeat(64),
+        sourceManifestSha256: "b".repeat(64),
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetBundleVersion: "1.4.0",
+        targetManifestSha256: "3".repeat(64),
+        token: issueProbeOperationToken({
+          expiresAtMs: nowMs + 10_000,
+          operation: upgrade,
+          probeId: registration.probeId,
+          secret: "configured-token-signing-secret",
+        }),
+        verifiedStageSha256: "c".repeat(64),
+      }),
+    );
+    expect(admitted.status).toBe(200);
+    const admittedAuthority = (
+      (await admitted.json()) as { authority: LifecycleUpgradeAuthority }
+    ).authority;
+    const failedAuthoritySha256 = createHash("sha256")
+      .update(canonicalLifecycleUpgradeAuthority(admittedAuthority))
+      .digest("hex");
+
+    const evidence = {
+      activatedTargets: 3,
+      expiresAtMs: nowMs + 60_000,
+      failedAuthoritySha256,
+      failedOperationId: String(upgrade.id),
+      finalizedTargets: 0,
+      hostId: String(host.id),
+      hubOrigin: "https://hub.example",
+      issuedAtMs: nowMs,
+      journalPhase: "repair-required" as const,
+      journalSha256: "e".repeat(64),
+      probeId: registration.probeId,
+      requestNonce: "closure-request-nonce-01",
+      schemaVersion: 1 as const,
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetBundleVersion: "1.4.0",
+      targetManifestSha256: "3".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+    };
+    const canonicalEligibility = canonicalProbeRepairEligibility({
+      activatedTargets: evidence.activatedTargets,
+      failedAuthoritySha256: evidence.failedAuthoritySha256,
+      failedOperationId: evidence.failedOperationId,
+      finalizedTargets: evidence.finalizedTargets,
+      hostId: evidence.hostId,
+      hubOrigin: evidence.hubOrigin,
+      journalPhase: evidence.journalPhase,
+      journalSha256: evidence.journalSha256,
+      probeId: evidence.probeId,
+      schemaVersion: 1,
+      targetAssetSetDigest: evidence.targetAssetSetDigest,
+      targetBundleVersion: evidence.targetBundleVersion,
+      targetManifestSha256: evidence.targetManifestSha256,
+      verifiedStageSha256: evidence.verifiedStageSha256,
+    });
+    const failureReport = await sendReport({
+      bootId: "repair-source-boot",
+      operationStatuses: [
+        {
+          failed: {
+            errorCode: "lifecycle.upgrade_repair_required",
+            message: "root status",
+            repairEligibilityEvidence: canonicalEligibility.toString("utf8"),
+            repairEligibilitySignature: signProbeRepairEligibility(
+              canonicalEligibility,
+              installKey,
+            ),
+          },
+          operationId: String(upgrade.id),
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: 1,
+      sequenceStart: 1,
+    });
+    expect(failureReport.status).toBe(200);
+
+    const authorizePath = `/api/probe/operations/${upgrade.id}/repair-authorize`;
+    const authorizedRepair = await app.request(authorizePath, {
+      body: JSON.stringify({
+        evidence,
+        evidenceSignature: signProbeRepairEvidence(
+          canonicalProbeRepairEvidence(evidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(authorizedRepair.status).toBe(200);
+    const repairId = Number(
+      (
+        (await authorizedRepair.json()) as {
+          authority: { repairOperationId: string };
+        }
+      ).authority.repairOperationId,
+    );
+
+    const startReport = await sendReport({
+      bootId: "repair-source-boot",
+      operationAcknowledgements: [{ operationId: String(repairId) }],
+      operationStatuses: [{ operationId: String(repairId), running: {} }],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: 2,
+      sequenceStart: 2,
+    });
+    expect(startReport.status).toBe(200);
+    expect(database.probeOperations.findById(repairId)).toEqual(
+      expect.objectContaining({
+        hostId: host.id,
+        kind: "probe_repair",
+        repairFailedOperationId: upgrade.id,
+        state: "running",
+      }),
+    );
+
+    const targetProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "1.4.0",
+      probeVersion: "1.4.0",
+    });
+    const targetProfileHash = hashStableHostProfile(targetProfile);
+
+    const bootReport = await sendReport({
+      bootId: "repair-boot",
+      metrics: [],
+      probeAssetBundleVersion: "1.4.0",
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: 1,
+      sequenceStart: 1,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile: targetProfile,
+          snapshotHash: targetProfileHash,
+        },
+      ],
+    });
+    expect(bootReport.status).toBe(200);
+    expect(database.probeOperations.findById(repairId)).toEqual(
+      expect.objectContaining({ state: "running" }),
+    );
+
+    const statusPath = `/api/probe/operations/${repairId}/status`;
+    const claimedSuccess = await postSignedJson(
+      statusPath,
+      JSON.stringify({
+        status: "succeeded",
+        token: issueProbeOperationToken({
+          expiresAtMs: nowMs + 10_000,
+          operation: database.probeOperations.findById(repairId)!,
+          probeId: registration.probeId,
+          secret: "configured-token-signing-secret",
+        }),
+      }),
+    );
+    expect(claimedSuccess.status).toBe(400);
+    expect(database.probeOperations.findById(repairId)).toEqual(
+      expect.objectContaining({ state: "running" }),
+    );
+
+    const producedReport = await sendReport({
+      bootId: "repair-boot",
+      metrics: [
+        {
+          collectedAtMs: nowMs,
+          collectorOutcomes: [
+            { collectorId: "official.host-profile", state: 1 },
+          ],
+          sequence: 2,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: 2,
+      sequenceStart: 2,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile: targetProfile,
+          snapshotHash: targetProfileHash,
+        },
+      ],
+    });
+    expect(producedReport.status).toBe(200);
+    expect(database.probeOperations.findById(repairId)).toEqual(
+      expect.objectContaining({
+        completedAtMs: nowMs,
+        state: "succeeded",
+      }),
+    );
+    expect(database.probeOperations.findById(upgrade.id!)).toEqual(
+      expect.objectContaining({
+        failureCode: "lifecycle.upgrade_repair_required",
+        repairEligibilityEvidenceJson: canonicalEligibility.toString("utf8"),
+        state: "failed",
+      }),
+    );
+
+    const detail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(detail.json()).resolves.toEqual({
+      host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+
+    database.close();
+  });
+
+  it("closes an Installed Bundle Failure Repair only from a Produced current Host Profile", async () => {
+    const harness = await createRepairClosureHarness({
+      eligibility: "installed_bundle_failure",
+    });
+    const { database, repairId } = harness;
+
+    // 正常领域入口只生成一条独立的 accepted Repair，没有伪造的失败 Upgrade。
+    expect(harness.acceptedOperation).toEqual(
+      expect.objectContaining({
+        hostId: harness.host.id,
+        kind: "probe_repair",
+        repairEligibilityKind: "installed_bundle_failure",
+        repairFailedOperationId: null,
+        repairFailureGeneration: harness.failureGeneration,
+        state: "accepted",
+      }),
+    );
+    expect(harness.repairState()).toBe("running");
+    expect(harness.repairCount()).toBe(1);
+
+    // 单 Boot 报告：同 boot、目标版本的旧式完整 Startup，但没有 Produced 概况。
+    expect((await harness.startupReport(harness.closureBoot)).status).toBe(200);
+    expect(harness.repairState()).toBe("running");
+
+    // 本机状态报告不能替代观察证据。
+    expect((await harness.claimSuccessViaStatus()).status).toBe(400);
+    expect(harness.repairState()).toBe("running");
+
+    expect((await harness.producedReport(harness.closureBoot, 2)).status).toBe(
+      200,
+    );
+    expect(database.probeOperations.findById(repairId)).toEqual(
+      expect.objectContaining({
+        completedAtMs: harness.nowMs,
+        state: "succeeded",
+      }),
+    );
+    // 两种资格共用结果合同：只结案一次，也不生成第二次 Repair。
+    expect(harness.repairCount()).toBe(1);
+    const detail = await harness.app.request(
+      `/api/web/hosts/${harness.host.id}`,
+      {
+        headers: { cookie: harness.ownerSession },
+      },
+    );
+    await expect(detail.json()).resolves.toEqual({
+      host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+
+    database.close();
+  });
+
+  it("keeps a running Repair open when identity, Boot or target version evidence does not match", async () => {
+    const harness = await createRepairClosureHarness({
+      eligibility: "failed_upgrade",
+    });
+
+    // 身份不符：另一台主机的同 boot 目标版本 Startup 报告不能关闭本机 Repair。
+    const otherProbe = await harness.registerSecondProbe();
+    expect(
+      (
+        await harness.startupReport(
+          harness.closureBoot,
+          harness.targetProfile,
+          otherProbe,
+        )
+      ).status,
+    ).toBe(200);
+    expect(harness.repairState()).toBe("running");
+
+    // Boot 不符：保留 boot 之外的一次重启没有 Produced，也不能结案。
+    expect((await harness.startupReport("repair-other-boot")).status).toBe(200);
+    expect(harness.repairState()).toBe("running");
+
+    // 目标版本不符：旧版本 Startup 仍被正常处理并保留为当前 boot 证据。
+    expect(
+      (await harness.startupReport("repair-legacy-boot", harness.legacyProfile))
+        .status,
+    ).toBe(200);
+    expect(harness.repairState()).toBe("running");
+    expect(harness.hostRow()?.probeAssetBundleVersion).toBe("1.3.0");
+
+    // 保留 boot 的无 Produced 旧式完整 Startup：这就是被复现的反证。
+    expect((await harness.startupReport(harness.closureBoot)).status).toBe(200);
+    expect(harness.repairState()).toBe("running");
+
+    // 合格的 Produced 当前概况仍按既有判据结案。
+    expect((await harness.producedReport(harness.closureBoot, 2)).status).toBe(
+      200,
+    );
+    expect(harness.repairState()).toBe("succeeded");
+
+    harness.database.close();
+  });
+
+  it("closes a Repair from a later Produced window in the same Boot after unqualified windows", async () => {
+    const harness = await createRepairClosureHarness({
+      eligibility: "failed_upgrade",
+    });
+    expect((await harness.startupReport(harness.closureBoot)).status).toBe(200);
+
+    // 首窗 No Data、失败窗与整窗失败都在同一 boot 内正常入库，但都不结案。
+    expect(
+      (await harness.noDataWindowReport(harness.closureBoot, 2)).status,
+    ).toBe(200);
+    expect(harness.repairState()).toBe("running");
+    expect(
+      (await harness.failedWindowReport(harness.closureBoot, 3)).status,
+    ).toBe(200);
+    expect(harness.repairState()).toBe("running");
+    expect(
+      (await harness.wholeWindowFailureReport(harness.closureBoot, 4)).status,
+    ).toBe(200);
+    expect(harness.repairState()).toBe("running");
+    expect(harness.observationCount(harness.closureBoot, 2)).toBe(1);
+    expect(harness.observationCount(harness.closureBoot, 3)).toBe(1);
+    expect(harness.observationCount(harness.closureBoot, 4)).toBe(1);
+
+    // 旧 Profile 不能冒充后续证据：携带旧版本的 Produced 窗口在事务中被拒绝且无副作用。
+    const impersonation = await harness.sendReport({
+      bootId: harness.closureBoot,
+      metrics: [
+        {
+          collectedAtMs: harness.nowMs,
+          collectorOutcomes: [
+            { collectorId: "official.host-profile", state: 1 },
+          ],
+          sequence: 5,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: 5,
+      sequenceStart: 5,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile: harness.legacyProfile,
+          snapshotHash: hashStableHostProfile(harness.legacyProfile),
+        },
+      ],
+    });
+    expect(impersonation.status).toBe(409);
+    expect(harness.repairState()).toBe("running");
+    expect(harness.observationCount(harness.closureBoot, 5)).toBe(0);
+
+    // 同一窗口改用真正的当前概况即结案：不要求首窗成功，也不要求 Boot ack 晚于本机 CLI。
+    expect((await harness.producedReport(harness.closureBoot, 5)).status).toBe(
+      200,
+    );
+    expect(harness.repairState()).toBe("succeeded");
+
+    harness.database.close();
+  });
+
+  it("keeps Repair closure idempotent for duplicate reports and late evidence", async () => {
+    const harness = await createRepairClosureHarness({
+      eligibility: "failed_upgrade",
+    });
+    expect((await harness.startupReport(harness.closureBoot)).status).toBe(200);
+
+    const closingReport = {
+      bootId: harness.closureBoot,
+      metrics: [
+        {
+          collectedAtMs: harness.nowMs,
+          collectorOutcomes: [
+            { collectorId: "official.host-profile", state: 1 },
+          ],
+          sequence: 2,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      sequenceEnd: 2,
+      sequenceStart: 2,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile: harness.targetProfile,
+          snapshotHash: hashStableHostProfile(harness.targetProfile),
+        },
+      ],
+    };
+    expect((await harness.sendReport(closingReport)).status).toBe(200);
+    const closed = harness.repairRow();
+    expect(closed).toEqual(
+      expect.objectContaining({
+        completedAtMs: harness.nowMs,
+        state: "succeeded",
+      }),
+    );
+
+    // 同一报告的必要重试保持幂等：不重复结案，也不留下第二条观测。
+    expect((await harness.sendReport(closingReport)).status).toBe(200);
+    expect(harness.repairRow()).toEqual(closed);
+    expect(harness.observationCount(harness.closureBoot, 2)).toBe(1);
+
+    // 迟到证据不能复活终态，也不会生成第二次 Repair。
+    expect((await harness.startupReport("repair-late-boot")).status).toBe(200);
+    const lateStatus = await harness.claimSuccessViaStatus();
+    expect(lateStatus.status).toBe(403);
+    await expect(lateStatus.json()).resolves.toEqual({
+      error: "probe_operation_token_operation_closed",
+    });
+    expect(harness.repairRow()).toEqual(closed);
+    expect(harness.repairCount()).toBe(1);
+
+    // 结案没有改写原故障资格：失败的 Upgrade 仍带着 Repair Eligibility 证据。
+    expect(
+      harness.database.probeOperations.findById(harness.failedOperationId!),
+    ).toEqual(
+      expect.objectContaining({
+        failureCode: "lifecycle.upgrade_repair_required",
+        repairEligibilityEvidenceJson: harness.failedEligibilityJson,
+        state: "failed",
+      }),
+    );
+
+    harness.database.close();
   });
 
   it("advances Host Profile freshness from validated same-hash full and compact reports", async () => {

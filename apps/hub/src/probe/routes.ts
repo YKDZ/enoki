@@ -966,6 +966,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         hostProfile: reportedHostProfile,
         nowMs: reportReceivedAtMs,
         profileReportBootId: request.bootId,
+        producedCurrentHostProfile: hasProducedHostProfile(request),
         services,
       });
 
@@ -2096,6 +2097,7 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
   } | null;
   nowMs: number;
   profileReportBootId: string;
+  producedCurrentHostProfile: boolean;
   services: ProbeRouteServices;
 }) {
   if (!input.hostProfile?.probeVersion) {
@@ -2108,6 +2110,11 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
   if (!active) {
     return;
   }
+
+  // ADR-0068/0086：Repair 只由成功观测窗口 Produced 的当前主机概况结案，
+  // 仅有 Boot 证据永远不能完成它。
+  if (active.kind === "probe_repair" && !input.producedCurrentHostProfile)
+    return;
 
   if (active.id === null) return;
   forwardTransitionsFor(input.services).reconcileAuthenticatedEvidence({
