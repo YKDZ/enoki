@@ -50,6 +50,24 @@ describe("Trust Epoch release transition", () => {
     ).rejects.toThrow("not authorized by the Probe Trust Delegation");
   });
 
+  it("refuses a migration authorization that the release identity issued itself", async () => {
+    const selfIssued = createTrustEpochMigrationAuthorization({
+      candidateVersion: "v1.2.3",
+      distribution: "enoki",
+      legacyRelease: fixture.createInput.legacyRelease,
+      rootPrivateKeyPem: fixture.createInput.releasePrivateKeyPem,
+    });
+    await expect(
+      createReleaseTransitionContract({
+        ...fixture.createInput,
+        authorizationBytes: selfIssued.bytes,
+        authorizationSignature: selfIssued.signature,
+      }),
+    ).rejects.toThrow(
+      "Trust Epoch Migration Authorization trust binding does not match",
+    );
+  });
+
   it("binds the authorized legacy baseline to one replacement-required candidate", async () => {
     const signed = await createReleaseTransitionContract(fixture.createInput);
 
