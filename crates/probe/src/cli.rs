@@ -145,3 +145,8 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
 pub fn render_probe_repair_failure(code: &str) -> String {
     format!("Probe repair failed: code={code}.\n")
 }
+
+#[must_use]
+pub fn render_probe_repair_success() -> String {
+    "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准\n".to_string()
+}

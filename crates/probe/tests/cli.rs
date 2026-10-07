@@ -3,6 +3,7 @@ use std::process::Command;
 
 use enoki_probe::cli::{
     ProbeCommand, parse_probe_command, render_probe_output, render_probe_repair_failure,
+    render_probe_repair_success,
 };
 
 #[test]
@@ -30,6 +31,14 @@ fn repair_output_describes_explicit_local_and_hub_authorization() {
     for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
         assert!(!output.contains(unsupported_guidance));
     }
+}
+
+#[test]
+fn local_repair_success_claims_only_local_completion() {
+    assert_eq!(
+        render_probe_repair_success(),
+        "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准\n",
+    );
 }
 
 #[test]

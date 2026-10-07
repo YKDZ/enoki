@@ -92,7 +92,7 @@ impl
         Self {
             root: PathBuf::from("/"),
             paths: FixedInstallPaths::production(),
-            systemd: SystemSystemd::for_live_upgrade(),
+            systemd: SystemSystemd::for_live_general_companion(),
             runner: ProcessRepairSystemdRunner,
             runtime: UnixRuntimeValidator,
             stages: ProductionStageOpener,
@@ -195,7 +195,16 @@ where
     }
 
     fn validate_temporary_runtime(&mut self) -> Result<(), Self::Error> {
-        install_runtime_repair_validation_gate(&self.context.root)?;
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .crash
+            .after(LiveRepairEffect::RuntimeGateRemoved)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        install_runtime_repair_validation_gate(&self.context.root, RuntimeValidation::Temporary)?;
         self.context
             .crash
             .after(LiveRepairEffect::TemporaryGateInstalled)?;
@@ -212,13 +221,17 @@ where
         self.context.runtime.validate(RuntimeValidation::Temporary)
     }
 
-    fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error> {
-        restore_canonical_runtime_gate(
+    fn normalize_canonical_runtime(&mut self) -> Result<(), Self::Error> {
+        install_canonical_runtime_gate(
             &self.context.root,
             &mut self.context.systemd,
             &mut self.context.runner,
             &mut self.context.crash,
-        )?;
+        )
+    }
+
+    fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error> {
+        self.normalize_canonical_runtime()?;
         self.context
             .systemd
             .start()
@@ -239,13 +252,54 @@ where
         self.context.runtime.validate(RuntimeValidation::Canonical)
     }
 
+    fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error> {
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::UnmaskRuntimeSocket)?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::StartRuntimeSocket)?;
+        self.context
+            .systemd
+            .start()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        self.context
+            .systemd
+            .wait_local_activated()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))
+    }
+
+    fn quiesce_status_published(&mut self) -> Result<(), Self::Error> {
+        mask_canonical_runtime_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .crash
+            .after(LiveRepairEffect::CanonicalGateRemoved)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))
+    }
+
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error> {
-        restore_canonical_runtime_gate(
-            &self.context.root,
-            &mut self.context.systemd,
-            &mut self.context.runner,
-            &mut self.context.crash,
-        )?;
+        mask_runtime_validation_socket(&mut self.context.runner)?;
+        remove_runtime_repair_validation_gate(&self.context.root)?;
+        self.context
+            .systemd
+            .daemon_reload()
+            .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::UnmaskRuntimeSocket)?;
+        self.context
+            .runner
+            .run(RepairSystemdAction::StartRuntimeSocket)?;
         self.context
             .systemd
             .start()
@@ -369,7 +423,7 @@ enum RepairSystemdAction {
     MaskRuntimeSocket,
     ResetRuntimeFailed,
     StartRuntimeSocket,
-    StopRuntime,
+    StopCanonicalRuntime,
     UnmaskRuntimeSocket,
 }
 
@@ -397,7 +451,11 @@ impl FixedRepairSystemdRunner for ProcessRepairSystemdRunner {
             RepairSystemdAction::StartRuntimeSocket => {
                 &["start", "enoki-observation-runtime.socket"]
             }
-            RepairSystemdAction::StopRuntime => &["stop", "enoki-observation-runtime.service"],
+            RepairSystemdAction::StopCanonicalRuntime => &[
+                "stop",
+                "enoki-observation-runtime.socket",
+                "enoki-observation-runtime.service",
+            ],
             RepairSystemdAction::UnmaskRuntimeSocket => {
                 &["unmask", "--runtime", "enoki-observation-runtime.socket"]
             }
@@ -454,18 +512,28 @@ impl RuntimeValidator for UnixRuntimeValidator {
         &mut self,
         validation: RuntimeValidation,
     ) -> Result<(), LiveInstalledBundleRepairError> {
-        crate::observation_runtime::UnixObservationRuntimeClient::production()
-            .request_finalized_window(Duration::from_secs(1), 0)
-            .map(|_| ())
-            .map_err(|_| match validation {
-                RuntimeValidation::Temporary => {
-                    contract_failure("probe_repair_runtime_validation_failed")
-                }
-                RuntimeValidation::Canonical => {
-                    contract_failure("probe_repair_canonical_runtime_validation_failed")
-                }
-            })
+        validate_runtime_window(
+            &crate::observation_runtime::UnixObservationRuntimeClient::production(),
+            validation,
+        )
     }
+}
+
+fn validate_runtime_window(
+    client: &impl crate::observation_runtime::ObservationWindowClient,
+    validation: RuntimeValidation,
+) -> Result<(), LiveInstalledBundleRepairError> {
+    client
+        .request_finalized_window(Duration::from_secs(1), 1)
+        .map(|_| ())
+        .map_err(|_| match validation {
+            RuntimeValidation::Temporary => {
+                contract_failure("probe_repair_runtime_validation_failed")
+            }
+            RuntimeValidation::Canonical => {
+                contract_failure("probe_repair_canonical_runtime_validation_failed")
+            }
+        })
 }
 
 const RUNTIME_REPAIR_RUN_DIR: &str = "/run/enoki-probe";
@@ -473,6 +541,9 @@ const RUNTIME_REPAIR_PERMIT: &str = "/run/enoki-probe/runtime-repair-permit";
 const RUNTIME_REPAIR_DROP_IN_DIR: &str = "/run/systemd/system/enoki-observation-runtime.service.d";
 const RUNTIME_REPAIR_DROP_IN: &str =
     "/run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf";
+// 验证 gate 只授权 root 修复角色读取固定别名 metadata；撤销 permit 即撤销授权。
+const VALIDATION_DROP_IN_TEMPORARY: &[u8] = b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n";
+const VALIDATION_DROP_IN_CANONICAL: &[u8] = b"[Unit]\nConditionPathExists=\nConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n";
 
 fn rooted(root: &Path, absolute: &str) -> PathBuf {
     root.join(absolute.trim_start_matches('/'))
@@ -485,8 +556,16 @@ fn mask_runtime_validation_socket(
     runner.run(RepairSystemdAction::MaskRuntimeSocket)
 }
 
+fn mask_canonical_runtime_socket(
+    runner: &mut impl FixedRepairSystemdRunner,
+) -> Result<(), LiveInstalledBundleRepairError> {
+    runner.run(RepairSystemdAction::StopCanonicalRuntime)?;
+    runner.run(RepairSystemdAction::MaskRuntimeSocket)
+}
+
 fn install_runtime_repair_validation_gate(
     root: &Path,
+    validation: RuntimeValidation,
 ) -> Result<(), LiveInstalledBundleRepairError> {
     let uid = unsafe { libc::geteuid() };
     ensure_directory(
@@ -508,9 +587,13 @@ fn install_runtime_repair_validation_gate(
         Some((uid, uid)),
     )
     .map_err(|_| contract_failure("probe_repair_validation_gate_failed"))?;
+    let drop_in: &[u8] = match validation {
+        RuntimeValidation::Temporary => VALIDATION_DROP_IN_TEMPORARY,
+        RuntimeValidation::Canonical => VALIDATION_DROP_IN_CANONICAL,
+    };
     atomic_write(
         &rooted(root, RUNTIME_REPAIR_DROP_IN),
-        b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n",
+        drop_in,
         0o600,
         Some((uid, uid)),
     )
@@ -531,15 +614,20 @@ fn remove_runtime_repair_validation_gate(
     Ok(())
 }
 
-fn restore_canonical_runtime_gate(
+fn install_canonical_runtime_gate(
     root: &Path,
     systemd: &mut impl SystemdPort,
     runner: &mut impl FixedRepairSystemdRunner,
     crash: &mut impl LiveRepairCrashHook,
 ) -> Result<(), LiveInstalledBundleRepairError> {
-    runner.run(RepairSystemdAction::StopRuntime)?;
+    runner.run(RepairSystemdAction::StopCanonicalRuntime)?;
+    runner.run(RepairSystemdAction::MaskRuntimeSocket)?;
     remove_runtime_repair_validation_gate(root)?;
     crash.after(LiveRepairEffect::CanonicalGateRemoved)?;
+    systemd
+        .daemon_reload()
+        .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
+    install_runtime_repair_validation_gate(root, RuntimeValidation::Canonical)?;
     systemd
         .daemon_reload()
         .map_err(|_| contract_failure("probe_repair_systemd_failed"))?;
@@ -716,9 +804,13 @@ mod tests {
                     state.probe_started = false;
                     state.probe_active = false;
                     state.socket_started = false;
+                    state.runtime_stopped = true;
                 }
                 RepairSystemdAction::MaskRuntimeSocket => {
-                    assert!(state.services_stopped);
+                    assert!(
+                        state.services_stopped || state.runtime_stopped,
+                        "Runtime socket 只能在其服务已先停止后被 mask"
+                    );
                     state.socket_masked = true;
                     state.socket_started = false;
                 }
@@ -730,7 +822,7 @@ mod tests {
                     state.socket_started = true;
                     state.runtime_stopped = false;
                 }
-                RepairSystemdAction::StopRuntime => {
+                RepairSystemdAction::StopCanonicalRuntime => {
                     state.runtime_stopped = true;
                     state.socket_started = false;
                 }
@@ -745,6 +837,7 @@ mod tests {
     #[derive(Clone)]
     struct TestRuntime {
         transcript: Rc<RefCell<Vec<RuntimeValidation>>>,
+        fail_on: Rc<RefCell<Option<RuntimeValidation>>>,
         fault: SharedFault,
         state: SharedSystemState,
     }
@@ -755,19 +848,35 @@ mod tests {
             validation: RuntimeValidation,
         ) -> Result<(), LiveInstalledBundleRepairError> {
             self.transcript.borrow_mut().push(validation);
-            let mut state = self.state.borrow_mut();
-            assert!(
-                state.socket_started,
-                "Runtime validation requires its socket"
-            );
-            match validation {
-                RuntimeValidation::Temporary => state.temporary_runtime_healthy = true,
-                RuntimeValidation::Canonical => {
+            {
+                let state = self.state.borrow();
+                assert!(
+                    state.socket_started,
+                    "Runtime validation requires its socket"
+                );
+                if validation == RuntimeValidation::Canonical {
                     assert!(state.probe_active);
-                    state.canonical_runtime_healthy = true;
                 }
             }
-            drop(state);
+            if *self.fail_on.borrow() == Some(validation) {
+                return Err(match validation {
+                    RuntimeValidation::Temporary => {
+                        contract_failure("probe_repair_runtime_validation_failed")
+                    }
+                    RuntimeValidation::Canonical => {
+                        contract_failure("probe_repair_canonical_runtime_validation_failed")
+                    }
+                });
+            }
+            {
+                let mut state = self.state.borrow_mut();
+                match validation {
+                    RuntimeValidation::Temporary => state.temporary_runtime_healthy = true,
+                    RuntimeValidation::Canonical => state.canonical_runtime_healthy = true,
+                }
+                drop(state);
+            }
+            // 验证窗口只有完整成功才可观测；崩溃注入发生在效果完成之后。
             self.fault
                 .borrow_mut()
                 .effect(FaultEvent::Runtime(validation));
@@ -918,6 +1027,7 @@ mod tests {
                 },
                 runtime: TestRuntime {
                     transcript: Rc::new(RefCell::new(Vec::new())),
+                    fail_on: Rc::new(RefCell::new(None)),
                     fault: fault.clone(),
                     state: state.clone(),
                 },
@@ -1038,7 +1148,7 @@ mod tests {
                 RepairSystemdAction::MaskRuntimeSocket => assert!(state.socket_masked),
                 RepairSystemdAction::ResetRuntimeFailed => assert!(state.probe_active),
                 RepairSystemdAction::StartRuntimeSocket => assert!(state.socket_started),
-                RepairSystemdAction::StopRuntime => {
+                RepairSystemdAction::StopCanonicalRuntime => {
                     assert!(state.runtime_stopped);
                     assert!(!state.socket_started);
                 }
@@ -1054,21 +1164,30 @@ mod tests {
         }
     }
 
-    fn fixed_live_effect_order() -> [FaultEvent; 23] {
+    fn fixed_live_effect_order() -> [FaultEvent; 40] {
         [
+            // restore_bundle：先停旧 Runtime 并撤销任何遗留验证 gate。
             FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
             FaultEvent::SystemdReload,
             FaultEvent::SystemdStop,
             FaultEvent::SystemdReload,
+            // temporary 验证：重建同 intent 的 permit-only shape。
+            FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
+            FaultEvent::SystemdReload,
             FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled),
             FaultEvent::SystemdReload,
             FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
             FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
             FaultEvent::Runtime(RuntimeValidation::Temporary),
-            FaultEvent::Runner(RepairSystemdAction::StopRuntime),
+            // canonical-validation shape：!latch + permit，仅绕过尚未退休的 J。
+            FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved),
+            FaultEvent::SystemdReload,
             FaultEvent::SystemdReload,
             FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
             FaultEvent::ProbeStart,
@@ -1076,8 +1195,20 @@ mod tests {
             FaultEvent::Runner(RepairSystemdAction::ResetRuntimeFailed),
             FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
             FaultEvent::Runtime(RuntimeValidation::Canonical),
-            FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
+            // 退休顺序：停 validation Runtime/socket -> 撤全 gate -> stage -> J -> 最终普通探针。
+            FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved),
+            FaultEvent::SystemdReload,
             FaultEvent::StageRetirement,
+            FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
+            FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+            FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+            FaultEvent::SystemdReload,
+            FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
+            FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
+            FaultEvent::ProbeStart,
+            FaultEvent::ProbeWait,
             FaultEvent::Gate(LiveRepairEffect::IntentRetired),
         ]
     }
@@ -1101,9 +1232,14 @@ mod tests {
                 .chain(&baseline[5..])
                 .copied()
                 .collect(),
-            6..=10 => baseline[6..].to_vec(),
-            11..=16 => baseline[11..].to_vec(),
-            17..=19 => baseline[17..].to_vec(),
+            6..=14 => baseline[6..].to_vec(),
+            15..=22 => baseline[15..].to_vec(),
+            23..=25 => baseline[15..=20]
+                .iter()
+                .chain(&baseline[23..])
+                .copied()
+                .collect(),
+            26..=38 => baseline[26..].to_vec(),
             _ => unreachable!(),
         };
         let expected = baseline[..=cut]
@@ -1167,7 +1303,7 @@ mod tests {
                 InstalledBundleRepairCrashPoint::Reload
                 | InstalledBundleRepairCrashPoint::Cleanup(_)
                 | InstalledBundleRepairCrashPoint::Complete => 6,
-                InstalledBundleRepairCrashPoint::JournalCleanup => 21,
+                InstalledBundleRepairCrashPoint::JournalCleanup => 32,
             };
             assert_eq!(
                 transcript,
@@ -1232,10 +1368,20 @@ mod tests {
             (FaultEvent::SystemdStop, 1),
             (FaultEvent::SystemdReload, 2),
             (
+                FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+                2,
+            ),
+            (
+                FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+                2,
+            ),
+            (FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved), 2),
+            (FaultEvent::SystemdReload, 3),
+            (
                 FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled),
                 1,
             ),
-            (FaultEvent::SystemdReload, 3),
+            (FaultEvent::SystemdReload, 4),
             (
                 FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
                 1,
@@ -1245,9 +1391,17 @@ mod tests {
                 1,
             ),
             (FaultEvent::Runtime(RuntimeValidation::Temporary), 1),
-            (FaultEvent::Runner(RepairSystemdAction::StopRuntime), 1),
+            (
+                FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+                1,
+            ),
+            (
+                FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+                3,
+            ),
             (FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved), 1),
-            (FaultEvent::SystemdReload, 4),
+            (FaultEvent::SystemdReload, 5),
+            (FaultEvent::SystemdReload, 6),
             (
                 FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
                 2,
@@ -1263,6 +1417,40 @@ mod tests {
                 2,
             ),
             (FaultEvent::Runtime(RuntimeValidation::Canonical), 1),
+            (
+                FaultEvent::Runner(RepairSystemdAction::StopCanonicalRuntime),
+                2,
+            ),
+            (
+                FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+                4,
+            ),
+            (FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved), 2),
+            (FaultEvent::SystemdReload, 7),
+            (FaultEvent::StageRetirement, 1),
+            (
+                FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
+                1,
+            ),
+            (
+                FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+                3,
+            ),
+            (
+                FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+                5,
+            ),
+            (FaultEvent::SystemdReload, 8),
+            (
+                FaultEvent::Runner(RepairSystemdAction::UnmaskRuntimeSocket),
+                3,
+            ),
+            (
+                FaultEvent::Runner(RepairSystemdAction::StartRuntimeSocket),
+                3,
+            ),
+            (FaultEvent::ProbeStart, 2),
+            (FaultEvent::ProbeWait, 2),
         ];
         for fault in faults {
             let fixture = LiveFixture::with_fault(Some(fault));
@@ -1479,5 +1667,465 @@ mod tests {
         );
         assert_eq!(fixture.fault.borrow().transcript, fixed_live_effect_order());
         assert_converged(&fixture, &identity_before);
+    }
+
+    fn identity_of(fixture: &LiveFixture) -> Vec<u8> {
+        fs::read(
+            fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+        )
+        .unwrap()
+    }
+
+    fn drive_until_crash(fixture: &LiveFixture) {
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err(),
+            "effect-after 切点必须让进程突然消失而不是返回普通错误"
+        );
+    }
+
+    #[test]
+    fn a_stale_validation_gate_is_normalized_before_the_temporary_shape_is_rebuilt() {
+        let fixture = LiveFixture::new();
+        let identity_before = identity_of(&fixture);
+        install_runtime_repair_validation_gate(fixture.root.path(), RuntimeValidation::Canonical)
+            .unwrap();
+
+        let outcome =
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
+
+        assert_eq!(outcome.probe_id, "probe_01");
+        assert_eq!(
+            fixture.fault.borrow().transcript[6..11].to_vec(),
+            [
+                FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
+                FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
+                FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
+                FaultEvent::SystemdReload,
+                FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled),
+            ],
+            "临时验证前必须先撤销漂移的旧 gate，再按同一 intent 重建 temporary shape"
+        );
+        assert_eq!(
+            fixture.fault.borrow().transcript,
+            fixed_live_effect_order().to_vec()
+        );
+        assert_converged(&fixture, &identity_before);
+    }
+
+    #[test]
+    fn forward_only_resume_repairs_a_drifted_gate_before_the_canonical_window() {
+        let fault = (
+            FaultEvent::Runner(RepairSystemdAction::ResetRuntimeFailed),
+            1,
+        );
+        let fixture = LiveFixture::with_fault(Some(fault));
+        let identity_before = identity_of(&fixture);
+        drive_until_crash(&fixture);
+
+        // 已持久化到 ProbeActive 后，验证 gate 漂移到缺少 !latch 负条件的 temporary shape。
+        install_runtime_repair_validation_gate(fixture.root.path(), RuntimeValidation::Temporary)
+            .unwrap();
+        assert_eq!(
+            fs::read(rooted(fixture.root.path(), RUNTIME_REPAIR_DROP_IN)).unwrap(),
+            VALIDATION_DROP_IN_TEMPORARY
+        );
+
+        let outcome =
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
+
+        assert_eq!(outcome.probe_id, "probe_01");
+        assert_converged(&fixture, &identity_before);
+        assert_exact_crash_restart_transcript(&fixture, fault);
+    }
+
+    struct InertWindowSleeper;
+
+    impl crate::observation_runtime::ObservationRuntimeSleeper for InertWindowSleeper {
+        fn sleep(&mut self, _duration: Duration) {}
+    }
+
+    struct ValidationWindowProvider;
+
+    impl crate::observation_runtime::SystemStateProvider for ValidationWindowProvider {
+        fn pull_system_state(
+            &mut self,
+            _request: crate::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            crate::observation_runtime::SystemStateResourceResult,
+            crate::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            use crate::observation_runtime::SystemStateResourceAcquisitionFailure::Malformed;
+
+            let counters = crate::metrics::parse_linux_proc_stat_cpu_counters(
+                "cpu  100 0 0 900 0 0 0 0 0 0\ncpu0 100 0 0 900 0 0 0 0 0 0\n",
+            )
+            .ok_or(Malformed)?;
+            crate::observation_runtime::SystemStateResourceResult::from_records(counters)
+                .map(|result| {
+                    result.with_system_state(
+                        Some(crate::metrics::LoadMetrics {
+                            one: 1.0,
+                            five: 0.5,
+                            fifteen: 0.25,
+                        }),
+                        Some(crate::metrics::MemoryMetrics {
+                            cache_bytes: 512,
+                            swap_total_bytes: 1_024,
+                            swap_used_bytes: 256,
+                            total_bytes: 8_192,
+                            used_bytes: 4_096,
+                        }),
+                        Some(123),
+                    )
+                })
+                .ok_or(Malformed)
+        }
+    }
+
+    fn validation_client(
+        socket: &std::path::Path,
+        bundle_version: &str,
+    ) -> crate::observation_runtime::UnixObservationRuntimeClient {
+        crate::observation_runtime::UnixObservationRuntimeClient::new(socket, bundle_version)
+    }
+
+    #[test]
+    fn validation_windows_travel_the_formal_runtime_client_over_a_real_socket() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("runtime.sock");
+        let listener =
+            std::os::unix::net::UnixListener::bind(&socket).expect("runtime socket binds");
+        let server = std::thread::spawn(move || {
+            let mut served = Vec::new();
+            for _ in 0..3 {
+                let (connection, _) = listener.accept().expect("repair validation connects");
+                let mut sleeper = InertWindowSleeper;
+                served.push(
+                    crate::observation_runtime::ObservationRuntimeServer::new(
+                        ValidationWindowProvider,
+                    )
+                    .serve_connection_with_sleeper(connection, &mut sleeper),
+                );
+            }
+            served
+        });
+
+        validate_runtime_window(
+            &validation_client(&socket, crate::version::probe_version()),
+            RuntimeValidation::Temporary,
+        )
+        .expect("正式 Runtime 的完整窗口解码必须让临时验证通过");
+        let window = validation_client(&socket, crate::version::probe_version())
+            .request_finalized_window(Duration::from_secs(1), 1)
+            .expect("验证请求在原预算内取得完整窗口");
+        let mismatch = validate_runtime_window(
+            &validation_client(&socket, "other-bundle"),
+            RuntimeValidation::Canonical,
+        )
+        .expect_err("bundle 版本不一致不是验证成功");
+        let served = server.join().expect("Runtime exits cleanly");
+        assert!(
+            served[0].is_ok() && served[1].is_ok(),
+            "两次验证窗口都必须由 Runtime 完整写出，而不是靠关闭 peer 制造失败"
+        );
+
+        assert_eq!(
+            window
+                .attempts
+                .iter()
+                .map(|attempt| attempt.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "修复验证取得的是从 seq1 开始的完整窗口，而不是 Hub 历史或 ready 断言"
+        );
+        assert_eq!(
+            mismatch.code(),
+            "probe_repair_canonical_runtime_validation_failed",
+            "版本不一致必须保持 canonical 段的 typed 失败"
+        );
+
+        let stopped = validate_runtime_window(
+            &validation_client(&socket, crate::version::probe_version()),
+            RuntimeValidation::Temporary,
+        )
+        .expect_err("Runtime 已停止时验证必须失败");
+        assert_eq!(
+            stopped.code(),
+            "probe_repair_runtime_validation_failed",
+            "关闭的 peer 不得被当作验证成功"
+        );
+    }
+
+    #[test]
+    fn temporary_validation_failure_recovers_reporting_without_a_root_gate() {
+        let fixture = LiveFixture::new();
+        *fixture.runtime.fail_on.borrow_mut() = Some(RuntimeValidation::Temporary);
+
+        let error =
+            match drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()) {
+                Ok(_) => panic!("临时 Runtime 验证失败必须阻断修复"),
+                Err(error) => error,
+            };
+
+        assert_eq!(error.code(), "probe_repair_runtime_validation_failed");
+        for path in [RUNTIME_REPAIR_PERMIT, RUNTIME_REPAIR_DROP_IN] {
+            assert!(
+                !rooted(fixture.root.path(), path).exists(),
+                "补偿后不得留下 root 验证 gate: {path}"
+            );
+        }
+        {
+            let state = fixture.state.borrow();
+            assert!(
+                state.probe_active,
+                "补偿必须把普通 Probe 上报恢复到本地活跃状态"
+            );
+            assert!(state.socket_started);
+            assert!(!state.socket_masked);
+            assert!(!state.services_stopped);
+            assert!(!state.canonical_runtime_healthy);
+        }
+        let intent: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .root
+                    .path()
+                    .join("var/lib/enoki-probe/runtime-failure/repair-intent.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            intent["lastErrorCode"], "probe_repair_runtime_validation_failed",
+            "补偿必须持久化本次验证失败而不是伪造成功"
+        );
+        assert!(
+            resume_installed_bundle_repair_at(fixture.root.path(), unsafe { libc::geteuid() })
+                .unwrap()
+                .is_some(),
+            "验证失败的 intent 必须仍可重入"
+        );
+        assert!(
+            installed_bundle_failure_is_current_at(
+                fixture.root.path(),
+                unsafe { libc::geteuid() },
+                &mut TerminalRuntime,
+            ),
+            "补偿不得消费剩余的 epoch/latch 证据"
+        );
+    }
+
+    #[test]
+    fn canonical_validation_failure_forwards_custody_instead_of_a_local_success() {
+        let fixture = LiveFixture::new();
+        *fixture.runtime.fail_on.borrow_mut() = Some(RuntimeValidation::Canonical);
+        let identity_before = identity_of(&fixture);
+
+        let error =
+            match drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()) {
+                Ok(_) => panic!("canonical Runtime 验证失败必须阻断修复"),
+                Err(error) => error,
+            };
+
+        assert_eq!(
+            error.code(),
+            "probe_repair_canonical_runtime_validation_failed"
+        );
+        assert!(
+            !fixture.state.borrow().canonical_runtime_healthy,
+            "验证失败不得被当作 canonical Runtime 已健康"
+        );
+        assert!(
+            fixture.stage.exists(),
+            "canonical 验证失败不得退休 operation-private stage"
+        );
+        let journal = fixture
+            .root
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/installed-bundle-repair.json");
+        assert!(
+            journal.exists(),
+            "canonical 验证失败必须保留恢复日志 custody"
+        );
+        for path in [RUNTIME_REPAIR_PERMIT, RUNTIME_REPAIR_DROP_IN] {
+            assert!(
+                rooted(fixture.root.path(), path).exists(),
+                "失败必须保留同一 intent 的 canonical-validation shape 以便重入: {path}"
+            );
+        }
+        assert_eq!(
+            identity_of(&fixture),
+            identity_before,
+            "验证失败不得改写本机 Probe Identity"
+        );
+        let intent: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                fixture
+                    .root
+                    .path()
+                    .join("var/lib/enoki-probe/runtime-failure/repair-intent.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            intent["lastErrorCode"], "probe_repair_canonical_runtime_validation_failed",
+            "已过提交边界的失败必须如实持久化错误码"
+        );
+        assert!(
+            resume_installed_bundle_repair_at(fixture.root.path(), unsafe { libc::geteuid() })
+                .unwrap()
+                .is_some(),
+            "canonical 验证失败的 intent 必须仍可 forward-only 重入"
+        );
+
+        *fixture.runtime.fail_on.borrow_mut() = None;
+        let outcome =
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
+        assert_eq!(outcome.probe_id, "probe_01");
+        assert_converged(&fixture, &identity_before);
+    }
+
+    #[test]
+    fn retirement_failure_gates_final_ordinary_activation_on_a_trusted_journal_parent() {
+        let fault = (
+            FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
+            1,
+        );
+        let fixture = LiveFixture::with_fault(Some(fault));
+        let identity_before = identity_of(&fixture);
+        drive_until_crash(&fixture);
+        assert!(!fixture.stage.exists(), "stage 必须先于恢复日志退休");
+        let journal = fixture
+            .root
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/installed-bundle-repair.json");
+        assert!(journal.exists(), "退休崩溃前必须保留恢复日志 custody");
+
+        // 模拟 unlink 之后进程消失：日志已缺失，但其父目录不再可信。
+        fs::remove_file(&journal).unwrap();
+        fs::set_permissions(journal.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+        let error =
+            match drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()) {
+                Ok(_) => panic!("不可信的耐久父目录不能被当作退休已完成"),
+                Err(error) => error,
+            };
+        assert_eq!(error.code(), "probe_repair_bundle_cleanup_failed");
+        assert_eq!(
+            fixture
+                .fault
+                .borrow()
+                .transcript
+                .iter()
+                .filter(
+                    |event| **event == FaultEvent::Runner(RepairSystemdAction::StopRepairServices)
+                )
+                .count(),
+            2,
+            "必需退休未完成时不得启动最终普通探针"
+        );
+        assert!(
+            fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .exists(),
+            "退休未完成必须保留 intent 作为 resume authority"
+        );
+
+        fs::set_permissions(journal.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        let outcome =
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
+        assert_eq!(outcome.probe_id, "probe_01");
+        assert_converged(&fixture, &identity_before);
+    }
+
+    #[test]
+    fn validation_drop_ins_carry_the_fixed_permit_and_latch_conditions() {
+        for (fault, expected) in [
+            (
+                (
+                    FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled),
+                    1,
+                ),
+                VALIDATION_DROP_IN_TEMPORARY,
+            ),
+            ((FaultEvent::SystemdReload, 6), VALIDATION_DROP_IN_CANONICAL),
+        ] {
+            let fixture = LiveFixture::with_fault(Some(fault));
+            let identity_before = identity_of(&fixture);
+            drive_until_crash(&fixture);
+            let root = fixture.root.path();
+            assert_eq!(
+                fs::read(rooted(root, RUNTIME_REPAIR_DROP_IN)).unwrap(),
+                expected
+            );
+            let permit_path = rooted(root, RUNTIME_REPAIR_PERMIT);
+            assert_eq!(
+                fs::read(&permit_path).unwrap(),
+                b"installed-bundle-repair\n"
+            );
+            for path in [RUNTIME_REPAIR_DROP_IN, RUNTIME_REPAIR_PERMIT] {
+                assert_eq!(
+                    fs::metadata(rooted(root, path))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600,
+                    "验证 gate 文件必须是 root-only 0600: {path}"
+                );
+            }
+            assert_eq!(
+                fs::metadata(rooted(root, RUNTIME_REPAIR_RUN_DIR))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "验证 gate 的父目录必须是 root-only 0700"
+            );
+
+            let outcome =
+                drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context())
+                    .unwrap();
+            assert_eq!(outcome.probe_id, "probe_01");
+            assert_converged(&fixture, &identity_before);
+            assert_exact_crash_restart_transcript(&fixture, fault);
+        }
+    }
+
+    #[test]
+    fn restored_ordinary_runtime_unit_carries_both_negative_start_conditions() {
+        let fixture = LiveFixture::new();
+        drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
+        let unit = fs::read_to_string(
+            fixture
+                .root
+                .path()
+                .join("etc/systemd/system/enoki-observation-runtime.service"),
+        )
+        .unwrap();
+        assert!(
+            unit.contains("ConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch"),
+            "普通 Runtime 必须保留 latch 负启动条件"
+        );
+        assert!(
+            unit.contains(
+                "ConditionPathExists=!/var/lib/enoki-probe-bootstrap/installed-bundle-repair.json"
+            ),
+            "普通 Runtime 必须保留修复日志负启动条件"
+        );
+        assert!(
+            !unit.contains(RUNTIME_REPAIR_PERMIT),
+            "普通 Runtime 不得依赖 root 验证 permit"
+        );
     }
 }

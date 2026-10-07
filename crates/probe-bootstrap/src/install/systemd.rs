@@ -73,15 +73,44 @@ fn rollback_unit_is_absent(state: &str) -> bool {
 #[derive(Default)]
 pub struct SystemSystemd {
     command_deadline: Option<Instant>,
-    preserve_live_upgrade_companion: bool,
+    preserve_live_companion: Option<LiveCompanionFamily>,
 }
+
+#[derive(Clone, Copy)]
+enum LiveCompanionFamily {
+    General,
+    Upgrade,
+}
+
 impl SystemSystemd {
+    pub fn for_live_general_companion() -> Self {
+        Self {
+            command_deadline: None,
+            preserve_live_companion: Some(LiveCompanionFamily::General),
+        }
+    }
+
     pub fn for_live_upgrade() -> Self {
         Self {
             command_deadline: None,
-            preserve_live_upgrade_companion: true,
+            preserve_live_companion: Some(LiveCompanionFamily::Upgrade),
         }
     }
+
+    fn preserves_live_companion_unit(&self, unit: &str) -> bool {
+        match self.preserve_live_companion {
+            Some(LiveCompanionFamily::General) => is_live_general_companion_unit(unit),
+            Some(LiveCompanionFamily::Upgrade) => is_live_upgrade_companion_unit(unit),
+            None => false,
+        }
+    }
+}
+
+fn is_live_general_companion_unit(unit: &str) -> bool {
+    matches!(
+        unit,
+        "enoki-probe-lifecycle-companion.socket" | "enoki-probe-lifecycle-companion@*.service"
+    )
 }
 
 fn is_live_upgrade_companion_unit(unit: &str) -> bool {
@@ -213,7 +242,7 @@ impl SystemdPort for SystemSystemd {
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
         // 先关闭激活 socket，阻止回滚期间产生新进程，再收敛所有固定角色。
         let mut first_error = attempt_all_fixed_units(ROLLBACK_STOP_UNITS, |unit| {
-            if self.preserve_live_upgrade_companion && is_live_upgrade_companion_unit(unit) {
+            if self.preserves_live_companion_unit(unit) {
                 return Ok(());
             }
             require_success(
@@ -225,7 +254,7 @@ impl SystemdPort for SystemSystemd {
         })
         .err();
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_RESET_UNITS, |unit| {
-            if self.preserve_live_upgrade_companion && is_live_upgrade_companion_unit(unit) {
+            if self.preserves_live_companion_unit(unit) {
                 return Ok(());
             }
             require_success(
@@ -239,7 +268,7 @@ impl SystemdPort for SystemSystemd {
             first_error = Some(error);
         }
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_VERIFY_UNITS, |unit| {
-            if self.preserve_live_upgrade_companion && is_live_upgrade_companion_unit(unit) {
+            if self.preserves_live_companion_unit(unit) {
                 return Ok(());
             }
             let output = run_bounded(
@@ -275,8 +304,8 @@ impl SystemdPort for SystemSystemd {
 mod tests {
     use super::{
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        attempt_all_fixed_units, canonical_restart_deadline, is_live_upgrade_companion_unit,
-        rollback_unit_is_absent,
+        attempt_all_fixed_units, canonical_restart_deadline, is_live_general_companion_unit,
+        is_live_upgrade_companion_unit, rollback_unit_is_absent,
     };
     use std::time::{Duration, Instant};
 
@@ -301,6 +330,20 @@ mod tests {
         assert!(!is_live_upgrade_companion_unit("enoki-probe.service"));
         assert!(!is_live_upgrade_companion_unit(
             "enoki-probe-lifecycle-companion.socket"
+        ));
+    }
+
+    #[test]
+    fn general_companion_preserves_only_its_own_fixed_socket_and_instance() {
+        assert!(is_live_general_companion_unit(
+            "enoki-probe-lifecycle-companion.socket"
+        ));
+        assert!(is_live_general_companion_unit(
+            "enoki-probe-lifecycle-companion@*.service"
+        ));
+        assert!(!is_live_general_companion_unit("enoki-probe.service"));
+        assert!(!is_live_general_companion_unit(
+            "enoki-probe-lifecycle-upgrade.socket"
         ));
     }
 

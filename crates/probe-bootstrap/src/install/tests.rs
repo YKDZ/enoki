@@ -2933,6 +2933,39 @@ mod tests {
             runtime.contains("ConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch"),
             "latch 存在时 Runtime 不得再生成进程"
         );
+        assert!(
+            runtime.contains(
+                "ConditionPathExists=!/var/lib/enoki-probe-bootstrap/installed-bundle-repair.json"
+            ),
+            "修复恢复日志存在时 ordinary Runtime 不得启动"
+        );
+        assert!(
+            !runtime.contains("/run/enoki-probe/runtime-repair-permit"),
+            "ordinary Runtime 必须是 Probe-only 而不能接受 root 验证请求"
+        );
+    }
+
+    #[test]
+    fn general_lifecycle_companion_retracts_the_validation_gate_when_it_stops() {
+        let socket = lifecycle_companion_socket_unit();
+        let service = lifecycle_companion_unit();
+
+        assert!(
+            socket.contains(
+                "ExecStopPost=/usr/bin/rm -f -- /run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf"
+            ),
+            "入口退出必须移除验证 drop-in，否则普通 Runtime 会被残留条件永久挡住"
+        );
+        assert!(
+            service.contains(
+                "ExecStopPost=/usr/bin/rm -f -- /run/enoki-probe/runtime-repair-permit"
+            ),
+            "入口退出必须撤销验证 permit"
+        );
+        assert!(
+            service.contains("ReadWritePaths=/etc/enoki"),
+            "入口必须能写它自己的固定 gate 路径"
+        );
     }
 
     #[test]
