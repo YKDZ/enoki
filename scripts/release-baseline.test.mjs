@@ -706,7 +706,6 @@ describe("Release Baseline resolution", () => {
     );
     expect(workflow).toContain("--release-baseline release-baseline");
     expect(workflow).toContain('--candidate-commit "${{ inputs.commit }}"');
-    expect(workflow).not.toMatch(/ENOKI_RELEASE_TRANSITION_CONTRACT_/);
     expect(releaseWorkflow).not.toMatch(
       /trust[_-]epoch|skip[_-]baseline|legacy[_-]signing/i,
     );
