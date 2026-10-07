@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import { standardCiJobNames } from "./release-ci-evidence.ts";
 import { createProbeHostHarness } from "./release-e2e-lib.mjs";
 import {
   createMatrixGateResult as createMatrixGateResultFromManifest,
@@ -364,6 +365,70 @@ describe("verify-only release workflow", () => {
       verified: true,
     });
   });
+
+  it("accepts the evidence the release prerequisite CLI generates for the same candidate", async () => {
+    const candidateManifest = releaseCandidateManifest();
+    const evidence = await generateStandardCiEvidence(
+      candidateManifest.candidate.commit,
+    );
+    expect(evidence).toMatchObject({
+      candidateCommit: candidateManifest.candidate.commit,
+      event: "workflow_dispatch",
+      runAttempt: 2,
+      schemaVersion: 2,
+    });
+
+    const summary = await summaryForCandidate(candidateManifest, evidence);
+    expect(summary.verified).toBe(true);
+    expect(summary.standardCi).toEqual(evidence);
+    expect(summary.gates.standardCi).toEqual({
+      outcome: "success",
+      runUrl: evidence.runUrl,
+    });
+  });
+
+  for (const { evidence, label } of [
+    {
+      evidence: (base) => ({ ...base, schemaVersion: 1 }),
+      label: "keeps the retired schema version",
+    },
+    {
+      evidence: (base) => withoutEvidenceKey(base, "event"),
+      label: "omits the triggering event",
+    },
+    {
+      evidence: (base) => withoutEvidenceKey(base, "runAttempt"),
+      label: "omits the current run attempt",
+    },
+    {
+      evidence: (base) => ({ ...base, runAttempt: 0 }),
+      label: "reports a run attempt below one",
+    },
+    {
+      evidence: (base) => ({ ...base, event: "pull_request" }),
+      label: "comes from an ineligible event",
+    },
+    {
+      evidence: (base) => ({ ...base, jobs: base.jobs.slice(0, 6) }),
+      label: "carries six of the seven checks",
+    },
+    {
+      evidence: (base) => ({ ...base, candidateCommit: "f".repeat(40) }),
+      label: "belongs to another candidate",
+    },
+  ]) {
+    it(`does not verify a release whose standard CI evidence ${label}`, async () => {
+      const candidateManifest = releaseCandidateManifest();
+      const summary = await summaryForCandidate(
+        candidateManifest,
+        evidence(standardCiEvidence(candidateManifest.candidate)),
+      );
+
+      expect(summary.verified).toBe(false);
+      expect(summary.missingIdentities).toContain("standard-ci-evidence");
+      expect(summary.standardCi).toBeNull();
+    });
+  }
 
   it("rejects a schema 4 Candidate Manifest whose Probe Asset Set closure is incomplete", async () => {
     const matrix = JSON.parse(
@@ -1938,12 +2003,111 @@ function trustEpochMigrationCandidateManifest() {
 function standardCiEvidence(candidate) {
   return {
     candidateCommit: candidate.commit,
-    jobs: [{ conclusion: "success", name: "Node checks / Node checks" }],
+    event: "push",
+    jobs: standardCiJobNames.map((name) => ({
+      conclusion: "success",
+      name,
+    })),
     kind: "enoki-standard-ci-evidence",
+    runAttempt: 1,
     runId: 42,
     runUrl: "https://github.com/YKDZ/enoki/actions/runs/42",
-    schemaVersion: 1,
+    schemaVersion: 2,
   };
+}
+
+async function generateStandardCiEvidence(commit) {
+  const directory = await mkdtemp(
+    path.join(tmpdir(), "enoki-standard-ci-evidence-"),
+  );
+  try {
+    const runsPath = path.join(directory, "runs.json");
+    const jobsPath = path.join(directory, "jobs.json");
+    const evidencePath = path.join(directory, "evidence.json");
+    await writeFile(
+      runsPath,
+      JSON.stringify({
+        workflow_runs: [
+          {
+            conclusion: "success",
+            event: "workflow_dispatch",
+            head_branch: "main",
+            head_sha: commit,
+            html_url: "https://github.com/YKDZ/enoki/actions/runs/4242",
+            id: 4242,
+            run_attempt: 2,
+            status: "completed",
+          },
+        ],
+      }),
+    );
+    await writeFile(
+      jobsPath,
+      JSON.stringify({
+        jobs: standardCiJobNames.map((name) => ({
+          conclusion: "success",
+          head_sha: commit,
+          name,
+          run_attempt: 2,
+          run_id: 4242,
+          status: "completed",
+        })),
+      }),
+    );
+    await execFileAsync(process.execPath, [
+      "scripts/release-ci.ts",
+      "verify",
+      "--commit",
+      commit,
+      "--jobs",
+      jobsPath,
+      "--output",
+      evidencePath,
+      "--workflow-runs",
+      runsPath,
+    ]);
+    return JSON.parse(await readFile(evidencePath, "utf8"));
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+}
+
+async function summaryForCandidate(candidateManifest, standardCi) {
+  const matrix = JSON.parse(
+    await readFile("scripts/release-e2e-matrix.json", "utf8"),
+  );
+  const hostGates = expectedHostGateResults(matrix, candidateManifest);
+  const uiGate = {
+    artifactName: "release-ui-contract-12345-1",
+    candidate: candidateManifest.candidate,
+    outcome: "succeeded",
+  };
+  return createReleaseVerificationSummary({
+    artifactIndex: releaseArtifactIndex(hostGates, uiGate),
+    candidateManifest,
+    gateResults: {
+      candidateBuild: "success",
+      matrixExpansion: "success",
+      matrixJob: "success",
+      uiJob: "success",
+    },
+    hostGates,
+    scenarioPlan: matrix,
+    requested: candidateManifest.candidate,
+    run: {
+      attempt: 1,
+      id: "12345",
+      url: "https://github.com/YKDZ/enoki/actions/runs/12345",
+    },
+    standardCi,
+    uiGate,
+  });
+}
+
+function withoutEvidenceKey(evidence, key) {
+  return Object.fromEntries(
+    Object.entries(evidence).filter(([name]) => name !== key),
+  );
 }
 
 function expectedHostGateResults(matrix, candidateManifest) {

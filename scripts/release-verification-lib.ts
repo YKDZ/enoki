@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { standardCiEvidenceErrors } from "./release-ci-evidence.ts";
 import {
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
@@ -2324,21 +2325,11 @@ export function createReleaseVerificationSummary({
     };
   });
   const uiOutcome = uiGateView.outcome ?? "missing";
-  const standardCiIsValid =
-    standardCiView.kind === "enoki-standard-ci-evidence" &&
-    standardCiView.schemaVersion === 1 &&
-    standardCiView.candidateCommit === requestView.commit &&
-    isSafeInteger(standardCiView.runId) &&
-    standardCiView.runId > 0 &&
-    typeof standardCiView.runUrl === "string" &&
-    standardCiView.runUrl.length > 0 &&
-    isUnknownArray(standardCiView.jobs) &&
-    standardCiView.jobs.length > 0 &&
-    standardCiView.jobs.every(
-      (job) =>
-        objectView(job).conclusion === "success" &&
-        typeof objectView(job).name === "string",
-    );
+  const standardCiValidationErrors = standardCiEvidenceErrors(
+    standardCi,
+    requestView.commit,
+  );
+  const standardCiIsValid = standardCiValidationErrors.length === 0;
   const verified =
     candidateIsAvailable &&
     sameCandidate(request, candidateIdentity) &&

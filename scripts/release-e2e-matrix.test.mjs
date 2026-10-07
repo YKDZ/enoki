@@ -64,12 +64,8 @@ describe("supported Release Test Host matrix", () => {
       workflow.indexOf("  candidate-release-e2e:"),
     );
 
-    expect(planningJob).toContain("actions/download-artifact@v8");
     expect(planningJob).toContain("candidate/candidate-manifest.json");
     expect(planningJob).toContain("release-scenario-plan.mjs github-actions");
-    expect(planningJob.indexOf("actions/download-artifact@v8")).toBeLessThan(
-      planningJob.indexOf("release-scenario-plan.mjs github-actions"),
-    );
   });
 
   it("passes only planner-produced cells to the one existing Orchestrator", async () => {

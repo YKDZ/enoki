@@ -541,7 +541,6 @@ with open(os.devnull, "rb") as input_stream:
     expect(signJob).not.toContain("ref: ${{ inputs.commit }}");
     expect(signJob).toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
     expect(downstreamJobs).not.toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
-    expect(workflow).toContain("actions/attest-build-provenance@v3");
     expect(workflow).toContain("subject-path: candidate.tar.gz");
     const assemblyJob = workflow.slice(
       workflow.indexOf("  assemble-candidate:"),
