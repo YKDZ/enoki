@@ -1,24 +1,16 @@
 import { spawn } from "node:child_process";
-import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
-const execFileAsync = promisify(execFile);
 const hubRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const workspaceRoot = path.resolve(hubRoot, "../..");
 
 describe("Hub server startup", () => {
   it("prints the fixed legacy-variable migration from the actual server process", async () => {
-    await execFileAsync("pnpm", ["--filter", "@enoki/hub", "build"], {
-      cwd: workspaceRoot,
-    });
-
     const secret = "legacy-value-must-not-be-logged";
     const result = await runServer({
       ENOKI_MANAGEMENT_ORIGIN: "https://manage.example",
