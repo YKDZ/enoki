@@ -640,14 +640,14 @@ export async function inspectProbeAssetSet(
         path.join(assetDir, "release-transition-contract.json.sig"),
       ),
       expected: {
-        classification: contractView.transition,
+        classification: stringExpectation(contractView.transition),
         delegationGeneration: manifest.signature.delegationGeneration,
-        sourceCommit: contractSource.commit,
-        sourceTag: contractSource.tag,
-        sourceVersion: contractSource.version,
+        sourceCommit: stringExpectation(contractSource.commit),
+        sourceTag: stringExpectation(contractSource.tag),
+        sourceVersion: stringExpectation(contractSource.version),
         targetAssetClosure: manifest.assets,
         targetAssetSetManifestSha256: sha256(manifestBytes),
-        targetVersion: manifest.version,
+        targetVersion: stringExpectation(manifest.version),
       },
       rootPublicKeyPem: trustedRootPublicKey ?? canonicalRootPublicKey,
     });
@@ -983,6 +983,12 @@ function assertExactKeys(
   if (JSON.stringify(actualKeys) !== JSON.stringify(expected)) {
     throw new Error(`manifest fields must be exactly: ${expected.join(", ")}`);
   }
+}
+
+// 这些期望值都来自 JSON.parse 的文档，且对应字段在本模块的 version 校验和验证器自身的结构校验
+// 里都只可能是非空字符串：非字符串形状在此之前一律被拒绝，所以仅在字符串时传入期望不改变通过集合。
+function stringExpectation(value: unknown): string | undefined {
+  return isNonEmptyString(value) ? value : undefined;
 }
 
 async function readCandidateManifest(

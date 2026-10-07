@@ -1110,6 +1110,54 @@ with open(os.devnull, "rb") as input_stream:
     }
   });
 
+  it.each([
+    [
+      "a non-string transition",
+      (contract) => {
+        contract.transition = 42;
+      },
+      /fields are invalid/,
+    ],
+    [
+      "a non-string source version",
+      (contract) => {
+        contract.source.version = 1.2;
+      },
+      /fields are invalid/,
+    ],
+    [
+      "a target version above the Asset Set manifest",
+      (contract) => {
+        contract.target.version = "1.2.4";
+      },
+      /candidate does not match/,
+    ],
+  ])(
+    "keeps rejecting an ordinary transition contract with %s",
+    async (_label, mutate, expected) => {
+      const workDir = await mkdtemp(
+        path.join(tmpdir(), "enoki-candidate-transition-expectation-"),
+      );
+      try {
+        const { outputDir, root } = await createProbeAssetSetFixture(workDir);
+        await writeOrdinaryTransitionContract({
+          candidateCommit: checkedOutCommit,
+          mutate,
+          probeAssetSetDir: outputDir,
+          root,
+        });
+
+        await expect(
+          inspectProbeAssetSet(outputDir, {
+            trustedRootPublicKeyPem: root.publicKey,
+          }),
+        ).rejects.toThrow(expected);
+      } finally {
+        await rm(workDir, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("requires the signer to recheck an unsigned Asset Set against an external root and exact delegation", async () => {
     const workDir = await mkdtemp(
       path.join(tmpdir(), "enoki-candidate-external-trust-"),
@@ -2693,6 +2741,7 @@ async function createCandidateFixture(
 
 async function writeOrdinaryTransitionContract({
   candidateCommit,
+  mutate,
   probeAssetSetDir,
   root,
 }) {
@@ -2724,6 +2773,7 @@ async function writeOrdinaryTransitionContract({
     },
     transition: "compatible",
   };
+  mutate?.(contract);
   const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
   await Promise.all([
     writeFile(
