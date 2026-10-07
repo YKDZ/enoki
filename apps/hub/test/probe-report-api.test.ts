@@ -400,7 +400,12 @@ async function createRepairClosureHarness(input: {
     );
 
   // 成功观测窗口：host-profile 结果 state 1，即 Produced 当前主机概况。
-  const producedReport = (bootId: string, sequence: number) =>
+  // 概况可注入，用于构造 Produced=true 但 Boot 或版本证据不符的正式负项。
+  const producedReport = (
+    bootId: string,
+    sequence: number,
+    hostProfile: root.enoki.v1.IHostProfileSnapshot = targetProfile,
+  ) =>
     sendReport({
       bootId,
       metrics: [
@@ -415,7 +420,7 @@ async function createRepairClosureHarness(input: {
       probeConfigurationVersion: "default-v1",
       sequenceEnd: sequence,
       sequenceStart: sequence,
-      snapshots: profileSnapshot(targetProfile),
+      snapshots: profileSnapshot(hostProfile),
     });
   const noDataWindowReport = (bootId: string, sequence: number) =>
     sendReport({
@@ -5642,6 +5647,72 @@ describe("Probe report API", () => {
       200,
     );
     expect(harness.repairState()).toBe("succeeded");
+
+    harness.database.close();
+  });
+
+  it("keeps a running Repair open when Produced windows carry mismatching Boot or version evidence", async () => {
+    const harness = await createRepairClosureHarness({
+      eligibility: "failed_upgrade",
+    });
+    expect((await harness.startupReport(harness.closureBoot)).status).toBe(200);
+
+    // Produced=true 且 Boot 错配：窗口按普通观测合法入库，但保留 Boot 证据不符，不结案。
+    const foreignBootWindow = await harness.producedReport(
+      "repair-produced-other-boot",
+      2,
+    );
+    expect(foreignBootWindow.status).toBe(200);
+    expect(harness.repairState()).toBe("running");
+    expect(harness.observationCount("repair-produced-other-boot", 2)).toBe(1);
+    expect(harness.hostRow()?.probeAssetBundleBootId).toBe(harness.closureBoot);
+
+    // Produced=true 但保留 Boot 内携带旧版本概况：命中既有不一致拒绝，未到达结案判据。
+    const staleWindow = await harness.producedReport(
+      harness.closureBoot,
+      3,
+      harness.legacyProfile,
+    );
+    expect(staleWindow.status).toBe(409);
+    await expect(staleWindow.json()).resolves.toEqual({
+      error: "probe_asset_bundle_incoherent",
+    });
+    expect(harness.repairState()).toBe("running");
+    expect(harness.observationCount(harness.closureBoot, 3)).toBe(0);
+
+    // 真实回退后的旧版本 Boot：Produced 窗口与保留 Boot 一致并合法入库，但目标版本不符，不结案。
+    expect(
+      (
+        await harness.startupReport(
+          "repair-rollback-boot",
+          harness.legacyProfile,
+        )
+      ).status,
+    ).toBe(200);
+    const rollbackWindow = await harness.producedReport(
+      "repair-rollback-boot",
+      2,
+      harness.legacyProfile,
+    );
+    expect(rollbackWindow.status).toBe(200);
+    expect(harness.repairState()).toBe("running");
+    expect(harness.observationCount("repair-rollback-boot", 2)).toBe(1);
+    expect(harness.hostRow()?.probeAssetBundleVersion).toBe("1.3.0");
+
+    // 重新升级并在目标版本 Boot 内产出概况后，仍按既有判据结案且只结案一次。
+    expect(
+      (
+        await harness.startupReport(
+          "repair-reupgrade-boot",
+          harness.targetProfile,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (await harness.producedReport("repair-reupgrade-boot", 2)).status,
+    ).toBe(200);
+    expect(harness.repairState()).toBe("succeeded");
+    expect(harness.repairCount()).toBe(1);
 
     harness.database.close();
   });
