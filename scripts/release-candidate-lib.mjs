@@ -42,7 +42,7 @@ import {
   withVerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-artifact.mjs";
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
-import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
+import { inspectHubOciArchive } from "./release-candidate-oci.ts";
 
 const execFileAsync = promisify(execFile);
 const commitPattern = /^[0-9a-f]{40}$/;

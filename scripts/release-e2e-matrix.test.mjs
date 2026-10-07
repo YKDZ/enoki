@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   supportedHostEnvironments,
   validateSupportedHostMatrix,
-} from "./release-e2e-matrix.mjs";
+} from "./release-e2e-matrix.ts";
 
 describe("supported Release Test Host matrix", () => {
   it("contains only supported Host capabilities and no candidate-independent scenarios", async () => {

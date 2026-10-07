@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 
 import {
   hasAdvancingPortableMetrics,
-  isSupportedReleaseTestHostVirtualization,
   isCandidateHostReady,
-} from "./release-e2e-lib.mjs";
+  isSupportedReleaseTestHostVirtualization,
+} from "./release-evidence-judgments.ts";
 
 const requiredComponentNames = Object.freeze([
   "inputValidation",

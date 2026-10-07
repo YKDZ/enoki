@@ -7,7 +7,7 @@ import {
   verifyTrustEpochMigrationAuthorization,
 } from "@enoki/probe-release";
 
-import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
+import { inspectHubOciArchive } from "./release-candidate-oci.ts";
 
 const sourceManifestFile = "hub-source-manifest.json";
 const authorizationFile = "trust-epoch-migration-authorization.json";

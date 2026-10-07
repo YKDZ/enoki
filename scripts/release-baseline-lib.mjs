@@ -25,7 +25,7 @@ import {
   verifyLegacyProbeAssetSet,
 } from "./release-baseline-migration-lib.mjs";
 import { inspectProbeAssetSet } from "./release-candidate-lib.mjs";
-import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
+import { inspectHubOciArchive } from "./release-candidate-oci.ts";
 
 const execFileAsync = promisify(execFile);
 const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;

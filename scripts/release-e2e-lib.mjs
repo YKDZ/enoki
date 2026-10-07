@@ -4,6 +4,12 @@ import { probeTargets } from "@enoki/probe-release";
 
 import { validateReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
 import {
+  hasAdvancingPortableMetrics,
+  isCandidateHostReady,
+  isPortableMetricSample,
+  isSupportedReleaseTestHostVirtualization,
+} from "./release-evidence-judgments.ts";
+import {
   createInstalledBundleFailureRepairHostDriver,
   proveInstalledBundleFailureRepair,
 } from "./release-installed-bundle-failure-repair.mjs";
@@ -79,31 +85,6 @@ const probeOperationStateRank = Object.freeze({
   succeeded: 3,
   superseded: 3,
 });
-
-const supportedReleaseTestHostVmTypes = new Set([
-  "acrn",
-  "amazon",
-  "apple",
-  "bhyve",
-  "bochs",
-  "google",
-  "kvm",
-  "microsoft",
-  "oracle",
-  "powervm",
-  "qemu",
-  "qnx",
-  "sre",
-  "uml",
-  "vm-other",
-  "vmware",
-  "xen",
-  "zvm",
-]);
-
-export function isSupportedReleaseTestHostVirtualization(value) {
-  return supportedReleaseTestHostVmTypes.has(value);
-}
 
 export const releaseE2EScenarioRegistry = Object.freeze({
   "compatible-upgrade-uninstall": runCompatibleUpgradeUninstallScenario,
@@ -6050,31 +6031,6 @@ async function waitForObservation({ code, label, observe, poll, ready }) {
   throw error;
 }
 
-export function isCandidateHostReady(value, expectedProbeVersion) {
-  const profile = value?.hostProfile;
-  const nonEmptyString = (candidate) =>
-    typeof candidate === "string" && candidate.trim().length > 0;
-  const normalizedProbeVersion = (candidate) =>
-    typeof candidate === "string" ? candidate.trim().replace(/^v/, "") : "";
-  return (
-    value?.status === "online" &&
-    profile &&
-    nonEmptyString(profile.architecture) &&
-    Number.isSafeInteger(profile.cpuCount) &&
-    profile.cpuCount >= 1 &&
-    profile.cpuCount <= 4_096 &&
-    nonEmptyString(profile.hostname) &&
-    nonEmptyString(profile.kernel) &&
-    Number.isSafeInteger(profile.memoryTotalBytes) &&
-    profile.memoryTotalBytes >= 1_048_576 &&
-    nonEmptyString(profile.os) &&
-    normalizedProbeVersion(profile.probeVersion) ===
-      normalizedProbeVersion(expectedProbeVersion) &&
-    Array.isArray(profile.filesystems) &&
-    Array.isArray(profile.networkInterfaces)
-  );
-}
-
 function stableHostProfileEvidence(profile) {
   const projection = {
     architecture: profile.architecture,
@@ -6156,46 +6112,6 @@ function canonicalSemanticValue(value) {
     );
   }
   return value;
-}
-
-export function hasAdvancingPortableMetrics(samples) {
-  if (!Array.isArray(samples)) return false;
-  const ordered = samples
-    .filter(isPortableMetricSample)
-    .sort((a, b) => a.sequence - b.sequence);
-  if (ordered.length < 2) return false;
-  const first = ordered[0];
-  const last = ordered.at(-1);
-  return (
-    Number.isSafeInteger(first?.sequence) &&
-    Number.isSafeInteger(last?.sequence) &&
-    last.sequence > first.sequence &&
-    Number.isFinite(first.collectedAtMs) &&
-    Number.isFinite(last.collectedAtMs) &&
-    last.collectedAtMs > first.collectedAtMs &&
-    Number.isFinite(first.uptimeSeconds) &&
-    Number.isFinite(last.uptimeSeconds) &&
-    last.uptimeSeconds >= first.uptimeSeconds
-  );
-}
-
-function isPortableMetricSample(sample) {
-  return (
-    Number.isSafeInteger(sample?.sequence) &&
-    sample.sequence >= 0 &&
-    Number.isSafeInteger(sample.collectedAtMs) &&
-    sample.collectedAtMs > 0 &&
-    Number.isFinite(sample.uptimeSeconds) &&
-    sample.uptimeSeconds >= 0 &&
-    Number.isFinite(sample.cpuPercent) &&
-    sample.cpuPercent >= 0 &&
-    sample.cpuPercent <= 100 &&
-    Number.isSafeInteger(sample.memoryTotalBytes) &&
-    sample.memoryTotalBytes > 0 &&
-    Number.isSafeInteger(sample.memoryUsedBytes) &&
-    sample.memoryUsedBytes >= 0 &&
-    sample.memoryUsedBytes <= sample.memoryTotalBytes
-  );
 }
 
 function compactHostEvidence(host) {

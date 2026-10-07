@@ -31,8 +31,6 @@ import {
 import {
   createHubLifecycleClient,
   createProbeHostHarness,
-  hasAdvancingPortableMetrics,
-  isCandidateHostReady,
   redactReleaseE2EEvidence,
   renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
@@ -40,6 +38,10 @@ import {
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
 } from "./release-e2e-lib.mjs";
+import {
+  hasAdvancingPortableMetrics,
+  isCandidateHostReady,
+} from "./release-evidence-judgments.ts";
 import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.mjs";
 import { createMatrixGateResult } from "./release-verification-lib.mjs";
 

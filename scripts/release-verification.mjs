@@ -17,8 +17,8 @@ import {
   releaseTransitionForValidatedCandidate,
   validateReleaseCandidate,
 } from "./release-candidate-lib.mjs";
-import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
-import { readReleaseE2EMatrix } from "./release-e2e-matrix.mjs";
+import { inspectHubOciArchive } from "./release-candidate-oci.ts";
+import { readReleaseE2EMatrix } from "./release-e2e-matrix.ts";
 import { compileReleaseScenarioPlan } from "./release-scenario-plan.mjs";
 import {
   createMatrixGateResult,

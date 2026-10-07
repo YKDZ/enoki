@@ -10,7 +10,7 @@ import {
 import {
   readSupportedHostMatrix,
   supportedHostEnvironments,
-} from "./release-e2e-matrix.mjs";
+} from "./release-e2e-matrix.ts";
 
 const sharedCandidateScenario = Object.freeze({
   capabilities: Object.freeze([

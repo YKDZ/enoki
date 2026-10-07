@@ -7,22 +7,69 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { createGunzip } from "node:zlib";
 
+import {
+  isSafeInteger,
+  isUnknownArray,
+  isUnknownRecord,
+  objectView,
+  type UnknownRecord,
+} from "./release-json-guards.ts";
+
 const execFileAsync = promisify(execFile);
-const imageConfigMediaTypes = new Set([
+const imageConfigMediaTypes = new Set<unknown>([
   "application/vnd.docker.container.image.v1+json",
   "application/vnd.oci.image.config.v1+json",
 ]);
-const imageManifestMediaTypes = new Set([
+const imageManifestMediaTypes = new Set<unknown>([
   "application/vnd.docker.distribution.manifest.v2+json",
   "application/vnd.oci.image.manifest.v1+json",
 ]);
-const layerMediaTypes = new Set([
+const layerMediaTypes = new Set<unknown>([
   "application/vnd.docker.image.rootfs.diff.tar.gzip",
   "application/vnd.oci.image.layer.v1.tar",
   "application/vnd.oci.image.layer.v1.tar+gzip",
 ]);
 
-export async function inspectHubOciArchive({ archivePath, probeFiles }) {
+export interface ProbeAssetFileIdentity {
+  file: string;
+  sha256: string;
+  size: number;
+}
+
+export interface HubOciArchiveInspection {
+  digest: string;
+}
+
+interface OciDescriptor {
+  digest: string;
+  mediaType: unknown;
+  size: number;
+}
+
+interface RootfsProbeFileEntry {
+  contents: Buffer | null;
+  type: string;
+}
+
+interface LayerRootfsState {
+  appType: string;
+  probeAssetsType: string;
+  probeFiles: Map<string, RootfsProbeFileEntry>;
+}
+
+interface TarEntry {
+  path: string;
+  rawName: string;
+  type: string;
+}
+
+export async function inspectHubOciArchive({
+  archivePath,
+  probeFiles,
+}: {
+  archivePath: string;
+  probeFiles: readonly ProbeAssetFileIdentity[];
+}): Promise<HubOciArchiveInspection> {
   const extractionDir = await mkdtemp(path.join(tmpdir(), "enoki-hub-oci-"));
 
   try {
@@ -47,39 +94,43 @@ export async function inspectHubOciArchive({ archivePath, probeFiles }) {
     }
 
     const index = await readJson(path.join(extractionDir, "index.json"));
-    if (
-      index.schemaVersion !== 2 ||
-      !Array.isArray(index.manifests) ||
-      index.manifests.length !== 1
-    ) {
+    const manifests = isUnknownArray(index.manifests)
+      ? index.manifests
+      : null;
+    if (index.schemaVersion !== 2 || !manifests || manifests.length !== 1) {
       throw new Error(
         "Hub OCI archive must contain exactly one image manifest",
       );
     }
 
-    const referencedBlobs = new Set();
-    const imageManifestDescriptor = index.manifests[0];
+    const referencedBlobs = new Set<string>();
+    const imageManifestDescriptor = objectView(manifests[0]);
     if (!imageManifestMediaTypes.has(imageManifestDescriptor.mediaType)) {
       throw new Error(
         "Hub OCI archive does not point to an OCI image manifest",
       );
     }
+    validateDescriptorShape(imageManifestDescriptor);
     const manifestPath = await verifyDescriptor(
       extractionDir,
       imageManifestDescriptor,
       referencedBlobs,
     );
     const imageManifest = await readJson(manifestPath);
+    const imageLayers = isUnknownArray(imageManifest.layers)
+      ? imageManifest.layers
+      : null;
     if (
       imageManifest.schemaVersion !== 2 ||
       imageManifest.mediaType !== imageManifestDescriptor.mediaType ||
       !imageManifest.config ||
-      !Array.isArray(imageManifest.layers) ||
-      imageManifest.layers.length === 0
+      !imageLayers ||
+      imageLayers.length === 0
     ) {
       throw new Error("Hub OCI image manifest is malformed");
     }
-    if (!imageConfigMediaTypes.has(imageManifest.config.mediaType)) {
+    const configDescriptor = objectView(imageManifest.config);
+    if (!imageConfigMediaTypes.has(configDescriptor.mediaType)) {
       throw new Error(
         "Hub OCI image config descriptor media type is unsupported",
       );
@@ -87,43 +138,55 @@ export async function inspectHubOciArchive({ archivePath, probeFiles }) {
 
     const configPath = await verifyDescriptor(
       extractionDir,
-      imageManifest.config,
+      configDescriptor,
       referencedBlobs,
     );
     const imageConfig = await readJson(configPath);
     if (imageConfig.os !== "linux" || imageConfig.architecture !== "amd64") {
       throw new Error("Hub OCI image config must target linux/amd64");
     }
+    const rootfsRecord = isUnknownRecord(imageConfig.rootfs)
+      ? imageConfig.rootfs
+      : null;
+    const diffIds = rootfsRecord
+      ? isUnknownArray(rootfsRecord.diff_ids)
+        ? rootfsRecord.diff_ids
+        : null
+      : null;
     if (
       !imageConfig.rootfs ||
-      typeof imageConfig.rootfs !== "object" ||
-      Array.isArray(imageConfig.rootfs) ||
-      imageConfig.rootfs.type !== "layers" ||
-      !Array.isArray(imageConfig.rootfs.diff_ids) ||
-      imageConfig.rootfs.diff_ids.length !== imageManifest.layers.length
+      !rootfsRecord ||
+      !diffIds ||
+      rootfsRecord.type !== "layers" ||
+      diffIds.length !== imageLayers.length
     ) {
       throw new Error("Hub OCI image rootfs diff_ids must match image layers");
     }
-    const rootfs = {
+    const rootfs: LayerRootfsState = {
       appType: "absent",
       probeAssetsType: "absent",
       probeFiles: new Map(),
     };
-    for (const [index, layer] of imageManifest.layers.entries()) {
+    for (const [position, layer] of imageLayers.entries()) {
+      const layerDescriptor = objectView(layer);
       const layerPath = await verifyDescriptor(
         extractionDir,
-        layer,
+        layerDescriptor,
         referencedBlobs,
       );
       if (
-        imageConfig.rootfs.diff_ids[index] !==
-        (await uncompressedLayerDigest(layerPath, layer.mediaType))
+        diffIds[position] !==
+        (await uncompressedLayerDigest(layerPath, layerDescriptor.mediaType))
       ) {
         throw new Error(
-          `Hub OCI image rootfs diff_id does not match layer ${index}`,
+          `Hub OCI image rootfs diff_id does not match layer ${position}`,
         );
       }
-      await applyProbeAssetsFromLayer(layerPath, layer.mediaType, rootfs);
+      await applyProbeAssetsFromLayer(
+        layerPath,
+        layerDescriptor.mediaType,
+        rootfs,
+      );
     }
 
     await assertNoUnreferencedBlobs(extractionDir, referencedBlobs);
@@ -143,7 +206,7 @@ export async function inspectHubOciArchive({ archivePath, probeFiles }) {
   }
 }
 
-async function assertOciLayoutRoot(extractionDir) {
+async function assertOciLayoutRoot(extractionDir: string): Promise<void> {
   const entries = (await readdir(extractionDir)).sort();
   const expected = ["blobs", "index.json", "oci-layout"];
   if (JSON.stringify(entries) !== JSON.stringify(expected)) {
@@ -158,17 +221,26 @@ async function assertOciLayoutRoot(extractionDir) {
   }
 }
 
-async function verifyDescriptor(extractionDir, descriptor, referencedBlobs) {
+function validateDescriptorShape(
+  descriptor: unknown,
+): asserts descriptor is OciDescriptor {
   if (
-    !descriptor ||
-    typeof descriptor !== "object" ||
+    !isUnknownRecord(descriptor) ||
     typeof descriptor.digest !== "string" ||
     !/^sha256:[0-9a-f]{64}$/.test(descriptor.digest) ||
-    !Number.isSafeInteger(descriptor.size) ||
+    !isSafeInteger(descriptor.size) ||
     descriptor.size < 0
   ) {
     throw new Error("Hub OCI archive contains a malformed descriptor");
   }
+}
+
+async function verifyDescriptor(
+  extractionDir: string,
+  descriptor: unknown,
+  referencedBlobs: Set<string>,
+): Promise<string> {
+  validateDescriptorShape(descriptor);
 
   const digestHex = descriptor.digest.slice("sha256:".length);
   const blobPath = path.join(extractionDir, "blobs", "sha256", digestHex);
@@ -182,17 +254,23 @@ async function verifyDescriptor(extractionDir, descriptor, referencedBlobs) {
     throw new Error(`Hub OCI blob size does not match ${descriptor.digest}`);
   }
   if ((await fileSha256(blobPath)) !== digestHex) {
-    throw new Error(`Hub OCI blob digest does not match ${descriptor.digest}`);
+    throw new Error(
+      `Hub OCI blob digest does not match ${descriptor.digest}`,
+    );
   }
 
   referencedBlobs.add(digestHex);
   return blobPath;
 }
 
-async function applyProbeAssetsFromLayer(layerPath, mediaType, rootfs) {
+async function applyProbeAssetsFromLayer(
+  layerPath: string,
+  mediaType: unknown,
+  rootfs: LayerRootfsState,
+): Promise<void> {
   if (!layerMediaTypes.has(mediaType)) {
     throw new Error(
-      `Hub OCI image layer media type is unsupported: ${mediaType}`,
+      `Hub OCI image layer media type is unsupported: ${String(mediaType)}`,
     );
   }
 
@@ -212,11 +290,18 @@ async function applyProbeAssetsFromLayer(layerPath, mediaType, rootfs) {
   if (rawNames.length !== verboseLines.length) {
     throw new Error("Hub OCI image layer entry metadata is malformed");
   }
-  const entries = rawNames.map((rawName, index) => ({
-    path: normalizedTarPath(rawName),
-    rawName,
-    type: verboseLines[index][0],
-  }));
+  const entries: TarEntry[] = [];
+  for (const [position, rawName] of rawNames.entries()) {
+    const verboseLine = verboseLines[position];
+    if (verboseLine === undefined) {
+      throw new Error("Hub OCI image layer entry metadata is malformed");
+    }
+    entries.push({
+      path: normalizedTarPath(rawName),
+      rawName,
+      type: verboseLine.charAt(0),
+    });
+  }
   for (const entry of entries) {
     if (
       entry.rawName.startsWith("/") ||
@@ -266,12 +351,14 @@ async function applyProbeAssetsFromLayer(layerPath, mediaType, rootfs) {
     }
     const file = entry.path.slice(prefix.length);
     if (!file || file.includes("/")) {
-      throw new Error(`Hub OCI Probe Asset Set contains nested path ${file}`);
+      throw new Error(
+        `Hub OCI Probe Asset Set contains nested path ${file}`,
+      );
     }
     rootfs.appType = "d";
     rootfs.probeAssetsType = "d";
     if (entry.type !== "-") {
-      rootfs.probeFiles.set(file, { type: entry.type });
+      rootfs.probeFiles.set(file, { contents: null, type: entry.type });
       continue;
     }
     const extracted = await execFileAsync(
@@ -286,18 +373,22 @@ async function applyProbeAssetsFromLayer(layerPath, mediaType, rootfs) {
   }
 }
 
-async function uncompressedLayerDigest(layerPath, mediaType) {
+async function uncompressedLayerDigest(
+  layerPath: string,
+  mediaType: unknown,
+): Promise<string> {
   if (!layerMediaTypes.has(mediaType)) {
     throw new Error(
-      `Hub OCI image layer media type is unsupported: ${mediaType}`,
+      `Hub OCI image layer media type is unsupported: ${String(mediaType)}`,
     );
   }
 
   const hash = createHash("sha256");
   const input = createReadStream(layerPath);
-  const contents = mediaType.endsWith("+gzip")
-    ? input.pipe(createGunzip())
-    : input;
+  const contents =
+    typeof mediaType === "string" && mediaType.endsWith("+gzip")
+      ? input.pipe(createGunzip())
+      : input;
   try {
     for await (const chunk of contents) {
       hash.update(chunk);
@@ -308,14 +399,17 @@ async function uncompressedLayerDigest(layerPath, mediaType) {
   return `sha256:${hash.digest("hex")}`;
 }
 
-function normalizedTarPath(value) {
+function normalizedTarPath(value: string): string {
   return value
     .replace(/^(?:[.][/])+/, "")
     .replace(/^[/]+/, "")
     .replace(/[/]+$/, "");
 }
 
-function assertEmbeddedProbeFiles(rootfs, probeFiles) {
+function assertEmbeddedProbeFiles(
+  rootfs: LayerRootfsState,
+  probeFiles: readonly ProbeAssetFileIdentity[],
+): void {
   const actualNames = [...rootfs.probeFiles.keys()].sort();
   const expectedNames = probeFiles.map(({ file }) => file).sort();
   if (
@@ -328,20 +422,23 @@ function assertEmbeddedProbeFiles(rootfs, probeFiles) {
     );
   }
 
-  const expectedByName = new Map(probeFiles.map((file) => [file.file, file]));
+  const expectedByName = new Map<string, ProbeAssetFileIdentity>(
+    probeFiles.map((entry) => [entry.file, entry]),
+  );
   for (const [file, entry] of rootfs.probeFiles) {
     const expected = expectedByName.get(file);
     if (
       entry.type !== "-" ||
-      entry.contents.byteLength !== expected.size ||
-      sha256(entry.contents) !== expected.sha256
+      entry.contents === null ||
+      entry.contents.byteLength !== expected?.size ||
+      sha256(entry.contents) !== expected?.sha256
     ) {
       throw new Error(`Hub OCI embedded Probe asset differs from ${file}`);
     }
   }
 }
 
-function applyRelevantWhiteout(entryPath, rootfs) {
+function applyRelevantWhiteout(entryPath: string, rootfs: LayerRootfsState): void {
   const base = pathBase(entryPath);
   if (!base.startsWith(".wh.")) {
     return;
@@ -375,26 +472,29 @@ function applyRelevantWhiteout(entryPath, rootfs) {
   }
 }
 
-function clearProbeAssets(rootfs) {
+function clearProbeAssets(rootfs: LayerRootfsState): void {
   rootfs.probeAssetsType = "absent";
   rootfs.probeFiles.clear();
 }
 
-function nonemptyLines(value) {
+function nonemptyLines(value: string): string[] {
   return value.split("\n").filter((line) => line.length > 0);
 }
 
-function pathBase(value) {
+function pathBase(value: string): string {
   const index = value.lastIndexOf("/");
   return index === -1 ? value : value.slice(index + 1);
 }
 
-function pathParent(value) {
+function pathParent(value: string): string {
   const index = value.lastIndexOf("/");
   return index === -1 ? "" : value.slice(0, index);
 }
 
-async function assertNoUnreferencedBlobs(extractionDir, referencedBlobs) {
+async function assertNoUnreferencedBlobs(
+  extractionDir: string,
+  referencedBlobs: Set<string>,
+): Promise<void> {
   const actual = (
     await readdir(path.join(extractionDir, "blobs", "sha256"))
   ).sort();
@@ -404,28 +504,27 @@ async function assertNoUnreferencedBlobs(extractionDir, referencedBlobs) {
   }
 }
 
-async function readJson(filePath) {
-  let value;
+async function readJson(filePath: string): Promise<UnknownRecord> {
+  let value: unknown;
   try {
     value = JSON.parse(await readFile(filePath, "utf8"));
   } catch {
     throw new Error(`Hub OCI archive contains malformed JSON at ${filePath}`);
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!isUnknownRecord(value)) {
     throw new Error(`Hub OCI archive contains malformed JSON at ${filePath}`);
   }
   return value;
 }
 
-async function fileSha256(filePath) {
+async function fileSha256(filePath: string): Promise<string> {
   const hash = createHash("sha256");
-  const file = await import("node:fs");
-  for await (const chunk of file.createReadStream(filePath)) {
+  for await (const chunk of createReadStream(filePath)) {
     hash.update(chunk);
   }
   return hash.digest("hex");
 }
 
-function sha256(contents) {
+function sha256(contents: Buffer): string {
   return createHash("sha256").update(contents).digest("hex");
 }
