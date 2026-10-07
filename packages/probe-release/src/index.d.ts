@@ -113,7 +113,7 @@ export type ReleaseTransitionContractExpectation = Readonly<{
   sourceVersion?: string;
   targetAssetClosure?: readonly unknown[];
   targetAssetSetManifestSha256?: string;
-  targetVersion?: string;
+  targetVersion?: unknown;
 }>;
 
 export type SignedDocument<T> = {

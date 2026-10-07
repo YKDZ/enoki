@@ -647,7 +647,7 @@ export async function inspectProbeAssetSet(
         sourceVersion: stringExpectation(contractSource.version),
         targetAssetClosure: manifest.assets,
         targetAssetSetManifestSha256: sha256(manifestBytes),
-        targetVersion: stringExpectation(manifest.version),
+        targetVersion: manifest.version,
       },
       rootPublicKeyPem: trustedRootPublicKey ?? canonicalRootPublicKey,
     });
