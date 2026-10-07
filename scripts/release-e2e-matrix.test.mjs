@@ -65,7 +65,7 @@ describe("supported Release Test Host matrix", () => {
     );
 
     expect(planningJob).toContain("candidate/candidate-manifest.json");
-    expect(planningJob).toContain("release-scenario-plan.mjs github-actions");
+    expect(planningJob).toContain("release-scenario-plan.ts github-actions");
   });
 
   it("passes only planner-produced cells to the one existing Orchestrator", async () => {

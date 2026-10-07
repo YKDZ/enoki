@@ -1,5 +1,5 @@
 // Release Scenario Plan 的纯编译闭包：场景闭包、编译与已编译计划校验。
-// 需要签名候选与矩阵读取的编排入口留在 release-scenario-plan.mjs。
+// 需要签名候选与矩阵读取的编排入口留在 release-scenario-plan.ts。
 
 import {
   supportedHostEnvironments,

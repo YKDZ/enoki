@@ -572,7 +572,7 @@ jobs:
         env:
           ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
-          node trusted-tool/scripts/release-scenario-plan.mjs github-actions
+          node trusted-tool/scripts/release-scenario-plan.ts github-actions
           --candidate-manifest candidate/candidate-manifest.json
           --matrix trusted-tool/scripts/release-e2e-matrix.json
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
