@@ -7,6 +7,7 @@ import {
   createReleaseTransitionContract,
   createTrustEpochMigrationAuthorization,
   probeTargets,
+  type ReleaseTransitionProbeComponent,
 } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 
@@ -220,7 +221,7 @@ async function createTrustEpochMigrationFixture({
   }
 }
 
-function sourceProbeComponentFixture() {
+function sourceProbeComponentFixture(): ReleaseTransitionProbeComponent[] {
   return probeTargets.map((target, index) => ({
     file: "enoki-probe",
     role: "probe",
