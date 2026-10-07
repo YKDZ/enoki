@@ -1,10 +1,18 @@
-// Installed Bundle Failure Repair Host driver and its direct proof, migrated
-// verbatim from release-installed-bundle-failure-repair.mjs to strictly typed,
-// erasable TypeScript so the Probe Host Harness can call the single typed
-// implementation. Behavior, ordering, evidence attribution and original failure
-// diagnostics are unchanged; only parameter/return types are added.
+// 已安装包故障修复的 Host driver 与本机直接证明：在受支持主机上耗尽 Observation
+// Runtime 恢复预算、读取 durable epoch/latch，再调用正式 CLI 完成本机修复。结案
+// 所需的本机事实、报告事实与 Hub 读数在这里分开采集，是否结案只由共享判据决定。
 
-import { regexInput, stringValue } from "./release-json-guards.ts";
+import { objectView, regexInput, stringValue } from "./release-json-guards.ts";
+import type {
+  HubHostProfileReading,
+  HubRepairOperationReading,
+  RepairClosureCapture,
+  RepairClosureExpectation,
+} from "./release-repair-closure-evidence.ts";
+import {
+  judgeInstalledBundleRepairClosure,
+  probeRepairLocalCompletionOutput,
+} from "./release-repair-closure-evidence.ts";
 
 export type CommandResult = {
   code: number;
@@ -33,6 +41,7 @@ export type FailureEvidence = {
     runtimeSha256: string;
     version: string;
   };
+  epochResult: string;
   failureEpoch: {
     bootId: string;
     generation: string;
@@ -91,6 +100,23 @@ export type InstalledBundleFailureRepairDriver = {
 
 const observationRuntimeUnit = "enoki-observation-runtime.service";
 const observationRuntimeRole = "observation_runtime";
+
+// 07 已接受合同：受支持主机上 Runtime 预算耗尽的真实终态 Result 由 durable epoch
+// 绑定；`start-limit-hit` 在受支持主机从未出现，不构成耗尽资格。
+const exhaustedRuntimeResults: readonly string[] = Object.freeze([
+  "exit-code",
+  "signal",
+  "core-dump",
+  "watchdog",
+  "timeout",
+  "protocol",
+  "resources",
+  "oom-kill",
+]);
+
+export function isExhaustedRuntimeResult(value: unknown): boolean {
+  return typeof value === "string" && exhaustedRuntimeResults.includes(value);
+}
 
 export function createInstalledBundleFailureRepairHostDriver({
   assertOwnedRun,
@@ -194,14 +220,20 @@ export async function proveInstalledBundleFailureRepair({
   host,
   hostId,
   identityBefore,
-  observeReadyHost,
+  readClosureCapture,
+  readHubHostProfile,
+  readHubRepairOperation,
   runId,
 }: {
   expectedBundleVersion: string;
   host: InstalledBundleFailureRepairHost;
   hostId: number;
   identityBefore: ProbeIdentityEvidence | null;
-  observeReadyHost: () => Promise<{ id?: unknown } | null>;
+  readClosureCapture: () => Promise<RepairClosureCapture | null>;
+  readHubHostProfile: () => Promise<HubHostProfileReading | null>;
+  readHubRepairOperation: (
+    operationId: string,
+  ) => Promise<HubRepairOperationReading | null>;
   runId: string;
 }) {
   if (
@@ -210,7 +242,9 @@ export async function proveInstalledBundleFailureRepair({
     typeof host?.repairInstalledBundleFailure !== "function" ||
     typeof host.assertInstalled !== "function" ||
     typeof host.readProbeIdentity !== "function" ||
-    typeof observeReadyHost !== "function"
+    typeof readClosureCapture !== "function" ||
+    typeof readHubHostProfile !== "function" ||
+    typeof readHubRepairOperation !== "function"
   ) {
     throw new Error(
       "Installed Bundle Failure Repair capability port is invalid",
@@ -238,20 +272,53 @@ export async function proveInstalledBundleFailureRepair({
       "Installed Bundle Failure Repair changed the Probe Identity",
     );
   }
-  const readyHost = await observeReadyHost();
-  if (readyHost?.id !== hostId) {
-    throw new Error("Installed Bundle Failure Repair changed the Hub Host");
+  // 本机 CLI 只证明本机恢复与最终普通 Probe 已启动；目标版本与身份保持分别取自
+  // 修复后的已安装包边界与身份读数，Hub 结案事实由协调参与者的普通读数独立采集。
+  const localCompletion = {
+    completedAtMs: Date.now(),
+    identitySha256: identityAfter.identitySha256,
+    output: repair.output,
+    probeId: identityAfter.probeId,
+    repairedVersion: stringValue(objectView(hostBoundary).probeVersion),
+  };
+  const capture = await readClosureCapture();
+  const operationId = capture?.repairAuthorization?.operationId ?? "";
+  const hubOperation = /^[1-9]\d*$/.test(operationId)
+    ? await readHubRepairOperation(operationId)
+    : null;
+  const hubHostProfile = await readHubHostProfile();
+  const expectation: RepairClosureExpectation = {
+    failureEpochBootId: failure.failureEpoch.bootId,
+    failureEpochGeneration: failure.failureEpoch.generation,
+    hostId,
+    identitySha256: identityAfter.identitySha256,
+    probeId: identityAfter.probeId,
+    targetProbeVersion: expectedBundleVersion,
+  };
+  const judgment = judgeInstalledBundleRepairClosure({
+    capture,
+    expectation,
+    hubHostProfile,
+    hubOperation,
+    localCompletion,
+  });
+  if (!judgment.accepted) {
+    throw new Error(
+      `Installed Bundle Failure Repair is not closed by the collected report facts and the Hub Repair Operation: ${judgment.reasons.join(",")}`,
+    );
   }
   return {
+    closure: {
+      capture,
+      expectation,
+      hubHostProfile,
+      hubOperation,
+      localCompletion,
+    },
     failure,
-    host: readyHost,
     hostBoundary,
     identity: { after: identityAfter, before: identityBefore },
-    repair: {
-      ...repair,
-      probeId: identityAfter.probeId,
-      repairedVersion: expectedBundleVersion,
-    },
+    repair,
   };
 }
 
@@ -269,6 +336,7 @@ function parseFailureEvidence(
       "epochLinks",
       "epochMode",
       "epochOwner",
+      "epochResult",
       "hostId",
       "identityReceiptSha256",
       "installStateSha256",
@@ -300,12 +368,13 @@ function parseFailureEvidence(
     values.role !== observationRuntimeRole ||
     values.unit !== observationRuntimeUnit ||
     values.activeState !== "failed" ||
-    values.result !== "start-limit-hit" ||
+    !isExhaustedRuntimeResult(values.result) ||
+    values.epochResult !== values.result ||
     values.bundleVersion !== expectedBundleVersion ||
     values.startLimitIntervalSec !== "60" ||
     startLimitBurst !== 3 ||
     !Number.isSafeInteger(restartCount) ||
-    restartCount + 1 < startLimitBurst ||
+    restartCount !== startLimitBurst ||
     values.epochGeneration !== values.latchGeneration ||
     values.epochOwner !== "0" ||
     values.epochMode !== "600" ||
@@ -357,11 +426,12 @@ function parseFailureEvidence(
       ownerUid: 0,
     },
     recoveryBudget: {
-      observedStarts: restartCount + 1,
+      observedStarts: restartCount,
       startLimitBurst,
       startLimitIntervalSeconds: 60,
     },
-    result: values.result,
+    result: stringValue(values.result),
+    epochResult: stringValue(values.epochResult),
     role: values.role,
     status: "latched",
     unit: values.unit,
@@ -393,7 +463,7 @@ function parseRepairEvidence(
   if (
     values.bundleVersion !== expectedBundleVersion ||
     values.unit !== observationRuntimeUnit ||
-    values.repairOutput !== "Probe repair completed." ||
+    values.repairOutput !== probeRepairLocalCompletionOutput ||
     values.runtimeSha256 !== originalRuntimeSha256 ||
     values.epochExists !== "0" ||
     values.latchExists !== "0" ||
@@ -481,18 +551,7 @@ trap - EXIT HUP INT TERM
 runtime_fault_sha256=$(sha256sum "$runtime" | cut -d ' ' -f 1)
 [ "$runtime_fault_sha256" != "$runtime_sha256" ] || fail 'Observation Runtime fault was not installed'
 systemctl start "$unit" >/dev/null 2>&1 || true
-active_state=
-result=
-remaining=50
-while [ "$remaining" -gt 0 ]; do
-  active_state=$(systemctl show "$unit" --property=ActiveState --value)
-  result=$(systemctl show "$unit" --property=Result --value)
-  if [ "$active_state" = failed ] && [ "$result" = start-limit-hit ]; then break; fi
-  sleep 1
-  remaining=$((remaining - 1))
-done
-[ "$active_state" = failed ] && [ "$result" = start-limit-hit ] || fail 'Observation Runtime did not exhaust its recovery budget'
-remaining=20
+remaining=60
 while [ "$remaining" -gt 0 ] && { [ ! -f "$epoch" ] || [ ! -f "$latch" ]; }; do
   sleep 1
   remaining=$((remaining - 1))
@@ -514,12 +573,21 @@ epoch_bundle_version=$(epoch_value bundle_version)
 epoch_result=$(epoch_value result)
 latch_generation=$(cat "$latch")
 [ "$epoch_generation" = "$latch_generation" ] || fail 'failure latch does not bind the epoch'
-[ "$epoch_unit" = "$unit" ] && [ "$epoch_result" = start-limit-hit ] || fail 'failure epoch does not bind terminal Runtime exhaustion'
+[ "$epoch_unit" = "$unit" ] || fail 'failure epoch does not bind the Observation Runtime unit'
+case "$epoch_result" in
+  exit-code|signal|core-dump|watchdog|timeout|protocol|resources|oom-kill) ;;
+  *) fail 'failure epoch does not bind a real terminal Runtime Result' ;;
+esac
+active_state=$(systemctl show "$unit" --property=ActiveState --value)
+live_result=$(systemctl show "$unit" --property=Result --value)
+[ "$active_state" = failed ] || fail 'Observation Runtime is not in the durable failed state'
+[ "$live_result" = "$epoch_result" ] || fail 'live Runtime Result diverged from the durable failure epoch'
 [ "$epoch_bundle_version" = "$bundle_version" ] || fail 'failure epoch bundle binding changed'
 [ "$epoch_unit_sha256" = "$(sha256sum "$unit_file" | cut -d ' ' -f 1)" ] || fail 'failure epoch unit binding changed'
 restart_count=$(systemctl show "$unit" --property=NRestarts --value)
-printf 'activeState=%s\nbootId=%s\nbundleVersion=%s\nepochGeneration=%s\nepochLinks=%s\nepochMode=%s\nepochOwner=%s\nhostId=%s\nidentityReceiptSha256=%s\ninstallStateSha256=%s\nlatchGeneration=%s\nlatchLinks=%s\nlatchMode=%s\nlatchOwner=%s\nmanifestSha256=%s\nprobeId=%s\nresult=%s\nrestartCount=%s\nrole=%s\nruntimeFaultSha256=%s\nruntimeSha256=%s\nstartLimitBurst=%s\nstartLimitIntervalSec=60\nunit=%s\nunitSha256=%s\n' \\
-  "$active_state" "$epoch_boot_id" "$epoch_bundle_version" "$epoch_generation" "$(stat -c '%h' "$epoch")" "$(stat -c '%a' "$epoch")" "$(stat -c '%u' "$epoch")" "$epoch_host_id" "$epoch_identity_sha256" "$epoch_install_sha256" "$latch_generation" "$(stat -c '%h' "$latch")" "$(stat -c '%a' "$latch")" "$(stat -c '%u' "$latch")" "$epoch_manifest_sha256" "$epoch_probe_id" "$result" "$restart_count" ${shellSingleQuote(observationRuntimeRole)} "$runtime_fault_sha256" "$runtime_sha256" "$start_limit_burst" "$unit" "$epoch_unit_sha256"
+[ "$restart_count" = "$start_limit_burst" ] || fail 'Observation Runtime did not exhaust its recovery budget'
+printf 'activeState=%s\nbootId=%s\nbundleVersion=%s\nepochGeneration=%s\nepochLinks=%s\nepochMode=%s\nepochOwner=%s\nepochResult=%s\nhostId=%s\nidentityReceiptSha256=%s\ninstallStateSha256=%s\nlatchGeneration=%s\nlatchLinks=%s\nlatchMode=%s\nlatchOwner=%s\nmanifestSha256=%s\nprobeId=%s\nresult=%s\nrestartCount=%s\nrole=%s\nruntimeFaultSha256=%s\nruntimeSha256=%s\nstartLimitBurst=%s\nstartLimitIntervalSec=60\nunit=%s\nunitSha256=%s\n' \\
+  "$active_state" "$epoch_boot_id" "$epoch_bundle_version" "$epoch_generation" "$(stat -c '%h' "$epoch")" "$(stat -c '%a' "$epoch")" "$(stat -c '%u' "$epoch")" "$epoch_result" "$epoch_host_id" "$epoch_identity_sha256" "$epoch_install_sha256" "$latch_generation" "$(stat -c '%h' "$latch")" "$(stat -c '%a' "$latch")" "$(stat -c '%u' "$latch")" "$epoch_manifest_sha256" "$epoch_probe_id" "$live_result" "$restart_count" ${shellSingleQuote(observationRuntimeRole)} "$runtime_fault_sha256" "$runtime_sha256" "$start_limit_burst" "$unit" "$epoch_unit_sha256"
 `;
 }
 
@@ -542,7 +610,7 @@ unit=${shellSingleQuote(observationRuntimeUnit)}
 [ -f "$backup" ] && [ -f "$epoch" ] && [ -f "$latch" ]
 runtime_sha256=$(sha256sum "$backup" | cut -d ' ' -f 1)
 repair_output=$(/usr/local/bin/enoki-probe repair)
-[ "$repair_output" = 'Probe repair completed.' ]
+[ "$repair_output" = ${shellSingleQuote(probeRepairLocalCompletionOutput)} ]
 [ ! -e "$epoch" ] && [ ! -e "$latch" ]
 [ "$(sha256sum "$runtime" | cut -d ' ' -f 1)" = "$runtime_sha256" ]
 rm -- "$backup"

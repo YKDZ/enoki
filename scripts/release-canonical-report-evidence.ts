@@ -10,11 +10,26 @@ import {
 } from "node:http";
 
 import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
+import {
+  hostProfileCollectorId,
+  type RepairClosureCapture,
+} from "./release-repair-closure-evidence.ts";
 
 const ReportRequest = enoki.v1.ProbeReportRequest;
 const ReportResponse = enoki.v1.ProbeReportResponse;
 const maxProbeReportPayloadBytes = 1024 * 1024;
 const reportPath = "/api/probe/report";
+// 正式 CLI 通过既有修复授权响应取得非秘密的 Repair Operation 绑定；这里只缓冲同一
+// 请求与真实 Hub 响应，不记录响应里的授权秘密。
+const repairAuthorizationPath =
+  /^\/api\/probe\/runtime-failures\/([0-9a-f]{64})\/repair-authorize$/;
+const maxRepairAuthorizationPayloadBytes = 16 * 1024;
+// Hub 判定 Produced 当前主机概况的既有产品条件：official.host-profile 的 Collector
+// Outcome 处于 Produced 状态且没有失败。验收层只按同一形状观测，不复制结案算法。
+const producedCollectorOutcomeState = 1;
+const probeBundleVersionPattern =
+  /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+const reportedIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 type NumericLike =
   | number
@@ -34,13 +49,39 @@ type CanonicalReportProjection = {
   collectionOutcomeCount: number;
   enrollmentId: string;
   failureReason: number;
+  hostProfile: HostProfileProjection | null;
   metricsCount: number;
   payloadSha256: string;
   probeAssetBundleVersion: string;
   probeConfigurationVersion: string;
   probeId: string;
+  producedHostProfile: boolean;
   sequenceEnd: number;
   sequenceStart: number;
+};
+
+type HostProfileProjection = {
+  architecture: string;
+  cpuCount: number;
+  hostname: string;
+  kernel: string;
+  os: string;
+  probeAssetBundleVersion: string;
+  probeVersion: string;
+  snapshotHash: string;
+};
+
+type ClosureObservation =
+  | { kind: "final-boot"; projected: CanonicalReportProjection }
+  | { kind: "produced-profile"; projected: CanonicalReportProjection }
+  | null;
+
+type ArmedRepairClosure = {
+  authorization: RepairClosureCapture["repairAuthorization"];
+  expectedProbeId: string;
+  failedWindows: RepairClosureCapture["failedWindows"];
+  finalBoot: RepairClosureCapture["finalBoot"];
+  producedProfile: RepairClosureCapture["producedProfile"];
 };
 
 type BootResponseEvidence = {
@@ -137,6 +178,9 @@ export function createCanonicalReportEvidenceTransport({
   let armed: ArmedCanonicalReport | null = null;
   let completedEvidence: CanonicalReportEvidence | null = null;
   let failure: CodedError | null = null;
+  let closure: ArmedRepairClosure | null = null;
+  let completedClosure: RepairClosureCapture | null = null;
+  let closureFailure: CodedError | null = null;
   let server: Server | null = null;
   let reportRequestCount = 0;
   let lastUpstreamStatus: number | null = null;
@@ -152,23 +196,45 @@ export function createCanonicalReportEvidenceTransport({
       const target = new URL(incoming.url ?? "/", upstream);
       const isReport =
         incoming.method === "POST" && target.pathname === reportPath;
-      if (!isReport) {
+      const authorization =
+        incoming.method === "POST"
+          ? repairAuthorizationPath.exec(target.pathname)
+          : null;
+      if (!isReport && !authorization) {
         streamTransparent(incoming, outgoing, target);
         return;
       }
-      if (contentLengthExceeds(incoming.headers, maxProbeReportPayloadBytes)) {
-        rejectOversizedReport(incoming, outgoing);
+      const maxPayloadBytes = isReport
+        ? maxProbeReportPayloadBytes
+        : maxRepairAuthorizationPayloadBytes;
+      if (contentLengthExceeds(incoming.headers, maxPayloadBytes)) {
+        if (isReport) rejectOversizedReport(incoming, outgoing);
+        else rejectOversizedAuthorization(incoming, outgoing);
         return;
       }
-      const body = await readCappedBody(incoming, maxProbeReportPayloadBytes);
+      const body = await readCappedBody(incoming, maxPayloadBytes);
       if (!body) {
-        rejectOversizedReport(incoming, outgoing);
+        if (isReport) rejectOversizedReport(incoming, outgoing);
+        else rejectOversizedAuthorization(incoming, outgoing);
         return;
       }
       const headers = forwardedHeaders(incoming.headers, body.byteLength);
       const activeArmed =
         isReport && !completedEvidence && !failure ? armed : null;
-      const observation = activeArmed ? observeReport(activeArmed, body) : null;
+      const activeClosure =
+        !completedClosure && !closureFailure ? closure : null;
+      const projected =
+        isReport && (activeArmed !== null || activeClosure !== null)
+          ? decodeReport(body, activeArmed !== null)
+          : null;
+      const observation =
+        activeArmed && projected
+          ? observeReport(activeArmed, body, projected)
+          : null;
+      const closureObservation =
+        isReport && activeClosure && projected
+          ? observeClosureReport(activeClosure, projected)
+          : null;
       const response = await fetch_(target, {
         body:
           incoming.method === "GET" || incoming.method === "HEAD"
@@ -182,6 +248,27 @@ export function createCanonicalReportEvidenceTransport({
       if (isReport) {
         reportRequestCount += 1;
         lastUpstreamStatus = response.status;
+      }
+      if (!isReport && authorization && activeClosure) {
+        recordRepairAuthorization(
+          activeClosure,
+          authorization[1] ?? "",
+          body,
+          response.status,
+          responseBody,
+        );
+      }
+      if (!isReport) {
+        writeResponse(outgoing, response, responseBody);
+        return;
+      }
+      if (activeClosure && closureObservation) {
+        acceptClosureObservation(
+          activeClosure,
+          closureObservation,
+          response.status,
+          responseBody,
+        );
       }
       const disposition =
         activeArmed && observation
@@ -205,20 +292,25 @@ export function createCanonicalReportEvidenceTransport({
     }
   }
 
+  function decodeReport(
+    body: Buffer,
+    reportIsArmed: boolean,
+  ): CanonicalReportProjection | null {
+    try {
+      return projectReport(ReportRequest.decode(body), body);
+    } catch (error) {
+      const message = `canonical report payload could not be decoded: ${errorText(error)}`;
+      if (reportIsArmed) fail(message);
+      else closureFail(message);
+      return null;
+    }
+  }
+
   function observeReport(
     armed: ArmedCanonicalReport,
     body: Buffer,
+    projected: CanonicalReportProjection,
   ): Observation {
-    let report;
-    try {
-      report = ReportRequest.decode(body);
-    } catch (error) {
-      fail(
-        `canonical report payload could not be decoded: ${errorText(error)}`,
-      );
-      return { kind: "invalid" };
-    }
-    const projected = projectReport(report, body);
     if (projected.probeId !== armed.expectedProbeId) return null;
 
     if (!armed.boot) {
@@ -229,9 +321,7 @@ export function createCanonicalReportEvidenceTransport({
         projected.metricsCount !== 0 ||
         projected.collectionOutcomeCount !== 0 ||
         projected.failureReason !== 0 ||
-        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-          projected.probeAssetBundleVersion,
-        );
+        !probeBundleVersionPattern.test(projected.probeAssetBundleVersion);
       if (invalidBoot) {
         fail("canonical sequence-one Boot Report is invalid");
         return { kind: "invalid" };
@@ -357,6 +447,199 @@ export function createCanonicalReportEvidenceTransport({
     if (!outgoing.destroyed) outgoing.destroy();
   }
 
+  function rejectOversizedAuthorization(
+    incoming: IncomingMessage,
+    outgoing: ServerResponse,
+  ) {
+    closureFail(
+      "repair closure authority payload exceeded the production 16 KiB limit",
+      "repair_closure_payload_too_large",
+    );
+    incoming.destroy();
+    if (!outgoing.destroyed) outgoing.destroy();
+  }
+
+  function observeClosureReport(
+    armed: ArmedRepairClosure,
+    projected: CanonicalReportProjection,
+  ): ClosureObservation {
+    if (projected.probeId !== armed.expectedProbeId) return null;
+    if (projected.failureReason !== 0) {
+      recordFailedWindow(armed, projected);
+      return null;
+    }
+    const isFinalBoot =
+      armed.authorization !== null &&
+      armed.finalBoot === null &&
+      projected.sequenceStart === 1 &&
+      projected.sequenceEnd === 1 &&
+      projected.metricsCount === 0 &&
+      projected.collectionOutcomeCount === 0 &&
+      probeBundleVersionPattern.test(projected.probeAssetBundleVersion);
+    if (isFinalBoot) return { kind: "final-boot", projected };
+    const isProducedProfile =
+      armed.finalBoot !== null &&
+      armed.producedProfile === null &&
+      projected.bootId === armed.finalBoot.bootId &&
+      projected.hostProfile !== null &&
+      projected.producedHostProfile;
+    if (isProducedProfile) return { kind: "produced-profile", projected };
+    return null;
+  }
+
+  function recordFailedWindow(
+    armed: ArmedRepairClosure,
+    projected: CanonicalReportProjection,
+  ) {
+    if (
+      armed.failedWindows.some(
+        ({ payloadSha256 }) => payloadSha256 === projected.payloadSha256,
+      )
+    ) {
+      return;
+    }
+    armed.failedWindows.push({
+      bootId: projected.bootId,
+      payloadSha256: projected.payloadSha256,
+      sequence: projected.sequenceEnd,
+    });
+  }
+
+  function acceptClosureObservation(
+    armed: ArmedRepairClosure,
+    observation: NonNullable<ClosureObservation>,
+    status: number,
+    responseBody: Buffer,
+  ) {
+    const projected = observation.projected;
+    const acceptedSequenceEnd = acceptedSequenceEndOf(responseBody);
+    const responseSha256 = sha256(responseBody);
+    if (observation.kind === "final-boot") {
+      armed.finalBoot = {
+        acceptedSequenceEnd,
+        ackObservedAtMs: Date.now(),
+        bootId: projected.bootId,
+        bytes: projected.bytes,
+        payloadSha256: projected.payloadSha256,
+        probeAssetBundleVersion: projected.probeAssetBundleVersion,
+        probeId: projected.probeId,
+        responseSha256,
+        sequence: projected.sequenceEnd,
+        upstreamStatus: status,
+      };
+    } else {
+      const hostProfile = projected.hostProfile;
+      if (hostProfile === null) return;
+      armed.producedProfile = {
+        acceptedSequenceEnd,
+        architecture: hostProfile.architecture,
+        bootId: projected.bootId,
+        bytes: projected.bytes,
+        collectorId: hostProfileCollectorId,
+        cpuCount: hostProfile.cpuCount,
+        hostname: hostProfile.hostname,
+        kernel: hostProfile.kernel,
+        os: hostProfile.os,
+        payloadSha256: projected.payloadSha256,
+        probeAssetBundleVersion: hostProfile.probeAssetBundleVersion,
+        probeId: projected.probeId,
+        probeVersion: hostProfile.probeVersion,
+        responseSha256,
+        sequence: projected.sequenceEnd,
+        snapshotHash: hostProfile.snapshotHash,
+        upstreamStatus: status,
+      };
+    }
+    completeClosureCapture(armed);
+    notify();
+  }
+
+  function recordRepairAuthorization(
+    armed: ArmedRepairClosure,
+    generation: string,
+    requestBody: Buffer,
+    status: number,
+    responseBody: Buffer,
+  ) {
+    if (armed.authorization) return;
+    const evidence = jsonObjectValue(jsonObject(requestBody)?.evidence);
+    const authority = jsonObjectValue(jsonObject(responseBody)?.authority);
+    armed.authorization = {
+      bootId: textField(evidence?.bootId),
+      bundleVersion: textField(evidence?.bundleVersion),
+      epochGeneration: generation,
+      hostId: textField(evidence?.hostId),
+      operationId: textField(authority?.repairOperationId),
+      probeId: textField(evidence?.probeId),
+      requestPayloadSha256: sha256(requestBody),
+      responseSha256: sha256(responseBody),
+      upstreamStatus: status,
+    };
+    completeClosureCapture(armed);
+    notify();
+  }
+
+  function closureCapture(armed: ArmedRepairClosure): RepairClosureCapture {
+    return {
+      bootId: armed.finalBoot?.bootId ?? "",
+      failedWindows: structuredClone(armed.failedWindows),
+      finalBoot: armed.finalBoot ? structuredClone(armed.finalBoot) : null,
+      kind: "installed-bundle-repair-closure-capture",
+      probeId: armed.expectedProbeId,
+      producedProfile: armed.producedProfile
+        ? structuredClone(armed.producedProfile)
+        : null,
+      repairAuthorization: armed.authorization
+        ? structuredClone(armed.authorization)
+        : null,
+      schemaVersion: 1,
+    };
+  }
+
+  function completeClosureCapture(armed: ArmedRepairClosure) {
+    if (
+      !armed.authorization ||
+      !armed.finalBoot ||
+      !armed.producedProfile ||
+      completedClosure
+    ) {
+      return;
+    }
+    completedClosure = closureCapture(armed);
+  }
+
+  function closureFail(
+    message: string,
+    code = "repair_closure_evidence_invalid",
+  ): void {
+    if (!closureFailure) {
+      closureFailure = new Error(message);
+      closureFailure.code = code;
+      notify();
+    }
+  }
+
+  async function waitForState(
+    deadline: number,
+    done: () => boolean,
+    getFailure: () => CodedError | null,
+  ) {
+    while (!done() && !getFailure() && Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        const remaining = Math.max(1, deadline - Date.now());
+        const timer = setTimeout(() => {
+          waiters.delete(wake);
+          resolve();
+        }, remaining);
+        const wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        waiters.add(wake);
+      });
+    }
+  }
+
   function fail(
     message: string,
     code = "canonical_report_evidence_invalid",
@@ -370,7 +653,7 @@ export function createCanonicalReportEvidenceTransport({
 
   return {
     arm({ expectedProbeId }: { expectedProbeId?: string }) {
-      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(expectedProbeId ?? "")) {
+      if (!reportedIdPattern.test(expectedProbeId ?? "")) {
         throw new Error("canonical report evidence Probe ID is invalid");
       }
       if (armed || completedEvidence || failure) {
@@ -383,6 +666,24 @@ export function createCanonicalReportEvidenceTransport({
         bootResponse: null,
         expectedProbeId,
         failure: null,
+      };
+    },
+
+    armRepairClosure({ expectedProbeId }: { expectedProbeId: string }) {
+      if (!reportedIdPattern.test(expectedProbeId)) {
+        throw new Error("repair closure evidence Probe ID is invalid");
+      }
+      if (closure || completedClosure || closureFailure) {
+        throw new Error(
+          "repair closure evidence transport can be armed only once",
+        );
+      }
+      closure = {
+        authorization: null,
+        expectedProbeId,
+        failedWindows: [],
+        finalBoot: null,
+        producedProfile: null,
       };
     },
 
@@ -401,6 +702,17 @@ export function createCanonicalReportEvidenceTransport({
         armed: Boolean(armed),
         bootReportObserved: Boolean(armed?.boot),
         completed: Boolean(completedEvidence),
+        closure: {
+          armed: Boolean(closure),
+          repairAuthorityObserved: Boolean(closure?.authorization),
+          completed: Boolean(completedClosure),
+          failedWindowCount: closure?.failedWindows.length ?? 0,
+          failure: closureFailure
+            ? { code: closureFailure.code, message: closureFailure.message }
+            : null,
+          finalBootObserved: Boolean(closure?.finalBoot),
+          producedProfileObserved: Boolean(closure?.producedProfile),
+        },
         failure: failure
           ? { code: failure.code, message: failure.message }
           : null,
@@ -440,20 +752,11 @@ export function createCanonicalReportEvidenceTransport({
         throw new Error("canonical report evidence timeout is invalid");
       }
       const deadline = Date.now() + timeoutMs;
-      while (!completedEvidence && !failure && Date.now() < deadline) {
-        await new Promise<void>((resolve) => {
-          const remaining = Math.max(1, deadline - Date.now());
-          const timer = setTimeout(() => {
-            waiters.delete(wake);
-            resolve();
-          }, remaining);
-          const wake = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-          waiters.add(wake);
-        });
-      }
+      await waitForState(
+        deadline,
+        () => Boolean(completedEvidence),
+        () => failure,
+      );
       if (failure) throw failure;
       if (completedEvidence) return structuredClone(completedEvidence);
       const missing = !armed.boot
@@ -471,11 +774,78 @@ export function createCanonicalReportEvidenceTransport({
       error.code = "canonical_report_evidence_timeout";
       throw error;
     },
+
+    async waitForRepairClosureEvidence({ timeoutMs }: { timeoutMs: number }) {
+      if (!closure)
+        throw new Error("repair closure evidence transport is not armed");
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+        throw new Error("repair closure evidence timeout is invalid");
+      }
+      const deadline = Date.now() + timeoutMs;
+      await waitForState(
+        deadline,
+        () => Boolean(completedClosure),
+        () => closureFailure,
+      );
+      if (closureFailure) throw closureFailure;
+      // 未完成时返回已观测到的部分事实，缺失项保持 null，由共享结案判据给出拒绝理由；
+      // 传输层不自行断言修复是否完成。
+      return closureCapture(closure);
+    },
   };
 }
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function hasProducedHostProfileOutcome(
+  report: ProbeReportRequestMessage,
+): boolean {
+  return (report.metrics ?? []).some((sample) =>
+    (sample?.collectorOutcomes ?? []).some(
+      (outcome) =>
+        outcome?.collectorId === hostProfileCollectorId &&
+        Number(outcome?.state) === producedCollectorOutcomeState &&
+        !outcome?.failure,
+    ),
+  );
+}
+
+function acceptedSequenceEndOf(responseBody: Buffer): number {
+  try {
+    return unsignedNumber(
+      ReportResponse.decode(responseBody).acceptedSequenceEnd,
+    );
+  } catch {
+    return -1;
+  }
+}
+
+function jsonObject(value: Buffer): Record<string, unknown> | null {
+  return jsonObjectValue(parseJson(value));
+}
+
+function parseJson(value: Buffer): unknown {
+  try {
+    return JSON.parse(value.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function jsonObjectValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function textField(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "bigint") {
+    return String(value);
+  }
+  return "";
 }
 
 function streamTransparent(
@@ -601,14 +971,42 @@ function projectReport(
       report.observationWindowFailure == null
         ? 0
         : unsignedNumber(report.observationWindowFailure.reason),
+    hostProfile: projectHostProfile(report),
     metricsCount: report.metrics?.length ?? 0,
     payloadSha256: sha256(body),
     probeAssetBundleVersion: report.probeAssetBundleVersion ?? "",
     probeConfigurationVersion: report.probeConfigurationVersion ?? "",
     probeId: report.probeId ?? "",
+    producedHostProfile: hasProducedHostProfileOutcome(report),
     sequenceEnd: unsignedNumber(report.sequenceEnd),
     sequenceStart: unsignedNumber(report.sequenceStart),
   };
+}
+
+function projectHostProfile(
+  report: ProbeReportRequestMessage,
+): HostProfileProjection | null {
+  for (const snapshot of report.snapshots ?? []) {
+    const hostProfile = snapshot?.hostProfile;
+    if (
+      !hostProfile ||
+      snapshot?.collectorId !== hostProfileCollectorId ||
+      !snapshot?.snapshotHash
+    ) {
+      continue;
+    }
+    return {
+      architecture: textField(hostProfile.architecture),
+      cpuCount: unsignedNumber(hostProfile.cpuCount),
+      hostname: textField(hostProfile.hostname),
+      kernel: textField(hostProfile.kernel),
+      os: textField(hostProfile.os),
+      probeAssetBundleVersion: textField(hostProfile.probeAssetBundleVersion),
+      probeVersion: textField(hostProfile.probeVersion),
+      snapshotHash: textField(snapshot.snapshotHash),
+    };
+  }
+  return null;
 }
 
 function observationLabel(kind: "boot" | "first-failure" | "retry"): string {

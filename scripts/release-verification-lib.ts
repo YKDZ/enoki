@@ -6,6 +6,7 @@ import {
   isCandidateHostReady,
   isSupportedReleaseTestHostVirtualization,
 } from "./release-evidence-judgments.ts";
+import { isExhaustedRuntimeResult } from "./release-installed-bundle-failure-repair.ts";
 import {
   isSafeInteger,
   isUnknownArray,
@@ -16,6 +17,11 @@ import {
   stringValue,
   type UnknownRecord,
 } from "./release-json-guards.ts";
+import {
+  judgeInstalledBundleRepairClosure,
+  probeRepairLocalCompletionOutput,
+  type RepairClosureFacts,
+} from "./release-repair-closure-evidence.ts";
 
 const requiredComponentNames = Object.freeze([
   "inputValidation",
@@ -551,13 +557,23 @@ function validateInstalledBundleFailureRepair(
   const budget = objectView(failure.recoveryBudget);
   const repair = objectView(valueView.repair);
   const valueIdentity = objectView(valueView.identity);
-  const valueHost = objectView(valueView.host);
+  const identityAfter = objectView(valueIdentity.after);
+  const closure = objectView(valueView.closure);
+  const expectation = objectView(closure.expectation);
   const sha256 = (candidate: unknown) =>
     /^[0-9a-f]{64}$/.test(regexInput(candidate));
   if (
+    !sameKeySet(valueView, {
+      closure: null,
+      failure: null,
+      hostBoundary: null,
+      identity: null,
+      repair: null,
+    }) ||
     !sameKeySet(failure ?? {}, {
       activeState: null,
       bundle: null,
+      epochResult: null,
       failureEpoch: null,
       latch: null,
       recoveryBudget: null,
@@ -600,14 +616,13 @@ function validateInstalledBundleFailureRepair(
       faultRemoved: null,
       latchRemoved: null,
       output: null,
-      probeId: null,
-      repairedVersion: null,
       runtimeSha256: null,
       sameBundle: null,
       unit: null,
     }) ||
     failure.activeState !== "failed" ||
-    failure.result !== "start-limit-hit" ||
+    !isExhaustedRuntimeResult(failure.result) ||
+    failure.epochResult !== failure.result ||
     failure.role !== "observation_runtime" ||
     failure.status !== "latched" ||
     failure.unit !== "enoki-observation-runtime.service" ||
@@ -636,21 +651,74 @@ function validateInstalledBundleFailureRepair(
     repair.failureEpochRemoved !== true ||
     repair.faultRemoved !== true ||
     repair.latchRemoved !== true ||
-    repair.output !== "Probe repair completed." ||
-    repair.repairedVersion !== version ||
+    repair.output !== probeRepairLocalCompletionOutput ||
     repair.runtimeSha256 !== bundle.runtimeSha256 ||
     repair.sameBundle !== true ||
     repair.unit !== failure.unit ||
-    repair.probeId !== epoch.probeId ||
-    repair.probeId !== objectView(valueIdentity.after).probeId ||
+    identityAfter.probeId !== epoch.probeId ||
     JSON.stringify(valueIdentity.after) !==
       JSON.stringify(valueIdentity.before) ||
-    valueHost.id !== expectedHostId ||
-    !isCandidateHostReady(valueView.host, version)
+    expectation.hostId !== expectedHostId ||
+    expectation.targetProbeVersion !== version ||
+    expectation.failureEpochBootId !== epoch.bootId ||
+    expectation.failureEpochGeneration !== epoch.generation ||
+    expectation.probeId !== epoch.probeId ||
+    expectation.identitySha256 !== identityAfter.identitySha256
   ) {
     errors.push("Installed Bundle Failure Repair evidence is invalid");
   }
+  // 结案与否只由共享判据决定：summary 用场景记录的同一份原始事实重新判定，
+  // 证据里不保存判定结论，也不得缺任何一类关联。
+  const facts = recordedRepairClosureFacts(closure);
+  const judgment = facts
+    ? judgeInstalledBundleRepairClosure(facts)
+    : {
+        accepted: false,
+        associated: null,
+        reasons: ["closure_capture_invalid"],
+      };
+  if (!judgment.accepted) {
+    errors.push(
+      `Installed Bundle Failure Repair is not closed by the recorded report facts and the Hub Repair Operation: ${judgment.reasons.join(",")}`,
+    );
+  }
   validateInstalledHostBoundary(valueView.hostBoundary, version, errors);
+}
+
+// 只接受结构完整的结案事实记录，避免将伪造形状交给判据；null 事实由判据自行给出拒绝理由。
+function recordedRepairClosureFacts(
+  closure: UnknownRecord,
+): RepairClosureFacts | null {
+  if (
+    !sameKeySet(closure, {
+      capture: null,
+      expectation: null,
+      hubHostProfile: null,
+      hubOperation: null,
+      localCompletion: null,
+    })
+  ) {
+    return null;
+  }
+  const capture = closure.capture;
+  if (capture === null) return closure as unknown as RepairClosureFacts;
+  if (!isUnknownRecord(capture)) return null;
+  if (
+    !sameKeySet(capture, {
+      bootId: null,
+      failedWindows: null,
+      finalBoot: null,
+      kind: null,
+      probeId: null,
+      producedProfile: null,
+      repairAuthorization: null,
+      schemaVersion: null,
+    }) ||
+    !isUnknownArray(capture.failedWindows)
+  ) {
+    return null;
+  }
+  return closure as unknown as RepairClosureFacts;
 }
 
 function validateInstallerEvidence(
@@ -1467,11 +1535,9 @@ function validateRepairEvidence(
     errors.push("Repair boundary validation did not succeed");
   }
   const repairView = objectView(evidenceView.repair);
-  if (
-    repairView.repairedVersion !== version ||
-    typeof repairView.probeId !== "string" ||
-    !repairView.probeId
-  ) {
+  // 08 已接受的正式 CLI 只宣告本机恢复与最终探针启动；目标版本由修复后的已安装包
+  // 边界证明，身份由身份连续性读数证明，都不再写进命令行输出。
+  if (repairView.output !== probeRepairLocalCompletionOutput) {
     errors.push("Repair completion is incomplete");
   }
   if (!isCandidateHostReady(evidenceView.repairedHost, version)) {
@@ -1482,12 +1548,6 @@ function validateRepairEvidence(
     objectView(evidenceView.repairedHost).id,
     errors,
   );
-  if (
-    repairView.probeId !==
-    objectView(objectView(evidenceView.identityContinuity).before).probeId
-  ) {
-    errors.push("Repair identity continuity is invalid");
-  }
   const metricsView = objectView(evidenceView.metrics);
   validateMetrics(metricsView.beforeUpgrade, "pre-failure", errors);
   validateMetrics(metricsView.afterRepair, "post-Repair", errors);

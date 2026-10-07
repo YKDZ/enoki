@@ -42,7 +42,15 @@ import {
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
 } from "./release-evidence-judgments.ts";
-import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.ts";
+import {
+  createInstalledBundleFailureRepairHostDriver,
+  proveInstalledBundleFailureRepair,
+} from "./release-installed-bundle-failure-repair.ts";
+import {
+  hostProfileCollectorId,
+  judgeInstalledBundleRepairClosure,
+  probeRepairLocalCompletionOutput,
+} from "./release-repair-closure-evidence.ts";
 import { createMatrixGateResult } from "./release-verification-lib.ts";
 
 const execFileAsync = promisify(execFile);
@@ -572,6 +580,48 @@ describe("Release E2E business assertions", () => {
         authority: { authorizationSha256: "[REDACTED]" },
       },
     });
+  });
+
+  it("keeps Repair closure authorization facts only at their exact evidence path", () => {
+    const redacted = redactReleaseE2EEvidence(
+      {
+        cleanup: { authorizationSha256: "a".repeat(64) },
+        installedBundleFailureRepair: {
+          closure: {
+            capture: {
+              repairAuthorization: {
+                authorizationSha256: "b".repeat(64),
+                bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+                epochGeneration: "8".repeat(64),
+                hostId: "7",
+                operationId: "42",
+                probeId: "probe_release_01",
+                requestPayloadSha256: "9".repeat(64),
+                responseSha256: "8".repeat(64),
+                upstreamStatus: 200,
+              },
+            },
+          },
+        },
+      },
+      { candidateManifest: candidateManifestWithBaseline() },
+    );
+
+    // 结案事实必须原样保留，共享判据才能在 summary 里重新判定；同名秘密键仍被脱敏。
+    expect(
+      redacted.installedBundleFailureRepair.closure.capture.repairAuthorization,
+    ).toEqual({
+      authorizationSha256: "[REDACTED]",
+      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+      epochGeneration: "8".repeat(64),
+      hostId: "7",
+      operationId: "42",
+      probeId: "probe_release_01",
+      requestPayloadSha256: "9".repeat(64),
+      responseSha256: "8".repeat(64),
+      upstreamStatus: 200,
+    });
+    expect(redacted.cleanup.authorizationSha256).toBe("[REDACTED]");
   });
 
   it("derives baseline kind from the validated Candidate Manifest in workflow", async () => {
@@ -1409,9 +1459,7 @@ describe("Probe Host Harness", () => {
           return successfulCommandText("removed\n");
         }
         if (command.includes("# enoki-release-e2e:probe-repair")) {
-          return successfulCommandText(
-            "Probe Repair succeeded: probe=probe_release_01 version=1.2.3\n",
-          );
+          return successfulCommandText(`${probeRepairLocalCompletionOutput}\n`);
         }
         return successfulCommandText(
           command.includes("# enoki-release-e2e:record-resources")
@@ -1459,7 +1507,9 @@ describe("Probe Host Harness", () => {
       probeVersion: "1.2.3",
     });
     await harness.removePostReplacementRestartFault("run-repair-host");
-    await harness.repair("run-repair-host");
+    await expect(harness.repair("run-repair-host")).resolves.toEqual({
+      output: probeRepairLocalCompletionOutput,
+    });
     await harness.completeRepairOwnershipTransition("run-repair-host", failed);
 
     const armed = commands.find(({ command }) =>
@@ -1566,6 +1616,7 @@ describe("Probe Host Harness", () => {
               "epochLinks=1",
               "epochMode=600",
               "epochOwner=0",
+              "epochResult=protocol",
               "hostId=7",
               `identityReceiptSha256=${"c".repeat(64)}`,
               `installStateSha256=${"d".repeat(64)}`,
@@ -1575,8 +1626,8 @@ describe("Probe Host Harness", () => {
               "latchOwner=0",
               `manifestSha256=${"e".repeat(64)}`,
               "probeId=probe_release_01",
-              "result=start-limit-hit",
-              "restartCount=2",
+              "result=protocol",
+              "restartCount=3",
               "role=observation_runtime",
               `runtimeFaultSha256=${"f".repeat(64)}`,
               `runtimeSha256=${runtimeSha256}`,
@@ -1599,7 +1650,7 @@ describe("Probe Host Harness", () => {
               "epochExists=0",
               "faultBackupExists=0",
               "latchExists=0",
-              "repairOutput=Probe repair completed.",
+              `repairOutput=${probeRepairLocalCompletionOutput}`,
               `runtimeSha256=${runtimeSha256}`,
               "unit=enoki-observation-runtime.service",
               "",
@@ -1629,7 +1680,7 @@ describe("Probe Host Harness", () => {
         },
         latch: { generation: "b".repeat(64), ownerUid: 0 },
         recoveryBudget: { observedStarts: 3, startLimitBurst: 3 },
-        result: "start-limit-hit",
+        result: "protocol",
         role: "observation_runtime",
         status: "latched",
         unit: "enoki-observation-runtime.service",
@@ -1638,6 +1689,7 @@ describe("Probe Host Harness", () => {
         failureEpochRemoved: true,
         faultRemoved: true,
         latchRemoved: true,
+        output: probeRepairLocalCompletionOutput,
         runtimeSha256,
         sameBundle: true,
       },
@@ -1656,7 +1708,10 @@ describe("Probe Host Harness", () => {
       "runtime=/usr/local/bin/enoki-observation-runtime",
     );
     expect(exhausted.command).toContain("StartLimitBurst=");
-    expect(exhausted.command).toContain('$result" = start-limit-hit');
+    expect(exhausted.command).toContain(
+      "exit-code|signal|core-dump|watchdog|timeout|protocol|resources|oom-kill",
+    );
+    expect(exhausted.command).toContain('"$live_result" = "$epoch_result"');
     expect(exhausted.command).toContain(
       "epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml",
     );
@@ -3502,6 +3557,7 @@ describe("Release E2E Orchestrator", () => {
     let canonicalRuntimeState = "available";
     let newEnrollmentCalls = 0;
     let offlineObservations = 0;
+    let repairClosureArmedWith = null;
     let probeConfiguration = {
       enabledCollectorIds: ["official.cpu", "official.memory"],
       metricsCollectionIntervalSeconds: 5,
@@ -3621,6 +3677,17 @@ describe("Release E2E Orchestrator", () => {
           mode: "override",
         };
       },
+      async getProbeRepairOperation(operationId) {
+        calls.push(`hub.getProbeRepairOperation:${operationId}`);
+        return {
+          hostId: 7,
+          id: operationId,
+          kind: "probe_repair",
+          source: "owner-probe-operation-read",
+          state: "succeeded",
+          targetProbeVersion: "1.2.3",
+        };
+      },
       async isHostSoftDeleted(hostId) {
         calls.push(`hub.isHostSoftDeleted:${hostId}`);
         return lifecycle === "deleted";
@@ -3646,9 +3713,9 @@ describe("Release E2E Orchestrator", () => {
       async assertDisposable() {
         calls.push("host.assertDisposable");
       },
-      async assertInstalled() {
+      async assertInstalled(_runId, version) {
         calls.push("host.assertInstalled");
-        return { service: { User: "enoki-probe" } };
+        return installedHostBoundary(version);
       },
       async awaitPermanentReportRejection() {
         calls.push("host.awaitPermanentReportRejection");
@@ -3753,23 +3820,11 @@ describe("Release E2E Orchestrator", () => {
       async repairInstalledBundleFailure() {
         calls.push("host.repairInstalledBundleFailure");
         return {
-          failure: {
-            activeState: "failed",
-            failureEpoch: {
-              hostId: "7",
-              probeId: "probe_release_01",
-            },
-            role: "observation_runtime",
-            status: "latched",
-            result: "start-limit-hit",
-            unit: "enoki-observation-runtime.service",
-          },
-          repair: {
-            failureEpochRemoved: true,
-            faultRemoved: true,
-            latchRemoved: true,
-            sameBundle: true,
-          },
+          failure: installedBundleFailureEvidence({
+            identity: installedState.identity,
+            version: "1.2.3",
+          }),
+          repair: installedBundleRepairEvidence(),
         };
       },
       async rejectRepeatedInstall() {
@@ -3801,12 +3856,31 @@ describe("Release E2E Orchestrator", () => {
                 arm({ expectedProbeId }) {
                   calls.push(`canonicalReports.arm:${expectedProbeId}`);
                 },
+                armRepairClosure({ expectedProbeId }) {
+                  calls.push(
+                    `canonicalReports.armRepairClosure:${expectedProbeId}`,
+                  );
+                  repairClosureArmedWith = expectedProbeId;
+                },
                 diagnostics() {
                   return { completed: true };
                 },
                 async waitForEvidence() {
                   calls.push("canonicalReports.waitForEvidence");
                   return canonicalReportEvidence;
+                },
+                async waitForRepairClosureEvidence() {
+                  calls.push("canonicalReports.waitForRepairClosureEvidence");
+                  if (repairClosureArmedWith !== "probe_release_01") {
+                    throw new Error(
+                      "repair closure evidence transport is not armed",
+                    );
+                  }
+                  return repairClosureCapture({
+                    expectedVersion: "1.2.3",
+                    hostProfile: readyHost().hostProfile,
+                    identity: installedState.identity,
+                  });
                 },
               },
               host,
@@ -3832,11 +3906,14 @@ describe("Release E2E Orchestrator", () => {
 
     expect(calls).toEqual(
       expect.arrayContaining([
+        "canonicalReports.armRepairClosure:probe_release_01",
+        "canonicalReports.waitForRepairClosureEvidence",
         "host.rejectRepeatedInstall",
         "host.repairInstalledBundleFailure",
         "host.localUninstall",
         "hub.createEnrollment:existing_host",
         "hub.deleteHostHubOnly:7",
+        "hub.getProbeRepairOperation:42",
         "host.awaitPermanentReportRejection",
         "canonicalReports.arm:probe_release_02",
         "host.restartCanonicalProbeWithoutObservationRuntime",
@@ -3844,6 +3921,12 @@ describe("Release E2E Orchestrator", () => {
         "host.restoreObservationRuntime",
       ]),
     );
+    expect(calls.indexOf("host.repairInstalledBundleFailure")).toBeLessThan(
+      calls.indexOf("canonicalReports.waitForRepairClosureEvidence"),
+    );
+    expect(
+      calls.indexOf("canonicalReports.waitForRepairClosureEvidence"),
+    ).toBeLessThan(calls.indexOf("hub.getProbeRepairOperation:42"));
     expect(calls.filter((call) => call === "host.install:1")).toHaveLength(1);
     expect(calls.filter((call) => call === "host.install:2")).toHaveLength(1);
     expect(
@@ -3882,31 +3965,40 @@ describe("Release E2E Orchestrator", () => {
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
       installedBundleFailureRepair: {
+        closure: {
+          expectation: {
+            failureEpochBootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+            hostId: 7,
+            identitySha256: "b".repeat(64),
+            probeId: "probe_release_01",
+            targetProbeVersion: "1.2.3",
+          },
+          hubOperation: {
+            id: "42",
+            kind: "probe_repair",
+            state: "succeeded",
+          },
+          localCompletion: {
+            output: probeRepairLocalCompletionOutput,
+            repairedVersion: "1.2.3",
+          },
+        },
         failure: {
+          epochResult: "protocol",
           failureEpoch: {
             hostId: "7",
             probeId: "probe_release_01",
           },
-          result: "start-limit-hit",
+          result: "protocol",
           role: "observation_runtime",
           status: "latched",
         },
-        host: {
-          hostProfile: { probeVersion: "1.2.3" },
-          id: 7,
-          status: "online",
-        },
+        hostBoundary: installedHostBoundary("1.2.3"),
         identity: {
           after: installedState.identity,
           before: installedState.identity,
         },
-        repair: {
-          failureEpochRemoved: true,
-          faultRemoved: true,
-          latchRemoved: true,
-          repairedVersion: "1.2.3",
-          sameBundle: true,
-        },
+        repair: installedBundleRepairEvidence(),
       },
       canonicalRuntimeUnavailableReporting: {
         reporting: canonicalReportEvidence,
@@ -3953,6 +4045,264 @@ describe("Release E2E Orchestrator", () => {
       },
       repeatedAdd: { rejection: { code: "existing_probe_installation" } },
     });
+
+    // 场景只记录原始结案事实，结案与否由共享判据（summary 用的同一份）判定。
+    const recordedClosure = written.at(-1).installedBundleFailureRepair.closure;
+    expect(Object.keys(recordedClosure).sort()).toEqual([
+      "capture",
+      "expectation",
+      "hubHostProfile",
+      "hubOperation",
+      "localCompletion",
+    ]);
+    expect(judgeInstalledBundleRepairClosure(recordedClosure)).toMatchObject({
+      accepted: true,
+      associated: {
+        repairOperationId: "42",
+        successWindowFollowedFailedWindow: true,
+      },
+      reasons: [],
+    });
+  });
+
+  it("keeps the Installed Bundle Repair open unless the collected facts fully qualify", async () => {
+    const identity = {
+      identitySha256: "b".repeat(64),
+      probeId: "probe_release_01",
+    };
+    const hostProfile = readyHost().hostProfile;
+    const capture = repairClosureCapture({
+      expectedVersion: "1.2.3",
+      hostProfile,
+      identity,
+    });
+    const hubOperation = {
+      hostId: 7,
+      id: "42",
+      kind: "probe_repair",
+      source: "owner-probe-operation-read",
+      state: "succeeded",
+      targetProbeVersion: "1.2.3",
+    };
+    const hubProfile = {
+      architecture: hostProfile.architecture,
+      cpuCount: hostProfile.cpuCount,
+      hostname: hostProfile.hostname,
+      kernel: hostProfile.kernel,
+      os: hostProfile.os,
+      probeVersion: "1.2.3",
+    };
+    const drive = ({
+      captured = capture,
+      operation = hubOperation,
+      profile = hubProfile,
+    }) =>
+      proveInstalledBundleFailureRepair({
+        expectedBundleVersion: "1.2.3",
+        host: {
+          async assertInstalled() {
+            return installedHostBoundary("1.2.3");
+          },
+          async readProbeIdentity() {
+            return identity;
+          },
+          async repairInstalledBundleFailure() {
+            return {
+              failure: installedBundleFailureEvidence({
+                identity,
+                version: "1.2.3",
+              }),
+              repair: installedBundleRepairEvidence(),
+            };
+          },
+        },
+        hostId: 7,
+        identityBefore: identity,
+        readClosureCapture: async () => captured,
+        readHubHostProfile: async () => profile,
+        readHubRepairOperation: async () => operation,
+        runId: "run-123",
+      });
+
+    // 只有本机 CLI 与本机校验：没有任何可关联的报告或 Hub 读数，必须保持未结案。
+    await expect(
+      drive({ captured: null, operation: null, profile: null }),
+    ).rejects.toThrow(
+      /closure_capture_missing,repair_authorization_missing,final_boot_report_missing,produced_profile_missing,hub_host_profile_read_missing,hub_repair_operation_missing/,
+    );
+    // 单 Boot：有修复授权与最终 Boot，却没有同会话产出的正常 Profile。
+    await expect(
+      drive({
+        captured: { ...capture, producedProfile: null },
+        operation: null,
+        profile: null,
+      }),
+    ).rejects.toThrow(
+      /produced_profile_missing,hub_host_profile_read_missing,hub_repair_operation_missing/,
+    );
+    // 旧 Host 状态：Hub 仍显示修复前的 Probe 版本。
+    await expect(
+      drive({ profile: { ...hubProfile, probeVersion: "1.2.2" } }),
+    ).rejects.toThrow(/produced_profile_not_current_on_hub/);
+    // 版本错配：报告产出的 Profile 仍是旧版本。
+    await expect(
+      drive({
+        captured: {
+          ...capture,
+          producedProfile: {
+            ...capture.producedProfile,
+            probeVersion: "1.2.2",
+          },
+        },
+      }),
+    ).rejects.toThrow(/produced_profile_stale/);
+    // 身份错配：结案事实来自另一个 Probe。
+    await expect(
+      drive({ captured: { ...capture, probeId: "probe_release_02" } }),
+    ).rejects.toThrow(/closure_capture_identity_mismatch/);
+    // Hub 独立读数未成功。
+    await expect(
+      drive({ operation: { ...hubOperation, state: "failed" } }),
+    ).rejects.toThrow(/hub_repair_operation_not_succeeded/);
+    // 取证通道失败只能报错，不能被当作结案。
+    await expect(
+      proveInstalledBundleFailureRepair({
+        expectedBundleVersion: "1.2.3",
+        host: {
+          async assertInstalled() {
+            return installedHostBoundary("1.2.3");
+          },
+          async readProbeIdentity() {
+            return identity;
+          },
+          async repairInstalledBundleFailure() {
+            return {
+              failure: installedBundleFailureEvidence({
+                identity,
+                version: "1.2.3",
+              }),
+              repair: installedBundleRepairEvidence(),
+            };
+          },
+        },
+        hostId: 7,
+        identityBefore: identity,
+        readClosureCapture: async () => {
+          throw new Error("closure transport is closed");
+        },
+        readHubHostProfile: async () => hubProfile,
+        readHubRepairOperation: async () => hubOperation,
+        runId: "run-123",
+      }),
+    ).rejects.toThrow(/closure transport is closed/);
+    // 全部事实合格时共享入口才返回结案关联。
+    await expect(drive({})).resolves.toMatchObject({
+      closure: {
+        hubOperation: { id: "42", state: "succeeded" },
+      },
+    });
+  });
+
+  it("reports the primary Host failure when cleanup and forensic reads also fail", async () => {
+    const calls = [];
+    const written = [];
+    const note = (name) => async () => {
+      calls.push(name);
+    };
+    const fail = (name, message) => async () => {
+      calls.push(name);
+      throw new Error(message);
+    };
+    const host = {
+      assertDisposable: fail(
+        "host.assertDisposable",
+        "Release Host still carries run-owned state",
+      ),
+      assertInstalled: note("host.assertInstalled"),
+      awaitPermanentReportRejection: note("host.awaitPermanentReportRejection"),
+      beginUpgradeOwnershipTransition: note("host.beginUpgrade"),
+      bindUpgradeOwnershipTransition: note("host.bindUpgrade"),
+      captureInstallationState: note("host.captureInstallationState"),
+      cleanup: fail("host.cleanup", "run-owned Host state was not removed"),
+      collectDiagnostics: note("host.collectDiagnostics"),
+      collectEvidence: fail(
+        "host.collectEvidence",
+        "Host journald forensics could not be read",
+      ),
+      completeUpgradeOwnershipTransition: note("host.completeUpgrade"),
+      install: note("host.install"),
+      localUninstall: note("host.localUninstall"),
+      readProbeIdentity: note("host.readProbeIdentity"),
+      rejectRepeatedInstall: note("host.rejectRepeatedInstall"),
+      repairInstalledBundleFailure: note("host.repairInstalledBundleFailure"),
+      verifyUninstallCompletion: note("host.verifyUninstallCompletion"),
+    };
+    const hub = {
+      authenticate: note("hub.authenticate"),
+      collectEvidence: fail(
+        "hub.collectEvidence",
+        "Hub evidence could not be read",
+      ),
+      createEnrollment: note("hub.createEnrollment"),
+      deleteHostHubOnly: note("hub.deleteHostHubOnly"),
+      getAuditLog: note("hub.getAuditLog"),
+      getEnrollment: note("hub.getEnrollment"),
+      getHost: note("hub.getHost"),
+      getHostMetrics: note("hub.getHostMetrics"),
+      getHostProbeConfiguration: note("hub.getHostProbeConfiguration"),
+      isHostSoftDeleted: note("hub.isHostSoftDeleted"),
+      listHosts: note("hub.listHosts"),
+      requestProbeUninstall: note("hub.requestProbeUninstall"),
+      requestProbeUpgrade: note("hub.requestProbeUpgrade"),
+      switchToCandidate: note("hub.switchToCandidate"),
+      updateHostProbeConfiguration: note("hub.updateHostProbeConfiguration"),
+      waitForProbeOperation: note("hub.waitForProbeOperation"),
+    };
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifest(),
+        environment: {
+          cleanup: fail("environment.cleanup", "environment teardown failed"),
+          start: async () => ({ host, hub }),
+        },
+        evidenceSink: {
+          async write(value) {
+            written.push(value);
+          },
+        },
+        ownerPassword: "owner-password",
+        runId: "run-primary-failure",
+        scenario: "fresh-install-uninstall",
+      }),
+    ).rejects.toThrow(/Release Host still carries run-owned state/);
+
+    const evidence = written.at(-1);
+    expect(evidence.failureBoundary).not.toBe("cleanup");
+    expect(evidence.result.error.message).toBe(
+      "Release Host still carries run-owned state",
+    );
+    expect(evidence.cleanup.host.error.message).toBe(
+      "run-owned Host state was not removed",
+    );
+    expect(evidence.cleanup.environment.error.message).toBe(
+      "environment teardown failed",
+    );
+    expect(evidence.hostEvidence.error.message).toBe(
+      "Host journald forensics could not be read",
+    );
+    expect(evidence.hubEvidence.error.message).toBe(
+      "Hub evidence could not be read",
+    );
+    expect(calls).toEqual([
+      "host.assertDisposable",
+      "hub.collectEvidence",
+      "host.collectEvidence",
+      "host.collectDiagnostics",
+      "hub.collectEvidence",
+      "host.cleanup",
+      "environment.cleanup",
+    ]);
   });
 
   it("proves the pinned baseline Probe through Upgrade and retains its reporting timeout", async () => {
@@ -5232,11 +5582,7 @@ describe("Release E2E Orchestrator", () => {
       async repair() {
         calls.push("host.repair");
         repaired = true;
-        return {
-          output: "Probe Repair succeeded",
-          probeId: "probe_release_01",
-          repairedVersion: "1.2.3",
-        };
+        return { output: probeRepairLocalCompletionOutput };
       },
       async verifyUninstallCompletion() {
         return successfulRepairBoundaryEvidence().uninstallCompletion;
@@ -7573,6 +7919,7 @@ function durableRuntimeFailureEvidenceOutput(runtimeSha256 = "a".repeat(64)) {
     "epochLinks=1",
     "epochMode=600",
     "epochOwner=0",
+    "epochResult=protocol",
     "hostId=7",
     `identityReceiptSha256=${"c".repeat(64)}`,
     `installStateSha256=${"d".repeat(64)}`,
@@ -7582,8 +7929,8 @@ function durableRuntimeFailureEvidenceOutput(runtimeSha256 = "a".repeat(64)) {
     "latchOwner=0",
     `manifestSha256=${"e".repeat(64)}`,
     "probeId=probe_release_01",
-    "result=start-limit-hit",
-    "restartCount=2",
+    "result=protocol",
+    "restartCount=3",
     "role=observation_runtime",
     `runtimeFaultSha256=${"f".repeat(64)}`,
     `runtimeSha256=${runtimeSha256}`,
@@ -7930,6 +8277,144 @@ function repairMatrixCell() {
   };
 }
 
+// 已安装包故障与修复结案事实替身：形状与正式场景实际采集到的读数一致（故障 epoch 的内核
+// boot_id 只绑定修复授权，最终普通 Probe 使用新报告会话 boot）。
+function installedBundleFailureEvidence({ identity, version }) {
+  return {
+    activeState: "failed",
+    bundle: {
+      installStateSha256: "c".repeat(64),
+      manifestSha256: "d".repeat(64),
+      runtimeFaultSha256: "e".repeat(64),
+      runtimeSha256: "a".repeat(64),
+      version,
+    },
+    epochResult: "protocol",
+    failureEpoch: {
+      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+      generation: "8".repeat(64),
+      hostId: "7",
+      identityReceiptSha256: "f".repeat(64),
+      links: 1,
+      mode: "0600",
+      ownerUid: 0,
+      probeId: identity.probeId,
+    },
+    latch: {
+      generation: "8".repeat(64),
+      links: 1,
+      mode: "0600",
+      ownerUid: 0,
+    },
+    recoveryBudget: {
+      observedStarts: 3,
+      startLimitBurst: 3,
+      startLimitIntervalSeconds: 60,
+    },
+    result: "protocol",
+    role: "observation_runtime",
+    status: "latched",
+    unit: "enoki-observation-runtime.service",
+    unitSha256: "7".repeat(64),
+  };
+}
+
+function installedBundleRepairEvidence() {
+  return {
+    failureEpochRemoved: true,
+    faultRemoved: true,
+    latchRemoved: true,
+    output: probeRepairLocalCompletionOutput,
+    runtimeSha256: "a".repeat(64),
+    sameBundle: true,
+    unit: "enoki-observation-runtime.service",
+  };
+}
+
+function installedHostBoundary(version) {
+  return {
+    delegationGeneration: 1,
+    inventory: {
+      accounts: { group: true, user: true },
+      files: [
+        "/etc/systemd/system/enoki-probe.service",
+        "/usr/local/bin/enoki-probe",
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+      ],
+      units: ["enoki-probe.service"],
+    },
+    probeVersion: version,
+    service: {
+      ActiveState: "active",
+      FragmentPath: "/etc/systemd/system/enoki-probe.service",
+      Group: "enoki-probe",
+      LoadState: "loaded",
+      SubState: "running",
+      User: "enoki-probe",
+    },
+    sudoers: "",
+  };
+}
+
+function repairClosureCapture({ expectedVersion, hostProfile, identity }) {
+  const reportSessionBootId = "boot-repaired-session-01";
+  return {
+    bootId: reportSessionBootId,
+    failedWindows: [
+      {
+        bootId: reportSessionBootId,
+        payloadSha256: "5".repeat(64),
+        sequence: 2,
+      },
+    ],
+    finalBoot: {
+      acceptedSequenceEnd: 1,
+      ackObservedAtMs: 1_725_000_000_100,
+      bootId: reportSessionBootId,
+      bytes: 220,
+      payloadSha256: "1".repeat(64),
+      probeAssetBundleVersion: expectedVersion,
+      probeId: identity.probeId,
+      responseSha256: "2".repeat(64),
+      sequence: 1,
+      upstreamStatus: 200,
+    },
+    kind: "installed-bundle-repair-closure-capture",
+    probeId: identity.probeId,
+    producedProfile: {
+      acceptedSequenceEnd: 3,
+      architecture: hostProfile.architecture,
+      bootId: reportSessionBootId,
+      bytes: 1_024,
+      collectorId: hostProfileCollectorId,
+      cpuCount: hostProfile.cpuCount,
+      hostname: hostProfile.hostname,
+      kernel: hostProfile.kernel,
+      os: hostProfile.os,
+      payloadSha256: "3".repeat(64),
+      probeAssetBundleVersion: expectedVersion,
+      probeId: identity.probeId,
+      probeVersion: expectedVersion,
+      responseSha256: "4".repeat(64),
+      sequence: 3,
+      snapshotHash: "c".repeat(64),
+      upstreamStatus: 200,
+    },
+    repairAuthorization: {
+      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+      bundleVersion: expectedVersion,
+      epochGeneration: "8".repeat(64),
+      hostId: "7",
+      operationId: "42",
+      probeId: identity.probeId,
+      requestPayloadSha256: "9".repeat(64),
+      responseSha256: "8".repeat(64),
+      upstreamStatus: 200,
+    },
+    schemaVersion: 1,
+  };
+}
+
 function readyHost(overrides = {}) {
   return {
     hostProfile: {
@@ -8262,9 +8747,7 @@ function successfulRepairBoundaryEvidence() {
       },
     },
     repair: {
-      output: "Probe Repair succeeded",
-      probeId: identity.probeId,
-      repairedVersion: "1.2.3",
+      output: probeRepairLocalCompletionOutput,
     },
     repairedHost: readyHost(),
     repairHostBoundary: {

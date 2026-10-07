@@ -45,6 +45,12 @@ import {
   regexInput,
 } from "./release-json-guards.ts";
 import type { UnknownRecord } from "./release-json-guards.ts";
+import type {
+  HubHostProfileReading,
+  HubRepairOperationReading,
+  RepairClosureCapture,
+} from "./release-repair-closure-evidence.ts";
+import { probeRepairLocalCompletionOutput } from "./release-repair-closure-evidence.ts";
 
 export { createProbeHostHarness, renderReleaseE2EResourceFingerprint };
 
@@ -339,10 +345,14 @@ export type HubStateRestoreEvidence = {
 
 type CanonicalReportEvidenceTransport = {
   arm(input: { expectedProbeId: string }): void;
+  armRepairClosure(input: { expectedProbeId: string }): void;
   diagnostics(): unknown;
   waitForEvidence(input: {
     timeoutMs: number;
   }): Promise<CanonicalReportEvidence>;
+  waitForRepairClosureEvidence(input: {
+    timeoutMs: number;
+  }): Promise<RepairClosureCapture>;
 };
 
 type ScenarioHub = HubLifecycleClient & {
@@ -1427,16 +1437,16 @@ async function runPostReplacementRepairUninstallScenario({
     });
     await host.removePostReplacementRestartFault(runId);
     evidence.repair = await host.repair(runId);
-    if (evidence.repair?.repairedVersion !== candidateProbeVersion) {
+    evidence.repairHostBoundary = await host.assertInstalled(
+      runId,
+      candidateProbeVersion,
+    );
+    if (evidence.repairHostBoundary?.probeVersion !== candidateProbeVersion) {
       throw assertionError(
         "probe_repair_target_mismatch",
         "Probe Repair did not restore the already-installed Candidate Probe version",
       );
     }
-    evidence.repairHostBoundary = await host.assertInstalled(
-      runId,
-      candidateProbeVersion,
-    );
     const repairedIdentity = await host.readProbeIdentity(runId);
     if (
       repairedIdentity.probeId !== repairIdentity.probeId ||
@@ -2126,8 +2136,9 @@ function validateRepairIdentityEvidence(
   if (
     before.probeId !== after.probeId ||
     before.identitySha256 !== after.identitySha256 ||
-    repair.probeId !== before.probeId ||
-    repair.repairedVersion !== candidateManifest.probeAssetSet.version ||
+    repair.output !== probeRepairLocalCompletionOutput ||
+    objectView(source.repairHostBoundary).probeVersion !==
+      candidateManifest.probeAssetSet.version ||
     objectView(source.repairedHost).id !== continuity.hostId
   ) {
     throw new Error("Probe Identity is inconsistent across Repair boundaries");
@@ -2827,28 +2838,45 @@ async function runFreshInstallUninstallScenario({
     });
     evidence.probeConfiguration = probeConfiguration;
 
+    const reportTransport = resources?.canonicalReports;
+    if (
+      !reportTransport ||
+      typeof reportTransport.armRepairClosure !== "function" ||
+      typeof reportTransport.waitForRepairClosureEvidence !== "function"
+    ) {
+      throw assertionError(
+        "canonical_report_evidence_unavailable",
+        "Release E2E environment lacks Installed Bundle Failure Repair closure evidence",
+      );
+    }
+    reportTransport.armRepairClosure({
+      expectedProbeId: initialIdentity.probeId,
+    });
     evidence.installedBundleFailureRepair =
       await proveInstalledBundleFailureRepair({
         expectedBundleVersion: candidateManifest.probeAssetSet.version,
         host,
         hostId,
         identityBefore: initialIdentity,
-        observeReadyHost: async () =>
-          compactHostEvidence(
-            await waitForObservation({
-              code: "installed_bundle_repair_reporting_timeout",
-              label:
-                "Candidate Probe reporting after Installed Bundle Failure Repair",
-              observe: () => hub.getHost(hostId),
-              poll,
-              ready: (value) =>
-                value?.id === hostId &&
-                isCandidateHostReady(
-                  value,
-                  candidateManifest.probeAssetSet.version,
-                ),
-            }),
-          ),
+        readClosureCapture: () =>
+          reportTransport.waitForRepairClosureEvidence({
+            timeoutMs: timing.canonicalReportTimeoutMs ?? 90_000,
+          }),
+        readHubHostProfile: async (): Promise<HubHostProfileReading | null> => {
+          const profile = objectView((await hub.getHost(hostId)).hostProfile);
+          return isHubHostProfile(profile)
+            ? {
+                architecture: profile.architecture,
+                cpuCount: profile.cpuCount,
+                hostname: profile.hostname,
+                kernel: profile.kernel,
+                os: profile.os,
+                probeVersion: profile.probeVersion,
+              }
+            : null;
+        },
+        readHubRepairOperation: (operationId) =>
+          hub.getProbeRepairOperation(operationId),
         runId,
       });
 
@@ -3437,6 +3465,37 @@ export function createHubLifecycleClient({
       return operation;
     },
 
+    // 普通 Owner 读数：修复授权响应里绑定的独立 Probe Repair Operation 只按公开
+    // /api/web/probe-operations/:id 的形状读取并回显，结案与否由共享判据决定。
+    async getProbeRepairOperation(
+      operationId: string,
+    ): Promise<HubRepairOperationReading | null> {
+      if (!/^[1-9]\d*$/.test(operationId)) return null;
+      const { response, body } = await request(
+        `/api/web/probe-operations/${operationId}`,
+        {},
+        [404],
+      );
+      if (response.status !== 200) return null;
+      const operation = objectView(body).probeOperation;
+      if (!isHubProbeOperation(operation)) return null;
+      assertProbeOperation(operation, { id: Number(operationId) });
+      if (!isPositiveSafeInteger(operation.hostId) || !operation.kind) {
+        throw assertionError(
+          "probe_operation_host_unbound",
+          `Hub returned Probe Operation ${operationId} without a Host binding`,
+        );
+      }
+      return {
+        hostId: operation.hostId,
+        id: String(operation.id),
+        kind: operation.kind,
+        source: "owner-probe-operation-read",
+        state: operation.state,
+        targetProbeVersion: operation.targetProbeVersion,
+      };
+    },
+
     async isHostSoftDeleted(hostId: number) {
       assertPositiveInteger(hostId, "Host ID");
       const hosts = await this.listHosts();
@@ -3642,6 +3701,19 @@ function isHubHostSummaryList(value: unknown): value is HubHostSummary[] {
 
 function isHubProbeOperation(value: unknown): value is ProbeOperation {
   return isUnknownRecord(value);
+}
+
+function isHubHostProfile(
+  value: UnknownRecord,
+): value is UnknownRecord & HubHostProfileReading {
+  return (
+    typeof value.architecture === "string" &&
+    isSafeInteger(value.cpuCount) &&
+    typeof value.hostname === "string" &&
+    typeof value.kernel === "string" &&
+    typeof value.os === "string" &&
+    typeof value.probeVersion === "string"
+  );
 }
 
 function isHubProbeConfiguration(
@@ -5232,6 +5304,15 @@ const releaseBaselineAuthorizationEvidencePath = Object.freeze([
   "authorizationSha256",
 ]);
 
+// 结案记录里的修复授权事实只含 epoch 绑定摘要、上游状态与 Operation ID；
+// 授权签名与令牌从不写入，因此这些字段要按原样保留，供 summary 用共享判据重新判定。
+const repairClosureAuthorizationEvidencePath = Object.freeze([
+  "installedBundleFailureRepair",
+  "closure",
+  "capture",
+  "repairAuthorization",
+]);
+
 export function redactReleaseE2EEvidence(
   value: unknown,
   {
@@ -5248,6 +5329,15 @@ export function redactReleaseE2EEvidence(
       ? baseline.authorization.sha256
       : null,
   });
+}
+
+function isRepairClosureAuthorizationFacts(path: readonly string[]): boolean {
+  return (
+    path.length === repairClosureAuthorizationEvidencePath.length &&
+    repairClosureAuthorizationEvidencePath.every(
+      (segment, index) => segment === path[index],
+    )
+  );
 }
 
 function isValidatedReleaseBaselineAuthorizationSummary(
@@ -5276,6 +5366,7 @@ function redactSensitiveEvidence(
   const key = path.at(-1) ?? "";
   if (
     key &&
+    !isRepairClosureAuthorizationFacts(path) &&
     !isValidatedReleaseBaselineAuthorizationSummary(
       path,
       value,

@@ -4,9 +4,16 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { enoki } from "../packages/proto/src/generated/ts/enoki_pb.js";
 import { createCanonicalReportEvidenceTransport } from "./release-canonical-report-evidence.ts";
+import {
+  hostProfileCollectorId,
+  judgeInstalledBundleRepairClosure,
+  probeRepairLocalCompletionOutput,
+} from "./release-repair-closure-evidence.ts";
 
 const ReportRequest = enoki.v1.ProbeReportRequest;
 const ReportResponse = enoki.v1.ProbeReportResponse;
+const failureEpochBootId = "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51";
+const failureEpochGeneration = "8".repeat(64);
 
 describe("canonical Probe report response-loss evidence", () => {
   const close = [];
@@ -383,6 +390,250 @@ describe("canonical Probe report response-loss evidence", () => {
     );
   });
 
+  it("collects Repair closure facts from the authority response and the repaired reports", async () => {
+    const upstreamRequests = [];
+    const upstream = await listen(async (incoming, response) => {
+      const body = await readBody(incoming);
+      upstreamRequests.push({ body, path: incoming.url });
+      if (incoming.url.startsWith("/api/probe/runtime-failures/")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            authority: { repairOperationId: 42 },
+            signature: "e".repeat(128),
+            targetAssetSetDigest: "sha256:" + "f".repeat(64),
+          }),
+        );
+        return;
+      }
+      const report = ReportRequest.decode(body);
+      response.writeHead(200, { "content-type": "application/x-protobuf" });
+      response.end(
+        ReportResponse.encode({
+          acceptedSequenceEnd: report.sequenceEnd,
+          currentProbeConfigurationVersion: "configuration-v7",
+        }).finish(),
+      );
+    });
+    close.push(upstream.close);
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+    close.push(() => transport.close());
+    transport.armRepairClosure({ expectedProbeId: "probe-canonical-01" });
+
+    await postRepairAuthority(started.origin);
+    await postReport(
+      started.origin,
+      reportBytes({
+        bootId: "boot-after-repair-01",
+        probeAssetBundleVersion: "1.2.3",
+        probeId: "probe-canonical-01",
+        sequence: 1,
+      }),
+    );
+    await postReport(
+      started.origin,
+      reportBytes({
+        bootId: "boot-after-repair-01",
+        failureReason: 1,
+        probeId: "probe-canonical-01",
+        sequence: 2,
+      }),
+    );
+    await postReport(
+      started.origin,
+      hostProfileReportBytes({
+        bootId: "boot-after-repair-01",
+        probeId: "probe-canonical-01",
+        sequence: 3,
+      }),
+    );
+
+    const capture = await transport.waitForRepairClosureEvidence({
+      timeoutMs: 1_000,
+    });
+    expect(capture).toMatchObject({
+      bootId: "boot-after-repair-01",
+      failedWindows: [{ bootId: "boot-after-repair-01", sequence: 2 }],
+      finalBoot: {
+        acceptedSequenceEnd: 1,
+        bootId: "boot-after-repair-01",
+        probeAssetBundleVersion: "1.2.3",
+        sequence: 1,
+        upstreamStatus: 200,
+      },
+      kind: "installed-bundle-repair-closure-capture",
+      probeId: "probe-canonical-01",
+      producedProfile: {
+        acceptedSequenceEnd: 3,
+        architecture: "x86_64",
+        collectorId: hostProfileCollectorId,
+        hostname: "release-host-01",
+        probeVersion: "1.2.3",
+        sequence: 3,
+        upstreamStatus: 200,
+      },
+      repairAuthorization: {
+        bootId: failureEpochBootId,
+        bundleVersion: "1.2.3",
+        epochGeneration: failureEpochGeneration,
+        hostId: "7",
+        operationId: "42",
+        probeId: "probe-canonical-01",
+        upstreamStatus: 200,
+      },
+      schemaVersion: 1,
+    });
+    expect(
+      upstreamRequests
+        .map(({ path }) => path)
+        .filter((path) => path.startsWith("/api/probe/runtime-failures/")),
+    ).toHaveLength(1);
+
+    // 结案判据只读采集到的事实：Transport 不自行断言修复完成，签名也从不进入证据。
+    expect(JSON.stringify(capture)).not.toMatch(/e{128}|sha256:f{64}/);
+    expect(JSON.stringify(capture)).not.toContain("signature");
+    const judgment = judgeInstalledBundleRepairClosure({
+      capture,
+      expectation: {
+        failureEpochBootId,
+        failureEpochGeneration,
+        hostId: 7,
+        identitySha256: "b".repeat(64),
+        probeId: "probe-canonical-01",
+        targetProbeVersion: "1.2.3",
+      },
+      hubHostProfile: {
+        architecture: "x86_64",
+        cpuCount: 4,
+        hostname: "release-host-01",
+        kernel: "5.15.0-139-generic",
+        os: "Ubuntu 22.04.5 LTS",
+        probeVersion: "1.2.3",
+      },
+      hubOperation: {
+        hostId: 7,
+        id: "42",
+        kind: "probe_repair",
+        source: "owner-probe-operation-read",
+        state: "succeeded",
+        targetProbeVersion: "1.2.3",
+      },
+      localCompletion: {
+        completedAtMs: Date.now(),
+        identitySha256: "b".repeat(64),
+        output: probeRepairLocalCompletionOutput,
+        probeId: "probe-canonical-01",
+        repairedVersion: "1.2.3",
+      },
+    });
+    expect(judgment).toEqual({
+      accepted: true,
+      associated: expect.objectContaining({
+        repairOperationId: "42",
+        successWindowFollowedFailedWindow: true,
+      }),
+      reasons: [],
+    });
+  });
+
+  it("returns partial closure facts instead of attesting completion", async () => {
+    const upstream = await listen(async (incoming, response) => {
+      const body = await readBody(incoming);
+      if (incoming.url.startsWith("/api/probe/runtime-failures/")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ authority: { repairOperationId: 42 } }));
+        return;
+      }
+      const report = ReportRequest.decode(body);
+      response.writeHead(200, { "content-type": "application/x-protobuf" });
+      response.end(
+        ReportResponse.encode({
+          acceptedSequenceEnd: report.sequenceEnd,
+        }).finish(),
+      );
+    });
+    close.push(upstream.close);
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+    close.push(() => transport.close());
+    transport.armRepairClosure({ expectedProbeId: "probe-canonical-01" });
+    await postRepairAuthority(started.origin);
+    await postReport(
+      started.origin,
+      reportBytes({
+        bootId: "boot-after-repair-01",
+        probeAssetBundleVersion: "1.2.3",
+        probeId: "probe-canonical-01",
+        sequence: 1,
+      }),
+    );
+
+    const partial = await transport.waitForRepairClosureEvidence({
+      timeoutMs: 100,
+    });
+    expect(partial).toMatchObject({
+      finalBoot: { bootId: "boot-after-repair-01", sequence: 1 },
+      producedProfile: null,
+    });
+    const judgment = judgeInstalledBundleRepairClosure({
+      capture: partial,
+      expectation: {
+        failureEpochBootId,
+        failureEpochGeneration,
+        hostId: 7,
+        identitySha256: "b".repeat(64),
+        probeId: "probe-canonical-01",
+        targetProbeVersion: "1.2.3",
+      },
+      hubHostProfile: null,
+      hubOperation: null,
+      localCompletion: null,
+    });
+    expect(judgment.accepted).toBe(false);
+    expect(judgment.reasons).toEqual(
+      expect.arrayContaining([
+        "local_completion_missing",
+        "produced_profile_missing",
+        "hub_host_profile_read_missing",
+        "hub_repair_operation_missing",
+      ]),
+    );
+  });
+
+  it("fails the closure evidence channel on an oversized Repair authority request", async () => {
+    let upstreamRequestCount = 0;
+    const upstream = await listen(async (incoming, response) => {
+      upstreamRequestCount += 1;
+      await readBody(incoming);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ authority: { repairOperationId: 42 } }));
+    });
+    close.push(upstream.close);
+    const transport = createCanonicalReportEvidenceTransport({
+      listenUrl: "http://127.0.0.1:0",
+      upstreamUrl: upstream.origin,
+    });
+    const started = await transport.start();
+    close.push(() => transport.close());
+    transport.armRepairClosure({ expectedProbeId: "probe-canonical-01" });
+
+    await postRepairAuthority(started.origin, {
+      evidence: { bootId: failureEpochBootId, padding: "p".repeat(17 * 1024) },
+    }).catch(() => {});
+
+    expect(upstreamRequestCount).toBe(0);
+    await expect(
+      transport.waitForRepairClosureEvidence({ timeoutMs: 500 }),
+    ).rejects.toMatchObject({ code: "repair_closure_payload_too_large" });
+  });
+
   it("closes safely before start and after the listening socket is released", async () => {
     const upstream = await protobufUpstream();
     close.push(upstream.close);
@@ -427,6 +678,66 @@ function reportBytes({
       sequenceEnd: sequence,
       sequenceStart: sequence,
     }).finish(),
+  );
+}
+
+function hostProfileReportBytes({ bootId, probeId, sequence }) {
+  return Buffer.from(
+    ReportRequest.encode({
+      bootId,
+      cpuResourceCollectionOutcomes: [],
+      metrics: [
+        {
+          collectorOutcomes: [
+            { collectorId: hostProfileCollectorId, state: 1 },
+          ],
+        },
+      ],
+      observationWindowFailure: null,
+      probeAssetBundleVersion: "1.2.3",
+      probeConfigurationVersion: "configuration-v7",
+      probeId,
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+      snapshots: [
+        {
+          collectorId: hostProfileCollectorId,
+          hostProfile: {
+            architecture: "x86_64",
+            cpuCount: 4,
+            hostname: "release-host-01",
+            kernel: "5.15.0-139-generic",
+            os: "Ubuntu 22.04.5 LTS",
+            probeAssetBundleVersion: "1.2.3",
+            probeVersion: "1.2.3",
+          },
+          snapshotHash: "c".repeat(64),
+        },
+      ],
+    }).finish(),
+  );
+}
+
+function postRepairAuthority(origin, body) {
+  return fetch(
+    `${origin}/api/probe/runtime-failures/${failureEpochGeneration}/repair-authorize`,
+    {
+      body: JSON.stringify(
+        body ?? {
+          evidence: {
+            bootId: failureEpochBootId,
+            bundleVersion: "1.2.3",
+            hostId: "7",
+            probeId: "probe-canonical-01",
+          },
+        },
+      ),
+      headers: {
+        ...canonicalAuthHeaders,
+        "content-type": "application/json",
+      },
+      method: "POST",
+    },
   );
 }
 

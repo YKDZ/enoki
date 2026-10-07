@@ -10,6 +10,10 @@ import { describe, expect, it } from "vitest";
 import { standardCiJobNames } from "./release-ci-evidence.ts";
 import { createProbeHostHarness } from "./release-e2e-orchestration.ts";
 import {
+  hostProfileCollectorId,
+  probeRepairLocalCompletionOutput,
+} from "./release-repair-closure-evidence.ts";
+import {
   createMatrixGateResult as createMatrixGateResultFromManifest,
   createReleaseVerificationSummary,
   createUiGateResult,
@@ -1008,29 +1012,15 @@ describe("verify-only release workflow", () => {
     );
   });
 
-  it("rejects transient Probe service failure as Installed Bundle Failure Repair evidence", () => {
+  it("rejects the retired start-limit-hit Runtime result as Installed Bundle Failure Repair evidence", () => {
     const candidate = releaseCandidateManifest().candidate;
     const evidence = successfulHostEvidence(
       "fresh-install-uninstall",
       candidate,
     );
-    evidence.installedBundleFailureRepair = {
-      failure: {
-        cause: "installed_bundle_restart_failure",
-        probeVersion: "1.2.3",
-        status: "failed",
-      },
-      host: evidenceHost("1.2.3"),
-      hostBoundary: installedHostBoundary("1.2.3"),
-      identity: {
-        after: probeIdentityEvidence(),
-        before: probeIdentityEvidence(),
-      },
-      repair: {
-        probeId: "probe_release_01",
-        repairedVersion: "1.2.3",
-      },
-    };
+    const failure = evidence.installedBundleFailureRepair.failure;
+    failure.result = "start-limit-hit";
+    failure.epochResult = "start-limit-hit";
 
     const gate = createMatrixGateResult({
       artifactName:
@@ -1047,6 +1037,76 @@ describe("verify-only release workflow", () => {
       "Installed Bundle Failure Repair evidence is invalid",
     );
   });
+
+  it.each([
+    [
+      "local CLI and local validation only",
+      (closure) => {
+        closure.capture = null;
+        closure.hubHostProfile = null;
+        closure.hubOperation = null;
+      },
+      /closure_capture_missing,repair_authorization_missing,final_boot_report_missing,produced_profile_missing,hub_host_profile_read_missing,hub_repair_operation_missing/,
+    ],
+    [
+      "a single Boot",
+      (closure) => {
+        closure.capture.producedProfile = null;
+        closure.hubHostProfile = null;
+      },
+      /produced_profile_missing,hub_host_profile_read_missing/,
+    ],
+    [
+      "a stale Hub Host Profile",
+      (closure) => {
+        closure.hubHostProfile.probeVersion = "1.2.2";
+      },
+      /produced_profile_not_current_on_hub/,
+    ],
+    [
+      "closure facts from another Probe",
+      (closure) => {
+        closure.capture.probeId = "probe_release_02";
+      },
+      /closure_capture_identity_mismatch/,
+    ],
+    [
+      "a Repair Operation that never succeeded",
+      (closure) => {
+        closure.hubOperation.state = "failed";
+      },
+      /hub_repair_operation_not_succeeded/,
+    ],
+  ])(
+    "rejects an Installed Bundle Failure Repair closed only by %s",
+    (_label, corrupt, reason) => {
+      const candidate = releaseCandidateManifest().candidate;
+      const evidence = successfulHostEvidence(
+        "fresh-install-uninstall",
+        candidate,
+      );
+      corrupt(evidence.installedBundleFailureRepair.closure);
+      const gate = createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+      expect(gate.outcome).toBe("failed");
+      expect(
+        gate.evidenceValidationErrors.some(
+          (error) =>
+            error.startsWith(
+              "Installed Bundle Failure Repair is not closed by the recorded report facts and the Hub Repair Operation:",
+            ) && reason.test(error),
+        ),
+      ).toBe(true);
+    },
+  );
 
   it("rejects fresh evidence made only of non-empty containers without business semantics", () => {
     const candidate = releaseCandidateManifest().candidate;
@@ -2301,6 +2361,15 @@ function successfulHostEvidence(
         runId,
       }),
       installedBundleFailureRepair: {
+        closure: repairClosureFacts({
+          epoch: {
+            bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+            generation: "8".repeat(64),
+            hostId: "7",
+          },
+          identity: initialIdentity,
+          version: "1.2.3",
+        }),
         failure: {
           activeState: "failed",
           bundle: {
@@ -2331,22 +2400,20 @@ function successfulHostEvidence(
             startLimitBurst: 3,
             startLimitIntervalSeconds: 60,
           },
-          result: "start-limit-hit",
+          epochResult: "protocol",
+          result: "protocol",
           role: "observation_runtime",
           status: "latched",
           unit: "enoki-observation-runtime.service",
           unitSha256: "a".repeat(64),
         },
-        host: evidenceHost("1.2.3"),
         hostBoundary: installedHostBoundary("1.2.3"),
         identity: { after: initialIdentity, before: initialIdentity },
         repair: {
           failureEpochRemoved: true,
           faultRemoved: true,
           latchRemoved: true,
-          output: "Probe repair completed.",
-          probeId: initialIdentity.probeId,
-          repairedVersion: "1.2.3",
+          output: probeRepairLocalCompletionOutput,
           runtimeSha256: "7".repeat(64),
           sameBundle: true,
           unit: "enoki-observation-runtime.service",
@@ -2463,7 +2530,7 @@ function successfulHostEvidence(
         state: "failed",
         targetProbeVersion: "1.2.3",
       }),
-      repair: { probeId: "probe_release_01", repairedVersion: "1.2.3" },
+      repair: { output: probeRepairLocalCompletionOutput },
       probeConfiguration: {
         afterRepair: probeConfigurationEvidence("host-7-2"),
         beforeUpgrade: probeConfigurationEvidence("host-7-1"),
@@ -2959,6 +3026,89 @@ function probeConfigurationValues(version) {
     enabledCollectorIds: ["official.cpu", "official.memory"],
     metricsCollectionIntervalSeconds: 2,
     version,
+  };
+}
+
+// 结案事实记录：形状与正式场景经共享 transport 与 Hub 普通读数采集到的原始事实一致。
+function repairClosureFacts({ epoch, identity, version }) {
+  const reportSessionBootId = "boot-repaired-session-01";
+  const hubHostProfile = {
+    architecture: "x86_64",
+    cpuCount: 4,
+    hostname: "release-host-01",
+    kernel: "5.15.0-139-generic",
+    os: "Ubuntu 22.04.5 LTS",
+    probeVersion: version,
+  };
+  return {
+    capture: {
+      bootId: reportSessionBootId,
+      failedWindows: [],
+      finalBoot: {
+        acceptedSequenceEnd: 1,
+        ackObservedAtMs: 1_725_000_000_100,
+        bootId: reportSessionBootId,
+        bytes: 220,
+        payloadSha256: "1".repeat(64),
+        probeAssetBundleVersion: version,
+        probeId: identity.probeId,
+        responseSha256: "2".repeat(64),
+        sequence: 1,
+        upstreamStatus: 200,
+      },
+      kind: "installed-bundle-repair-closure-capture",
+      probeId: identity.probeId,
+      producedProfile: {
+        acceptedSequenceEnd: 3,
+        ...hubHostProfile,
+        bootId: reportSessionBootId,
+        bytes: 1_024,
+        collectorId: hostProfileCollectorId,
+        payloadSha256: "3".repeat(64),
+        probeAssetBundleVersion: version,
+        probeId: identity.probeId,
+        responseSha256: "4".repeat(64),
+        sequence: 3,
+        snapshotHash: "c".repeat(64),
+        upstreamStatus: 200,
+      },
+      repairAuthorization: {
+        bootId: epoch.bootId,
+        bundleVersion: version,
+        epochGeneration: epoch.generation,
+        hostId: epoch.hostId,
+        operationId: "42",
+        probeId: identity.probeId,
+        requestPayloadSha256: "9".repeat(64),
+        responseSha256: "8".repeat(64),
+        upstreamStatus: 200,
+      },
+      schemaVersion: 1,
+    },
+    expectation: {
+      failureEpochBootId: epoch.bootId,
+      failureEpochGeneration: epoch.generation,
+      hostId: Number(epoch.hostId),
+      identitySha256: identity.identitySha256,
+      probeId: identity.probeId,
+      targetProbeVersion: version,
+    },
+    hubHostProfile,
+    hubOperation: {
+      hostId: Number(epoch.hostId),
+      id: "42",
+      kind: "probe_repair",
+      source: "owner-probe-operation-read",
+      state: "succeeded",
+      targetProbeVersion: version,
+    },
+    localCompletion: {
+      completedAtMs: 1_725_000_000_200,
+      identitySha256: identity.identitySha256,
+      output: probeRepairLocalCompletionOutput,
+      probeId: identity.probeId,
+      repairedVersion: version,
+    },
   };
 }
 

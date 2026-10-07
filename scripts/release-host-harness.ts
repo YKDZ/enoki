@@ -29,6 +29,7 @@ import {
   regexInput,
   stringValue,
 } from "./release-json-guards.ts";
+import { probeRepairLocalCompletionOutput } from "./release-repair-closure-evidence.ts";
 
 // Release E2E infrastructure has one narrowly scoped, run-owned resource
 // definition. It produces the preflight allowlist, recorded fingerprint, and
@@ -977,10 +978,12 @@ export function createProbeHostHarness({
         "# enoki-release-e2e:probe-repair\n/usr/local/bin/enoki-probe repair\n",
         { root: true },
       );
-      const success = result.stdout.match(
-        /^Probe Repair succeeded: probe=([^\s]+) version=(\d+\.\d+\.\d+)\s*$/,
-      );
-      if (result.code !== 0 || !success) {
+      // 08 已接受的正式 CLI 合同：本机完成行不携带 Probe 身份或版本；恢复后的目标
+      // 版本与身份保持由已安装包边界与身份读数独立证明，不从 stdout 解析。
+      if (
+        result.code !== 0 ||
+        result.stdout.trim() !== probeRepairLocalCompletionOutput
+      ) {
         throw Object.assign(
           new Error(
             `Probe Repair failed (${result.code}): ${result.stderr || result.stdout}`,
@@ -992,11 +995,7 @@ export function createProbeHostHarness({
           },
         );
       }
-      return {
-        output: result.stdout.trim(),
-        probeId: success[1],
-        repairedVersion: success[2],
-      };
+      return { output: result.stdout.trim() };
     },
 
     async completeRepairOwnershipTransition(
