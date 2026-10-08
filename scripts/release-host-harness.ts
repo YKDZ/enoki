@@ -637,6 +637,86 @@ export function createProbeHostHarness({
       };
     },
 
+    // Trust Epoch 迁移基线由旧发布生命周期安装，因此按旧 root 视图的必备条目、服务身份与
+    // 版本边界验证，并要求候选安装才创建的 Bootstrap 资源尚未出现在基线上。
+    async assertLegacyReleaseBaselineInstalled(
+      runId: string,
+      expectedProbeVersion: string,
+    ) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      if (
+        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+          regexInput(expectedProbeVersion),
+        )
+      ) {
+        throw new Error("Release Baseline Probe version is invalid");
+      }
+      const [inspected, serviceResult, binaryVersionResult] = await Promise.all(
+        [
+          inventory(),
+          execute(serviceBoundaryScript()),
+          execute(binaryVersionScript()),
+        ],
+      );
+      const residue = inventoryResidue(inspected);
+      const required = [
+        "user:enoki-probe",
+        "group:enoki-probe",
+        "/usr/local/bin/enoki-probe",
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        "/etc/enoki/probe-install.toml",
+        "/etc/systemd/system/enoki-probe.service",
+        "/var/lib/enoki-probe",
+        "/etc/sudoers.d/enoki-probe-operations",
+        "enoki-probe.service",
+      ];
+      const missing = required.filter((entry) => !residue.includes(entry));
+      if (missing.length > 0) {
+        throw new Error(
+          `Legacy Release Baseline Probe installation is incomplete: missing ${missing.join(", ")}`,
+        );
+      }
+      const candidateBootstrapResources = [
+        "/usr/local/bin/enoki-probe-bootstrap-acquire",
+        "/usr/local/bin/enoki-probe-bootstrap-activate",
+        "/var/lib/enoki-probe-bootstrap",
+      ].filter((entry) => residue.includes(entry));
+      if (candidateBootstrapResources.length > 0) {
+        throw new Error(
+          `Legacy Release Baseline Probe installation contains Candidate Bootstrap resources: ${candidateBootstrapResources.join(", ")}`,
+        );
+      }
+      if (serviceResult.code !== 0) {
+        throw new Error(
+          `Legacy Probe service inspection failed: ${serviceResult.stderr}`,
+        );
+      }
+      const service = parseKeyValues(serviceResult.stdout);
+      if (
+        service.LoadState !== "loaded" ||
+        service.ActiveState !== "active" ||
+        service.User !== "enoki-probe" ||
+        service.Group !== "enoki-probe" ||
+        service.FragmentPath !== "/etc/systemd/system/enoki-probe.service"
+      ) {
+        throw new Error(
+          `Legacy Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
+        );
+      }
+      const probeVersion =
+        binaryVersionResult.code === 0
+          ? binaryVersionResult.stdout
+              .trim()
+              .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
+          : null;
+      if (probeVersion !== expectedProbeVersion) {
+        throw new Error(
+          `Installed legacy Probe binary version ${probeVersion ?? "unknown"} does not match Release Baseline ${expectedProbeVersion}`,
+        );
+      }
+      return { inventory: inspected, probeVersion, service };
+    },
+
     async captureInstallationState(runId: string) {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
       const result = await execute(installedStateScript(), { root: true });
@@ -1418,7 +1498,7 @@ set -eu
 function bootstrapGenerationStateScript(): string {
   return String.raw`# enoki-release-e2e:bootstrap-generation
 set -eu
-generation=/var/lib/enoki-probe/trust/delegation-generation
+generation=/var/lib/enoki-probe-bootstrap/trust/delegation-generation
 [ -f "$generation" ] && [ ! -L "$generation" ]
 [ "$(stat -c %u "$generation")" = 0 ]
 [ "$(stat -c %a "$generation")" = 600 ]

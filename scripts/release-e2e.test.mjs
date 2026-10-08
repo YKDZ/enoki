@@ -387,6 +387,10 @@ describe("Release E2E business assertions", () => {
     ).resolves.toEqual({ status: "succeeded" });
     expect(calls).toContain("host.manualReinstall:manual_reinstall");
     expect(calls).not.toContain("hub.requestProbeUpgrade");
+    // 基线安装按其已验证类型断言旧发布边界；候选安装仍走 schema 2 边界。
+    expect(calls).toContain("host.assertLegacyReleaseBaselineInstalled:0.1.74");
+    expect(calls).toContain("host.assertInstalled:1.2.3");
+    expect(calls).not.toContain("host.assertInstalled:0.1.74");
     expect(
       calls
         .filter((call) => call.startsWith("hub.getHost:candidate:"))
@@ -1465,6 +1469,164 @@ describe("Probe Host Harness", () => {
     await expect(
       harness.assertInstalled("run-version", "1.2.3"),
     ).rejects.toThrow(/Probe binary version 9\.9\.9.*Candidate 1\.2\.3/);
+  });
+
+  it("keeps the Candidate schema 2 boundary rejecting a complete legacy installation", async () => {
+    // 原正式 run 37829170363 的失败点：真实 v0.1.74 安装 code 0、生命周期完成、旧 Enrollment
+    // ready 之后，候选态清单在基线步骤逐字拒绝该 root 视图布局。
+    const legacyRootView = [
+      "/etc/enoki/probe-install.toml",
+      "/etc/sudoers.d/enoki-probe-operations",
+      "/etc/systemd/system/enoki-probe.service",
+      "/usr/local/bin/enoki-probe",
+      "/var/lib/enoki-probe",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ];
+    const schema2Layout = ["/var/lib/enoki-probe-bootstrap", ...legacyRootView];
+
+    await expect(
+      runInstalledBoundary({
+        layout: { files: legacyRootView, probeVersion: "0.1.74" },
+        role: "candidate",
+      }),
+    ).rejects.toThrow(
+      "Probe installation is incomplete: missing /var/lib/enoki-probe-bootstrap",
+    );
+    // 只补上被拒绝的那一个目录不构成关闭：候选的无 sudoers 要求继续拒绝旧安装
+    await expect(
+      runInstalledBoundary({
+        layout: { files: schema2Layout, probeVersion: "0.1.74" },
+        role: "candidate",
+      }),
+    ).rejects.toThrow(/schema 2 installation must not retain Probe sudoers/);
+    // 再移除 legacy sudoers 后，候选才创建的序号状态要求仍然拒绝旧安装
+    await expect(
+      runInstalledBoundary({
+        layout: {
+          files: schema2Layout.filter(
+            (file) => file !== "/etc/sudoers.d/enoki-probe-operations",
+          ),
+          probeVersion: "0.1.74",
+        },
+        role: "candidate",
+      }),
+    ).rejects.toThrow(/delegation generation state is missing or invalid/);
+  });
+
+  it("verifies a Trust Epoch baseline install through the baseline release boundary", async () => {
+    const boundary = await runInstalledBoundary({
+      layout: {
+        files: [
+          "/etc/enoki/probe-install.toml",
+          "/etc/sudoers.d/enoki-probe-operations",
+          "/etc/systemd/system/enoki-probe.service",
+          "/usr/local/bin/enoki-probe",
+          "/var/lib/enoki-probe",
+          "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        ],
+        probeVersion: "0.1.74",
+      },
+      role: "baseline",
+    });
+
+    expect(boundary.probeVersion).toBe("0.1.74");
+    expect(boundary.service).toMatchObject({
+      ActiveState: "active",
+      Group: "enoki-probe",
+      LoadState: "loaded",
+      User: "enoki-probe",
+    });
+  });
+
+  it("rejects Candidate Bootstrap resources on the baseline release boundary", async () => {
+    await expect(
+      runInstalledBoundary({
+        layout: {
+          files: [
+            "/etc/enoki/probe-install.toml",
+            "/etc/sudoers.d/enoki-probe-operations",
+            "/etc/systemd/system/enoki-probe.service",
+            "/usr/local/bin/enoki-probe",
+            "/usr/local/bin/enoki-probe-bootstrap-acquire",
+            "/var/lib/enoki-probe",
+            "/var/lib/enoki-probe-bootstrap",
+            "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+          ],
+          generationStatePaths: [candidateDelegationGenerationPath],
+          probeVersion: "0.1.74",
+        },
+        role: "baseline",
+      }),
+    ).rejects.toThrow(/contains Candidate Bootstrap resources/);
+  });
+
+  it("keeps the legacy sudoers and baseline Probe version boundaries on the baseline role", async () => {
+    const legacyRootView = [
+      "/etc/enoki/probe-install.toml",
+      "/etc/sudoers.d/enoki-probe-operations",
+      "/etc/systemd/system/enoki-probe.service",
+      "/usr/local/bin/enoki-probe",
+      "/var/lib/enoki-probe",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ];
+
+    await expect(
+      runInstalledBoundary({
+        layout: {
+          files: legacyRootView.filter(
+            (file) => file !== "/etc/sudoers.d/enoki-probe-operations",
+          ),
+          probeVersion: "0.1.74",
+        },
+        role: "baseline",
+      }),
+    ).rejects.toThrow(
+      /installation is incomplete: missing \/etc\/sudoers\.d\/enoki-probe-operations/,
+    );
+    await expect(
+      runInstalledBoundary({
+        expectedProbeVersion: "0.1.74",
+        layout: { files: legacyRootView, probeVersion: "0.1.75" },
+        role: "baseline",
+      }),
+    ).rejects.toThrow(
+      /legacy Probe binary version 0\.1\.75.*Release Baseline 0\.1\.74/,
+    );
+  });
+
+  it("reads the delegation generation state where the production lifecycle writes it", async () => {
+    const candidateLayout = [
+      "/etc/enoki/probe-install.toml",
+      "/etc/systemd/system/enoki-probe.service",
+      "/usr/local/bin/enoki-probe",
+      "/var/lib/enoki-probe",
+      "/var/lib/enoki-probe-bootstrap",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ];
+
+    // 生产 ensure_production_state_root 在 /var/lib/enoki-probe-bootstrap 下写入序号状态：
+    // 候选边界必须接受该布局并读出序号。
+    await expect(
+      runInstalledBoundary({
+        layout: {
+          files: candidateLayout,
+          generationStatePaths: [candidateDelegationGenerationPath],
+          probeVersion: "1.2.3",
+        },
+        role: "candidate",
+      }),
+    ).resolves.toMatchObject({ delegationGeneration: 1 });
+    // 序号状态只存在于其他位置时，候选边界不得放行。
+    await expect(
+      runInstalledBoundary({
+        layout: {
+          files: candidateLayout,
+          generationStatePaths: [unrelatedDelegationGenerationPath],
+          probeVersion: "1.2.3",
+        },
+        role: "candidate",
+      }),
+    ).rejects.toThrow(/delegation generation state is missing or invalid/);
   });
 
   it("uses a run-owned post-replacement fault and the real root-only Probe Repair command", async () => {
@@ -8077,6 +8239,94 @@ function productInstallerOutput() {
   return "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n";
 }
 
+const candidateDelegationGenerationPath =
+  "/var/lib/enoki-probe-bootstrap/trust/delegation-generation";
+const unrelatedDelegationGenerationPath =
+  "/var/lib/enoki-probe/trust/delegation-generation";
+
+// 安装边界夹具：把 Host 布局交给 execute 接缝，并按被交付脚本自己查询的路径回答存在性。
+// 序号状态文件的位置由生产生命周期决定，因此只有布局里实际存在的位置才可能被读到。
+function installedLayoutCommandAdapter({
+  files,
+  generationStatePaths = [],
+  probeVersion,
+}) {
+  let inventoryReads = 0;
+  return async (command) => {
+    const marker = command.split("\n", 1)[0].trim();
+    if (marker === "# enoki-release-e2e:inventory") {
+      inventoryReads += 1;
+      return successfulCommand(
+        inventoryReads === 1
+          ? { accounts: { group: false, user: false }, files: [], units: [] }
+          : {
+              accounts: { group: true, user: true },
+              files,
+              units: ["enoki-probe.service"],
+            },
+      );
+    }
+    if (marker === "# enoki-release-e2e:service-boundary") {
+      return successfulCommandText(
+        [
+          "LoadState=loaded",
+          "ActiveState=active",
+          "SubState=running",
+          "User=enoki-probe",
+          "Group=enoki-probe",
+          "FragmentPath=/etc/systemd/system/enoki-probe.service",
+        ].join("\n"),
+      );
+    }
+    if (marker === "# enoki-release-e2e:sudoers-boundary") {
+      const retained = files.filter(
+        (file) => file.startsWith("/etc/sudoers.d/") && command.includes(file),
+      );
+      return retained.length > 0
+        ? {
+            code: 1,
+            stderr: `managed sudoers residue: ${retained.join(" ")}\n`,
+            stdout: "",
+          }
+        : successfulCommandText("");
+    }
+    if (marker === "# enoki-release-e2e:binary-version") {
+      return successfulCommandText(`enoki-probe ${probeVersion}\n`);
+    }
+    if (marker === "# enoki-release-e2e:bootstrap-generation") {
+      const consulted = generationStatePaths.some((file) =>
+        command.includes(file),
+      );
+      return consulted
+        ? successfulCommandText("1\n")
+        : {
+            code: 1,
+            stderr: "delegation generation state is not readable\n",
+            stdout: "",
+          };
+    }
+    return successfulCommandText(productInstallerOutput());
+  };
+}
+
+// 按正式调用点的原顺序 assertDisposable → install → 边界断言回放一次安装。
+async function runInstalledBoundary({
+  expectedProbeVersion,
+  layout,
+  role,
+  runId = "run-release-role-boundary",
+}) {
+  const harness = createProbeHostHarness({
+    execute: installedLayoutCommandAdapter(layout),
+  });
+  await harness.assertDisposable(runId);
+  await harness.install(officialEnrollment(), runId);
+  const version = expectedProbeVersion ?? layout.probeVersion;
+  return role === "baseline"
+    ? harness.assertLegacyReleaseBaselineInstalled(runId, version)
+    : harness.assertInstalled(runId, version);
+}
+
 const officialInstallCommand =
   "printf '%s\\n' 'enk_enroll_secret' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'";
 
@@ -9039,8 +9289,8 @@ function migrationBaselineEnvironment(
   });
   const host = {
     async assertDisposable() {},
-    async assertInstalled() {
-      if (!replaced) return { probeVersion: "0.1.74" };
+    async assertInstalled(_runId, version) {
+      calls.push(`host.assertInstalled:${version}`);
       return {
         delegationGeneration: 1,
         inventory: {
@@ -9062,6 +9312,10 @@ function migrationBaselineEnvironment(
         },
         sudoers: "",
       };
+    },
+    async assertLegacyReleaseBaselineInstalled(_runId, version) {
+      calls.push(`host.assertLegacyReleaseBaselineInstalled:${version}`);
+      return { probeVersion: version };
     },
     async cleanup() {
       return { clean: true };
