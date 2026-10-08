@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   writeFile,
@@ -6591,6 +6592,94 @@ describe("Release E2E command", () => {
       await rm(candidateDir, { force: true, recursive: true });
     }
   });
+
+  // 生产 verify 脚本自身拒绝 root，所以这条真实复验只在非 root 进程执行；
+  // 不伪造子进程身份，也不放宽 stage/verify/remove 的权限边界。
+  it.runIf(typeof process.getuid === "function" && process.getuid() !== 0)(
+    "passes matching Candidate Bootstrap staging and rejects a wrong digest through the real Host shell",
+    async () => {
+      const candidateDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-e2e-bootstrap-real-"),
+      );
+      const file = "enoki-probe-bootstrap.py";
+      const recipe = Buffer.from("real staged candidate bootstrap recipe\n");
+      const sha256 = createHash("sha256").update(recipe).digest("hex");
+      await mkdir(path.join(candidateDir, "recipe"));
+      await writeFile(path.join(candidateDir, "recipe", file), recipe);
+      const stagingPrefix = "enoki-release-e2e-recipe.";
+      const stagedBefore = new Set(
+        (await readdir("/tmp")).filter((entry) =>
+          entry.startsWith(stagingPrefix),
+        ),
+      );
+      const adapterFor = (declaredSha256) =>
+        createCiReleaseInfrastructureAdapter({
+          candidateManifestPath: path.join(
+            candidateDir,
+            "candidate-manifest.json",
+          ),
+          environment: {
+            GITHUB_ACTIONS: "true",
+            GITHUB_RUN_ATTEMPT: "2",
+            GITHUB_RUN_ID: "1234",
+            RUNNER_ARCH: "X64",
+            RUNNER_OS: "Linux",
+          },
+          loadCandidate: async () => ({
+            candidateDir,
+            manifest: {
+              ...candidateManifest(),
+              bootstrapRecipe: {
+                ...candidateManifest().bootstrapRecipe,
+                file,
+                sha256: declaredSha256,
+                size: recipe.byteLength,
+              },
+            },
+          }),
+        });
+      try {
+        const matchingAdapter = adapterFor(sha256);
+        const prepared = await matchingAdapter.prepare({
+          matrixCell: freshMatrixCell(),
+          runId: "run-bootstrap-real",
+        });
+        const provisioned = await prepared.provisionBootstrap({
+          runId: "run-bootstrap-real",
+        });
+        expect(provisioned.evidence).toEqual({
+          file,
+          sha256,
+          version: "v1",
+        });
+        expect(provisioned.workingDirectory).toMatch(
+          /^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/u,
+        );
+
+        const mismatch = await adapterFor("f".repeat(64)).prepare({
+          matrixCell: freshMatrixCell(),
+          runId: "run-bootstrap-mismatch",
+        });
+        await expect(
+          mismatch.provisionBootstrap({ runId: "run-bootstrap-mismatch" }),
+        ).rejects.toThrow(/computed checksum did NOT match/u);
+
+        await expect(
+          matchingAdapter.release({
+            prepared,
+            runId: "run-bootstrap-real",
+          }),
+        ).resolves.toMatchObject({ clean: true, recipe: { clean: true } });
+
+        const retired = (await readdir("/tmp"))
+          .filter((entry) => entry.startsWith(stagingPrefix))
+          .filter((entry) => !stagedBefore.has(entry));
+        expect(retired).toEqual([]);
+      } finally {
+        await rm(candidateDir, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("bounds a real local Host process tree timeout without waiting for descendant stdio", async () => {
     const execute = createCiHostExecutor({ timeoutMs: 50 });
