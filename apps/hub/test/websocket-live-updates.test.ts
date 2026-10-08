@@ -506,6 +506,7 @@ function collectWebSocketJson(
   options: {
     quietMs?: number;
     timeoutMs?: number;
+    waitForAction?: () => Promise<unknown>;
   } = {},
 ) {
   const quietMs = options.quietMs ?? 50;
@@ -514,6 +515,7 @@ function collectWebSocketJson(
   return new Promise<unknown[]>((resolve, reject) => {
     const messages: unknown[] = [];
     let quietTimer: NodeJS.Timeout | null = null;
+    let actionCompleted = options.waitForAction === undefined;
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for WebSocket messages."));
@@ -524,6 +526,13 @@ function collectWebSocketJson(
       }
 
       quietTimer = setTimeout(() => {
+        if (!actionCompleted) {
+          // The triggering report request is still in flight, so a later
+          // message may still follow the current quiet window.
+          finishAfterQuiet();
+          return;
+        }
+
         cleanup();
         resolve(messages);
       }, quietMs);
@@ -548,6 +557,19 @@ function collectWebSocketJson(
 
     socket.on("message", onMessage);
     socket.on("error", onError);
+    if (options.waitForAction) {
+      void Promise.resolve()
+        .then(options.waitForAction)
+        .then(
+          () => {
+            actionCompleted = true;
+          },
+          (error: unknown) => {
+            cleanup();
+            reject(error);
+          },
+        );
+    }
   });
 }
 
@@ -934,14 +956,14 @@ describe("WebSocket live updates", () => {
     const initialOverview = (await initialOverviewResponse.json()) as {
       hosts: Array<{ probeUpgradeProblem: unknown }>;
     };
-    const summaryMessages = collectWebSocketJson(socket);
-    await sendReport(baseUrl, registration, {
-      bootId: "boot-live-summary",
-      diskAvailable: false,
-      sequence: 2,
+    const receivedSummaries = await collectWebSocketJson(socket, {
+      waitForAction: () =>
+        sendReport(baseUrl, registration, {
+          bootId: "boot-live-summary",
+          diskAvailable: false,
+          sequence: 2,
+        }),
     });
-
-    const receivedSummaries = await summaryMessages;
     expect(receivedSummaries).toEqual(
       expect.arrayContaining([
         {
@@ -1370,32 +1392,34 @@ describe("WebSocket live updates", () => {
         type: "subscribe_host_detail",
       }),
     );
-    const messages = collectWebSocketJson(socket);
-    await sendReport(baseUrl, registration, {
-      bootId: "boot-profile-live",
-      hostProfile: {
-        architecture: "x86_64",
-        collectorCapabilities: {
-          official: {
-            diskHealth: { diagnostic: "", status: 1 },
+    const messages = collectWebSocketJson(socket, {
+      waitForAction: () =>
+        sendReport(baseUrl, registration, {
+          bootId: "boot-profile-live",
+          hostProfile: {
+            architecture: "x86_64",
+            collectorCapabilities: {
+              official: {
+                diskHealth: { diagnostic: "", status: 1 },
+              },
+            },
+            cpuCount: 4,
+            cpuModel: "AMD EPYC 7B13",
+            filesystems: [],
+            hostname: "profile-live-host",
+            kernel: "6.9.0",
+            memoryTotalBytes: 4_294_967_296,
+            networkInterfaces: [
+              {
+                addresses: ["10.0.0.20"],
+                name: "eth0",
+              },
+            ],
+            os: "linux",
+            probeVersion: "0.2.0",
           },
-        },
-        cpuCount: 4,
-        cpuModel: "AMD EPYC 7B13",
-        filesystems: [],
-        hostname: "profile-live-host",
-        kernel: "6.9.0",
-        memoryTotalBytes: 4_294_967_296,
-        networkInterfaces: [
-          {
-            addresses: ["10.0.0.20"],
-            name: "eth0",
-          },
-        ],
-        os: "linux",
-        probeVersion: "0.2.0",
-      },
-      sequence: 2,
+          sequence: 2,
+        }),
     });
 
     await expect(messages).resolves.toEqual(
