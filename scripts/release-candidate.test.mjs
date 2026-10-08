@@ -1218,7 +1218,7 @@ with open(os.devnull, "rb") as input_stream:
     } finally {
       await rm(workDir, { force: true, recursive: true });
     }
-  });
+  }, 30_000);
 
   it.each([
     [

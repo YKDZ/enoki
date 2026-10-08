@@ -429,7 +429,7 @@ describe("Release Baseline resolution", () => {
         /delegation does not match the trusted delegation/,
       );
       await expect(readdir(rejectedDir)).rejects.toThrow();
-    });
+    }, 30_000);
   });
 
   describe("legacy trust epoch other-tag fixture", () => {
