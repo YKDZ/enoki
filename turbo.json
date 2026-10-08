@@ -15,7 +15,10 @@
     "//#lint:fix": { "cache": false },
     "//#rust:check": { "cache": false, "outputs": [] },
     "//#test": { "outputs": [] },
-    "//#test:e2e": { "dependsOn": ["^build"], "cache": false },
+    "//#test:e2e": {
+      "dependsOn": ["^build", "@enoki/web#build"],
+      "cache": false
+    },
     "//#typecheck": { "outputs": [] },
     "build": {
       "dependsOn": ["^build"],
