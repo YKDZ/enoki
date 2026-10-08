@@ -58,13 +58,11 @@ jobs:
           exit 1
 
       - name: Set up Node.js for release verification
-        if: inputs.package-artifact || inputs.probe-assets-artifact-name != ''
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: source/package.json
 
       - name: Set up the release tool runtime
-        if: inputs.package-artifact || inputs.probe-assets-artifact-name != ''
         uses: ./source/.github/actions/setup-release-tool
         with:
           directory: source
@@ -94,6 +92,28 @@ jobs:
           node source/scripts/release-candidate.mjs write-bootstrap-publication
           --source-dir source
           --version "$CANDIDATE_VERSION"
+          --output source/probe-bootstrap-publication
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
+
+      # 标准 CI 不签署也不下载 Probe Asset Set，但 Dockerfile 与生产启动无条件要求
+      # 根公钥和 Bootstrap 发布记录，因此这里只复用现有正式 publication 生产者，
+      # 记录版本固定为非发布值 0.0.0，与镜像标签 inputs.version 分开。
+      - name: Prepare the CI Probe Distribution root public key
+        if: ${{ !inputs.package-artifact && inputs.probe-assets-artifact-name == '' }}
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: |
+          mkdir -p source/probe-assets
+          printf '%s\n' "$ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM" > source/probe-assets/root-key.pem
+
+      - name: Derive the non-release Probe Bootstrap publication
+        if: ${{ !inputs.package-artifact && inputs.probe-assets-artifact-name == '' }}
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: >-
+          node source/scripts/release-candidate.mjs write-bootstrap-publication
+          --source-dir source
+          --version 0.0.0
           --output source/probe-bootstrap-publication
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
