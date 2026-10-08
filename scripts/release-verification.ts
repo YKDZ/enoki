@@ -359,7 +359,10 @@ async function readAttemptIdentities(
   try {
     releaseBaseline = await validateResolvedReleaseBaseline(
       options["--release-baseline-dir"],
-      { trustedRootPublicKeyPem },
+      {
+        candidateVersion: options["--requested-version"],
+        trustedRootPublicKeyPem,
+      },
     );
   } catch (error) {
     errors.push(
