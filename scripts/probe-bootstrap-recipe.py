@@ -25,7 +25,6 @@ DISTRIBUTION = "__ENOKI_DISTRIBUTION__"
 ROOT_FINGERPRINT = "__ENOKI_ROOT_FINGERPRINT__"
 BUNDLE_VERSION = "__ENOKI_BUNDLE_VERSION__"
 DELEGATION_DOMAIN = b"enoki/probe-trust-delegation/v1\0"
-MANIFEST_DOMAIN = b"enoki/probe-asset-manifest/v1\0"
 METADATA_LIMIT = 256 * 1024
 ARCHIVE_LIMIT = 512 * 1024 * 1024
 DEADLINE_SECONDS = 75
@@ -170,7 +169,7 @@ def authenticate_metadata(stage, target):
         fail("Probe Asset Signing Identity does not match its delegation")
     manifest_raw = (stage / "manifest.json").read_bytes()
     manifest = exact_json(manifest_raw, ("assets", "kind", "signature", "version"), "Probe Asset Set manifest")
-    verify_signature(signing, (stage / "manifest.json.sig").read_bytes(), MANIFEST_DOMAIN + manifest_raw, "Probe Asset Set manifest")
+    verify_signature(signing, (stage / "manifest.json.sig").read_bytes(), manifest_raw, "Probe Asset Set manifest")
     if manifest.get("kind") != "enoki-probe-assets" or manifest.get("version") != BUNDLE_VERSION or not isinstance(manifest.get("assets"), list):
         fail("Probe Asset Set manifest is invalid")
     matches = [asset for asset in manifest["assets"] if isinstance(asset, dict) and asset.get("target") == target]

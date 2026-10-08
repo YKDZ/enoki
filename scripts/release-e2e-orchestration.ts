@@ -930,7 +930,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       );
     }
     evidence.baselineInstall = await host.install(enrollment, runId);
-    await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
+    await assertReleaseBaselineInstalled(host, baseline, runId);
     const hostSummary = await waitForObservation({
       code: "restore_probe_enrollment_timeout",
       label: "Release Baseline Probe enrollment before Hub State Snapshot",
@@ -1347,7 +1347,7 @@ async function runPostReplacementRepairUninstallScenario({
       );
     }
     evidence.baselineInstall = await host.install(enrollment, runId);
-    await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
+    await assertReleaseBaselineInstalled(host, baseline, runId);
     const hostSummary = await waitForObservation({
       code: "repair_probe_enrollment_timeout",
       label: "Release Baseline Probe enrollment for Repair",
@@ -2306,7 +2306,7 @@ async function runForwardLifecycleScenario({
       );
     }
     evidence.baselineInstall = await host.install(enrollment, runId);
-    await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
+    await assertReleaseBaselineInstalled(host, baseline, runId);
 
     const hostSummary = await waitForObservation({
       code: "probe_enrollment_timeout",
@@ -4150,6 +4150,19 @@ function releaseBaselineProbeVersion(
     : baseline.probeAssetSet.version;
 }
 
+// 基线安装消费该已验证 Release Baseline 类型对应的安装边界：Trust Epoch 迁移基线按旧发布
+// 边界验证，其余基线沿用候选 schema 2 边界。两类转换共用同一 Harness 与 execute 接缝。
+async function assertReleaseBaselineInstalled(
+  host: ProbeHost,
+  baseline: ReleaseBaselineDescriptor,
+  runId: string,
+) {
+  const expectedProbeVersion = releaseBaselineProbeVersion(baseline);
+  return isTrustEpochMigrationBaseline(baseline)
+    ? host.assertLegacyReleaseBaselineInstalled(runId, expectedProbeVersion)
+    : host.assertInstalled(runId, expectedProbeVersion);
+}
+
 function releaseBaselineEvidence(baseline: ReleaseBaselineDescriptor) {
   assertReleaseBaselineDescriptor(baseline);
   const migration = isTrustEpochMigrationBaseline(baseline);
@@ -4524,7 +4537,7 @@ function assertBaselineScenarioParticipants(
   const hostMethods = ["readProbeIdentity"];
   const hubMethods = ["switchToCandidate"];
   if (transitionClassification === "replacement-required") {
-    hostMethods.push("manualReinstall");
+    hostMethods.push("assertLegacyReleaseBaselineInstalled", "manualReinstall");
     hubMethods.push(
       "createManualReinstallEnrollment",
       "getAuditLog",
