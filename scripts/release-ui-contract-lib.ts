@@ -8,20 +8,79 @@ import {
   loadValidatedCandidate,
 } from "./release-e2e-environment.ts";
 
-const optionDefinitions = Object.freeze({
-  "--candidate-manifest": { required: true },
-  "--container-engine": { default: "docker" },
-  "--evidence-dir": { default: "release-ui-contract-evidence" },
-  "--hub-port": { default: "38220" },
-});
+type DockerHubController = ReturnType<typeof createDockerHubController>;
+type HubResources = Awaited<ReturnType<DockerHubController["start"]>>;
 
-export function parseCandidateUiContractCommandLine(arguments_) {
+type CandidateUiContractOptions = {
+  candidateManifestPath: string;
+  containerEngine: string;
+  evidenceDir?: string;
+  hubPort: number;
+  rootPublicKeyEnvironment: string;
+};
+
+type ValidatedCandidate = Awaited<ReturnType<typeof loadValidatedCandidate>>;
+
+type LoadValidatedCandidate = (
+  candidateManifestPath: string,
+  options?: { trustedRootPublicKeyPem?: string },
+) => Promise<ValidatedCandidate>;
+
+type HubStartInput = Parameters<DockerHubController["start"]>[0];
+type HubCleanupResult = { clean?: boolean; error?: string };
+type HubEvidence = Record<string, unknown>;
+
+type CandidateHubController = {
+  cleanup: (input: {
+    resources: HubResources | null;
+    runId: string;
+  }) => Promise<HubCleanupResult>;
+  collectEvidence?: (input: {
+    resources?: HubResources | null;
+  }) => Promise<HubEvidence>;
+  start: (input: HubStartInput) => Promise<HubResources>;
+};
+
+type PlaywrightRunResult = { code: number; signal: NodeJS.Signals | null };
+
+type UiContractFailure = Error & { cleanupError?: Error };
+
+type UiContractDependencies = {
+  createHubController?: (options: {
+    containerEngine: string;
+  }) => CandidateHubController;
+  loadCandidate?: LoadValidatedCandidate;
+  ownerPassword?: string;
+  runId?: string;
+  runPlaywright?: (input: {
+    baseUrl: string;
+    candidateVersion: string;
+    evidenceDir?: string;
+    ownerPassword: string;
+  }) => Promise<PlaywrightRunResult>;
+};
+
+type OptionDefinition = { default?: string; required?: boolean };
+
+const optionDefinitions: Readonly<Record<string, OptionDefinition>> =
+  Object.freeze({
+    "--candidate-manifest": { required: true },
+    "--container-engine": { default: "docker" },
+    "--evidence-dir": { default: "release-ui-contract-evidence" },
+    "--hub-port": { default: "38220" },
+    "--root-public-key-env": { required: true },
+  });
+
+export function parseCandidateUiContractCommandLine(
+  arguments_: readonly string[],
+): CandidateUiContractOptions {
   if (arguments_.length % 2 !== 0) {
     throw new Error(`option ${arguments_.at(-1)} requires a value`);
   }
-  const values = {};
-  for (let index = 0; index < arguments_.length; index += 2) {
-    const name = arguments_[index];
+  const values: Record<string, string> = {};
+  // 上一判据已确认参数成对出现，这里按下标偶数取值，奇数位是前一项的值。
+  for (const [index, name] of arguments_.entries()) {
+    if (index % 2 !== 0) continue;
     const value = arguments_[index + 1];
     if (!Object.hasOwn(optionDefinitions, name)) {
       throw new Error(`unknown option: ${name}`);
@@ -40,31 +99,41 @@ export function parseCandidateUiContractCommandLine(arguments_) {
       throw new Error(`${name} is required`);
     }
   }
-  if (
-    path.basename(values["--candidate-manifest"]) !== "candidate-manifest.json"
-  ) {
+  const candidateManifestPath = values["--candidate-manifest"] ?? "";
+  const containerEngine = values["--container-engine"] ?? "";
+  const evidenceDir = values["--evidence-dir"] ?? "";
+  const rootPublicKeyEnvironment = values["--root-public-key-env"] ?? "";
+  if (path.basename(candidateManifestPath) !== "candidate-manifest.json") {
     throw new Error("--candidate-manifest must name candidate-manifest.json");
   }
-  if (values["--container-engine"] !== "docker") {
+  if (containerEngine !== "docker") {
     throw new Error("--container-engine must be docker");
   }
-  const hubPort = Number(values["--hub-port"]);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rootPublicKeyEnvironment)) {
+    throw new Error("--root-public-key-env must name an environment variable");
+  }
+  const hubPort = Number(values["--hub-port"] ?? "");
   if (!Number.isSafeInteger(hubPort) || hubPort < 1 || hubPort > 65_535) {
     throw new Error("--hub-port must be an integer between 1 and 65535");
   }
   return {
-    candidateManifestPath: values["--candidate-manifest"],
-    containerEngine: values["--container-engine"],
-    evidenceDir: path.resolve(values["--evidence-dir"]),
+    candidateManifestPath,
+    containerEngine,
+    evidenceDir: path.resolve(evidenceDir),
     hubPort,
+    rootPublicKeyEnvironment,
   };
 }
 
-export async function runCandidateUiContract(options, dependencies = {}) {
+export async function runCandidateUiContract(
+  options: CandidateUiContractOptions,
+  dependencies: UiContractDependencies = {},
+): Promise<PlaywrightRunResult | null> {
   const loadCandidate = dependencies.loadCandidate ?? loadValidatedCandidate;
   const createHubController =
     dependencies.createHubController ??
-    ((controllerOptions) => createDockerHubController(controllerOptions));
+    ((controllerOptions: { containerEngine: string }) =>
+      createDockerHubController(controllerOptions));
   const runPlaywright = dependencies.runPlaywright ?? runPlaywrightProcess;
   const ownerPassword = dependencies.ownerPassword;
   const runId = dependencies.runId;
@@ -76,17 +145,26 @@ export async function runCandidateUiContract(options, dependencies = {}) {
   const controller = createHubController({
     containerEngine: options.containerEngine,
   });
-  let resources = null;
-  let result = null;
-  let failure = null;
+  let resources: HubResources | null = null;
+  let result: PlaywrightRunResult | null = null;
+  let failure: UiContractFailure | null = null;
   let failurePhase = "candidate-validation";
-  let manifest = null;
-  const failures = [];
-  let hubEvidence = null;
-  let cleanupEvidence = null;
+  let manifest: ValidatedCandidate["manifest"] | null = null;
+  const failures: { error: string; phase: string }[] = [];
+  let hubEvidence: HubEvidence | null = null;
+  let cleanupEvidence: HubCleanupResult | null = null;
 
   try {
-    const loaded = await loadCandidate(options.candidateManifestPath);
+    const trustedRootPublicKeyPem =
+      process.env[options.rootPublicKeyEnvironment] ?? "";
+    if (!trustedRootPublicKeyPem) {
+      throw new Error(
+        `Probe Distribution Trust Root environment variable ${options.rootPublicKeyEnvironment} is empty`,
+      );
+    }
+    const loaded = await loadCandidate(options.candidateManifestPath, {
+      trustedRootPublicKeyPem,
+    });
     manifest = loaded.manifest;
     failurePhase = "hub-startup";
     resources = await controller.start({
@@ -110,7 +188,7 @@ export async function runCandidateUiContract(options, dependencies = {}) {
       );
     }
   } catch (error) {
-    failure = error;
+    failure = toError(error);
     failures.push(serializeUiFailure(failurePhase, error, [ownerPassword]));
   }
 
@@ -121,7 +199,7 @@ export async function runCandidateUiContract(options, dependencies = {}) {
       failures.push(
         serializeUiFailure("hub-diagnostics", error, [ownerPassword]),
       );
-      if (!failure) failure = error;
+      if (!failure) failure = toError(error);
     }
   }
 
@@ -133,12 +211,12 @@ export async function runCandidateUiContract(options, dependencies = {}) {
     }
   } catch (error) {
     if (failure) {
-      failure.cleanupError = error;
+      failure.cleanupError = toError(error);
     } else {
-      failure = error;
+      failure = toError(error);
     }
     failures.push(serializeUiFailure("cleanup", error, [ownerPassword]));
-    cleanupEvidence = { clean: false, error: error.message };
+    cleanupEvidence = { clean: false, error: errorMessage(error) };
   }
 
   if (options.evidenceDir) {
@@ -166,12 +244,29 @@ export async function runCandidateUiContract(options, dependencies = {}) {
   return result;
 }
 
+type UiContractEvidence = {
+  candidate: ValidatedCandidate["manifest"]["candidate"] | null;
+  cleanup: HubCleanupResult | null;
+  failures: { error: string; phase: string }[];
+  hub: { expectedManifestDigest: string | null; runtime: HubEvidence | null };
+  kind: string;
+  playwright: PlaywrightRunResult | null;
+  result: { status: string };
+  runId: string;
+  schemaVersion: number;
+};
+
 function runPlaywrightProcess({
   baseUrl,
   candidateVersion,
   evidenceDir,
   ownerPassword,
-}) {
+}: {
+  baseUrl: string;
+  candidateVersion: string;
+  evidenceDir?: string;
+  ownerPassword: string;
+}): Promise<PlaywrightRunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "pnpm",
@@ -200,14 +295,22 @@ function runPlaywrightProcess({
   });
 }
 
-function serializeUiFailure(phase, error, secrets) {
+function serializeUiFailure(
+  phase: string,
+  error: unknown,
+  secrets: readonly string[],
+): { error: string; phase: string } {
   return {
-    error: boundAndRedact(error?.message ?? String(error), secrets),
+    error: boundAndRedact(errorMessage(error), secrets),
     phase,
   };
 }
 
-async function writeUiEvidence(evidenceDir, evidence, secrets) {
+async function writeUiEvidence(
+  evidenceDir: string,
+  evidence: UiContractEvidence,
+  secrets: readonly string[],
+): Promise<void> {
   const destination = path.join(evidenceDir, "runner-evidence.json");
   const temporary = `${destination}.tmp-${randomUUID()}`;
   await mkdir(evidenceDir, { recursive: true });
@@ -216,7 +319,10 @@ async function writeUiEvidence(evidenceDir, evidence, secrets) {
   await rename(temporary, destination);
 }
 
-function redactAndBoundValue(value, secrets) {
+function redactAndBoundValue(
+  value: unknown,
+  secrets: readonly string[],
+): unknown {
   if (typeof value === "string") return boundAndRedact(value, secrets);
   if (Array.isArray(value)) {
     return value.map((item) => redactAndBoundValue(item, secrets));
@@ -232,8 +338,8 @@ function redactAndBoundValue(value, secrets) {
   return value;
 }
 
-function boundAndRedact(value, secrets) {
-  let redacted = String(value);
+function boundAndRedact(value: string, secrets: readonly string[]): string {
+  let redacted = value;
   for (const secret of secrets.filter(Boolean)) {
     redacted = redacted.split(secret).join("[REDACTED]");
   }
@@ -241,4 +347,12 @@ function boundAndRedact(value, secrets) {
   return redacted.length > maximumLength
     ? `${redacted.slice(0, maximumLength)}\n[TRUNCATED]`
     : redacted;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
