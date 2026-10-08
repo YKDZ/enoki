@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -7297,6 +7298,7 @@ describe("Release E2E command", () => {
     const manifestDigest = `sha256:${"d".repeat(64)}`;
     const configDigest = `sha256:${"e".repeat(64)}`;
     const commands = [];
+    const hubEnvs = [];
     const state = { container: false, image: false, volume: false };
     const exec = async (command, arguments_) => {
       commands.push([command, ...arguments_].join(" "));
@@ -7319,6 +7321,9 @@ describe("Release E2E command", () => {
       }
       if (arguments_[0] === "run") {
         state.container = true;
+        hubEnvs.push(
+          parseHubEnvFile(arguments_[arguments_.indexOf("--env-file") + 1]),
+        );
         return successfulCommandText("container-id\n");
       }
       if (arguments_[0] === "logs") {
@@ -7419,6 +7424,11 @@ describe("Release E2E command", () => {
       ownerPassword: "owner-secret",
       runId: "run-runtime",
     });
+    // W48-2：fresh 场景的候选 Hub 报告配置仍声明其规范观察地址（canonical
+    // transport 的 listenUrl，由现有测试锁定为 hubPublicUrl），必要捕获不关闭。
+    expect(hubEnvs).toHaveLength(1);
+    expect(hubEnvs[0].ENOKI_PROBE_API_ORIGIN).toBe("http://192.0.2.20:33000");
+    expect(hubEnvs[0].ENOKI_PUBLIC_HUB_URL).toBeUndefined();
 
     expect(commands).toEqual(
       expect.arrayContaining([
@@ -7457,6 +7467,7 @@ describe("Release E2E command", () => {
     const candidateConfigDigest = `sha256:${"e".repeat(64)}`;
     const commands = [];
     const runMounts = [];
+    const hubEnvs = [];
     const images = new Map();
     let stagedImage = null;
     let stagedTag = null;
@@ -7509,6 +7520,9 @@ describe("Release E2E command", () => {
         container = true;
         activeImage = images.get(arguments_.at(-1));
         runMounts.push(arguments_[arguments_.indexOf("--mount") + 1]);
+        hubEnvs.push(
+          parseHubEnvFile(arguments_[arguments_.indexOf("--env-file") + 1]),
+        );
         return successfulCommandText("container-id\n");
       }
       if (arguments_[0] === "rm") {
@@ -7598,6 +7612,19 @@ describe("Release E2E command", () => {
     expect(resources.activeHub).toBe("baseline");
     await controller.switchToCandidate({ resources, runId: "run-switch" });
     expect(resources.activeHub).toBe("candidate");
+    // W48-1：forward 场景下基线 v0.1.74 探针的实际请求 Origin 是容器唯一发布的
+    // owner 直连地址；环境声明的 Probe 报告 Origin 必须与之及候选消费者一致。
+    expect(hubEnvs.map((env) => env.ENOKI_PROBE_API_ORIGIN)).toEqual([
+      "http://127.0.0.1:33000",
+      "http://127.0.0.1:33000",
+    ]);
+    expect(hubEnvs.map((env) => env.ENOKI_MANAGEMENT_ORIGIN)).toEqual([
+      "http://192.0.2.20:33000",
+      "http://192.0.2.20:33000",
+    ]);
+    expect(hubEnvs.every((env) => env.ENOKI_PUBLIC_HUB_URL === undefined)).toBe(
+      true,
+    );
     expect(runMounts).toEqual([
       "type=volume,source=enoki-e2e-data-run-switch,target=/data",
       "type=volume,source=enoki-e2e-data-run-switch,target=/data",
@@ -8187,6 +8214,18 @@ describe("Release E2E command", () => {
     });
   });
 });
+
+// 生产 runHubRuntime 在 `docker run --env-file` 时刻真实写入磁盘的 Hub 运行配置。
+function parseHubEnvFile(filePath) {
+  const values = {};
+  for (const line of readFileSync(filePath, "utf8").split("\n")) {
+    const separator = line.indexOf("=");
+    if (separator > 0) {
+      values[line.slice(0, separator)] = line.slice(separator + 1);
+    }
+  }
+  return values;
+}
 
 function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
