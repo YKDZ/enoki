@@ -34,7 +34,7 @@ import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { describe, expect, it } from "vitest";
 
-import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.ts";
 import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
 import {
   createProbeBootstrapPublication,

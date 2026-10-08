@@ -129,7 +129,7 @@ jobs:
             ENOKI_BOOTSTRAP_BUILD_ROLE="$role" CARGO_TARGET_DIR="$target_dir" \
               cargo build -p enoki-probe-bootstrap --release --no-default-features \
               --features "$features" --bin "$binary" --target "$BOOTSTRAP_TARGET"
-            node scripts/probe-bootstrap-artifact.mjs inspect \
+            node scripts/probe-bootstrap-artifact.ts inspect \
               --binary "$target_dir/${BOOTSTRAP_TARGET}/release/$binary" \
               --distribution "$BOOTSTRAP_DISTRIBUTION" --role "$role" \
               --root-key-id "$ROOT_KEY_ID" --target "$BOOTSTRAP_TARGET" \
@@ -137,7 +137,7 @@ jobs:
           }
           build_role acquirer acquirer,compiled-trust enoki-probe-bootstrap-acquire target/bootstrap-repro-first-acquirer
           build_role activator activator,compiled-trust enoki-probe-bootstrap-activate target/bootstrap-repro-first-activator
-          node scripts/probe-bootstrap-artifact.mjs package \
+          node scripts/probe-bootstrap-artifact.ts package \
             --acquirer-binary "target/bootstrap-repro-first-acquirer/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-acquire" \
             --activator-binary "target/bootstrap-repro-first-activator/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-activate" \
             --distribution "$BOOTSTRAP_DISTRIBUTION" --root-key-id "$ROOT_KEY_ID" \
@@ -146,7 +146,7 @@ jobs:
 
           build_role acquirer acquirer,compiled-trust enoki-probe-bootstrap-acquire target/bootstrap-repro-second-acquirer
           build_role activator activator,compiled-trust enoki-probe-bootstrap-activate target/bootstrap-repro-second-activator
-          node scripts/probe-bootstrap-artifact.mjs package \
+          node scripts/probe-bootstrap-artifact.ts package \
             --acquirer-binary "target/bootstrap-repro-second-acquirer/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-acquire" \
             --activator-binary "target/bootstrap-repro-second-activator/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-activate" \
             --distribution "$BOOTSTRAP_DISTRIBUTION" --root-key-id "$ROOT_KEY_ID" \

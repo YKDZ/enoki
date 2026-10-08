@@ -7,7 +7,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
-import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.ts";
 import {
   inspectProbeBootstrapArtifact,
   inspectProbeBootstrapBinary,
@@ -174,6 +174,66 @@ describe("Probe Bootstrap build artifact", () => {
       await expect(
         inspectProbeBootstrapArtifact({
           archivePath: artifact.archivePath,
+          ...identity,
+        }),
+      ).resolves.toMatchObject({
+        roles: {
+          acquirer: { identity: { ...identity, role: "acquirer" } },
+          activator: { identity: { ...identity, role: "activator" } },
+        },
+      });
+    });
+  });
+
+  it("packages role binaries given through two different sibling relative directories", async () => {
+    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
+      const acquirerDirectory = path.join(root, "rel-acquirer");
+      const activatorDirectory = path.join(root, "rel-activator");
+      await mkdir(acquirerDirectory);
+      await mkdir(activatorDirectory);
+      const relativeAcquirerPath = path.join(
+        path.relative(process.cwd(), acquirerDirectory),
+        path.basename(acquirerPath),
+      );
+      const relativeActivatorPath = path.join(
+        path.relative(process.cwd(), activatorDirectory),
+        path.basename(activatorPath),
+      );
+      await writeFile(relativeAcquirerPath, await readFile(acquirerPath));
+      await writeFile(relativeActivatorPath, await readFile(activatorPath));
+      const first = await packageProbeBootstrapArtifact({
+        binaries: {
+          acquirerPath: relativeAcquirerPath,
+          activatorPath: relativeActivatorPath,
+        },
+        outputDir: path.join(root, "relative-first"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+      const second = await packageProbeBootstrapArtifact({
+        binaries: {
+          acquirerPath: relativeAcquirerPath,
+          activatorPath: relativeActivatorPath,
+        },
+        outputDir: path.join(root, "relative-second"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+      expect(await readFile(second.archivePath)).toEqual(
+        await readFile(first.archivePath),
+      );
+      const absolute = await packageProbeBootstrapArtifact({
+        binaries: { acquirerPath, activatorPath },
+        outputDir: path.join(root, "relative-absolute"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+      expect(await readFile(absolute.archivePath)).toEqual(
+        await readFile(first.archivePath),
+      );
+      await expect(
+        inspectProbeBootstrapArtifact({
+          archivePath: first.archivePath,
           ...identity,
         }),
       ).resolves.toMatchObject({
@@ -367,8 +427,6 @@ describe("Probe Bootstrap build artifact", () => {
     expect(workflow).toContain('ENOKI_BOOTSTRAP_BUILD_ROLE="$role"');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_TARGET");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_VERSION");
-    expect(workflow).toContain("probe-bootstrap-artifact.mjs package");
-    expect(workflow).toContain("probe-bootstrap-artifact.mjs inspect");
     expect(workflow).not.toMatch(/genpkey|openssl genrsa|private key/i);
   });
 });

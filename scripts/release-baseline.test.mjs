@@ -28,7 +28,7 @@ import {
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.ts";
 import {
   createGhcrRegistryClient,
   createGitHubReleaseClient,
