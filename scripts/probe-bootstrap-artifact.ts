@@ -1,5 +1,6 @@
 // Probe Bootstrap 发布制品的打包与命令行入口；本地压缩包与 ELF 检验闭包见
-// ./probe-bootstrap-inspection.ts。
+// ./probe-bootstrap-inspection.ts。GNU tar 的第二个相对 --directory 会承接前一个
+// 目录，因此打包前把每个角色目录规范化为绝对路径，归档成员名保持 basename。
 
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -10,21 +11,69 @@ import {
   inspectProbeBootstrapBinary,
   sameBuildTrust,
   sha256,
+  type ProbeBootstrapBuildTrust,
+  type ProbeBootstrapRole,
 } from "./probe-bootstrap-inspection.ts";
-import { isUnknownRecord } from "./release-json-guards.ts";
+import {
+  isUnknownRecord,
+  regexInput,
+  assertAllowedOptions,
+  parseCommandLine,
+  requiredOption,
+} from "./release-json-guards.ts";
 
 const execFileAsync = promisify(execFile);
 
-export async function packageProbeBootstrapArtifact({
-  binaries,
-  distribution,
-  outputDir,
-  rootKeyId,
-  sourceDateEpoch,
-  target,
-  version,
-}) {
-  if (!/^(?:0|[1-9]\d*)$/.test(sourceDateEpoch ?? "")) {
+const inspectOptions = [
+  "--binary",
+  "--distribution",
+  "--role",
+  "--root-key-id",
+  "--target",
+  "--version",
+] as const;
+const packageOptions = [
+  "--acquirer-binary",
+  "--activator-binary",
+  "--distribution",
+  "--output-dir",
+  "--root-key-id",
+  "--source-date-epoch",
+  "--target",
+  "--version",
+] as const;
+
+type RoleBinary = {
+  binaryPath: string;
+  role: ProbeBootstrapRole;
+};
+
+export type PackageProbeBootstrapArtifactInput = ProbeBootstrapBuildTrust & {
+  binaries: unknown;
+  outputDir: string;
+  sourceDateEpoch: unknown;
+};
+
+export type PackagedProbeBootstrapArtifact = {
+  archivePath: string;
+  file: string;
+  sha256: string;
+  size: number;
+};
+
+export async function packageProbeBootstrapArtifact(
+  input: PackageProbeBootstrapArtifactInput,
+): Promise<PackagedProbeBootstrapArtifact> {
+  const {
+    binaries,
+    distribution,
+    outputDir,
+    rootKeyId,
+    sourceDateEpoch,
+    target,
+    version,
+  } = input;
+  if (!/^(?:0|[1-9]\d*)$/.test(regexInput(sourceDateEpoch))) {
     throw new Error("source date epoch must be a non-negative integer");
   }
   const roleBinaries = exactRoleBinaries(binaries);
@@ -40,7 +89,12 @@ export async function packageProbeBootstrapArtifact({
       }),
     ),
   );
-  if (!sameBuildTrust(inspections[0].identity, inspections[1].identity)) {
+  const [acquirerInspection, activatorInspection] = inspections;
+  if (
+    acquirerInspection === undefined ||
+    activatorInspection === undefined ||
+    !sameBuildTrust(acquirerInspection.identity, activatorInspection.identity)
+  ) {
     throw new Error("Probe Bootstrap role identities must match");
   }
   const file = `enoki-probe-bootstrap-${target}.tar.gz`;
@@ -63,7 +117,7 @@ export async function packageProbeBootstrapArtifact({
       archivePath,
       ...roleBinaries.flatMap(({ binaryPath }) => [
         "--directory",
-        path.dirname(binaryPath),
+        path.dirname(path.resolve(binaryPath)),
         path.basename(binaryPath),
       ]),
     ],
@@ -79,12 +133,12 @@ export async function packageProbeBootstrapArtifact({
   };
 }
 
-function exactRoleBinaries(binaries) {
+function exactRoleBinaries(binaries: unknown): RoleBinary[] {
   if (
     !isUnknownRecord(binaries) ||
     Object.keys(binaries).join(",") !== "acquirerPath,activatorPath" ||
-    typeof binaries.acquirerPath !== "string" ||
-    typeof binaries.activatorPath !== "string" ||
+    !isNonEmptyStringPath(binaries.acquirerPath) ||
+    !isNonEmptyStringPath(binaries.activatorPath) ||
     path.basename(binaries.acquirerPath) !== "enoki-probe-bootstrap-acquire" ||
     path.basename(binaries.activatorPath) !==
       "enoki-probe-bootstrap-activate" ||
@@ -100,42 +154,41 @@ function exactRoleBinaries(binaries) {
   ];
 }
 
-function untrustedToolEnvironment() {
+function isNonEmptyStringPath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function untrustedToolEnvironment(): NodeJS.ProcessEnv {
   return { LANG: "C", LC_ALL: "C", PATH: process.env.PATH ?? "/usr/bin:/bin" };
 }
 
-async function main(arguments_) {
-  const [command, ...tokens] = arguments_;
-  const options = new Map();
-  for (let index = 0; index < tokens.length; index += 2) {
-    if (!tokens[index]?.startsWith("--") || tokens[index + 1] === undefined) {
-      throw new Error("invalid Probe Bootstrap artifact command");
-    }
-    options.set(tokens[index].slice(2), tokens[index + 1]);
-  }
+async function main(arguments_: readonly string[]): Promise<void> {
+  const { command, options } = parseCommandLine(arguments_);
   const buildIdentity = {
-    distribution: options.get("distribution"),
-    rootKeyId: options.get("root-key-id"),
-    target: options.get("target"),
-    version: options.get("version"),
+    distribution: requiredOption(options, "--distribution"),
+    rootKeyId: requiredOption(options, "--root-key-id"),
+    target: requiredOption(options, "--target"),
+    version: requiredOption(options, "--version"),
   };
   if (command === "inspect") {
+    assertAllowedOptions(command, options, inspectOptions);
     await inspectProbeBootstrapBinary({
-      binaryPath: options.get("binary"),
-      role: options.get("role"),
+      binaryPath: requiredOption(options, "--binary"),
+      role: requiredOption(options, "--role"),
       ...buildIdentity,
     });
     return;
   }
   if (command === "package") {
+    assertAllowedOptions(command, options, packageOptions);
     await packageProbeBootstrapArtifact({
       ...buildIdentity,
       binaries: {
-        acquirerPath: options.get("acquirer-binary"),
-        activatorPath: options.get("activator-binary"),
+        acquirerPath: requiredOption(options, "--acquirer-binary"),
+        activatorPath: requiredOption(options, "--activator-binary"),
       },
-      outputDir: options.get("output-dir"),
-      sourceDateEpoch: options.get("source-date-epoch"),
+      outputDir: requiredOption(options, "--output-dir"),
+      sourceDateEpoch: options.get("--source-date-epoch"),
     });
     return;
   }
@@ -143,7 +196,7 @@ async function main(arguments_) {
 }
 
 if (import.meta.main) {
-  main(process.argv.slice(2)).catch((error) => {
+  main(process.argv.slice(2)).catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : error}\n`);
     process.exitCode = 1;
   });
