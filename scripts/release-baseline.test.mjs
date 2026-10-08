@@ -152,9 +152,16 @@ describe("Release Baseline resolution", () => {
     }
   });
 
-  it("resolves the exact root-authorized v0.1.74 baseline as replacement-required", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
+  describe("root-authorized v0.1.74 legacy trust epoch baseline fixture", () => {
+    let fixture;
+    beforeEach(async () => {
+      fixture = await createLegacyTrustEpochFixture();
+    });
+    afterEach(async () => {
+      await fixture?.cleanup();
+    });
+
+    it("resolves the exact root-authorized v0.1.74 baseline as replacement-required", async () => {
       await expect(
         resolveReleaseBaseline(fixture.arguments_),
       ).resolves.toMatchObject({
@@ -172,9 +179,7 @@ describe("Release Baseline resolution", () => {
           trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
       ).resolves.toMatchObject({ transition: "replacement-required" });
-    } finally {
-      await fixture.cleanup();
-    }
+    });
   });
 
   describe("v0.1.76 rooted publication baseline fixture", () => {
