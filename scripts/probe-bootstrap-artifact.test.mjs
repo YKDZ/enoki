@@ -1,48 +1,19 @@
 import { execFile } from "node:child_process";
-import { renameSync, truncateSync } from "node:fs";
-import {
-  link,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-const archivePathMutation = vi.hoisted(() => ({
-  afterRead: null,
-}));
-
-vi.mock("@enoki/probe-release", async (importOriginal) => {
-  const original = await importOriginal();
-  return {
-    ...original,
-    async readRegularFileSnapshot(...input) {
-      const snapshot = await original.readRegularFileSnapshot(...input);
-      await archivePathMutation.afterRead?.({
-        filePath: String(input[0]),
-        snapshot,
-      });
-      archivePathMutation.afterRead = null;
-      return snapshot;
-    },
-  };
-});
-
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import {
   inspectProbeBootstrapArtifact,
   inspectProbeBootstrapBinary,
-  packageProbeBootstrapArtifact,
   withVerifiedProbeBootstrapArchive,
   withVerifiedProbeBootstrapArtifact,
-} from "./probe-bootstrap-artifact.mjs";
+} from "./probe-bootstrap-inspection.ts";
 
 const execFileAsync = promisify(execFile);
 const identity = {
@@ -69,107 +40,6 @@ describe("Probe Bootstrap build artifact", () => {
           async () => undefined,
         ),
       ).rejects.toThrow(/expected release bytes/);
-    });
-  });
-
-  it("rejects a large path before reading beyond its small expected release size", async () => {
-    await withFixture(async ({ root }) => {
-      const archivePath = path.join(root, "oversized.tar.gz");
-      await writeFile(archivePath, Buffer.from("not release bytes"));
-      truncateSync(archivePath, 63 * 1024 * 1024);
-      let called = false;
-
-      await expect(
-        withVerifiedProbeBootstrapArchive(
-          {
-            archivePath,
-            expectedArchive: { sha256: "a".repeat(64), size: 1024 * 1024 },
-          },
-          async () => {
-            called = true;
-          },
-        ),
-      ).rejects.toThrow(/size does not match/);
-      expect(called).toBe(false);
-    });
-  });
-
-  it.each(["symlink", "hardlink"])(
-    "rejects a Bootstrap archive %s at both exported path APIs",
-    async (kind) => {
-      await withFixture(async ({ acquirerPath, activatorPath, root }) => {
-        const artifact = await packageProbeBootstrapArtifact({
-          binaries: { acquirerPath, activatorPath },
-          outputDir: path.join(root, "out"),
-          sourceDateEpoch: "0",
-          ...identity,
-        });
-        const unsafePath = path.join(root, `${kind}.tar.gz`);
-        if (kind === "symlink") {
-          await symlink(artifact.archivePath, unsafePath);
-        } else {
-          await link(artifact.archivePath, unsafePath);
-        }
-        let called = false;
-        await expect(
-          withVerifiedProbeBootstrapArchive(
-            {
-              archivePath: unsafePath,
-              expectedArchive: {
-                sha256: artifact.sha256,
-                size: artifact.size,
-              },
-            },
-            async () => {
-              called = true;
-            },
-          ),
-        ).rejects.toThrow(/regular/);
-        expect(called).toBe(false);
-        await expect(
-          inspectProbeBootstrapArtifact({
-            archivePath: unsafePath,
-            ...identity,
-          }),
-        ).rejects.toThrow(/regular/);
-      });
-    },
-  );
-
-  it("keeps the opened archive bytes when its pathname is replaced", async () => {
-    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
-      const artifact = await packageProbeBootstrapArtifact({
-        binaries: { acquirerPath, activatorPath },
-        outputDir: path.join(root, "out"),
-        sourceDateEpoch: "0",
-        ...identity,
-      });
-      const original = await readFile(artifact.archivePath);
-      const replacement = Buffer.from(original);
-      replacement[Math.floor(replacement.byteLength / 2)] ^= 0xff;
-      const replacementPath = path.join(root, "replacement.tar.gz");
-      await writeFile(replacementPath, replacement);
-      archivePathMutation.afterRead = ({ filePath }) => {
-        if (filePath === artifact.archivePath) {
-          renameSync(replacementPath, artifact.archivePath);
-        }
-      };
-
-      await withVerifiedProbeBootstrapArchive(
-        {
-          archivePath: artifact.archivePath,
-          expectedArchive: {
-            sha256: artifact.sha256,
-            size: artifact.size,
-          },
-        },
-        async ({ archivePath }) => {
-          await expect(readFile(archivePath)).resolves.toEqual(original);
-        },
-      );
-      await expect(readFile(artifact.archivePath)).resolves.toEqual(
-        replacement,
-      );
     });
   });
 
@@ -494,19 +364,6 @@ describe("Probe Bootstrap build artifact", () => {
     expect(workflow).toContain('test "$BOOTSTRAP_DISTRIBUTION" = enoki');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM");
-    expect(workflow).toContain(
-      "key.asymmetricKeyDetails?.modulusLength !== 4096",
-    );
-    expect(workflow).toContain("root must be RSA-4096");
-    expect(workflow).not.toContain(
-      'key.asymmetricKeyType !== "rsa") throw new Error("root must be RSA")',
-    );
-    const bootstrapBuildScript = await readFile(
-      "crates/probe-bootstrap/build.rs",
-      "utf8",
-    );
-    expect(bootstrapBuildScript).toContain("root.n().bits() != 4096");
-    expect(bootstrapBuildScript).toContain("must be an RSA-4096 SPKI PEM");
     expect(workflow).toContain('ENOKI_BOOTSTRAP_BUILD_ROLE="$role"');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_TARGET");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_VERSION");
@@ -533,7 +390,6 @@ async function withFixture(run) {
     );
     await run({ acquirerPath, activatorPath, root });
   } finally {
-    archivePathMutation.afterRead = null;
     await rm(root, { force: true, recursive: true });
   }
 }

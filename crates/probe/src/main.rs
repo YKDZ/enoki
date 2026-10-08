@@ -1,5 +1,8 @@
 use enoki_probe::{
-    cli::{ProbeCommand, parse_probe_command, render_probe_output, render_probe_repair_failure},
+    cli::{
+        ProbeCommand, parse_probe_command, render_probe_output, render_probe_repair_failure,
+        render_probe_repair_success,
+    },
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{
         ProbeRunInput, probe_run_exit_status, run_loop_control_from_environment,
@@ -25,7 +28,7 @@ fn main() {
             }
         },
         ProbeCommand::Repair => match enoki_probe::runtime::request_local_probe_repair() {
-            Ok(()) => println!("本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准"),
+            Ok(()) => print!("{}", render_probe_repair_success()),
             Err(code) => {
                 eprint!("{}", render_probe_repair_failure(code));
                 std::process::exit(1);

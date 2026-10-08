@@ -1,6 +1,5 @@
 import { type BrowserContext, type Page } from "@playwright/test";
 
-import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
 import { expect, test } from "./security-console";
 
 type BrowserEnrollmentTarget =
@@ -64,6 +63,10 @@ type BrowserScrollCall = {
   block?: ScrollLogicalPosition;
 };
 
+const isCandidateImageGate = Boolean(
+  process.env.ENOKI_RELEASE_UI_CANDIDATE_VERSION,
+);
+
 test("owner can generate the configured probe activation command", async ({
   context,
   page,
@@ -81,13 +84,21 @@ test("owner can generate the configured probe activation command", async ({
 
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
-  const probeApiOrigin = escapeRegex(releaseUiBrowserRuntime().probeApiUrl);
-  const enrollmentToken = /enk_enroll_[A-Za-z0-9_-]+/;
-  await expect(command).toHaveValue(
-    new RegExp(
-      `^printf '%s\\\\n' 'enk_enroll_[A-Za-z0-9_-]+' \\| python3 -- \\.\\/enoki-probe-bootstrap\\.py --hub-origin '${probeApiOrigin}'$`,
-    ),
-  );
+  const enrollmentToken = isCandidateImageGate
+    ? /ENOKI_ENROLLMENT_TOKEN=/
+    : /enk_enroll_[A-Za-z0-9_-]+/;
+  if (isCandidateImageGate) {
+    await expect(command).toHaveValue(
+      /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
+    );
+    await expect(command).toHaveValue(
+      /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38201'/,
+    );
+  } else {
+    await expect(command).toHaveValue(
+      /^printf '%s\\n' 'enk_enroll_[A-Za-z0-9_-]+' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin 'http:\/\/127\.0\.0\.1:38201'$/,
+    );
+  }
   await expect(command).toHaveValue(enrollmentToken);
   await expect(command).not.toHaveValue(/sudo env/);
   await expect(command).not.toHaveValue(/curl/);
@@ -106,10 +117,6 @@ test("owner can generate the configured probe activation command", async ({
   await command.press("Control+V");
   await expect(command).toHaveValue(enrollmentToken);
 });
-
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 test("owner can select the command with Cmd+A on a macOS browser runner", async ({
   page,

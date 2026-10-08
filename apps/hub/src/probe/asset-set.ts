@@ -39,9 +39,7 @@ export type ProbeAssetSetVersionResult = {
 export type VerifiedReleaseTransition = {
   classification: "compatible" | "replacement-required";
   sourceProbeVersion: string;
-  sourceAssetSetDigest: string;
   sourceProbeSha256: string[];
-  targetProbeSha256: string[];
   targetAssetSetDigest: string;
   targetBundles?: ReadonlyArray<{
     bundleManifestSha256: string;
@@ -261,9 +259,7 @@ function probeAssetSetVersionResult(
   };
 }
 
-export function normalizeSemVer(
-  value: string | null | undefined,
-): string | null {
+function normalizeSemVer(value: string | null | undefined) {
   if (typeof value !== "string") {
     return null;
   }

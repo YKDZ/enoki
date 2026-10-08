@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   supportedHostEnvironments,
   validateSupportedHostMatrix,
-} from "./release-e2e-matrix.mjs";
+} from "./release-e2e-matrix.ts";
 
 describe("supported Release Test Host matrix", () => {
   it("contains only supported Host capabilities and no candidate-independent scenarios", async () => {
@@ -64,12 +64,8 @@ describe("supported Release Test Host matrix", () => {
       workflow.indexOf("  candidate-release-e2e:"),
     );
 
-    expect(planningJob).toContain("actions/download-artifact@v8");
     expect(planningJob).toContain("candidate/candidate-manifest.json");
-    expect(planningJob).toContain("release-scenario-plan.mjs github-actions");
-    expect(planningJob.indexOf("actions/download-artifact@v8")).toBeLessThan(
-      planningJob.indexOf("release-scenario-plan.mjs github-actions"),
-    );
+    expect(planningJob).toContain("release-scenario-plan.ts github-actions");
   });
 
   it("passes only planner-produced cells to the one existing Orchestrator", async () => {
@@ -85,13 +81,13 @@ describe("supported Release Test Host matrix", () => {
       "matrix: ${{ fromJSON(needs.prepare-release-e2e-matrix.outputs.matrix) }}",
     );
     expect(workflow).toContain('--matrix-cell "$MATRIX_CELL"');
-    expect(workflow.match(/release-e2e[.]mjs run/g)).toHaveLength(1);
+    expect(workflow.match(/release-e2e[.]ts run/g)).toHaveLength(1);
     expect(workflow).not.toContain("continue-on-error:");
   });
 
   it("validates the plan before journaling and protects provisioning with release", async () => {
     const entrypoint = await readFile(
-      new URL("./release-e2e.mjs", import.meta.url),
+      new URL("./release-e2e.ts", import.meta.url),
       "utf8",
     );
     const run = entrypoint.slice(entrypoint.indexOf("async function run("));

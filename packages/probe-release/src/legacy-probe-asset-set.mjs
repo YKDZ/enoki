@@ -1,23 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import {
-  lstat,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import { probeTargets } from "./probe-asset-bundle.mjs";
-import { readRegularFileSnapshot } from "./regular-file-snapshot.mjs";
 
 const execFileAsync = promisify(execFile);
-const MAX_LEGACY_PROBE_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const dynamicLoaderByProbeTarget = Object.freeze({
   "aarch64-unknown-linux-gnu": "/lib/ld-linux-aarch64.so.1",
   "aarch64-unknown-linux-musl": "/lib/ld-musl-aarch64.so.1",
@@ -42,8 +32,7 @@ export async function inspectLegacyProbeAssetSet(
         !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(asset.name) ||
         !/^[0-9a-f]{64}$/.test(asset.sha256) ||
         !Number.isSafeInteger(asset.size) ||
-        asset.size < 1 ||
-        asset.size > MAX_LEGACY_PROBE_ARCHIVE_BYTES
+        asset.size < 1
       ) {
         throw new Error("legacy Probe Asset Set authorization is invalid");
       }
@@ -59,16 +48,6 @@ export async function inspectLegacyProbeAssetSet(
     "legacy Probe Asset Set",
   );
   for (const asset of expectedAssets) {
-    if (
-      probeTargets.some(
-        (target) => asset.name === `enoki-probe-${target}.tar.gz`,
-      )
-    ) {
-      // 每个 archive 在签名 manifest 已经通过之后由下面同一段受控
-      // bytes 路径验证。这里若提前按路径哈希，之后再打开 archive 会重新
-      // 引入 pathname TOCTOU。
-      continue;
-    }
     const assetPath = path.join(assetDir, asset.name);
     const details = await stat(assetPath);
     if (
@@ -138,31 +117,15 @@ export async function inspectLegacyProbeAssetSet(
       asset.target !== target ||
       !/^[0-9a-f]{64}$/.test(asset.sha256) ||
       !Number.isSafeInteger(asset.size) ||
-      asset.size < 1 ||
-      asset.size > MAX_LEGACY_PROBE_ARCHIVE_BYTES
+      asset.size < 1
     ) {
       throw new Error(`legacy Probe Asset Set target ${target} is invalid`);
     }
     const archivePath = path.join(assetDir, file);
-    const authorizedAsset = expectedAssets.find(
-      (expected) => expected.name === file,
-    );
-    if (!authorizedAsset || asset.size !== authorizedAsset.size) {
-      throw new Error(`legacy Probe Asset Set archive does not match ${file}`);
-    }
-    const archive = await readRegularFileSnapshot(
-      archivePath,
-      "legacy Probe Asset Set archive",
-      {
-        expectedSize: asset.size,
-        maximumSize: MAX_LEGACY_PROBE_ARCHIVE_BYTES,
-      },
-    ).catch(() => {
-      throw new Error("legacy Probe Asset Set archive does not match");
-    });
+    const archiveDetails = await stat(archivePath);
     if (
-      sha256(archive.bytes) !== asset.sha256 ||
-      sha256(archive.bytes) !== authorizedAsset.sha256
+      archiveDetails.size !== asset.size ||
+      (await fileSha256(archivePath)) !== asset.sha256
     ) {
       throw new Error(`legacy Probe Asset Set archive does not match ${file}`);
     }
@@ -175,8 +138,7 @@ export async function inspectLegacyProbeAssetSet(
     probeComponents.push({
       file: "enoki-probe",
       role: "probe",
-      sha256: await inspectLegacyProbeArchive(archive.bytes, {
-        archiveName: file,
+      sha256: await inspectLegacyProbeArchive(archivePath, {
         target,
         version: `v${manifest.version}`,
       }),
@@ -190,23 +152,14 @@ export async function inspectLegacyProbeAssetSet(
   if (!installer.includes(expectedSigningKeySha256)) {
     throw new Error("legacy Probe installer does not pin its signing identity");
   }
-  return {
-    assetSetManifestSha256: sha256(manifestBytes),
-    probeComponents,
-    version: manifest.version,
-  };
+  return { probeComponents, version: manifest.version };
 }
 
-async function inspectLegacyProbeArchive(
-  archive,
-  { archiveName, target, version },
-) {
+async function inspectLegacyProbeArchive(archivePath, { target, version }) {
   const extractionDir = await mkdtemp(
     path.join(tmpdir(), "enoki-legacy-probe-archive-"),
   );
   try {
-    const archivePath = path.join(extractionDir, "archive.tar.gz");
-    await writeFile(archivePath, archive, { mode: 0o600 });
     let listing;
     try {
       ({ stdout: listing } = await execFileAsync(
@@ -215,10 +168,14 @@ async function inspectLegacyProbeArchive(
         { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
       ));
     } catch {
-      throw new Error(`legacy Probe archive ${archiveName} is invalid`);
+      throw new Error(
+        `legacy Probe archive ${path.basename(archivePath)} is invalid`,
+      );
     }
     if (listing !== "enoki-probe\n") {
-      throw new Error(`legacy Probe archive ${archiveName} closure is invalid`);
+      throw new Error(
+        `legacy Probe archive ${path.basename(archivePath)} closure is invalid`,
+      );
     }
     await execFileAsync(
       "tar",
@@ -236,7 +193,9 @@ async function inspectLegacyProbeArchive(
     const binaryPath = path.join(extractionDir, "enoki-probe");
     const details = await lstat(binaryPath);
     if (!details.isFile() || (details.mode & 0o111) === 0) {
-      throw new Error(`legacy Probe archive ${archiveName} payload is invalid`);
+      throw new Error(
+        `legacy Probe archive ${path.basename(archivePath)} payload is invalid`,
+      );
     }
     const binary = await readFile(binaryPath);
     inspectProbeElf(binary, { target, version });

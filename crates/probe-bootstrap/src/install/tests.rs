@@ -3,9 +3,7 @@ mod tests {
     use super::account::{
         account_records_match_transaction, classify_gshadow_lookup,
         create_probe_ipc_group_with_commands, create_transaction_identity_with_commands,
-        fixed_ipc_group_is_harmless_records, owned_ipc_group_record_matches,
-        nss_gshadow_matches_local, remove_fixed_ipc_group_transaction_with,
-        remove_owned_ipc_group_with_commands,
+        owned_ipc_group_record_matches, remove_owned_ipc_group_with_commands,
     };
     use super::upgrade::{upgrade_destinations, write_operation_status};
     use super::*;
@@ -22,93 +20,6 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::sync::OnceLock;
     use tempfile::tempdir;
-
-    #[test]
-    fn retired_fixed_ipc_group_is_reusable_only_without_members_or_primary_gid_users() {
-        let group = "enoki-probe-ipc:x:4242:";
-        let shadow = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::";
-        let nss = "enoki-probe-ipc:x:4242:";
-
-        assert!(fixed_ipc_group_is_harmless_records(
-            "enoki-probe-ipc",
-            group,
-            shadow,
-            "root:x:0:0:root:/root:/bin/bash\n",
-            nss,
-            nss,
-        ));
-        assert!(!fixed_ipc_group_is_harmless_records(
-            "enoki-probe-ipc",
-            "enoki-probe-ipc:x:4242:other",
-            shadow,
-            "root:x:0:0:root:/root:/bin/bash\n",
-            nss,
-            nss,
-        ));
-        assert!(!fixed_ipc_group_is_harmless_records(
-            "enoki-probe-ipc",
-            group,
-            shadow,
-            "other:x:1000:4242:other:/nonexistent:/usr/sbin/nologin\n",
-            nss,
-            nss,
-        ));
-    }
-
-    #[test]
-    fn retired_fixed_ipc_group_rejects_duplicate_local_records_and_nss_members() {
-        let group = "enoki-probe-ipc:x:4242:";
-        let shadow = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::";
-        let passwd = "root:x:0:0:root:/root:/bin/bash\n";
-        let nss = "enoki-probe-ipc:x:4242:";
-
-        assert!(!fixed_ipc_group_is_harmless_records(
-            "enoki-probe-ipc",
-            &format!("{group}\n{group}"),
-            shadow,
-            passwd,
-            nss,
-            nss,
-        ));
-        assert!(!fixed_ipc_group_is_harmless_records(
-            "enoki-probe-ipc",
-            group,
-            shadow,
-            passwd,
-            "enoki-probe-ipc:x:4242:outsider",
-            nss,
-        ));
-    }
-
-    #[test]
-    fn retired_fixed_ipc_group_rejects_nss_password_or_authorization_disagreement() {
-        let group = "enoki-probe-ipc:x:4242:";
-        let shadow = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::";
-        let passwd = "root:x:0:0:root:/root:/bin/bash\n";
-        let nss = "enoki-probe-ipc:x:4242:";
-
-        for inconsistent_nss in [
-            "enoki-probe-ipc:independent-password:4242:",
-            "enoki-probe-ipc:!:4242:",
-        ] {
-            assert!(!fixed_ipc_group_is_harmless_records(
-                "enoki-probe-ipc",
-                group,
-                shadow,
-                passwd,
-                inconsistent_nss,
-                nss,
-            ));
-            assert!(!fixed_ipc_group_is_harmless_records(
-                "enoki-probe-ipc",
-                group,
-                shadow,
-                passwd,
-                nss,
-                inconsistent_nss,
-            ));
-        }
-    }
 
     fn coordinate_fresh_install_for_test(
         components: VerifiedCompleteFreshComponents<'_>,
@@ -145,7 +56,6 @@ mod tests {
             InstallFailureSemantics::FreshRollback,
         )
     }
-
 
     struct LayoutBootstrapComponentsForTest<'a> {
         probe: &'a mut File,
@@ -293,24 +203,6 @@ mod tests {
         assert!(provider.contains("/proc/diskstats"));
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("SocketBindDeny=ipv4:any"));
-    }
-
-    #[test]
-    fn canonical_runtime_projection_requires_latch_and_restore_journal_absence() {
-        let conditions = observation_runtime_unit()
-            .lines()
-            .filter_map(|line| line.strip_prefix("ConditionPathExists="))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            conditions,
-            vec![
-                "!/var/lib/enoki-probe/runtime-failure/latch",
-                "!/var/lib/enoki-probe-bootstrap/installed-bundle-repair.json",
-            ],
-            "signed canonical Runtime projection must reject both an active latch and an unretired restore journal"
-        );
     }
 
     #[test]
@@ -469,49 +361,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fixed_ipc_transaction_cleanup_uses_the_system_accounts_compensation_branch() {
-        let marker = "tx-1";
-        for group_name in [PROBE_IPC_GROUP, OBSERVATION_IPC_GROUP] {
-            let record = format!("{group_name}:!enoki-bootstrap-{marker}::\n");
-            for (lookup, current, harmless, delete, expected) in [
-                (false, false, true, Ok(()), Ok(())),
-                (true, true, true, Err(InstallError::Account), Ok(())),
-                (
-                    true,
-                    true,
-                    false,
-                    Err(InstallError::Account),
-                    Err(InstallError::Account),
-                ),
-            ] {
-                let result = remove_fixed_ipc_group_transaction_with(
-                    group_name,
-                    marker,
-                    None,
-                    &mut || Ok(lookup.then(|| record.clone())),
-                    &mut || Ok(current),
-                    &mut || Ok(harmless),
-                    &mut || delete.clone(),
-                );
-                assert_eq!(result, expected);
-            }
-        }
-    }
-
-    #[test]
-    fn fixed_ipc_cleanup_requires_keyed_gshadow_to_match_the_unique_local_record() {
-        let local = "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::\n";
-        assert!(nss_gshadow_matches_local(local, local, PROBE_IPC_GROUP));
-        for keyed in [
-            "enoki-probe-ipc:!enoki-bootstrap-ffffffffffffffffffffffffffffffff::\n",
-            "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef:admin:\n",
-            "enoki-probe-ipc:!enoki-bootstrap-0123456789abcdef0123456789abcdef::\nextra",
-        ] {
-            assert!(!nss_gshadow_matches_local(keyed, local, PROBE_IPC_GROUP));
-        }
-    }
-
     #[derive(Default)]
     struct Accounts {
         calls: Vec<&'static str>,
@@ -522,7 +371,6 @@ mod tests {
         crash_after: Option<&'static str>,
         fail_identity: bool,
         fail_ipc: bool,
-        fixed_ipc_absent_or_harmless: Option<bool>,
         poison_staging: Option<PathBuf>,
         break_state_on_identity: Option<(PathBuf, PathBuf)>,
     }
@@ -605,15 +453,6 @@ mod tests {
             self.ipc_calls.push("owns");
             Ok(self.ipc_present)
         }
-        fn fixed_ipc_group_is_absent_or_harmless(
-            &mut self,
-            group_name: &str,
-        ) -> Result<bool, InstallError> {
-            assert_eq!(group_name, PROBE_IPC_GROUP);
-            Ok(self
-                .fixed_ipc_absent_or_harmless
-                .unwrap_or(!self.identity_present))
-        }
         fn remove_observation_ipc_group(
             &mut self,
             _transaction_id: &str,
@@ -633,12 +472,6 @@ mod tests {
         fail_restart: bool,
         residue: bool,
         registration_identity: Option<PathBuf>,
-        reload_topology_tamper: Option<ReloadTopologyTamper>,
-    }
-    struct ReloadTopologyTamper {
-        protected_paths: Vec<PathBuf>,
-        protected_before: Option<Vec<Vec<u8>>>,
-        residue_path: PathBuf,
     }
     impl SystemdPort for Systemd {
         fn require_absent(&mut self) -> Result<(), InstallError> {
@@ -649,20 +482,6 @@ mod tests {
         }
         fn daemon_reload(&mut self) -> Result<(), InstallError> {
             self.calls.push("reload");
-            if let Some(tamper) = self.reload_topology_tamper.as_mut() {
-                fs::write(&tamper.residue_path, b"postactivation topology tamper")
-                    .map_err(|_| InstallError::Io)?;
-                fs::set_permissions(&tamper.residue_path, fs::Permissions::from_mode(0o755))
-                    .map_err(|_| InstallError::Io)?;
-                tamper.protected_before = Some(
-                    tamper
-                        .protected_paths
-                        .iter()
-                        .map(fs::read)
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|_| InstallError::Io)?,
-                );
-            }
             (!self.fail_reload)
                 .then_some(())
                 .ok_or(InstallError::Systemd)
@@ -697,7 +516,7 @@ mod tests {
                 let registered = pending.replace(
                     "enrollment_token = \"enk_enroll_secret\"\n",
                     &format!(
-                        "enrollment_id = \"enr_0123456789abcdef\"\nprobe_id = \"probe-registered\"\nhost_id = \"7\"\nprobe_private_key_pem = {:?}\n",
+                        "enrollment_id = \"enrollment_01\"\nprobe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = {:?}\n",
                         valid_probe_private_key_pem()
                     ),
                 );
@@ -818,9 +637,9 @@ mod tests {
     fn replacement_commit(bundle: &VerifiedBundle) -> ReplacementCommitFact {
         ReplacementCommitFact::for_test(
             crate::replacement::ReplacementIntent {
-                enrollment_id: "enr_0123456789abcdef".to_owned(),
+                enrollment_id: "enrollment_01".to_owned(),
                 enrollment_token_sha256: "1".repeat(64),
-                host_id: "7".to_owned(),
+                host_id: "host-registered".to_owned(),
                 hub_origin: "https://hub.example".to_owned(),
                 old_probe_id: "probe-old".to_owned(),
                 source_probe_version: "1.2.2".to_owned(),
@@ -886,190 +705,6 @@ mod tests {
             installed,
             repair,
         }
-    }
-
-    fn write_runtime_failure_pair_fixture(paths: &FixedInstallPaths, generation: &str) {
-        fs::create_dir_all(paths.runtime_failure_dir()).unwrap();
-        fs::set_permissions(
-            paths.runtime_failure_dir(),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        fs::create_dir_all(paths.boot_id().parent().unwrap()).unwrap();
-        fs::set_permissions(
-            paths.boot_id().parent().unwrap(),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        fs::write(paths.boot_id(), b"boot-01\n").unwrap();
-        fs::set_permissions(paths.boot_id(), fs::Permissions::from_mode(0o444)).unwrap();
-        let metadata = fs::read_to_string(paths.metadata()).unwrap();
-        let identity = fs::read_to_string(paths.identity()).unwrap();
-        let unit = fs::read(paths.observation_runtime_unit()).unwrap();
-        let epoch = format!(
-            "schema_version = 1\ngeneration = {generation:?}\nboot_id = \"boot-01\"\nunit = \"enoki-observation-runtime.service\"\nunit_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nprobe_id = {:?}\nidentity_receipt_sha256 = {:?}\ninstall_state_sha256 = {:?}\nmanifest_sha256 = {:?}\nbundle_version = {:?}\nresult = \"exit-code\"\n",
-            format!("{:x}", Sha256::digest(&unit)),
-            upgrade::metadata_string(&metadata, "hub_url").unwrap(),
-            upgrade::metadata_string(&identity, "host_id").unwrap(),
-            upgrade::metadata_string(&identity, "probe_id").unwrap(),
-            format!("{:x}", Sha256::digest(identity.as_bytes())),
-            upgrade::metadata_string(&metadata, "install_state_sha256").unwrap(),
-            upgrade::metadata_string(&metadata, "target_manifest_sha256").unwrap(),
-            upgrade::metadata_string(&metadata, "bundle_version").unwrap(),
-        );
-        fs::write(paths.runtime_failure_epoch(), epoch).unwrap();
-        fs::set_permissions(
-            paths.runtime_failure_epoch(),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        fs::write(paths.runtime_failure_latch(), generation).unwrap();
-        fs::set_permissions(
-            paths.runtime_failure_latch(),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-    }
-
-    fn prepare_legacy_partial_upgrade_with_unreceipted_next_target(
-        fixture: &InstalledBundleFixture,
-        activated_targets: usize,
-    ) -> VerifiedBundle {
-        let paths = &fixture.paths;
-        let mut target = fixture.bundle.clone();
-        target.version = "1.2.4".to_owned();
-        target.manifest_sha256 = "d".repeat(64);
-        target.asset_set_manifest_sha256 = "e".repeat(64);
-        let destinations = upgrade_destinations(paths);
-        for destination in &destinations {
-            let name = destination.file_name().unwrap().to_str().unwrap();
-            let backup = destination.with_file_name(format!(".{name}.enoki-upgrade-old"));
-            fs::hard_link(destination, backup).unwrap();
-            let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-            let current = fs::read(destination).unwrap();
-            let target_bytes = if destination == &paths.identity() {
-                upgrade::updated_receipt_projection(
-                    std::str::from_utf8(&current).unwrap(),
-                    &target,
-                    &fixture.installed,
-                )
-                .unwrap()
-                .into_bytes()
-            } else if destination == &paths.metadata() {
-                upgrade::updated_metadata(
-                    std::str::from_utf8(&current).unwrap(),
-                    &target,
-                    &fixture.installed,
-                )
-                .unwrap()
-                .into_bytes()
-            } else {
-                current
-            };
-            fs::write(&staged, target_bytes).unwrap();
-            let mode = fs::metadata(destination).unwrap().mode() & 0o7777;
-            fs::set_permissions(&staged, fs::Permissions::from_mode(mode)).unwrap();
-        }
-        for destination in destinations.iter().take(activated_targets) {
-            let name = destination.file_name().unwrap().to_str().unwrap();
-            let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-            fs::rename(staged, destination).unwrap();
-        }
-        if let Some(destination) = destinations.get(activated_targets) {
-            let name = destination.file_name().unwrap().to_str().unwrap();
-            let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-            fs::rename(staged, destination).unwrap();
-        }
-        fs::create_dir_all(paths.bootstrap_state()).unwrap();
-        let journal = format!(
-            "schema_version = 3\noperation_id = \"legacy-runtime-pair\"\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = {:?}\nhost_id = \"host_01\"\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"activation-started\"\nactivation_started = true\nactivated_targets = {activated_targets}\nfinalized_targets = 0\n",
-            unsafe { libc::geteuid() },
-            "a".repeat(64),
-            fixture.installed.hub_origin,
-            fixture.installed.probe_id,
-            fixture.installed.source_bundle_version,
-            fixture.installed.source_install_state_sha256,
-            fixture.installed.source_manifest_sha256,
-            target.version,
-            format!("sha256:{}", target.asset_set_manifest_sha256),
-            target.manifest_sha256,
-            "f".repeat(64),
-        );
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        fs::write(&journal_path, journal).unwrap();
-        fs::set_permissions(journal_path, fs::Permissions::from_mode(0o600)).unwrap();
-        target
-    }
-
-    fn prepare_legacy_postactivation_effect_phase(
-        fixture: &InstalledBundleFixture,
-        phase: &str,
-        finalized_targets: usize,
-    ) -> VerifiedBundle {
-        let target = prepare_legacy_partial_upgrade_with_unreceipted_next_target(fixture, 21);
-        let paths = &fixture.paths;
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal = fs::read_to_string(&journal_path).unwrap();
-        if phase == "stage-cleanup-required" {
-            upgrade::write_upgrade_attempt_from_journal(paths, &journal, "finalizing", 21, 21)
-                .unwrap();
-            let finalizing = fs::read_to_string(&journal_path).unwrap();
-            upgrade::write_upgrade_attempt_from_journal(
-                paths,
-                &finalizing,
-                "stage-cleanup-required",
-                21,
-                21,
-            )
-            .unwrap();
-        } else {
-            upgrade::write_upgrade_attempt_from_journal(
-                paths,
-                &journal,
-                phase,
-                21,
-                finalized_targets,
-            )
-            .unwrap();
-        }
-        for destination in upgrade_destinations(paths).iter().take(finalized_targets) {
-            let name = destination.file_name().unwrap().to_str().unwrap();
-            let backup = destination.with_file_name(format!(".{name}.enoki-upgrade-old"));
-            fs::remove_file(backup).unwrap();
-        }
-        target
-    }
-
-    fn scope_less_upgrade_journal(journal: &str, target_install_state: Option<&str>) -> String {
-        let mut output = String::new();
-        for line in journal.lines() {
-            if [
-                "hub_origin = ",
-                "host_id = ",
-                "target_asset_set_digest = ",
-                "verified_stage_sha256 = ",
-            ]
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-            {
-                continue;
-            }
-            if line.starts_with("target_manifest_sha256 = ")
-                && let Some(digest) = target_install_state
-            {
-                output.push_str(&format!("target_install_state_sha256 = {digest:?}\n"));
-            }
-            output.push_str(line);
-            output.push('\n');
-        }
-        output
-    }
-
-    fn legacy_upgrade_recovery_receipt(
-        fixture: &InstalledBundleFixture,
-        _target: &VerifiedBundle,
-    ) -> UpgradeRecoveryReceipt {
-        upgrade::validated_upgrade_recovery_receipt_for_test(&fixture.paths).unwrap()
     }
 
     fn restore_bundle_fixture(
@@ -1593,123 +1228,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_coordinator_retires_an_empty_ordinary_state_shell_before_its_new_journal() {
-        let temporary = tempdir().unwrap();
-        for parent in [
-            "usr/local/bin",
-            "var/lib",
-            "etc/systemd/system",
-            "etc/sudoers.d",
-        ] {
-            fs::create_dir_all(temporary.path().join(parent)).unwrap();
-        }
-        let shell = temporary.path().join("var/lib/enoki-probe");
-        fs::create_dir(&shell).unwrap();
-        fs::set_permissions(&shell, fs::Permissions::from_mode(0o750)).unwrap();
-        write_bootstrap_roles(temporary.path());
-        let mut component = component();
-        let mut accounts = Accounts::default();
-        let mut systemd = Systemd::default();
-
-        activate_layout_without_roles_for_test(
-            &mut component,
-            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-            &bundle(),
-            &trust(),
-            &FixedInstallPaths::under(temporary.path()),
-            &mut accounts,
-            &mut systemd,
-        )
-        .expect("fresh coordinator removes only the verified empty shell before journaling");
-
-        assert!(temporary
-            .path()
-            .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
-            .exists());
-    }
-
-    #[test]
-    fn fresh_coordinator_retires_an_empty_canonical_state_shell_before_its_new_journal() {
-        use std::os::unix::fs::symlink;
-
-        let temporary = tempdir().unwrap();
-        for parent in [
-            "usr/local/bin",
-            "var/lib/private",
-            "etc/systemd/system",
-            "etc/sudoers.d",
-        ] {
-            fs::create_dir_all(temporary.path().join(parent)).unwrap();
-        }
-        let private = temporary.path().join("var/lib/private/enoki-probe");
-        fs::create_dir(&private).unwrap();
-        fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).unwrap();
-        symlink("private/enoki-probe", temporary.path().join("var/lib/enoki-probe")).unwrap();
-        write_bootstrap_roles(temporary.path());
-        let mut component = component();
-        let mut accounts = Accounts::default();
-        let mut systemd = Systemd::default();
-
-        activate_layout_without_roles_for_test(
-            &mut component,
-            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-            &bundle(),
-            &trust(),
-            &FixedInstallPaths::under(temporary.path()),
-            &mut accounts,
-            &mut systemd,
-        )
-        .expect("fresh coordinator retires the exact empty canonical shell");
-
-        assert!(temporary
-            .path()
-            .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
-            .exists());
-    }
-
-    #[test]
-    fn fresh_second_preflight_rejects_a_shell_recreated_after_retirement() {
-        let temporary = tempdir().unwrap();
-        for parent in [
-            "usr/local/bin",
-            "var/lib",
-            "etc/systemd/system",
-            "etc/sudoers.d",
-        ] {
-            fs::create_dir_all(temporary.path().join(parent)).unwrap();
-        }
-        let paths = FixedInstallPaths::under(temporary.path());
-        fs::create_dir(paths.state()).unwrap();
-        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o750)).unwrap();
-        write_bootstrap_roles(temporary.path());
-        let mut component = component();
-        let mut accounts = Accounts::default();
-        let mut systemd = Systemd::default();
-        RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE.with(|recreate| recreate.set(true));
-
-        assert_eq!(
-            activate_layout_without_roles_for_test(
-                &mut component,
-                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-                &bundle(),
-                &trust(),
-                &paths,
-                &mut accounts,
-                &mut systemd,
-            ),
-            Err(InstallError::ExistingResidue),
-            "the coordinator re-runs strict preflight after retirement"
-        );
-        assert!(
-            !temporary
-                .path()
-                .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
-                .exists(),
-            "the strict second preflight fails before a new journal begins"
-        );
-    }
-
-    #[test]
     fn fresh_machine_installs_bundled_bootstrap_receipts_before_probe_activation() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -1801,24 +1319,11 @@ mod tests {
         )
         .unwrap();
         let mut registered_identity = fs::read_to_string(paths.identity()).unwrap();
-        registered_identity.push_str("probe_id = \"probe_01\"\nhost_id = \"host_01\"\n");
+        registered_identity.push_str("probe_id = \"probe_01\"\n");
         fs::write(paths.identity(), &registered_identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         let identity_before = fs::read_to_string(paths.identity()).unwrap();
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
-        write_runtime_failure_pair_fixture(&paths, &"17".repeat(32));
-        assert!(upgrade::current_runtime_failure_epoch_binding(&paths).is_ok());
-        let epoch = fs::read_to_string(paths.runtime_failure_epoch()).unwrap();
-        fs::write(
-            paths.runtime_failure_epoch(),
-            epoch.replacen("result = \"exit-code\"", "result = \"start-limit-hit\"", 1),
-        )
-        .unwrap();
-        assert_eq!(
-            upgrade::current_runtime_failure_epoch_binding(&paths),
-            Err(InstallError::ExistingResidue),
-        );
-        fs::write(paths.runtime_failure_epoch(), epoch).unwrap();
         let mut target_bundle = bundle().with_test_complete_receipts(5);
         target_bundle.version = "1.2.4".to_owned();
         target_bundle.manifest_sha256 = "d".repeat(64);
@@ -1875,10 +1380,18 @@ mod tests {
 
         assert_eq!(completion, UpgradeCompletion::Activated);
         assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-        let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
-            .unwrap()
-            .unwrap();
-        finalize_probe_upgrade_stage_cleanup(&paths, &receipt).unwrap();
+        finalize_probe_upgrade_stage_cleanup(
+            &paths,
+            &UpgradeRecoveryReceipt {
+                operation_id: "41".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.3".to_owned(),
+                target_bundle_version: "1.2.4".to_owned(),
+                activated: true,
+            },
+        )
+        .unwrap();
         let identity_after = fs::read_to_string(paths.identity()).unwrap();
         assert_ne!(identity_after, identity_before);
         assert!(identity_after.contains("probe_id = \"probe_01\""));
@@ -1912,11 +1425,8 @@ mod tests {
         assert!(journal.contains("host_id = \"host_01\""));
         assert!(journal.contains("source_probe_id = \"probe_01\""));
         assert!(journal.contains("phase = \"activated\""));
-        assert!(journal.contains("schema_version = 4"));
+        assert!(journal.contains("schema_version = 3"));
         assert!(journal.contains("activation_started = true"));
-        assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
-        assert!(!paths.runtime_failure_epoch().exists());
-        assert!(!paths.runtime_failure_latch().exists());
 
         let next_source = inspect_installed_probe_for_upgrade(&paths).unwrap();
         let mut failed_target = bundle().with_test_complete_receipts(5);
@@ -1992,21 +1502,35 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"42\""));
         assert!(journal.contains("phase = \"repair-required\""));
-        assert!(journal.contains("schema_version = 4"));
+        assert!(journal.contains("schema_version = 3"));
         assert!(journal.contains("activation_started = true"));
-        assert!(journal.contains("runtime_failure_consumption = \"none-consumed\""));
 
         systemd.fail_start = false;
         systemd.calls.clear();
-        let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
-            .unwrap()
-            .unwrap();
-        assert!(receipt.activated());
-        assert_eq!(receipt.operation_id(), "42");
-        assert_eq!(receipt.source_bundle_version(), "1.2.4");
-        assert_eq!(receipt.target_bundle_version(), "1.2.5");
+        assert_eq!(
+            recover_incomplete_probe_upgrade(&paths, &mut systemd).unwrap(),
+            Some(UpgradeRecoveryReceipt {
+                operation_id: "42".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.4".to_owned(),
+                target_bundle_version: "1.2.5".to_owned(),
+                activated: true,
+            })
+        );
         assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-        finalize_probe_upgrade_stage_cleanup(&paths, &receipt).unwrap();
+        finalize_probe_upgrade_stage_cleanup(
+            &paths,
+            &UpgradeRecoveryReceipt {
+                operation_id: "42".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.4".to_owned(),
+                target_bundle_version: "1.2.5".to_owned(),
+                activated: true,
+            },
+        )
+        .unwrap();
         let journal = fs::read_to_string(
             temporary
                 .path()
@@ -2016,734 +1540,6 @@ mod tests {
         assert!(journal.contains("phase = \"activated\""));
         assert!(journal.contains("activated_targets = 21"));
         assert!(journal.contains("finalized_targets = 21"));
-    }
-
-    #[cfg(feature = "acquirer")]
-    #[test]
-    fn normal_activation_custody_rejection_preserves_facts_without_repair_authority() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let source = &fixture.installed;
-        let generation = "2c".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        let mut target = fixture.bundle.clone();
-        target.version = "1.2.4".to_owned();
-        target.manifest_sha256 = "d".repeat(64);
-        target.asset_set_manifest_sha256 = "e".repeat(64);
-        let [
-            mut probe,
-            mut runtime,
-            mut system_state,
-            mut disk_health,
-            mut lifecycle,
-            mut acquirer,
-            mut activator,
-        ] = std::array::from_fn(|_| component());
-        let attempt = consume_probe_upgrade_authority(
-            paths,
-            &UpgradeAuthorityConsumption {
-                operation_id: "custody-rejection".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                hub_origin: source.hub_origin.clone(),
-                host_id: "host_01".to_owned(),
-                probe_id: source.probe_id.clone(),
-                source_bundle_version: source.source_bundle_version.clone(),
-                source_install_state_sha256: source.source_install_state_sha256.clone(),
-                source_manifest_sha256: source.source_manifest_sha256.clone(),
-                target_bundle_version: target.version.clone(),
-                target_asset_set_digest: format!(
-                    "sha256:{}",
-                    target.asset_set_manifest_sha256
-                ),
-                target_manifest_sha256: target.manifest_sha256.clone(),
-                verified_stage_sha256: "9".repeat(64),
-            },
-        )
-        .unwrap();
-        let destination = &upgrade_destinations(paths)[0];
-        let name = destination.file_name().unwrap().to_str().unwrap();
-        let residue_path = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let status_path = paths.state().join("probe-operation-status.toml");
-        let protected_paths = vec![
-            journal_path.clone(),
-            status_path.clone(),
-            paths.runtime_failure_epoch(),
-            paths.runtime_failure_latch(),
-        ];
-        let mut systemd = Systemd {
-            reload_topology_tamper: Some(ReloadTopologyTamper {
-                protected_paths: protected_paths.clone(),
-                protected_before: None,
-                residue_path: residue_path.clone(),
-            }),
-            ..Systemd::default()
-        };
-
-        let request = crate::lifecycle::LifecycleRequest::hub_upgrade(
-            &source.hub_origin,
-            "host_01",
-            &source.probe_id,
-            &attempt.operation_id,
-            &source.source_bundle_version,
-            &source.source_install_state_sha256,
-            &source.source_manifest_sha256,
-            &target.version,
-            &format!("sha256:{}", target.asset_set_manifest_sha256),
-            &target.manifest_sha256,
-            &"9".repeat(64),
-            u64::MAX,
-            "signed-authority",
-        )
-        .unwrap();
-        let mut mechanics = compatible_upgrade::RealMechanicsForTest {
-            components: Some(VerifiedUpgradeComponents {
-                probe: &mut probe,
-                observation_runtime: &mut runtime,
-                system_state_provider: &mut system_state,
-                disk_health_provider: &mut disk_health,
-                lifecycle_companion: &mut lifecycle,
-                bootstrap_acquirer: &mut acquirer,
-                bootstrap_activator: &mut activator,
-            }),
-            bundle: &target,
-            expected_source: source,
-            consumed: &attempt,
-            paths,
-            systemd: &mut systemd,
-        };
-        let response = compatible_upgrade::run_compatible_upgrade_with_real_mechanics_for_test(
-            &request,
-            unsafe { libc::geteuid() },
-            &mut mechanics,
-        );
-
-        assert_eq!(
-            response,
-            crate::lifecycle::LifecycleResponse::failed("lifecycle.install_state_invalid")
-        );
-        assert_eq!(systemd.calls, ["stop", "reload"]);
-        let protected_before = systemd
-            .reload_topology_tamper
-            .as_ref()
-            .and_then(|tamper| tamper.protected_before.as_ref())
-            .unwrap();
-        assert_eq!(
-            protected_paths.iter().map(fs::read).collect::<Result<Vec<_>, _>>().unwrap(),
-            *protected_before,
-        );
-        assert_eq!(
-            fs::read(&residue_path).unwrap(),
-            b"postactivation topology tamper"
-        );
-        let status = fs::read_to_string(status_path).unwrap();
-        assert!(status.contains("status = \"running\""));
-        assert!(!status.contains("repair_eligibility"));
-        assert!(!status.contains("lifecycle.upgrade_repair_required"));
-        let journal = fs::read_to_string(journal_path).unwrap();
-        assert!(journal.contains("phase = \"activation-started\""));
-        assert!(journal.contains("activated_targets = 21"));
-        assert!(journal.contains("finalized_targets = 0"));
-        assert!(journal.contains("runtime_failure_consumption = \"bound\""));
-    }
-
-    #[test]
-    fn upgrade_pair_consumption_resumes_epoch_unlink_before_receipt_without_opening_latch_early() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "2d".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_postactivation_effect_phase(&fixture, "activation-started", 0);
-        upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
-        upgrade::fail_next_atomic_write_containing("epoch-removed");
-
-        assert!(upgrade::consume_runtime_failure_pair_for_upgrade(paths).is_err());
-        assert!(!paths.runtime_failure_epoch().exists());
-        assert_eq!(
-            fs::read(paths.runtime_failure_latch()).unwrap(),
-            generation.as_bytes()
-        );
-        let interrupted = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(interrupted.contains("runtime_failure_consumption = \"bound\""));
-
-        upgrade::consume_runtime_failure_pair_for_upgrade(paths).unwrap();
-        assert!(!paths.runtime_failure_epoch().exists());
-        assert!(!paths.runtime_failure_latch().exists());
-        let completed = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(completed.contains("runtime_failure_consumption = \"latch-removed\""));
-        assert!(completed.contains(&format!("runtime_failure_generation = {generation:?}")));
-    }
-
-    #[test]
-    fn normal_upgrade_rejects_postactivation_topology_tamper_before_pair_consumption() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "2e".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_postactivation_effect_phase(&fixture, "activation-started", 0);
-        upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
-        let destination = &upgrade_destinations(paths)[0];
-        let name = destination.file_name().unwrap().to_str().unwrap();
-        let unexpected = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-        fs::write(&unexpected, b"postactivation topology tamper").unwrap();
-        fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o755)).unwrap();
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read(&journal_path).unwrap();
-        let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
-        let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
-        let systemd = Systemd::default();
-
-        assert_eq!(
-            upgrade::consume_runtime_failure_pair_for_upgrade(paths),
-            Err(InstallError::ExistingResidue),
-        );
-
-        assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
-        assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
-        assert_eq!(
-            fs::read(&unexpected).unwrap(),
-            b"postactivation topology tamper"
-        );
-    }
-
-    #[test]
-    fn fresh_candidate_recovers_every_legacy_activation_receipt_window_after_binding_old_pair() {
-        for activated_targets in 0..=21 {
-            let fixture = installed_bundle_fixture();
-            let paths = &fixture.paths;
-            let generation = format!("{:02x}", 0x30 + activated_targets).repeat(32);
-            write_runtime_failure_pair_fixture(paths, &generation);
-            let target = prepare_legacy_partial_upgrade_with_unreceipted_next_target(
-                &fixture,
-                activated_targets,
-            );
-            let mut systemd = Systemd::default();
-
-            let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
-                .unwrap_or_else(|error| {
-                    panic!("legacy activated_targets={activated_targets} recovery failed: {error:?}")
-                })
-                .unwrap();
-
-            assert_eq!(
-                receipt.source_bundle_version(),
-                fixture.installed.source_bundle_version
-            );
-            assert_eq!(receipt.target_bundle_version(), target.version);
-            assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-            let journal = fs::read_to_string(
-                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-            )
-            .unwrap();
-            assert!(journal.contains("schema_version = 4"));
-            assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
-            assert!(journal.contains(&format!("runtime_failure_generation = {generation:?}")));
-            assert!(!paths.runtime_failure_epoch().exists());
-            assert!(!paths.runtime_failure_latch().exists());
-        }
-    }
-
-    #[test]
-    fn legacy_source_pair_rejects_unexpected_registry_residue_before_custody_or_effects() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "4d".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_partial_upgrade_with_unreceipted_next_target(&fixture, 1);
-        let destination = &upgrade_destinations(paths)[0];
-        let name = destination.file_name().unwrap().to_str().unwrap();
-        let unexpected = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-        fs::write(&unexpected, b"unexpected stale target").unwrap();
-        fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o755)).unwrap();
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read(&journal_path).unwrap();
-        let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
-        let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
-        let mut systemd = Systemd::default();
-
-        assert_eq!(
-            recover_incomplete_probe_upgrade(paths, &mut systemd),
-            Err(InstallError::ExistingResidue),
-        );
-
-        assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
-        assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
-        assert_eq!(fs::read(&unexpected).unwrap(), b"unexpected stale target");
-    }
-
-    #[test]
-    fn legacy_pair_binding_failure_precedes_stop_and_any_further_target_mutation() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "5a".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_partial_upgrade_with_unreceipted_next_target(&fixture, 18);
-        let destinations = upgrade_destinations(paths);
-        let next = &destinations[19];
-        let next_before = fs::read(next).unwrap();
-        let staged = next.with_file_name(format!(
-            ".{}.enoki-upgrade-new",
-            next.file_name().unwrap().to_str().unwrap(),
-        ));
-        let staged_before = fs::read(&staged).unwrap();
-        upgrade::fail_next_atomic_write_containing("schema_version = 4");
-        let mut systemd = Systemd::default();
-
-        assert!(recover_incomplete_probe_upgrade(paths, &mut systemd).is_err());
-        assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(next).unwrap(), next_before);
-        assert_eq!(fs::read(staged).unwrap(), staged_before);
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
-        assert!(paths.runtime_failure_epoch().exists());
-        assert!(
-            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml"))
-                .unwrap()
-                .contains("schema_version = 3")
-        );
-    }
-
-    #[test]
-    fn legacy_recovery_establishes_epoch_only_or_absent_pair_custody_before_resuming() {
-        for epoch_only in [true, false] {
-            let fixture = installed_bundle_fixture();
-            let paths = &fixture.paths;
-            let generation = "6b".repeat(32);
-            if epoch_only {
-                write_runtime_failure_pair_fixture(paths, &generation);
-                fs::remove_file(paths.runtime_failure_latch()).unwrap();
-            }
-            prepare_legacy_partial_upgrade_with_unreceipted_next_target(&fixture, 19);
-            let mut systemd = Systemd::default();
-
-            recover_incomplete_probe_upgrade(paths, &mut systemd)
-                .unwrap()
-                .unwrap();
-
-            let journal = fs::read_to_string(
-                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-            )
-            .unwrap();
-            assert!(journal.contains("schema_version = 4"));
-            assert!(journal.contains(if epoch_only {
-                "runtime_failure_consumption = \"latch-removed\""
-            } else {
-                "runtime_failure_consumption = \"none-consumed\""
-            }));
-            assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-            assert!(!paths.runtime_failure_epoch().exists());
-            assert!(!paths.runtime_failure_latch().exists());
-        }
-    }
-
-    #[test]
-    fn legacy_repair_required_with_partial_finalization_binds_before_remaining_effects() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "7c".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_postactivation_effect_phase(&fixture, "repair-required", 7);
-        let mut systemd = Systemd::default();
-
-        let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
-            .unwrap()
-            .unwrap();
-
-        assert!(systemd.calls.is_empty());
-        assert!(!paths.runtime_failure_epoch().exists());
-        assert!(!paths.runtime_failure_latch().exists());
-        let journal = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(journal.contains("schema_version = 4"));
-        assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
-        assert!(journal.contains("phase = \"stage-cleanup-required\""));
-        assert!(journal.contains("finalized_targets = 21"));
-        finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
-    }
-
-    #[test]
-    fn legacy_late_effect_phases_complete_absent_pair_custody_before_forward_progress() {
-        for (phase, finalized_targets) in
-            [("finalizing", 7), ("stage-cleanup-required", 21)]
-        {
-            let fixture = installed_bundle_fixture();
-            let paths = &fixture.paths;
-            prepare_legacy_postactivation_effect_phase(&fixture, phase, finalized_targets);
-            let mut systemd = Systemd::default();
-
-            let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
-                .unwrap()
-                .unwrap();
-
-            assert!(systemd.calls.is_empty());
-            let journal = fs::read_to_string(
-                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-            )
-            .unwrap();
-            assert!(journal.contains("schema_version = 4"));
-            assert!(journal.contains("runtime_failure_consumption = \"none-consumed\""));
-            assert!(journal.contains("phase = \"stage-cleanup-required\""));
-            finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
-        }
-    }
-
-    #[test]
-    fn direct_stage_cleanup_finalizer_establishes_legacy_pair_custody_before_status_effects() {
-        for (schema, pair_present) in [(3, true), (3, false), (2, true), (2, false)] {
-            let fixture = installed_bundle_fixture();
-            let paths = &fixture.paths;
-            let target =
-                prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
-            let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-            if schema == 2 {
-                let journal = fs::read_to_string(&journal_path).unwrap();
-                fs::write(
-                    &journal_path,
-                    journal.replacen("schema_version = 3", "schema_version = 2", 1),
-                )
-                .unwrap();
-            }
-            if pair_present {
-                write_runtime_failure_pair_fixture(paths, &"ab".repeat(32));
-            }
-            let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
-            if schema == 3 && pair_present {
-                upgrade::crash_after_runtime_failure_custody_write();
-                let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = finalize_probe_upgrade_stage_cleanup(paths, &receipt);
-                }));
-                assert!(crashed.is_err());
-                let journal = fs::read_to_string(&journal_path).unwrap();
-                assert!(journal.contains("schema_version = 4"));
-                assert!(journal.contains("runtime_failure_consumption = \"bound\""));
-                assert!(journal.contains("phase = \"stage-cleanup-required\""));
-                assert!(!paths.state().join("probe-operation-status.toml").exists());
-                assert!(paths.runtime_failure_epoch().exists());
-                assert!(paths.runtime_failure_latch().exists());
-            }
-
-            finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
-
-            let journal = fs::read_to_string(&journal_path).unwrap();
-            assert!(journal.contains("schema_version = 4"));
-            assert!(journal.contains("phase = \"activated\""));
-            assert!(journal.contains(if pair_present {
-                "runtime_failure_consumption = \"latch-removed\""
-            } else {
-                "runtime_failure_consumption = \"none-consumed\""
-            }));
-            assert!(!paths.runtime_failure_epoch().exists());
-            assert!(!paths.runtime_failure_latch().exists());
-            assert!(
-                fs::read_to_string(paths.state().join("probe-operation-status.toml"))
-                    .unwrap()
-                    .contains("status = \"running\"")
-            );
-        }
-    }
-
-    #[test]
-    fn direct_stage_cleanup_finalizer_rejects_a_stale_full_binding_receipt_before_any_effect() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let target =
-            prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
-        write_runtime_failure_pair_fixture(paths, &"bc".repeat(32));
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read_to_string(&journal_path).unwrap();
-        let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
-        let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
-        let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
-        let authority_line = journal_before
-            .lines()
-            .find(|line| line.starts_with("authority_sha256 = "))
-            .unwrap();
-        let different_binding = journal_before.replacen(
-            authority_line,
-            &format!("authority_sha256 = {:?}", "12".repeat(32)),
-            1,
-        );
-        fs::write(&journal_path, &different_binding).unwrap();
-
-        assert!(finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_err());
-
-        assert_eq!(fs::read_to_string(&journal_path).unwrap(), different_binding);
-        assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
-        assert!(!paths.state().join("probe-operation-status.toml").exists());
-    }
-
-    #[test]
-    fn scope_less_stage_cleanup_requires_its_historical_target_install_binding() {
-        for target_install_state in [None, Some("invalid")] {
-            let fixture = installed_bundle_fixture();
-            let paths = &fixture.paths;
-            let target =
-                prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
-            write_runtime_failure_pair_fixture(paths, &"cd".repeat(32));
-            let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-            let journal = fs::read_to_string(&journal_path).unwrap();
-            let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
-            let invalid = scope_less_upgrade_journal(&journal, target_install_state);
-            fs::write(&journal_path, &invalid).unwrap();
-            let epoch_before = fs::read(paths.runtime_failure_epoch()).unwrap();
-            let latch_before = fs::read(paths.runtime_failure_latch()).unwrap();
-
-            assert!(finalize_probe_upgrade_stage_cleanup(paths, &receipt).is_err());
-
-            assert_eq!(fs::read_to_string(&journal_path).unwrap(), invalid);
-            assert_eq!(fs::read(paths.runtime_failure_epoch()).unwrap(), epoch_before);
-            assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), latch_before);
-            assert!(!paths.state().join("probe-operation-status.toml").exists());
-        }
-
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let target =
-            prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
-        write_runtime_failure_pair_fixture(paths, &"de".repeat(32));
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal = fs::read_to_string(&journal_path).unwrap();
-        fs::write(
-            &journal_path,
-            scope_less_upgrade_journal(&journal, Some(&target.install_state_sha256())),
-        )
-        .unwrap();
-        let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
-
-        finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
-
-        let journal = fs::read_to_string(&journal_path).unwrap();
-        assert!(journal.contains("schema_version = 4"));
-        assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
-        assert!(journal.contains("phase = \"activated\""));
-    }
-
-    #[test]
-    fn legacy_late_recovery_with_retired_binding_backup_preserves_facts_and_has_zero_effects() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "8d".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 9);
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read(&journal_path).unwrap();
-        let next = &upgrade_destinations(paths)[9];
-        let next_name = next.file_name().unwrap().to_str().unwrap();
-        let next_backup = next.with_file_name(format!(".{next_name}.enoki-upgrade-old"));
-        let next_backup_before = fs::read(&next_backup).unwrap();
-        let mut systemd = Systemd::default();
-
-        assert!(recover_incomplete_probe_upgrade(paths, &mut systemd).is_err());
-
-        assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
-        assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
-        assert!(paths.runtime_failure_epoch().exists());
-    }
-
-    #[test]
-    fn legacy_source_proof_mismatch_never_falls_back_to_the_current_target() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 8);
-        let generation = "8e".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read(&journal_path).unwrap();
-        let next = &upgrade_destinations(paths)[8];
-        let next_name = next.file_name().unwrap().to_str().unwrap();
-        let next_backup = next.with_file_name(format!(".{next_name}.enoki-upgrade-old"));
-        let next_backup_before = fs::read(&next_backup).unwrap();
-        let mut systemd = Systemd::default();
-
-        assert!(recover_incomplete_probe_upgrade(paths, &mut systemd).is_err());
-
-        assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
-        assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
-        assert!(paths.runtime_failure_epoch().exists());
-    }
-
-    #[test]
-    fn legacy_target_proof_converges_after_every_protected_source_is_retired() {
-        for next_backup_unlinked_before_receipt in [false, true] {
-            let fixture = installed_bundle_fixture();
-            let paths = &fixture.paths;
-            prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 20);
-            if next_backup_unlinked_before_receipt {
-                let next = &upgrade_destinations(paths)[20];
-                let next_name = next.file_name().unwrap().to_str().unwrap();
-                fs::remove_file(next.with_file_name(format!(".{next_name}.enoki-upgrade-old")))
-                    .unwrap();
-            }
-            let generation = "8f".repeat(32);
-            write_runtime_failure_pair_fixture(paths, &generation);
-            let mut systemd = Systemd::default();
-
-            let receipt = recover_incomplete_probe_upgrade(paths, &mut systemd)
-                .unwrap()
-                .unwrap();
-
-            assert!(receipt.activated());
-            assert!(systemd.calls.is_empty());
-            assert!(!paths.runtime_failure_epoch().exists());
-            assert!(!paths.runtime_failure_latch().exists());
-            let journal = fs::read_to_string(
-                paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-            )
-            .unwrap();
-            assert!(journal.contains("runtime_failure_consumption = \"latch-removed\""));
-            assert!(journal.contains("phase = \"stage-cleanup-required\""));
-            assert!(journal.contains("finalized_targets = 21"));
-        }
-    }
-
-    #[test]
-    fn activated_finalizer_receipt_retries_the_status_effect_without_replaying_custody() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let target =
-            prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
-        write_runtime_failure_pair_fixture(paths, &"90".repeat(32));
-        let receipt = legacy_upgrade_recovery_receipt(&fixture, &target);
-        upgrade::fail_next_atomic_write_containing("status = \"running\"");
-
-        assert_eq!(
-            finalize_probe_upgrade_stage_cleanup(paths, &receipt),
-            Err(InstallError::Io),
-        );
-        let activated = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(activated.contains("phase = \"activated\""));
-        assert!(activated.contains("runtime_failure_consumption = \"latch-removed\""));
-        assert!(!paths.state().join("probe-operation-status.toml").exists());
-
-        finalize_probe_upgrade_stage_cleanup(paths, &receipt).unwrap();
-
-        assert!(
-            fs::read_to_string(paths.state().join("probe-operation-status.toml"))
-                .unwrap()
-                .contains("status = \"running\"")
-        );
-    }
-
-    #[test]
-    fn fresh_recovery_completes_a_durable_legacy_custody_write_before_any_effect() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "9e".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        prepare_legacy_postactivation_effect_phase(&fixture, "repair-required", 7);
-        let next = &upgrade_destinations(paths)[7];
-        let next_name = next.file_name().unwrap().to_str().unwrap();
-        let next_backup = next.with_file_name(format!(".{next_name}.enoki-upgrade-old"));
-        let next_backup_before = fs::read(&next_backup).unwrap();
-        upgrade::crash_after_runtime_failure_custody_write();
-        let mut crashed_systemd = Systemd::default();
-
-        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = recover_incomplete_probe_upgrade(paths, &mut crashed_systemd);
-        }));
-
-        assert!(crashed.is_err());
-        assert!(crashed_systemd.calls.is_empty());
-        assert_eq!(fs::read(&next_backup).unwrap(), next_backup_before);
-        let bound = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(bound.contains("schema_version = 4"));
-        assert!(bound.contains("runtime_failure_consumption = \"bound\""));
-        assert!(paths.runtime_failure_epoch().exists());
-        assert_eq!(fs::read(paths.runtime_failure_latch()).unwrap(), generation.as_bytes());
-
-        let mut fresh_systemd = Systemd::default();
-        recover_incomplete_probe_upgrade(paths, &mut fresh_systemd)
-            .unwrap()
-            .unwrap();
-        assert!(fresh_systemd.calls.is_empty());
-        assert!(!paths.runtime_failure_epoch().exists());
-        assert!(!paths.runtime_failure_latch().exists());
-        let completed = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(completed.contains("runtime_failure_consumption = \"latch-removed\""));
-        assert!(completed.contains("phase = \"stage-cleanup-required\""));
-    }
-
-    #[test]
-    fn upgrade_does_not_claim_a_pair_owned_by_another_typed_consumer() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        let generation = "3e".repeat(32);
-        write_runtime_failure_pair_fixture(paths, &generation);
-        fs::write(
-            paths.runtime_failure_dir().join("repair-intent.json"),
-            b"typed repair custody",
-        )
-        .unwrap();
-        fs::set_permissions(
-            paths.runtime_failure_dir().join("repair-intent.json"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        write_authority_upgrade_journal(paths, 3, "admitted", Some(false), 0, 0);
-
-        assert_eq!(
-            upgrade::bind_runtime_failure_pair_to_upgrade(paths),
-            Err(InstallError::ExistingResidue),
-        );
-        assert!(paths.runtime_failure_epoch().exists());
-        assert_eq!(
-            fs::read(paths.runtime_failure_latch()).unwrap(),
-            generation.as_bytes(),
-        );
-        let journal = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(journal.contains("schema_version = 3"));
-
-        fs::remove_file(paths.runtime_failure_dir().join("repair-intent.json")).unwrap();
-        fs::remove_file(paths.runtime_failure_epoch()).unwrap();
-        fs::remove_file(paths.runtime_failure_latch()).unwrap();
-        let completed_retry = paths
-            .runtime_failure_dir()
-            .join("local-retry-receipt.json");
-        fs::write(
-            &completed_retry,
-            format!(
-                "{{\"schemaVersion\":1,\"generation\":{:?},\"epochSha256\":{:?},\"progress\":\"retry-invoked\"}}",
-                "3e".repeat(32),
-                "4f".repeat(32),
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&completed_retry, fs::Permissions::from_mode(0o600)).unwrap();
-        upgrade::bind_runtime_failure_pair_to_upgrade(paths).unwrap();
-        assert!(!completed_retry.exists());
-        let journal = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
-        assert!(journal.contains("runtime_failure_consumption = \"none\""));
     }
 
     #[test]
@@ -2834,9 +1630,7 @@ mod tests {
                 &paths,
                 &mut preactivation_systemd,
             ),
-            Err(UpgradeOperationFailure::Failed(
-                InstallError::InvalidVerifiedComponent
-            ))
+            Err(InstallError::InvalidVerifiedComponent)
         );
         assert!(preactivation_systemd.calls.is_empty());
         assert_eq!(
@@ -2876,9 +1670,7 @@ mod tests {
                 &paths,
                 &mut Systemd::default(),
             ),
-            Err(UpgradeOperationFailure::Failed(
-                InstallError::ExistingResidue
-            )),
+            Err(InstallError::ExistingResidue),
             "the consumed authority cannot be replayed after pre-activation failure"
         );
 
@@ -2901,13 +1693,17 @@ mod tests {
             )
             .unwrap();
         }
-        let receipt = recover_incomplete_probe_upgrade(&paths, &mut Systemd::default())
-            .unwrap()
-            .unwrap();
-        assert!(!receipt.activated());
-        assert_eq!(receipt.operation_id(), "consume-1");
-        assert_eq!(receipt.source_bundle_version(), "1.2.3");
-        assert_eq!(receipt.target_bundle_version(), "1.2.4");
+        assert_eq!(
+            recover_incomplete_probe_upgrade(&paths, &mut Systemd::default()).unwrap(),
+            Some(UpgradeRecoveryReceipt {
+                operation_id: "consume-1".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.3".to_owned(),
+                target_bundle_version: "1.2.4".to_owned(),
+                activated: false,
+            })
+        );
         let recovered = fs::read_to_string(&journal_path).unwrap();
         assert!(recovered.contains("phase = \"aborted\""));
         assert!(
@@ -3094,41 +1890,6 @@ mod tests {
                 "success 发布前缺失 complete journal 必须 fail closed"
             );
         }
-    }
-
-    #[test]
-    fn installed_bundle_repair_journal_absence_requires_a_trusted_parent_sync() {
-        let fixture = installed_bundle_fixture();
-        restore_bundle_fixture(&fixture, &mut Systemd::default()).unwrap();
-        let journal = fixture
-            .paths
-            .bootstrap_state()
-            .join("installed-bundle-repair.json");
-        assert!(journal.exists());
-
-        bundle_restore::set_crash("journal-cleanup");
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = cleanup_installed_bundle_repair(&fixture.repair, &fixture.paths);
-            }))
-            .is_err(),
-            "J unlink 后的骤停必须留下 J-absent 重试窗口"
-        );
-        assert!(
-            !journal.exists(),
-            "crash point 必须位于真实 J unlink 与 parent sync 之后"
-        );
-        fs::set_permissions(
-            fixture.paths.bootstrap_state(),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-
-        assert_eq!(
-            cleanup_installed_bundle_repair(&fixture.repair, &fixture.paths),
-            Err(InstallError::ExistingResidue),
-            "J-absent 续行必须直接重验并 sync 固定 bootstrap parent，不能接受不可信目录"
-        );
     }
 
     #[test]
@@ -3589,29 +2350,40 @@ mod tests {
     }
 
     #[test]
-    fn finalizing_recovery_rejects_invalid_topology_without_reactivation_or_progress() {
-        let fixture = installed_bundle_fixture();
-        let paths = &fixture.paths;
-        prepare_legacy_postactivation_effect_phase(&fixture, "finalizing", 7);
-        let destinations = upgrade_destinations(paths);
+    fn finalizing_recovery_never_reactivates_and_preserves_progress_on_a_second_failure() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        fs::write(
+            paths.metadata(),
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+        )
+        .unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        write_authority_upgrade_journal(&paths, 3, "finalizing", Some(true), 21, 7);
+        let destinations = upgrade_destinations(&paths);
+        for destination in &destinations {
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        }
         let blocked_backup = destinations[7].with_file_name(format!(
             ".{}.enoki-upgrade-old",
             destinations[7].file_name().unwrap().to_str().unwrap(),
         ));
-        fs::remove_file(&blocked_backup).unwrap();
         fs::create_dir(&blocked_backup).unwrap();
-        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
-        let journal_before = fs::read(&journal_path).unwrap();
 
         let mut systemd = Systemd::default();
         assert_eq!(
-            recover_incomplete_probe_upgrade(paths, &mut systemd),
-            Err(InstallError::ExistingResidue),
+            recover_incomplete_probe_upgrade(&paths, &mut systemd),
+            Err(InstallError::Io),
         );
         assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        let failed =
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
+        assert!(failed.contains("phase = \"repair-required\""));
+        assert!(failed.contains("activated_targets = 21"));
+        assert!(failed.contains("finalized_targets = 7"));
         assert_eq!(
-            issue_probe_repair_eligibility(paths)
+            issue_probe_repair_eligibility(&paths)
                 .unwrap()
                 .evidence
                 .finalized_targets,
@@ -3619,11 +2391,15 @@ mod tests {
         );
 
         assert_eq!(
-            recover_incomplete_probe_upgrade(paths, &mut systemd),
-            Err(InstallError::ExistingResidue),
+            recover_incomplete_probe_upgrade(&paths, &mut systemd),
+            Err(InstallError::Io),
         );
         assert!(systemd.calls.is_empty());
-        assert_eq!(fs::read(&journal_path).unwrap(), journal_before);
+        let failed_again =
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
+        assert!(failed_again.contains("phase = \"repair-required\""));
+        assert!(failed_again.contains("activated_targets = 21"));
+        assert!(failed_again.contains("finalized_targets = 7"));
     }
 
     #[test]
@@ -3645,25 +2421,15 @@ mod tests {
 
     #[test]
     fn repair_authority_is_offline_verified_and_consumed_once_in_an_independent_journal() {
-        let fixture = installed_bundle_fixture();
-        let paths = fixture.paths.clone();
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
         let key = [0x11_u8; 32];
-        let metadata = fs::read_to_string(paths.metadata()).unwrap();
-        let metadata = metadata
-            .lines()
-            .map(|line| {
-                if line.starts_with("lifecycle_authority_install_key = ") {
-                    format!("lifecycle_authority_install_key = {:?}", "11".repeat(32))
-                } else {
-                    line.to_owned()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
         fs::write(
             paths.metadata(),
-            metadata,
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
         )
         .unwrap();
         fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
@@ -3861,7 +2627,6 @@ mod tests {
             )
             .replace("activated_targets = 3", "activated_targets = 21")
             .replace("finalized_targets = 0", "finalized_targets = 21");
-        prepare_legacy_postactivation_effect_phase(&fixture, "stage-cleanup-required", 21);
         fs::write(&journal_path, cleanup_required).unwrap();
 
         let repair_write = paths
@@ -4005,7 +2770,7 @@ mod tests {
             let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
                 .unwrap()
                 .expect("explicit retry must complete the preactivation cleanup");
-            assert!(!receipt.activated());
+            assert!(!receipt.activated);
             assert!(systemd.calls.is_empty());
             assert!(
                 fs::read_to_string(&journal_path)
@@ -4024,7 +2789,6 @@ mod tests {
     #[test]
     fn observation_units_keep_callers_roles_and_deadlines_fixed() {
         let probe = service_unit();
-        let lifecycle = lifecycle_companion_unit();
         let runtime_socket = observation_runtime_socket_unit();
         let runtime = observation_runtime_unit();
         let provider_socket = cpu_provider_socket_unit();
@@ -4043,9 +2807,6 @@ mod tests {
         assert!(probe.contains(
             "Wants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket"
         ));
-        assert!(lifecycle.contains("StandardInput=socket\n"));
-        assert!(lifecycle.contains("StandardOutput=socket\n"));
-        assert!(lifecycle.contains("StandardError=journal\n"));
         assert!(runtime_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(runtime.contains("User=enoki-observation-runtime"));
         assert!(runtime.contains("PrivateNetwork=true"));
@@ -4085,34 +2846,12 @@ mod tests {
         assert!(disk_provider.contains("BindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl"));
         assert!(upgrade_socket.contains("ListenStream=/run/enoki-probe-lifecycle-upgrade.sock"));
         assert!(upgrade_socket.contains("SocketGroup=enoki-probe-ipc"));
-        assert!(upgrade.contains(
-            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
-        ));
         assert!(
             upgrade.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade")
         );
         assert!(upgrade.contains("PrivateNetwork=true"));
         assert!(upgrade.contains("RestrictAddressFamilies=AF_UNIX"));
         assert!(upgrade.contains("IPAddressDeny=any"));
-        assert!(upgrade.contains("RuntimeDirectory=enoki-probe"));
-        assert!(upgrade.contains("RuntimeDirectoryPreserve=yes"));
-        assert!(upgrade.contains("StandardError=journal\n"));
-        assert!(upgrade.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe"));
-        assert!(upgrade.contains("/run/lock\n"));
-    }
-
-    #[test]
-    fn ordinary_lifecycle_companion_preserves_root_child_credential_handoff() {
-        let lifecycle = lifecycle_companion_unit();
-
-        assert!(lifecycle.contains("Group=root\n"));
-        assert!(!lifecycle.lines().any(|line| line.starts_with("User=")));
-        assert!(lifecycle.contains("NoNewPrivileges=true\n"));
-        assert!(lifecycle.contains("AmbientCapabilities=\n"));
-        assert!(lifecycle.contains("SystemCallFilter=@system-service\n"));
-        assert!(lifecycle.contains(
-            "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\n"
-        ));
     }
 
     #[test]
@@ -4190,6 +2929,43 @@ mod tests {
         ] {
             assert!(runtime.contains(property), "Runtime 缺少 {property}");
         }
+        assert!(
+            runtime.contains("ConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch"),
+            "latch 存在时 Runtime 不得再生成进程"
+        );
+        assert!(
+            runtime.contains(
+                "ConditionPathExists=!/var/lib/enoki-probe-bootstrap/installed-bundle-repair.json"
+            ),
+            "修复恢复日志存在时 ordinary Runtime 不得启动"
+        );
+        assert!(
+            !runtime.contains("/run/enoki-probe/runtime-repair-permit"),
+            "ordinary Runtime 必须是 Probe-only 而不能接受 root 验证请求"
+        );
+    }
+
+    #[test]
+    fn general_lifecycle_companion_retracts_the_validation_gate_when_it_stops() {
+        let socket = lifecycle_companion_socket_unit();
+        let service = lifecycle_companion_unit();
+
+        assert!(
+            socket.contains(
+                "ExecStopPost=/usr/bin/rm -f -- /run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf"
+            ),
+            "入口退出必须移除验证 drop-in，否则普通 Runtime 会被残留条件永久挡住"
+        );
+        assert!(
+            service.contains(
+                "ExecStopPost=/usr/bin/rm -f -- /run/enoki-probe/runtime-repair-permit"
+            ),
+            "入口退出必须撤销验证 permit"
+        );
+        assert!(
+            service.contains("ReadWritePaths=/etc/enoki"),
+            "入口必须能写它自己的固定 gate 路径"
+        );
     }
 
     #[test]
@@ -4202,25 +2978,23 @@ mod tests {
             "Type=oneshot",
             "User=root",
             "Group=root",
-            "RefuseManualStart=yes",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
-            "AmbientCapabilities=\n",
+            "CapabilityBoundingSet=",
+            "AmbientCapabilities=",
             "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any",
             "SocketBindDeny=any",
             "ProtectSystem=strict",
-            "RuntimeDirectory=enoki-probe",
-            "RuntimeDirectoryMode=0700",
-            "RuntimeDirectoryPreserve=yes",
-            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id",
-            "ReadWritePaths=/var/lib/enoki-probe/runtime-failure /run/enoki-probe",
+            "ReadWritePaths=/var/lib/enoki-probe/runtime-failure",
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
-        assert!(recorder.contains("CapabilityBoundingSet=CAP_DAC_READ_SEARCH\n"));
-        assert_eq!(recorder.matches("CapabilityBoundingSet=").count(), 1);
-        assert!(!recorder.contains("CAP_DAC_OVERRIDE"));
+        assert!(recorder.contains("RefuseManualStart=yes"));
+        assert!(
+            recorder.contains("/etc/systemd/system/enoki-observation-runtime-failure.service"),
+            "recorder 必须能读到自己的固定 unit 内容"
+        );
         assert!(!recorder.contains("Environment="));
         assert!(!recorder.contains("StandardInput=socket"));
     }
@@ -4374,13 +3148,7 @@ mod tests {
         assert!(lifecycle.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion"));
         assert!(lifecycle.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
         assert!(lifecycle.contains("SocketBindDeny=ipv4:any"));
-        assert!(lifecycle.contains("RuntimeDirectory=enoki-probe"));
-        assert!(lifecycle.contains("RuntimeDirectoryPreserve=yes"));
-        assert!(lifecycle.contains(
-            "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
-        ));
         assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
-        assert!(lifecycle.contains("/run/lock\n"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
         let lifecycle_socket = lifecycle_companion_socket_unit();
@@ -4395,37 +3163,6 @@ mod tests {
             assert!(socket.contains("SocketGroup=enoki-observation-ipc"));
             assert!(socket.contains("SocketMode=0660"));
         }
-    }
-
-    #[test]
-    fn ordinary_lifecycle_companion_owns_repair_drop_in_without_replacement_registration_custody()
-    {
-        let lifecycle = lifecycle_companion_unit();
-        let socket = lifecycle_companion_socket_unit();
-        let write_paths = lifecycle
-            .lines()
-            .filter_map(|line| line.strip_prefix("ReadWritePaths="))
-            .flat_map(str::split_ascii_whitespace)
-            .map(|path| path.strip_prefix('-').unwrap_or(path))
-            .collect::<Vec<_>>();
-
-        assert!(lifecycle.contains(
-            "RuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\n"
-        ));
-        assert!(lifecycle.contains("ReadOnlyPaths=/run/systemd/system\n"));
-        assert!(lifecycle.contains(
-            "BindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\n"
-        ));
-        assert!(lifecycle.contains(
-            "ExecStopPost=/usr/bin/rm -f -- /run/enoki-probe/runtime-repair-permit\n"
-        ));
-        assert!(socket.contains(
-            "ExecStopPost=/usr/bin/rm -f -- /run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf\n"
-        ));
-        assert!(!write_paths.contains(&"/var/lib/enoki-probe-registration"));
-        assert!(write_paths.iter().all(|path| {
-            *path != "/run/systemd/system" && !path.starts_with("/run/systemd/system/")
-        }));
     }
 
     #[test]
@@ -4745,114 +3482,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_predecessor_correlation_rejects_unrelated_current_enrollment_before_finalizer() {
-        let temporary = tempdir().unwrap();
-        let paths = FixedInstallPaths::under(temporary.path());
-        fs::create_dir_all(paths.identity_dir()).unwrap();
-        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o700)).unwrap();
-        fs::set_permissions(paths.identity_dir(), fs::Permissions::from_mode(0o700)).unwrap();
-
-        let bundle = bundle().with_test_complete_receipts(5);
-        let predecessor = ReplacementCommitFact::for_test(
-            crate::replacement::ReplacementIntent {
-                enrollment_id: "enr_0123456789abcdef".to_owned(),
-                enrollment_token_sha256: "1".repeat(64),
-                host_id: "7".to_owned(),
-                hub_origin: "https://hub.example".to_owned(),
-                old_probe_id: "probe-old".to_owned(),
-                source_probe_version: "1.2.2".to_owned(),
-                source_probe_sha256: "2".repeat(64),
-                target_bundle_target: bundle.target.clone(),
-                target_probe_version: bundle.version.clone(),
-                target_asset_set_digest: format!("sha256:{}", bundle.asset_set_manifest_sha256),
-                target_manifest_sha256: bundle.manifest_sha256.clone(),
-            },
-            true,
-            true,
-        );
-        let binding = predecessor.registration_binding().unwrap();
-        fs::write(
-            paths.identity(),
-            format!(
-                "hub_url = \"https://hub.example\"\nenrollment_id = \"enr_0123456789abcdef\"\nhost_id = \"7\"\nprobe_id = \"probe-current\"\nprobe_private_key_pem = {:?}\n",
-                valid_probe_private_key_pem()
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
-
-        let current_probe_sha256 = bundle.component_receipt("probe").unwrap().0;
-        let exact_input = format!(
-            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_successor\",\"replacementMigration\":{{\"enrollmentId\":\"enr_fedcba9876543210\",\"expectedProbeId\":\"probe-current\",\"sourceProbeSha256\":[\"{current_probe_sha256}\"],\"sourceProbeVersion\":\"{}\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"{}\"}},\"schemaVersion\":1}}",
-            bundle.version, bundle.asset_set_manifest_sha256, bundle.version,
-        );
-        let exact = Enrollment::from_install_input("https://hub.example", exact_input.as_bytes())
-            .unwrap();
-        assert!(completed_replacement_predecessor_matches_current_enrollment(
-            &paths, &binding, &exact, &bundle,
-        ));
-
-        for (name, input) in [
-            ("new-host", None),
-            ("other-host", Some(exact_input.replace("\"targetHostId\":\"7\"", "\"targetHostId\":\"8\""))),
-            ("other-current-probe", Some(exact_input.replace("\"expectedProbeId\":\"probe-current\"", "\"expectedProbeId\":\"probe-other\""))),
-            ("wrong-source", Some(exact_input.replace(current_probe_sha256, &"f".repeat(64)))),
-            ("wrong-target-version", Some(exact_input.replace(&format!("\"targetProbeVersion\":\"{}\"", bundle.version), "\"targetProbeVersion\":\"1.2.4\""))),
-            ("wrong-asset-set", Some(exact_input.replace(&bundle.asset_set_manifest_sha256, &"e".repeat(64)))),
-        ] {
-            let enrollment = match input {
-                Some(input) => Enrollment::from_install_input("https://hub.example", input.as_bytes()).unwrap(),
-                None => Enrollment::new("https://hub.example", "enk_enroll_new_host").unwrap(),
-            };
-            assert!(
-                !completed_replacement_predecessor_matches_current_enrollment(
-                    &paths, &binding, &enrollment, &bundle,
-                ),
-                "{name} must retain predecessor custody before the finalizer"
-            );
-        }
-
-        for (name, bundle) in [
-            ("wrong-bundle-target", {
-                let mut bundle = bundle.clone();
-                bundle.target = "aarch64-unknown-linux-gnu".to_owned();
-                bundle
-            }),
-            ("wrong-bundle-manifest", {
-                let mut bundle = bundle.clone();
-                bundle.manifest_sha256 = "d".repeat(64);
-                bundle
-            }),
-            ("wrong-bundle-asset-set", {
-                let mut bundle = bundle.clone();
-                bundle.asset_set_manifest_sha256 = "e".repeat(64);
-                bundle
-            }),
-        ] {
-            assert!(
-                !completed_replacement_predecessor_matches_current_enrollment(
-                    &paths, &binding, &exact, &bundle,
-                ),
-                "{name} must retain predecessor custody before the finalizer"
-            );
-        }
-
-        let canonical_identity = fs::read_to_string(paths.identity()).unwrap();
-        fs::write(
-            paths.identity(),
-            canonical_identity.replace("probe-current", "probe-tampered"),
-        )
-        .unwrap();
-        assert!(
-            !completed_replacement_predecessor_matches_current_enrollment(
-                &paths, &binding, &exact, &bundle,
-            ),
-            "a tampered canonical identity must retain predecessor custody"
-        );
-        fs::write(paths.identity(), canonical_identity).unwrap();
-    }
-
-    #[test]
     fn replacement_registration_production_recovery_windows() {
         if let Some(root) = std::env::var_os("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ROOT") {
             run_replacement_lifecycle_recovery_child(Path::new(&root));
@@ -4886,29 +3515,24 @@ mod tests {
         )
         .unwrap();
         let replacement_bundle = bundle().with_test_complete_receipts(5);
-        let mut replacement_commit = replacement_commit(&replacement_bundle);
-        replacement_commit.schema_version = 1;
+        let replacement_commit = replacement_commit(&replacement_bundle);
         FileReplacementCommitStore::at(&commit_path, unsafe { libc::geteuid() })
             .persist(&replacement_commit)
             .unwrap();
 
-        let capsule_before_rename = tempdir().unwrap();
-        fs::create_dir_all(capsule_before_rename.path().join("var/lib")).unwrap();
-        let interrupted_source = FixedInstallPaths::under(capsule_before_rename.path())
-            .replacement_registration_attempt_source();
         assert!(!run_replacement_lifecycle_child(
-            capsule_before_rename.path(),
+            temporary.path(),
             "publish-source",
-            Some((&interrupted_source, "before-rename")),
+            Some((&source, "before-rename")),
         ));
-        assert!(!interrupted_source.exists());
+        assert!(!source.exists());
         assert!(run_replacement_lifecycle_child(
             temporary.path(),
             "publish-source",
             None,
         ));
-        let capsule_bytes = fs::read(&source).unwrap();
-        let capsule: serde_json::Value = serde_json::from_slice(&capsule_bytes).unwrap();
+        let capsule: serde_json::Value =
+            serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
 
         for point in ["before-rename", "after-rename"] {
             assert!(!run_replacement_lifecycle_child(
@@ -4982,79 +3606,6 @@ mod tests {
         assert!(runtime_credential.exists());
         assert!(!fs::read_to_string(paths.unit()).unwrap().contains("LoadCredential="));
 
-        let exact_identity = fs::read(paths.identity()).unwrap();
-        let exact_commit = fs::read(&commit_path).unwrap();
-        let exact_journal_path = paths.bootstrap_state().join("activation-journal.json");
-        let exact_journal = fs::read(&exact_journal_path).unwrap();
-        let exact_staging = TransactionJournal::load(&paths.bootstrap_state())
-            .unwrap()
-            .unwrap()
-            .staging_directory()
-            .to_owned();
-        let exact_staging_present = exact_staging.exists();
-        for mutation in [
-            "token-hash",
-            "raw-token",
-            "key",
-            "signature",
-            "signed-digest",
-            "binding",
-        ] {
-            let corrupted = crate::replacement::mutate_signed_replacement_capsule_for_test(
-                &capsule_bytes,
-                mutation,
-            );
-            fs::write(&source, &corrupted).unwrap();
-            assert!(
-                run_replacement_lifecycle_child(
-                    temporary.path(),
-                    "reject-retirement",
-                    None,
-                ),
-                "{mutation} capsule must fail before identity custody or retirement"
-            );
-            assert_eq!(fs::read(&source).unwrap(), corrupted);
-            assert_eq!(fs::read(&commit_path).unwrap(), exact_commit);
-            assert_eq!(fs::read(paths.identity()).unwrap(), exact_identity);
-            assert_eq!(fs::read(&exact_journal_path).unwrap(), exact_journal);
-            assert_eq!(
-                exact_staging.exists(),
-                exact_staging_present,
-                "{mutation} preserves the staging custody state"
-            );
-            assert!(runtime_credential.exists(), "{mutation} has zero restart effect");
-        }
-        fs::write(&source, &capsule_bytes).unwrap();
-
-        let missing_capsule = replacement_recovery_ready_fixture();
-        let missing_paths = FixedInstallPaths::under(missing_capsule.path());
-        let missing_source = missing_paths.replacement_registration_attempt_source();
-        let missing_commit = missing_paths
-            .bootstrap_state()
-            .join("replacement-migration.json");
-        let missing_journal = missing_paths
-            .bootstrap_state()
-            .join("activation-journal.json");
-        let missing_commit_bytes = fs::read(&missing_commit).unwrap();
-        let missing_journal_bytes = fs::read(&missing_journal).unwrap();
-        let missing_identity = fs::read(missing_paths.identity()).unwrap();
-        let missing_staging = TransactionJournal::load(&missing_paths.bootstrap_state())
-            .unwrap()
-            .unwrap()
-            .staging_directory()
-            .to_owned();
-        let missing_staging_present = missing_staging.exists();
-        fs::remove_file(&missing_source).unwrap();
-        assert!(run_replacement_lifecycle_child(
-            missing_capsule.path(),
-            "reject-retirement",
-            None,
-        ));
-        assert_eq!(fs::read(&missing_commit).unwrap(), missing_commit_bytes);
-        assert_eq!(fs::read(&missing_journal).unwrap(), missing_journal_bytes);
-        assert_eq!(fs::read(missing_paths.identity()).unwrap(), missing_identity);
-        assert_eq!(missing_staging.exists(), missing_staging_present);
-
         for tampered in [
             registered_identity
                 .lines()
@@ -5063,7 +3614,7 @@ mod tests {
                 .collect::<String>(),
             format!("{registered_identity}registration_unknown = \"tamper\"\n"),
             format!(
-                "{registered_identity}registration_host_id = \"8\"\n"
+                "{registered_identity}registration_host_id = \"host-registered\"\n"
             ),
         ] {
             fs::write(paths.identity(), tampered).unwrap();
@@ -5092,6 +3643,18 @@ mod tests {
         ));
         assert!(source.exists(), "wrong candidate key retains capsule");
         assert!(commit_path.exists(), "wrong candidate key retains commit");
+        fs::write(
+            paths.identity(),
+            registered_identity.replace("probe-registered", "probe-tampered"),
+        )
+        .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "reject-canonical-restart",
+            None,
+        ));
+        assert!(source.exists(), "wrong Probe ID retains capsule");
+        assert!(commit_path.exists(), "wrong Probe ID retains commit");
         fs::write(paths.identity(), &registered_identity).unwrap();
 
         for point in ["before-rename", "after-rename"] {
@@ -5141,61 +3704,24 @@ mod tests {
         fs::remove_file(&drop_in).unwrap();
         fs::remove_dir(drop_in.parent().unwrap()).unwrap();
 
-        let pre_binding_crash = replacement_recovery_ready_fixture();
-        let blocked_paths = FixedInstallPaths::under(pre_binding_crash.path());
-        let blocked_commit = blocked_paths
-            .bootstrap_state()
-            .join("replacement-migration.json");
-        let blocked_source = blocked_paths.replacement_registration_attempt_source();
-        let blocked_identity = fs::read(blocked_paths.identity()).unwrap();
-        let blocked_commit_bytes = fs::read(&blocked_commit).unwrap();
-        let blocked_source_bytes = fs::read(&blocked_source).unwrap();
-        let blocked_journal_path = blocked_paths
-            .bootstrap_state()
-            .join("activation-journal.json");
-        let blocked_journal_bytes = fs::read(&blocked_journal_path).unwrap();
-        let blocked_journal = TransactionJournal::load(&blocked_paths.bootstrap_state())
-            .unwrap()
-            .unwrap();
-        let blocked_staging = blocked_journal.staging_directory().to_owned();
-        let blocked_staging_present = blocked_staging.exists();
-        assert!(!run_replacement_lifecycle_child(
-            pre_binding_crash.path(),
-            "retire-source",
-            Some((&blocked_commit, "before-rename")),
-        ));
-        assert_eq!(fs::read(&blocked_commit).unwrap(), blocked_commit_bytes);
-        assert_eq!(fs::read(&blocked_source).unwrap(), blocked_source_bytes);
-        assert_eq!(fs::read(&blocked_journal_path).unwrap(), blocked_journal_bytes);
-        assert_eq!(blocked_staging.exists(), blocked_staging_present);
-        assert!(blocked_paths.identity().exists());
-        assert!(!run_replacement_lifecycle_child(
-            pre_binding_crash.path(),
-            "retire-source",
-            None,
-        ));
-        assert_eq!(fs::read(&blocked_commit).unwrap(), blocked_commit_bytes);
-        assert_eq!(fs::read(&blocked_source).unwrap(), blocked_source_bytes);
-        assert_eq!(fs::read(&blocked_journal_path).unwrap(), blocked_journal_bytes);
-        assert_eq!(blocked_staging.exists(), blocked_staging_present);
-        assert_ne!(
-            fs::read(blocked_paths.identity()).unwrap(),
-            blocked_identity,
-            "proof-backed convergence may precede the interrupted CAS"
-        );
-
-        assert!(!run_replacement_lifecycle_child(
+        for point in ["fail-restart", "before-restart"] {
+            assert!(!run_replacement_lifecycle_child(
                 temporary.path(),
                 "retire-source",
-                Some((&commit_path, "after-rename")),
+                Some((&runtime_credential, point)),
             ));
-        assert!(source.exists(), "identity binding must precede capsule retirement");
+            assert!(source.exists());
+            assert!(commit_path.exists());
+            assert!(runtime_credential.exists());
+        }
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&runtime_credential, "after-restart")),
+        ));
+        assert!(source.exists());
         assert!(commit_path.exists());
-        assert!(runtime_credential.exists());
-        let bound_commit: serde_json::Value =
-            serde_json::from_slice(&fs::read(&commit_path).unwrap()).unwrap();
-        assert_eq!(bound_commit["schemaVersion"], 2);
-        assert!(bound_commit["canonicalIdentitySha256"].as_str().is_some());
+        assert!(!runtime_credential.exists());
 
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
@@ -5203,7 +3729,6 @@ mod tests {
             Some((&source, "before-unlink")),
         ));
         assert!(source.exists());
-        assert!(commit_path.exists());
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
             "retire-source",
@@ -5211,50 +3736,6 @@ mod tests {
         ));
         assert!(!source.exists());
         assert!(commit_path.exists(), "registration retirement 中断必须保留 commit");
-
-        let bound_commit_bytes = fs::read(&commit_path).unwrap();
-        let mut legacy_without_capsule: serde_json::Value =
-            serde_json::from_slice(&bound_commit_bytes).unwrap();
-        legacy_without_capsule["schemaVersion"] = 1.into();
-        legacy_without_capsule
-            .as_object_mut()
-            .unwrap()
-            .remove("canonicalIdentitySha256");
-        fs::write(
-            &commit_path,
-            serde_json::to_vec(&legacy_without_capsule).unwrap(),
-        )
-        .unwrap();
-        assert!(run_replacement_lifecycle_child(
-            temporary.path(),
-            "reject-retirement",
-            None,
-        ));
-        assert!(commit_path.exists(), "legacy commit without capsule has no identity authority");
-        assert!(runtime_credential.exists(), "legacy rejection has zero restart effect");
-        fs::write(&commit_path, bound_commit_bytes).unwrap();
-
-        let canonical_identity = fs::read_to_string(paths.identity()).unwrap();
-        for tampered in [
-            canonical_identity.replace("probe-registered", "probe-tampered"),
-            canonical_identity.replace(
-                &format!("probe_private_key_pem = {capsule_key:?}"),
-                &format!("probe_private_key_pem = {other_key:?}"),
-            ),
-        ] {
-            assert_ne!(tampered, canonical_identity);
-            fs::write(paths.identity(), tampered).unwrap();
-            assert!(run_replacement_lifecycle_child(
-                temporary.path(),
-                "reject-retirement",
-                None,
-            ));
-            assert!(!source.exists());
-            assert!(commit_path.exists(), "identity digest mismatch must retain commit");
-            assert!(runtime_credential.exists(), "identity rejection has zero restart effect");
-        }
-        fs::write(paths.identity(), &canonical_identity).unwrap();
-
         for point in ["fail-restart", "before-restart"] {
             assert!(!run_replacement_lifecycle_child(
                 temporary.path(),
@@ -5267,14 +3748,28 @@ mod tests {
                 "source-absent retry 仍必须 fresh restart 后才可退休 commit"
             );
         }
-        assert!(!run_replacement_lifecycle_child(
-            temporary.path(),
-            "retire-source",
-            Some((&runtime_credential, "after-restart")),
-        ));
-        assert!(!source.exists());
-        assert!(commit_path.exists());
-        assert!(!runtime_credential.exists());
+        let canonical_identity = fs::read_to_string(paths.identity()).unwrap();
+        for tampered in [
+            canonical_identity.replace("probe-registered", "probe-tampered"),
+            canonical_identity.replace(
+                &format!("probe_private_key_pem = {capsule_key:?}"),
+                &format!("probe_private_key_pem = {other_key:?}"),
+            ),
+        ] {
+            assert_ne!(tampered, canonical_identity);
+            fs::write(paths.identity(), tampered).unwrap();
+            assert!(run_replacement_lifecycle_child(
+                temporary.path(),
+                "reject-canonical-restart",
+                None,
+            ));
+            assert!(!source.exists());
+            assert!(
+                commit_path.exists(),
+                "Hub-authenticated canonical restart 失败必须保留 commit"
+            );
+        }
+        fs::write(paths.identity(), canonical_identity).unwrap();
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
             "retire-source",
@@ -5334,45 +3829,6 @@ mod tests {
         command.status().unwrap().success()
     }
 
-    fn replacement_recovery_ready_fixture() -> tempfile::TempDir {
-        let temporary = tempdir().unwrap();
-        for parent in [
-            "usr/local/bin",
-            "var/lib",
-            "etc/systemd/system",
-            "etc/sudoers.d",
-        ] {
-            fs::create_dir_all(temporary.path().join(parent)).unwrap();
-        }
-        let paths = FixedInstallPaths::under(temporary.path());
-        fs::create_dir_all(paths.bootstrap_state()).unwrap();
-        fs::set_permissions(
-            paths.bootstrap_state(),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        let replacement_bundle = bundle().with_test_complete_receipts(5);
-        let commit_path = paths
-            .bootstrap_state()
-            .join("replacement-migration.json");
-        let mut replacement_commit = replacement_commit(&replacement_bundle);
-        replacement_commit.schema_version = 1;
-        FileReplacementCommitStore::at(&commit_path, unsafe { libc::geteuid() })
-            .persist(&replacement_commit)
-            .unwrap();
-        assert!(run_replacement_lifecycle_child(
-            temporary.path(),
-            "publish-source",
-            None,
-        ));
-        assert!(run_replacement_lifecycle_child(
-            temporary.path(),
-            "activate",
-            None,
-        ));
-        temporary
-    }
-
     fn run_replacement_lifecycle_recovery_child(root: &Path) {
         let paths = FixedInstallPaths::under(root);
         match std::env::var("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION")
@@ -5387,14 +3843,16 @@ mod tests {
                     fs::Permissions::from_mode(0o700),
                 )
                 .unwrap();
-                let binding = replacement_commit(&bundle().with_test_complete_receipts(5))
-                    .registration_binding()
-                    .expect("test replacement binding");
-                let capsule = crate::replacement::
-                    signed_replacement_registration_attempt_capsule_for_test(
-                        &binding,
-                        "enk_enroll_replacement_recovery",
-                    );
+                let capsule = serde_json::to_vec(&serde_json::json!({
+                    "candidatePrivateKeyPem": valid_probe_private_key_pem(),
+                    "enrollmentTokenSha256": "e".repeat(64),
+                    "hubOrigin": "https://hub.example",
+                    "localClockReferenceMs": 1_725_000_000_000_u64,
+                    "requestHex": "00",
+                    "schemaVersion": 1,
+                    "signedAttemptSha256": "f".repeat(64),
+                }))
+                .unwrap();
                 crate::secure_file::atomic_write(
                     &source,
                     &capsule,
@@ -5456,15 +3914,13 @@ mod tests {
             }
             "retire-source" | "reject-retirement" | "reject-canonical-restart" => {
                 let bundle = bundle().with_test_complete_receipts(5);
+                let commit = replacement_commit(&bundle);
                 let mut store = FileReplacementCommitStore::at(
                     paths
                         .bootstrap_state()
                         .join("replacement-migration.json"),
                     unsafe { libc::geteuid() },
                 );
-                let Some(commit) = store.load().unwrap() else {
-                    return;
-                };
                 let mut systemd = ProductionRecoverySystemd {
                     paths: &paths,
                     timeout: false,
@@ -5592,7 +4048,7 @@ mod tests {
                 let registered = pending.replace(
                     "enrollment_token = \"enk_enroll_secret\"\n",
                     &format!(
-                        "enrollment_id = \"enr_0123456789abcdef\"\nprobe_id = \"probe-registered\"\nhost_id = \"7\"\nprobe_private_key_pem = {candidate_private_key:?}\nregistration_signed_attempt_sha256 = {signed_attempt_sha256:?}\n",
+                        "enrollment_id = \"enrollment_01\"\nprobe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = {candidate_private_key:?}\nregistration_signed_attempt_sha256 = {signed_attempt_sha256:?}\n",
                     ),
                 );
                 fs::write(identity, registered).map_err(|_| InstallError::Io)?;
@@ -6160,7 +4616,7 @@ mod tests {
         let registered_identity = fs::read_to_string(paths.identity()).unwrap();
         fs::write(
             paths.identity(),
-            registered_identity.replace("enr_0123456789abcdef", "enr_wrong_0123456789"),
+            registered_identity.replace("enrollment_01", "enrollment_wrong"),
         )
         .unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
@@ -7366,49 +5822,6 @@ mod tests {
     }
 
     #[test]
-    fn no_receipt_recovery_retires_only_an_absent_or_harmless_fixed_ipc_group() {
-        for (absent_or_harmless, expected_success) in [(true, true), (false, false)] {
-            let temporary = tempdir().unwrap();
-            for parent in [
-                "usr/local/bin",
-                "var/lib/enoki-probe-bootstrap",
-                "etc/systemd/system",
-                "etc/sudoers.d",
-            ] {
-                fs::create_dir_all(temporary.path().join(parent)).unwrap();
-            }
-            fs::set_permissions(
-                temporary.path().join("var/lib/enoki-probe-bootstrap"),
-                fs::Permissions::from_mode(0o700),
-            )
-            .unwrap();
-            write_bootstrap_roles(temporary.path());
-            let paths = FixedInstallPaths::under(temporary.path());
-            drop(TransactionJournal::begin(&paths.bootstrap_state()).unwrap());
-            let mut accounts = Accounts {
-                fixed_ipc_absent_or_harmless: Some(absent_or_harmless),
-                ..Accounts::default()
-            };
-
-            let result = activate_layout_without_roles_for_test(
-                &mut component(),
-                &Enrollment::new("https://hub.example", "enk_enroll_restart").unwrap(),
-                &bundle(),
-                &trust(),
-                &paths,
-                &mut accounts,
-                &mut Systemd::default(),
-            );
-
-            assert_eq!(result.is_ok(), expected_success);
-            assert_eq!(
-                paths.bootstrap_state().join("activation-journal.json").exists(),
-                !expected_success,
-            );
-        }
-    }
-
-    #[test]
     fn fresh_retry_recovers_journal_owned_bootstrap_roles() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -8441,4 +6854,131 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
+
+    fn fresh_parents_ready(root: &Path) {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(root.join(parent)).unwrap();
+        }
+        write_bootstrap_roles(root);
+    }
+
+    fn run_fresh_install(
+        root: &Path,
+        component: &mut File,
+        accounts: &mut Accounts,
+        systemd: &mut Systemd,
+    ) -> Result<(), InstallError> {
+        activate_layout_without_roles_for_test(
+            component,
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(root),
+            accounts,
+            systemd,
+        )
+    }
+
+    #[test]
+    fn fresh_install_retires_a_proven_empty_ordinary_state_shell_before_the_new_journal() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let state = root.join("var/lib/enoki-probe");
+        fs::create_dir(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        run_fresh_install(root, &mut component, &mut accounts, &mut systemd).unwrap();
+
+        let config = fs::read_to_string(state.join("identity/probe-bootstrap.toml")).unwrap();
+        assert!(config.contains("hub_url = \"https://hub.example\""));
+        assert_eq!(fs::metadata(&state).unwrap().mode() & 0o777, 0o750);
+        assert!(!fs::symlink_metadata(&state).unwrap().file_type().is_symlink());
+        assert_eq!(accounts.calls, ["absent", "create"]);
+        assert_eq!(
+            systemd.calls,
+            ["absent", "reload", "enable", "start", "ready"]
+        );
+    }
+
+    #[test]
+    fn fresh_install_retires_a_proven_empty_canonical_state_shell_before_the_new_journal() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let state = root.join("var/lib/enoki-probe");
+        let private_root = root.join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private_root).unwrap();
+        fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750)).unwrap();
+        std::os::unix::fs::symlink("private/enoki-probe", &state).unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        run_fresh_install(root, &mut component, &mut accounts, &mut systemd).unwrap();
+
+        let config = fs::read_to_string(state.join("identity/probe-bootstrap.toml")).unwrap();
+        assert!(config.contains("hub_url = \"https://hub.example\""));
+        assert!(!fs::symlink_metadata(&state).unwrap().file_type().is_symlink());
+        assert!(!private_root.exists(), "空 private 壳在 journal 前退休");
+    }
+
+    #[test]
+    fn fresh_install_refuses_a_non_empty_state_shell_without_touching_the_data() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let state = root.join("var/lib/enoki-probe");
+        fs::create_dir_all(state.join("audit")).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(state.join("audit/evidence.json"), "install data").unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            run_fresh_install(root, &mut component, &mut accounts, &mut systemd),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(
+            state.join("audit/evidence.json").exists(),
+            "非空旧数据不被新安装接管或删除"
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[test]
+    fn fresh_install_does_not_accept_private_state_data_behind_an_absent_public_root() {
+        let temporary = tempdir().unwrap();
+        let root = temporary.path();
+        fresh_parents_ready(root);
+        let private_root = root.join("var/lib/private/enoki-probe");
+        fs::create_dir_all(&private_root).unwrap();
+        fs::set_permissions(&private_root, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::write(private_root.join("payload"), "install data").unwrap();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            run_fresh_install(root, &mut component, &mut accounts, &mut systemd),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(
+            private_root.join("payload").exists(),
+            "public absent 不掩盖 private 数据"
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
 }

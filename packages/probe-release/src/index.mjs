@@ -2,11 +2,7 @@ export {
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
-  inspectHistoricalProbeBundleArchiveBytes,
-  inspectRuntimeProbeBundleArchiveBytes,
-  inspectProbeBundleArchiveBytes,
 } from "./probe-asset-bundle.mjs";
-export { readRegularFileSnapshot } from "./regular-file-snapshot.mjs";
 export {
   inspectLegacyProbeAssetSet,
   inspectProbeElf,
@@ -18,7 +14,6 @@ export {
 } from "./probe-trust-delegation.mjs";
 export {
   createReleaseTransitionContract,
-  preflightReleaseMigrationConfiguration,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
 } from "./release-transition-contract.mjs";

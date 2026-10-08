@@ -6,7 +6,7 @@ use std::{
         fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::ffi::OsStrExt,
     },
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -23,334 +23,6 @@ pub fn atomic_write(
     let (parent, target) = open_parent(path)
         .map_err(|error| io::Error::new(error.kind(), format!("受管父目录打开失败: {error}")))?;
     atomic_write_at(&parent, &target, path, contents, mode, owner)
-}
-
-/// One private atomic file namespace held by descriptor for the whole
-/// read/compare/publish operation. Residue classification and target effects
-/// never re-resolve the managed parent pathname.
-pub struct PrivateAtomicFileCustody {
-    container: DirectoryFd,
-    parent: DirectoryFd,
-    parent_name: CString,
-    target: CString,
-    path: PathBuf,
-    mode: u32,
-    owner: (u32, u32),
-}
-
-impl PrivateAtomicFileCustody {
-    pub fn open(
-        path: &Path,
-        mode: u32,
-        owner: (u32, u32),
-        expected_parent_uid: u32,
-    ) -> io::Result<Self> {
-        let (container, parent, parent_name, target) = open_parent_with_container(path)?;
-        let metadata = stat_fd(parent.raw())?;
-        if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR
-            || metadata.st_mode & 0o022 != 0
-            || metadata.st_uid != expected_parent_uid
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private atomic file parent custody does not match",
-            ));
-        }
-        Ok(Self {
-            container,
-            parent,
-            parent_name,
-            target,
-            path: path.to_owned(),
-            mode,
-            owner,
-        })
-    }
-
-    /// Reads the target only after classifying all sibling publish residue in
-    /// the same held namespace. Absence is distinct from unsafe custody.
-    pub fn read_bounded(&self, maximum_bytes: usize) -> io::Result<Option<Vec<u8>>> {
-        self.guard_residue()?;
-        let fd = unsafe {
-            libc::openat(
-                self.parent.raw(),
-                self.target.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            let error = io::Error::last_os_error();
-            return if error.kind() == io::ErrorKind::NotFound {
-                self.verify_parent_namespace()?;
-                Ok(None)
-            } else {
-                Err(error)
-            };
-        }
-        let mut file = unsafe { File::from_raw_fd(fd) };
-        let stat = stat_fd(file.as_raw_fd())?;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG
-            || stat.st_mode & 0o777 != self.mode
-            || stat.st_uid != self.owner.0
-            || stat.st_gid != self.owner.1
-            || stat.st_nlink != 1
-            || stat.st_size < 0
-            || stat.st_size as usize > maximum_bytes
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "private atomic file attributes do not match",
-            ));
-        }
-        let mut bytes = Vec::with_capacity(stat.st_size as usize);
-        Read::by_ref(&mut file)
-            .take(maximum_bytes as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > maximum_bytes {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "private atomic file is too large",
-            ));
-        }
-        self.verify_parent_namespace()?;
-        Ok(Some(bytes))
-    }
-
-    /// Publishes through the same held namespace used to classify residue.
-    pub fn publish(&self, contents: &[u8]) -> io::Result<()> {
-        self.guard_residue()?;
-        atomic_write_at(
-            &self.parent,
-            &self.target,
-            &self.path,
-            contents,
-            self.mode,
-            Some(self.owner),
-        )?;
-        private_atomic_after_publish_for_test(&self.path)?;
-        self.verify_parent_namespace()
-    }
-
-    /// Publishes one previously-absent fixed target and retracts only that
-    /// inode when the caller's read-only custody check no longer holds.
-    pub fn publish_absent_checked(
-        &self,
-        contents: &[u8],
-        mut postcondition: impl FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
-        self.guard_absent_target()?;
-        postcondition()?;
-        let published = match self.publish_absent(contents) {
-            Ok(published) => published,
-            Err(PublishAbsentError::BeforePublish(error)) => return Err(error),
-            Err(PublishAbsentError::AfterPublish { published, error }) => {
-                return self.rollback_after(error, &[published]);
-            }
-        };
-        if let Err(error) = postcondition() {
-            return self.rollback_after(error, &[published]);
-        }
-        Ok(())
-    }
-
-    /// Publishes the fixed epoch then latch pair. Both targets must be absent;
-    /// a custody failure retracts this invocation's epoch before its latch.
-    pub fn publish_epoch_then_latch_absent_checked(
-        epoch: (&Self, &[u8]),
-        latch: (&Self, &[u8]),
-        mut postcondition: impl FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
-        epoch.0.guard_absent_target()?;
-        latch.0.guard_absent_target()?;
-        postcondition()?;
-        let published_epoch = match epoch.0.publish_absent(epoch.1) {
-            Ok(published) => published,
-            Err(PublishAbsentError::BeforePublish(error)) => return Err(error),
-            Err(PublishAbsentError::AfterPublish { published, error }) => {
-                return rollback_pair_after(error, epoch.0, published, latch.0, None);
-            }
-        };
-        if let Err(error) = postcondition() {
-            return rollback_pair_after(error, epoch.0, published_epoch, latch.0, None);
-        }
-        let published_latch = match latch.0.publish_absent(latch.1) {
-            Ok(published) => published,
-            Err(PublishAbsentError::BeforePublish(error)) => {
-                return rollback_pair_after(error, epoch.0, published_epoch, latch.0, None);
-            }
-            Err(PublishAbsentError::AfterPublish { published, error }) => {
-                return rollback_pair_after(
-                    error,
-                    epoch.0,
-                    published_epoch,
-                    latch.0,
-                    Some(published),
-                );
-            }
-        };
-        if let Err(error) = postcondition() {
-            return rollback_pair_after(
-                error,
-                epoch.0,
-                published_epoch,
-                latch.0,
-                Some(published_latch),
-            );
-        }
-        Ok(())
-    }
-
-    /// Removes only the exact private target in this held namespace.
-    pub(crate) fn remove(&self) -> io::Result<()> {
-        self.guard_residue()?;
-        match stat_at(self.parent.raw(), &self.target) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.verify_parent_namespace()?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        }
-        verify_file(self.parent.raw(), &self.target, self.mode, Some(self.owner))?;
-        self.verify_parent_namespace()?;
-        secure_file_effect_crash(&self.path, "before-unlink");
-        unlink_at(self.parent.raw(), &self.target)?;
-        sync_directory(self.parent.raw())?;
-        self.verify_parent_namespace()?;
-        secure_file_effect_crash(&self.path, "after-unlink");
-        Ok(())
-    }
-
-    /// Removes the now-empty held parent only if its original namespace entry
-    /// still resolves to the exact held directory inode.
-    pub(crate) fn remove_empty_parent(&self) -> io::Result<()> {
-        self.verify_parent_namespace()?;
-        if unsafe {
-            libc::unlinkat(
-                self.container.raw(),
-                self.parent_name.as_ptr(),
-                libc::AT_REMOVEDIR,
-            )
-        } != 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        sync_directory(self.container.raw())
-    }
-
-    fn guard_residue(&self) -> io::Result<()> {
-        reject_atomic_write_residue_at(self.parent.raw(), &self.target)?;
-        private_atomic_after_scan_for_test(&self.path)?;
-        reject_atomic_write_residue_at(self.parent.raw(), &self.target)?;
-        self.verify_parent_namespace()
-    }
-
-    fn guard_absent_target(&self) -> io::Result<()> {
-        self.guard_residue()?;
-        match stat_at(self.parent.raw(), &self.target) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "checked publication target already exists",
-            )),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn publish_absent(&self, contents: &[u8]) -> Result<PublishedInode, PublishAbsentError> {
-        let published = atomic_write_absent_at(
-            &self.parent,
-            &self.target,
-            &self.path,
-            contents,
-            self.mode,
-            self.owner,
-        )?;
-        if let Err(error) = private_atomic_after_publish_for_test(&self.path) {
-            return Err(PublishAbsentError::AfterPublish { published, error });
-        }
-        Ok(published)
-    }
-
-    fn rollback_after(&self, primary: io::Error, published: &[PublishedInode]) -> io::Result<()> {
-        let rollback = published
-            .iter()
-            .try_for_each(|published| self.remove_published_inode(*published));
-        match rollback {
-            Ok(()) => Err(primary),
-            Err(rollback) => Err(io::Error::other(format!(
-                "checked publication failed: {primary}; rollback failed: {rollback}"
-            ))),
-        }
-    }
-
-    fn remove_published_inode(&self, published: PublishedInode) -> io::Result<()> {
-        match stat_at(self.parent.raw(), &self.target) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-            Ok(current)
-                if current.st_dev != published.device || current.st_ino != published.inode =>
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "checked publication target inode changed",
-                ));
-            }
-            Ok(_) => {}
-        }
-        unlink_at(self.parent.raw(), &self.target)?;
-        sync_directory(self.parent.raw())?;
-        secure_file_effect_crash(&self.path, "after-checked-unlink");
-        Ok(())
-    }
-
-    fn verify_parent_namespace(&self) -> io::Result<()> {
-        let held = stat_fd(self.parent.raw())?;
-        let named = stat_at(self.container.raw(), &self.parent_name)?;
-        if held.st_dev == named.st_dev && held.st_ino == named.st_ino {
-            return Ok(());
-        }
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "private atomic parent namespace changed",
-        ))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PublishedInode {
-    device: libc::dev_t,
-    inode: libc::ino_t,
-}
-
-enum PublishAbsentError {
-    BeforePublish(io::Error),
-    AfterPublish {
-        published: PublishedInode,
-        error: io::Error,
-    },
-}
-
-fn rollback_pair_after(
-    primary: io::Error,
-    epoch: &PrivateAtomicFileCustody,
-    published_epoch: PublishedInode,
-    latch: &PrivateAtomicFileCustody,
-    published_latch: Option<PublishedInode>,
-) -> io::Result<()> {
-    if let Err(rollback) = epoch.remove_published_inode(published_epoch) {
-        return Err(io::Error::other(format!(
-            "checked publication failed: {primary}; epoch rollback failed: {rollback}"
-        )));
-    }
-    if let Some(published_latch) = published_latch
-        && let Err(rollback) = latch.remove_published_inode(published_latch)
-    {
-        return Err(io::Error::other(format!(
-            "checked publication failed: {primary}; latch rollback failed: {rollback}"
-        )));
-    }
-    Err(primary)
 }
 
 /// 在 systemd `DynamicUser` 管理的固定 Probe state directory 中原子替换 bootstrap config。
@@ -534,27 +206,6 @@ impl SystemdProbeStateProjection {
     }
 }
 
-/// 复用既有 root finalizer 投影，供卸载在停止 DynamicUser 前取得并在恢复时重建 owner。
-pub fn systemd_probe_state_owner_for_cleanup(
-    state_directory: &Path,
-    authority_owner: (u32, u32),
-) -> io::Result<(u32, u32)> {
-    if (unsafe { libc::geteuid() }, unsafe { libc::getegid() }) != authority_owner {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "systemd StateDirectory finalizer authority 不匹配",
-        ));
-    }
-    // 卸载恢复时 identity child 可能已删除；状态投影的 root 保管证明仍然有效。
-    open_systemd_probe_state_directory(
-        state_directory,
-        authority_owner,
-        None,
-        SystemdProbeStateView::HostJournal,
-    )
-    .map(|(_, owner)| owner)
-}
-
 pub(crate) fn open_systemd_probe_state_projection_for_finalization(
     state_directory: &Path,
     authority_owner: (u32, u32),
@@ -580,7 +231,7 @@ enum SystemdProbeStateView {
 }
 
 impl SystemdProbeStateView {
-    fn private_parent_contract(self) -> (u32, libc::nlink_t) {
+    fn private_parent_contract(self) -> (u32, u64) {
         match self {
             Self::HostJournal => (0o700, 1),
             Self::ServiceConfig => (0o755, 2),
@@ -659,113 +310,12 @@ fn atomic_write_at(
     Ok(())
 }
 
-fn atomic_write_absent_at(
-    parent: &DirectoryFd,
-    target: &CString,
-    path: &Path,
-    contents: &[u8],
-    mode: u32,
-    owner: (u32, u32),
-) -> Result<PublishedInode, PublishAbsentError> {
-    verify_private_directory(parent.raw()).map_err(PublishAbsentError::BeforePublish)?;
-    let temporary = temporary_name(target).map_err(PublishAbsentError::BeforePublish)?;
-    let fd = unsafe {
-        libc::openat(
-            parent.raw(),
-            temporary.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            mode,
-        )
-    };
-    if fd < 0 {
-        return Err(PublishAbsentError::BeforePublish(io::Error::last_os_error()));
-    }
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    let staged = (|| {
-        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::fchown(file.as_raw_fd(), owner.0, owner.1) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        file.write_all(contents)?;
-        file.sync_all()?;
-        let stat = stat_fd(file.as_raw_fd())?;
-        Ok(PublishedInode {
-            device: stat.st_dev,
-            inode: stat.st_ino,
-        })
-    })();
-    drop(file);
-    let published = match staged {
-        Ok(published) => published,
-        Err(error) => {
-            let _ = unlink_at(parent.raw(), &temporary);
-            return Err(PublishAbsentError::BeforePublish(error));
-        }
-    };
-    secure_file_effect_crash(path, "before-rename");
-    let renamed = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            parent.raw(),
-            temporary.as_ptr(),
-            parent.raw(),
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if renamed != 0 {
-        let error = io::Error::last_os_error();
-        let _ = unlink_at(parent.raw(), &temporary);
-        return Err(PublishAbsentError::BeforePublish(error));
-    }
-    if let Err(error) = sync_directory(parent.raw()) {
-        return Err(PublishAbsentError::AfterPublish { published, error });
-    }
-    let current = match stat_at(parent.raw(), target) {
-        Ok(current) => current,
-        Err(error) => return Err(PublishAbsentError::AfterPublish { published, error }),
-    };
-    if current.st_dev != published.device || current.st_ino != published.inode {
-        return Err(PublishAbsentError::AfterPublish {
-            published,
-            error: io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "checked publication target inode changed",
-            ),
-        });
-    }
-    if let Err(error) = verify_file(parent.raw(), target, mode, Some(owner)) {
-        return Err(PublishAbsentError::AfterPublish { published, error });
-    }
-    secure_file_effect_crash(path, "after-rename");
-    Ok(published)
-}
-
 fn open_systemd_probe_state_projection(
     path: &Path,
     authority_owner: (u32, u32),
     expected_service_owner: Option<(u32, u32)>,
     view: SystemdProbeStateView,
 ) -> io::Result<SystemdProbeStateProjection> {
-    let (state, service_owner) =
-        open_systemd_probe_state_directory(path, authority_owner, expected_service_owner, view)?;
-    let identity = state.open_child(OsStr::new("identity"))?;
-    verify_owned_directory(identity.raw(), 0o700, service_owner, 2)?;
-    Ok(SystemdProbeStateProjection {
-        state,
-        identity,
-        owner: service_owner,
-    })
-}
-
-fn open_systemd_probe_state_directory(
-    path: &Path,
-    authority_owner: (u32, u32),
-    expected_service_owner: Option<(u32, u32)>,
-    view: SystemdProbeStateView,
-) -> io::Result<(DirectoryFd, (u32, u32))> {
     let (public_parent, public_name) = open_parent(path)?;
     verify_owned_directory(public_parent.raw(), 0o755, authority_owner, 1)?;
     let public = stat_at(public_parent.raw(), &public_name)?;
@@ -811,6 +361,8 @@ fn open_systemd_probe_state_directory(
         ));
     }
     verify_owned_directory(state.raw(), 0o750, service_owner, 2)?;
+    let identity = state.open_child(OsStr::new("identity"))?;
+    verify_owned_directory(identity.raw(), 0o700, service_owner, 2)?;
     let followed = stat_following_at(public_parent.raw(), &public_name)?;
     let opened = stat_fd(state.raw())?;
     if followed.st_dev != opened.st_dev || followed.st_ino != opened.st_ino {
@@ -819,7 +371,11 @@ fn open_systemd_probe_state_directory(
             "systemd StateDirectory 在打开期间发生变化",
         ));
     }
-    Ok((state, service_owner))
+    Ok(SystemdProbeStateProjection {
+        state,
+        identity,
+        owner: service_owner,
+    })
 }
 
 #[cfg(any(test, feature = "deterministic-test-seams"))]
@@ -834,11 +390,9 @@ fn secure_file_effect_crash(path: &Path, point: &str) {
 #[cfg(not(any(test, feature = "deterministic-test-seams")))]
 fn secure_file_effect_crash(_path: &Path, _point: &str) {}
 
-pub(crate) fn remove_transient_private_file(
-    path: &Path,
-    mode: u32,
-    owner: (u32, u32),
-) -> io::Result<()> {
+/// 通过持有的禁止跟随符号链接目录描述符，删除指定的 root 私有普通文件，
+/// 并对命名空间更新执行 fsync。
+pub fn remove_private_regular_file(path: &Path, mode: u32, owner: (u32, u32)) -> io::Result<()> {
     let (parent, target) = open_parent(path)?;
     verify_private_directory(parent.raw())?;
     verify_file(parent.raw(), &target, mode, Some(owner))?;
@@ -849,7 +403,7 @@ pub(crate) fn remove_transient_private_file(
     Ok(())
 }
 
-pub(crate) fn retire_transient_atomic_write_residue(
+pub(crate) fn retire_replacement_atomic_write_residue(
     path: &Path,
     mode: u32,
     owner: (u32, u32),
@@ -879,7 +433,7 @@ pub(crate) fn retire_transient_atomic_write_residue(
             };
         }
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        if !is_exact_atomic_write_residue(name.to_bytes(), target.as_bytes()) {
+        if !is_atomic_write_residue(name.to_bytes(), target.as_bytes()) {
             continue;
         }
         let metadata = stat_at(parent.raw(), name)?;
@@ -891,7 +445,7 @@ pub(crate) fn retire_transient_atomic_write_residue(
         {
             break Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
-                "transient atomic write residue attributes do not match",
+                "atomic write residue attributes do not match",
             ));
         }
         unlink_at(parent.raw(), name)?;
@@ -907,54 +461,7 @@ pub(crate) fn retire_transient_atomic_write_residue(
     Ok(())
 }
 
-fn reject_atomic_write_residue_at(parent: RawFd, target: &CStr) -> io::Result<()> {
-    let current = c".";
-    let duplicate = unsafe {
-        libc::openat(
-            parent,
-            current.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if duplicate < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let directory = unsafe { libc::fdopendir(duplicate) };
-    if directory.is_null() {
-        let error = io::Error::last_os_error();
-        unsafe { libc::close(duplicate) };
-        return Err(error);
-    }
-    let mut prefix = Vec::with_capacity(target.to_bytes().len() + 14);
-    prefix.push(b'.');
-    prefix.extend_from_slice(target.to_bytes());
-    prefix.extend_from_slice(b"-enoki-write-");
-    let result = loop {
-        unsafe { *libc::__errno_location() = 0 };
-        let entry = unsafe { libc::readdir(directory) };
-        if entry.is_null() {
-            let error = io::Error::last_os_error();
-            break if error.raw_os_error() == Some(0) {
-                Ok(())
-            } else {
-                Err(error)
-            };
-        }
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        if name.to_bytes().starts_with(&prefix) {
-            break Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unresolved private atomic write residue",
-            ));
-        }
-    };
-    if unsafe { libc::closedir(directory) } != 0 && result.is_ok() {
-        return Err(io::Error::last_os_error());
-    }
-    result
-}
-
-fn is_exact_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
+fn is_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
     let mut prefix = Vec::with_capacity(target.len() + 14);
     prefix.push(b'.');
     prefix.extend_from_slice(target);
@@ -972,66 +479,6 @@ fn is_exact_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
         && sequence.iter().all(u8::is_ascii_digit)
 }
 
-#[cfg(any(test, feature = "deterministic-test-seams"))]
-fn private_atomic_after_scan_for_test(path: &Path) -> io::Result<()> {
-    if std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_PATH").as_deref() != Some(path.as_os_str()) {
-        return Ok(());
-    }
-    let Some(signal) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL") else {
-        return Ok(());
-    };
-    let Some(resume) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_RESUME") else {
-        return Ok(());
-    };
-    std::fs::write(&signal, b"scanned")?;
-    for _ in 0..2_000 {
-        if Path::new(&resume).exists() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "private atomic test race did not resume",
-    ))
-}
-
-#[cfg(not(any(test, feature = "deterministic-test-seams")))]
-fn private_atomic_after_scan_for_test(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(any(test, feature = "deterministic-test-seams"))]
-fn private_atomic_after_publish_for_test(path: &Path) -> io::Result<()> {
-    if std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_PATH").as_deref()
-        != Some(path.as_os_str())
-    {
-        return Ok(());
-    }
-    let Some(signal) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_SIGNAL") else {
-        return Ok(());
-    };
-    let Some(resume) = std::env::var_os("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_RESUME") else {
-        return Ok(());
-    };
-    std::fs::write(&signal, b"published")?;
-    for _ in 0..2_000 {
-        if Path::new(&resume).exists() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    Err(io::Error::new(
-        io::ErrorKind::TimedOut,
-        "private atomic post-publish test race did not resume",
-    ))
-}
-
-#[cfg(not(any(test, feature = "deterministic-test-seams")))]
-fn private_atomic_after_publish_for_test(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 fn open_parent(path: &Path) -> io::Result<(DirectoryFd, CString)> {
     let components = absolute_components(path)?;
     let (target, parents) = components
@@ -1047,33 +494,6 @@ fn open_parent(path: &Path) -> io::Result<(DirectoryFd, CString)> {
         })?;
     }
     Ok((directory, component_name(target)?))
-}
-
-fn open_parent_with_container(
-    path: &Path,
-) -> io::Result<(DirectoryFd, DirectoryFd, CString, CString)> {
-    let components = absolute_components(path)?;
-    let (target, parents) = components
-        .split_last()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "受管路径缺少文件名"))?;
-    let (parent_name, ancestors) = parents.split_last().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private atomic file cannot use the root directory",
-        )
-    })?;
-    let mut container = DirectoryFd::root()?;
-    for component in ancestors {
-        container = container.open_child(component).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("目录分量 {:?} 打开失败: {error}", component),
-            )
-        })?;
-    }
-    let parent_name = component_name(parent_name)?;
-    let parent = container.open_child(OsStr::from_bytes(parent_name.to_bytes()))?;
-    Ok((container, parent, parent_name, component_name(target)?))
 }
 
 fn absolute_components(path: &Path) -> io::Result<Vec<&OsStr>> {
@@ -1178,14 +598,15 @@ fn verify_owned_directory(
     fd: RawFd,
     mode: u32,
     owner: (u32, u32),
-    minimum_links: libc::nlink_t,
+    minimum_links: u64,
 ) -> io::Result<()> {
     let stat = stat_fd(fd)?;
+    // st_nlink 在 ARM 上是 u32、在 x86_64 上是 u64，两边加宽到可无损容纳二者的 u128 再比较。
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
         || stat.st_mode & 0o777 != mode
         || stat.st_uid != owner.0
         || stat.st_gid != owner.1
-        || stat.st_nlink < minimum_links
+        || u128::from(stat.st_nlink) < u128::from(minimum_links)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1307,7 +728,7 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::{
-        PrivateAtomicFileCustody, atomic_write, atomic_write_systemd_probe_bootstrap_config_at,
+        atomic_write, atomic_write_systemd_probe_bootstrap_config_at,
         open_systemd_probe_state_projection_for_finalization,
         read_systemd_probe_bootstrap_config_at,
     };
@@ -1383,67 +804,6 @@ mod tests {
             0o600
         );
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn checked_publication_rolls_back_the_exact_published_inode() {
-        let root = tempdir().unwrap();
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let target = root.path().join("epoch.toml");
-        let custody = PrivateAtomicFileCustody::open(
-            &target,
-            0o600,
-            (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
-            unsafe { libc::geteuid() },
-        )
-        .unwrap();
-
-        let mut checks = 0;
-        assert!(
-            custody
-                .publish_absent_checked(b"epoch", || {
-                    checks += 1;
-                    if checks > 1 {
-                        Err(std::io::Error::other("boundary changed"))
-                    } else {
-                        Ok(())
-                    }
-                })
-                .is_err()
-        );
-        assert!(!target.exists());
-    }
-
-    #[test]
-    fn checked_publication_never_deletes_a_replacement_target() {
-        let root = tempdir().unwrap();
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let target = root.path().join("epoch.toml");
-        let replacement = root.path().join("replacement");
-        let custody = PrivateAtomicFileCustody::open(
-            &target,
-            0o600,
-            (unsafe { libc::geteuid() }, unsafe { libc::getegid() }),
-            unsafe { libc::geteuid() },
-        )
-        .unwrap();
-
-        let mut checks = 0;
-        assert!(
-            custody
-                .publish_absent_checked(b"epoch", || {
-                    checks += 1;
-                    if checks == 1 {
-                        return Ok(());
-                    }
-                    fs::rename(&target, &replacement)?;
-                    fs::write(&target, b"unknown")?;
-                    Err(std::io::Error::other("boundary changed"))
-                })
-                .is_err()
-        );
-        assert_eq!(fs::read(&target).unwrap(), b"unknown");
-        assert_eq!(fs::read(&replacement).unwrap(), b"epoch");
     }
 
     #[test]

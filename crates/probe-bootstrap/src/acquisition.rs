@@ -14,11 +14,8 @@ use std::{
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, Read, Seek, Write},
     os::fd::{FromRawFd, OwnedFd},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     os::unix::net::UnixStream,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-    },
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     time::{Duration, Instant},
@@ -72,25 +69,25 @@ pub fn acquire_probe_repair_authority_once(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = failed_upgrade_repair_authorization_url(
-                &origin,
-                &envelope.evidence.failed_operation_id,
-            )?;
+            let url = format!(
+                "{origin}/api/probe/operations/{}/repair-authorize",
+                envelope.evidence.failed_operation_id
+            );
             (url, None)
         }
         ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
             if envelope.evidence_signature.len() != 64
                 || envelope.evidence.kind != "installed_bundle_failure"
                 || !valid_stage_identifier(&envelope.evidence.generation)
-                || std::env::current_dir().map_err(|_| AcquisitionFailure::Local)?
-                    != Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT)
             {
                 return Err(AcquisitionFailure::Permanent);
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url =
-                installed_bundle_repair_authorization_url(&origin, &envelope.evidence.generation)?;
+            let url = format!(
+                "{origin}/api/probe/runtime-failures/{}/repair-authorize",
+                envelope.evidence.generation
+            );
             (url, Some(envelope.evidence))
         }
     };
@@ -169,7 +166,7 @@ pub fn acquire_probe_repair_authority_once(
     {
         return Err(AcquisitionFailure::Permanent);
     }
-    let stage_receipt = acquire_installed_bundle_repair_once(ProbeUpgradeAcquisition {
+    let stage_receipt = acquire_probe_upgrade_once(ProbeUpgradeAcquisition {
         hub_origin: evidence.hub_origin,
         operation_id: exchange.authority.repair_operation_id.clone(),
         target_asset_set_digest: exchange.target_asset_set_digest,
@@ -213,96 +210,6 @@ fn classify_repair_authorization_error(
 }
 
 pub const PROBE_UPGRADE_STAGE_ROOT: &str = "/var/lib/enoki-probe/upgrade-stages";
-pub const INSTALLED_BUNDLE_REPAIR_STAGE_ROOT: &str =
-    "/var/lib/enoki-probe-bootstrap/installed-bundle-repair-stage";
-const INSTALLED_BUNDLE_REPAIR_STAGE_FILES: [&str; 13] = [
-    "trust-delegation.json",
-    "trust-delegation.json.sig",
-    "manifest.json",
-    "manifest.json.sig",
-    "signing-key.pem",
-    "bundle-manifest.json",
-    "enoki-probe",
-    "enoki-observation-runtime",
-    "enoki-cpu-resource-provider",
-    "enoki-disk-health-resource-provider",
-    "enoki-probe-lifecycle-companion",
-    "enoki-probe-bootstrap-acquire",
-    "enoki-probe-bootstrap-activate",
-];
-
-/// root 为尚未持久化 intent 的 Installed Bundle Repair 收敛固定 stage root。
-/// 固定 root 位于既有 root-private bootstrap state 内；root 在降权前把 child cwd
-/// 固定到该目录，因此 acquirer 无需获得 parent 的 traverse 权限。
-pub fn prepare_installed_bundle_repair_stage(
-    owner_uid: u32,
-    owner_gid: u32,
-) -> Result<(), AcquisitionFailure> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(AcquisitionFailure::RootRefused);
-    }
-    prepare_installed_bundle_repair_stage_for_fresh_acquisition_at(
-        Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT),
-        owner_uid,
-        owner_gid,
-    )
-}
-
-fn prepare_installed_bundle_repair_stage_for_fresh_acquisition_at(
-    root: &Path,
-    owner_uid: u32,
-    owner_gid: u32,
-) -> Result<(), AcquisitionFailure> {
-    match fs::symlink_metadata(root) {
-        Ok(_) => {
-            let metadata = fs::symlink_metadata(root).map_err(|_| AcquisitionFailure::Local)?;
-            let previous_owner = metadata.uid();
-            if previous_owner == 0 {
-                return Err(AcquisitionFailure::Permanent);
-            }
-            validated_repair_operation_at(root, previous_owner, None, None)?;
-            discard_repair_stage_at(root, previous_owner, None, None)?;
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(AcquisitionFailure::Local),
-    }
-    prepare_installed_bundle_repair_stage_at(root, owner_uid, owner_gid)
-}
-
-fn prepare_installed_bundle_repair_stage_at(
-    root: &Path,
-    owner_uid: u32,
-    owner_gid: u32,
-) -> Result<(), AcquisitionFailure> {
-    if owner_uid == 0 {
-        return Err(AcquisitionFailure::RootRefused);
-    }
-    match fs::symlink_metadata(root) {
-        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_dir() => {}
-        Ok(_) => return Err(AcquisitionFailure::Permanent),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            DirBuilder::new()
-                .mode(0o700)
-                .create(root)
-                .map_err(|_| AcquisitionFailure::Local)?;
-        }
-        Err(_) => return Err(AcquisitionFailure::Local),
-    }
-    if fs::read_dir(root)
-        .map_err(|_| AcquisitionFailure::Local)?
-        .next()
-        .is_some()
-    {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    fs::set_permissions(root, fs::Permissions::from_mode(0o700))
-        .map_err(|_| AcquisitionFailure::Local)?;
-    let path = CString::new(root.as_os_str().as_bytes()).map_err(|_| AcquisitionFailure::Local)?;
-    if unsafe { libc::chown(path.as_ptr(), owner_uid, owner_gid) } != 0 {
-        return Err(AcquisitionFailure::Local);
-    }
-    validate_stage_directory(root, owner_uid)
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgradeAcquisition {
@@ -342,17 +249,6 @@ pub fn open_verified_probe_upgrade_stage(
 ) -> Result<VerifiedProbeUpgradeStage, AcquisitionFailure> {
     open_verified_probe_upgrade_stage_at(
         Path::new(PROBE_UPGRADE_STAGE_ROOT),
-        receipt,
-        expected_owner_uid,
-    )
-}
-
-pub fn open_verified_installed_bundle_repair_stage(
-    receipt: &VerifiedUpgradeStageReceipt,
-    expected_owner_uid: u32,
-) -> Result<VerifiedProbeUpgradeStage, AcquisitionFailure> {
-    open_verified_probe_upgrade_stage_at(
-        Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT),
         receipt,
         expected_owner_uid,
     )
@@ -482,7 +378,7 @@ fn validate_stage_directory(path: &Path, expected_uid: u32) -> Result<(), Acquis
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
         || metadata.uid() != expected_uid
-        || metadata.mode() & 0o7777 != 0o700
+        || metadata.mode() & 0o777 != 0o700
     {
         return Err(AcquisitionFailure::Permanent);
     }
@@ -515,7 +411,7 @@ fn open_stage_file(
     let metadata = file.metadata().map_err(|_| AcquisitionFailure::Local)?;
     if !metadata.is_file()
         || metadata.uid() != expected_uid
-        || metadata.mode() & 0o7777 != 0o600
+        || metadata.mode() & 0o777 != 0o600
         || metadata.nlink() != 1
         || metadata.len() == 0
         || metadata.len() > maximum
@@ -805,13 +701,6 @@ pub(crate) fn acquire_production(
 pub fn acquire_probe_upgrade_once(
     request: ProbeUpgradeAcquisition,
 ) -> Result<VerifiedUpgradeStageReceipt, AcquisitionFailure> {
-    acquire_probe_upgrade_once_at(request, Path::new(PROBE_UPGRADE_STAGE_ROOT))
-}
-
-fn acquire_probe_upgrade_once_at(
-    request: ProbeUpgradeAcquisition,
-    stage_root: &Path,
-) -> Result<VerifiedUpgradeStageReceipt, AcquisitionFailure> {
     if unsafe { libc::geteuid() } == 0 {
         return Err(AcquisitionFailure::RootRefused);
     }
@@ -820,6 +709,7 @@ fn acquire_probe_upgrade_once_at(
     let Some(origin) = exact_origin(&request.hub_origin) else {
         return Err(AcquisitionFailure::InvalidOrigin);
     };
+    let stage_root = PathBuf::from(PROBE_UPGRADE_STAGE_ROOT);
     let mut transport = UreqTransport;
     let mut dependencies = AcquisitionDependencies {
         transport: &mut transport,
@@ -837,7 +727,7 @@ fn acquire_probe_upgrade_once_at(
             external_root_fingerprint: trust.root_fingerprint.to_owned(),
             external_root_pem: Some(trust.root_pem.as_bytes()),
         },
-        staging_dir: stage_root.to_path_buf(),
+        staging_dir: stage_root.clone(),
         deadline_ms: 60_000,
     };
     let deadline_at = dependencies.clock.now_ms().saturating_add(60_000);
@@ -854,7 +744,7 @@ fn acquire_probe_upgrade_once_at(
         return Err(AcquisitionFailure::Permanent);
     }
     let verified_stage_sha256 =
-        acquired.persist_upgrade_stage_at(stage_root, &request.operation_id)?;
+        acquired.persist_upgrade_stage_at(&stage_root, &request.operation_id)?;
     Ok(VerifiedUpgradeStageReceipt {
         operation_id: request.operation_id,
         target_asset_set_digest: request.target_asset_set_digest,
@@ -862,17 +752,6 @@ fn acquire_probe_upgrade_once_at(
         target_version: request.target_version,
         verified_stage_sha256,
     })
-}
-
-fn acquire_installed_bundle_repair_once(
-    request: ProbeUpgradeAcquisition,
-) -> Result<VerifiedUpgradeStageReceipt, AcquisitionFailure> {
-    if std::env::current_dir().map_err(|_| AcquisitionFailure::Local)?
-        != Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT)
-    {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    acquire_probe_upgrade_once_at(request, Path::new("."))
 }
 
 pub(crate) struct VerifiedAcquisition {
@@ -1097,209 +976,6 @@ pub fn remove_verified_probe_upgrade_stage(
     File::open(root)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| AcquisitionFailure::Local)
-}
-
-pub fn remove_verified_installed_bundle_repair_stage(
-    operation_id: &str,
-    expected_owner_uid: u32,
-) -> Result<(), AcquisitionFailure> {
-    remove_verified_installed_bundle_repair_stage_at(
-        Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT),
-        operation_id,
-        expected_owner_uid,
-        0,
-    )
-}
-
-fn remove_verified_installed_bundle_repair_stage_at(
-    root: &Path,
-    operation_id: &str,
-    expected_owner_uid: u32,
-    expected_parent_uid: u32,
-) -> Result<(), AcquisitionFailure> {
-    match fs::symlink_metadata(root) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return sync_trusted_repair_stage_parent(root, expected_parent_uid);
-        }
-        Err(_) => return Err(AcquisitionFailure::Local),
-    }
-    discard_repair_stage_at(root, expected_owner_uid, Some(operation_id), None)?;
-    sync_trusted_repair_stage_parent(root, expected_parent_uid)
-}
-
-pub fn validate_unadmitted_installed_bundle_repair_stage()
--> Result<(Option<String>, u32), AcquisitionFailure> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(AcquisitionFailure::RootRefused);
-    }
-    let root = Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT);
-    let metadata = fs::symlink_metadata(root).map_err(|_| AcquisitionFailure::Local)?;
-    let owner_uid = metadata.uid();
-    if owner_uid == 0 {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    let operation = validated_repair_operation_at(root, owner_uid, None, None)?;
-    let entry_name = operation
-        .as_ref()
-        .and_then(|path| path.file_name())
-        .and_then(|name| name.to_str())
-        .map(str::to_owned);
-    Ok((entry_name, owner_uid))
-}
-
-pub fn discard_validated_unadmitted_installed_bundle_repair_stage(
-    entry_name: Option<&str>,
-    expected_owner_uid: u32,
-) -> Result<(), AcquisitionFailure> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(AcquisitionFailure::RootRefused);
-    }
-    discard_repair_stage_at(
-        Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT),
-        expected_owner_uid,
-        None,
-        entry_name,
-    )
-}
-
-/// intent 持久化前的失败只删除一个严格验证过的 pending 或 committed operation stage。
-/// 未知名称、嵌套目录、链接或多个 operation 一律 fail closed。
-pub fn discard_unadmitted_installed_bundle_repair_stage(
-    expected_owner_uid: u32,
-) -> Result<(), AcquisitionFailure> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(AcquisitionFailure::RootRefused);
-    }
-    discard_repair_stage_at(
-        Path::new(INSTALLED_BUNDLE_REPAIR_STAGE_ROOT),
-        expected_owner_uid,
-        None,
-        None,
-    )
-}
-
-fn discard_repair_stage_at(
-    root: &Path,
-    expected_owner_uid: u32,
-    expected_operation_id: Option<&str>,
-    expected_entry_name: Option<&str>,
-) -> Result<(), AcquisitionFailure> {
-    match fs::symlink_metadata(root) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(AcquisitionFailure::Local),
-    }
-    let Some(directory) = validated_repair_operation_at(
-        root,
-        expected_owner_uid,
-        expected_operation_id,
-        expected_entry_name,
-    )?
-    else {
-        fs::remove_dir(root).map_err(|_| AcquisitionFailure::Local)?;
-        let parent = root.parent().ok_or(AcquisitionFailure::Local)?;
-        return File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| AcquisitionFailure::Local);
-    };
-    for name in INSTALLED_BUNDLE_REPAIR_STAGE_FILES {
-        match fs::remove_file(directory.join(name)) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(AcquisitionFailure::Local),
-        }
-    }
-    fs::remove_dir(&directory).map_err(|_| AcquisitionFailure::Local)?;
-    fs::remove_dir(root).map_err(|_| AcquisitionFailure::Local)?;
-    let parent = root.parent().ok_or(AcquisitionFailure::Local)?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| AcquisitionFailure::Local)
-}
-
-fn sync_trusted_repair_stage_parent(
-    root: &Path,
-    expected_parent_uid: u32,
-) -> Result<(), AcquisitionFailure> {
-    let parent = root.parent().ok_or(AcquisitionFailure::Local)?;
-    let metadata = fs::symlink_metadata(parent).map_err(|_| AcquisitionFailure::Local)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.uid() != expected_parent_uid
-        || metadata.mode() & 0o7777 != 0o700
-    {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| AcquisitionFailure::Local)
-}
-
-fn validated_repair_operation_at(
-    root: &Path,
-    expected_owner_uid: u32,
-    expected_operation_id: Option<&str>,
-    expected_entry_name: Option<&str>,
-) -> Result<Option<PathBuf>, AcquisitionFailure> {
-    match fs::symlink_metadata(root) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(AcquisitionFailure::Local),
-    }
-    validate_stage_directory(root, expected_owner_uid)?;
-    let mut root_entries = fs::read_dir(root).map_err(|_| AcquisitionFailure::Local)?;
-    let Some(operation) = root_entries.next() else {
-        return Ok(None);
-    };
-    let operation = operation.map_err(|_| AcquisitionFailure::Local)?;
-    if root_entries.next().is_some() {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    drop(root_entries);
-    let name = operation
-        .file_name()
-        .into_string()
-        .map_err(|_| AcquisitionFailure::Permanent)?;
-    if expected_entry_name.is_some_and(|expected| expected != name) {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    let operation_id = match expected_operation_id {
-        Some(expected) if name == expected => expected,
-        Some(_) => return Err(AcquisitionFailure::Permanent),
-        None => name.strip_prefix(".pending-").unwrap_or(&name),
-    };
-    if !valid_stage_identifier(operation_id) {
-        return Err(AcquisitionFailure::Permanent);
-    }
-    let directory = operation.path();
-    validate_stage_directory(&directory, expected_owner_uid)?;
-    let mut entries = fs::read_dir(&directory).map_err(|_| AcquisitionFailure::Local)?;
-    for entry in entries.by_ref() {
-        let entry = entry.map_err(|_| AcquisitionFailure::Local)?;
-        let entry_name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| AcquisitionFailure::Permanent)?;
-        if !INSTALLED_BUNDLE_REPAIR_STAGE_FILES.contains(&entry_name.as_str()) {
-            return Err(AcquisitionFailure::Permanent);
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(entry.path())
-            .map_err(|_| AcquisitionFailure::Local)?;
-        let metadata = file.metadata().map_err(|_| AcquisitionFailure::Local)?;
-        if !metadata.is_file()
-            || metadata.uid() != expected_owner_uid
-            || metadata.mode() & 0o7777 != 0o600
-            || metadata.nlink() != 1
-        {
-            return Err(AcquisitionFailure::Permanent);
-        }
-    }
-    drop(entries);
-    Ok(Some(directory))
 }
 
 /// admission 失败时由创建者清理本次固定 stage。root 仍只能走独立的
@@ -1714,30 +1390,6 @@ fn exact_origin(value: &str) -> Option<Url> {
     .then_some(url)
 }
 
-fn failed_upgrade_repair_authorization_url(
-    origin: &Url,
-    operation_id: &str,
-) -> Result<String, AcquisitionFailure> {
-    origin
-        .join(&format!(
-            "api/probe/operations/{operation_id}/repair-authorize"
-        ))
-        .map(Into::into)
-        .map_err(|_| AcquisitionFailure::InvalidOrigin)
-}
-
-fn installed_bundle_repair_authorization_url(
-    origin: &Url,
-    generation: &str,
-) -> Result<String, AcquisitionFailure> {
-    origin
-        .join(&format!(
-            "api/probe/runtime-failures/{generation}/repair-authorize"
-        ))
-        .map(Into::into)
-        .map_err(|_| AcquisitionFailure::InvalidOrigin)
-}
-
 const MAX_METADATA_BYTES: usize = 256 * 1024;
 
 fn fetch_metadata(
@@ -1985,7 +1637,6 @@ fn create_exclusive_staging_file(staging_dir: &Path) -> Result<File, Acquisition
 mod tests {
     use super::*;
     use crate::verifier::VerificationPolicy;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     struct Root;
@@ -2425,109 +2076,6 @@ mod tests {
             AcquisitionFailure::Temporary {
                 retry_after_ms: Some(2_000)
             },
-        );
-    }
-
-    #[test]
-    fn installed_bundle_repair_stage_is_private_to_the_invoking_admin() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let temporary = tempfile::tempdir().expect("repair stage parent");
-        let stage_root = temporary.path().join("installed-bundle-repair-stage");
-
-        prepare_installed_bundle_repair_stage_at(&stage_root, 12345, 12346)
-            .expect("prepare repair stage");
-
-        let metadata = fs::symlink_metadata(&stage_root).expect("repair stage metadata");
-        assert!(metadata.is_dir());
-        assert_eq!(metadata.uid(), 12345);
-        assert_eq!(metadata.gid(), 12346);
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
-        assert!(!INSTALLED_BUNDLE_REPAIR_STAGE_ROOT.starts_with("/var/lib/enoki-probe/"));
-
-        fs::set_permissions(&stage_root, fs::Permissions::from_mode(0o1700))
-            .expect("special mode stage");
-        assert_eq!(
-            validate_stage_directory(&stage_root, 12345),
-            Err(AcquisitionFailure::Permanent)
-        );
-
-        fs::set_permissions(&stage_root, fs::Permissions::from_mode(0o700))
-            .expect("restore stage mode");
-        let operation = stage_root.join(".pending-repair-01");
-        fs::create_dir(&operation).expect("operation stage");
-        fs::set_permissions(&operation, fs::Permissions::from_mode(0o700)).expect("operation mode");
-        let payload = operation.join("manifest.json");
-        fs::write(&payload, b"manifest").expect("stage payload");
-        fs::set_permissions(&payload, fs::Permissions::from_mode(0o1600))
-            .expect("special payload mode");
-        for path in [&operation, &payload] {
-            let path = CString::new(path.as_os_str().as_bytes()).expect("stage path");
-            assert_eq!(unsafe { libc::chown(path.as_ptr(), 12345, 12346) }, 0);
-        }
-        assert_eq!(
-            validated_repair_operation_at(&stage_root, 12345, None, None),
-            Err(AcquisitionFailure::Permanent)
-        );
-        fs::set_permissions(&payload, fs::Permissions::from_mode(0o600))
-            .expect("restore payload mode");
-        assert_eq!(
-            validated_repair_operation_at(&stage_root, 12345, Some("repair-01"), None),
-            Err(AcquisitionFailure::Permanent)
-        );
-        prepare_installed_bundle_repair_stage_for_fresh_acquisition_at(&stage_root, 22345, 0)
-            .expect("validated orphan is retired before fresh custody");
-        let metadata = fs::symlink_metadata(&stage_root).expect("fresh repair stage");
-        assert_eq!(metadata.uid(), 22345);
-        assert_eq!(metadata.gid(), 0);
-    }
-
-    #[test]
-    fn installed_bundle_repair_acquisition_rejects_a_caller_working_directory() {
-        let result = acquire_installed_bundle_repair_once(ProbeUpgradeAcquisition {
-            hub_origin: "https://hub.example".to_owned(),
-            operation_id: "repair-01".to_owned(),
-            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
-            target_version: "1.2.3".to_owned(),
-        });
-
-        assert_eq!(result, Err(AcquisitionFailure::Permanent));
-    }
-
-    #[test]
-    fn retired_repair_stage_rechecks_its_fixed_parent_before_idempotent_success() {
-        let temporary = tempfile::tempdir().unwrap();
-        let parent = temporary.path().join("bootstrap-state");
-        fs::create_dir(&parent).unwrap();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
-        let root = parent.join("installed-bundle-repair-stage");
-        let parent_uid = unsafe { libc::geteuid() };
-
-        assert_eq!(
-            remove_verified_installed_bundle_repair_stage_at(&root, "repair-01", 12345, parent_uid),
-            Ok(())
-        );
-        fs::remove_dir(&parent).unwrap();
-        assert_eq!(
-            remove_verified_installed_bundle_repair_stage_at(&root, "repair-01", 12345, parent_uid),
-            Err(AcquisitionFailure::Local),
-            "an absent stage is resumable only after its fixed bootstrap parent can be synced"
-        );
-    }
-
-    #[test]
-    fn repair_authorization_uses_canonical_closed_hub_endpoints() {
-        let origin = exact_origin("https://hub.example").expect("canonical Hub origin");
-
-        assert_eq!(
-            failed_upgrade_repair_authorization_url(&origin, "upgrade-1")
-                .expect("Failed Upgrade Repair endpoint"),
-            "https://hub.example/api/probe/operations/upgrade-1/repair-authorize"
-        );
-        assert_eq!(
-            installed_bundle_repair_authorization_url(&origin, "generation-1")
-                .expect("Installed Bundle Failure Repair endpoint"),
-            "https://hub.example/api/probe/runtime-failures/generation-1/repair-authorize"
         );
     }
 }

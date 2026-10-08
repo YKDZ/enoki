@@ -13,14 +13,15 @@ mod filesystem;
 mod installed_layout;
 mod replacement_finalize;
 mod replacement_registration;
+mod state_root;
 mod systemd;
-pub(crate) mod transaction;
+mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
 mod upgrade;
 
 use crate::replacement::{
-    FileReplacementCommitStore, ReplacementCommitFact, ReplacementCommitStore,
-    ReplacementRegistrationBinding, ReplacementResumeBinding,
+    FileReplacementCommitStore, ReplacementCommitFact, ReplacementRegistrationBinding,
+    ReplacementResumeBinding,
 };
 use crate::{
     bundle_role::{
@@ -43,7 +44,6 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-#[allow(unused_imports)]
 use transaction::{ActivationLock, OwnedPath, TransactionJournal};
 
 pub(crate) use replacement_registration::retire_attempt_source as retire_replacement_registration_attempt_source;
@@ -51,8 +51,6 @@ pub(crate) use replacement_registration::retire_attempt_source as retire_replace
 const INSTALL_COMMAND_BUDGET: Duration = Duration::from_secs(90);
 const ROLLBACK_COMMAND_BUDGET: Duration = Duration::from_secs(30);
 const COMMAND_STEP_BUDGET: Duration = Duration::from_secs(15);
-
-use crate::activation::BootstrapInstallAdmission;
 
 const SERVICE_NAME: &str = "enoki-probe";
 const SERVICE_USER: &str = "enoki-probe";
@@ -65,15 +63,9 @@ const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const LIFECYCLE_COMPANION_BINARY: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 const STATE: &str = "/var/lib/enoki-probe";
-const PRIVATE_STATE: &str = "/var/lib/private/enoki-probe";
 const RUNTIME_FAILURE_EPOCH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const RUNTIME_FAILURE_LATCH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
 const RUNTIME_FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
-// Volatile synchronization only. This path deliberately lives outside every
-// durable Runtime-failure state directory so cleanup can never unlink the
-// inode while another recorder or typed consumer is waiting on it.
-const RUNTIME_FAILURE_LOCK: &str = "/run/enoki-probe/runtime-failure-pair.lock";
-const BOOT_ID: &str = "/run/enoki-probe/runtime-failure-boot-id";
 const IDENTITY_DIR: &str = "/var/lib/enoki-probe/identity";
 const IDENTITY: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
@@ -265,15 +257,6 @@ pub trait AccountPort {
         Ok(false)
     }
     fn owns_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<bool, InstallError> {
-        Ok(false)
-    }
-    fn fixed_ipc_group_is_harmless(&mut self, _group_name: &str) -> Result<bool, InstallError> {
-        Ok(false)
-    }
-    fn fixed_ipc_group_is_absent_or_harmless(
-        &mut self,
-        _group_name: &str,
-    ) -> Result<bool, InstallError> {
         Ok(false)
     }
     fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
@@ -476,12 +459,6 @@ impl FixedInstallPaths {
     fn runtime_failure_latch(&self) -> PathBuf {
         self.map(RUNTIME_FAILURE_LATCH)
     }
-    fn runtime_failure_lock(&self) -> PathBuf {
-        self.map(RUNTIME_FAILURE_LOCK)
-    }
-    fn boot_id(&self) -> PathBuf {
-        self.map(BOOT_ID)
-    }
     fn identity_dir(&self) -> PathBuf {
         self.map(IDENTITY_DIR)
     }
@@ -579,22 +556,6 @@ impl FixedInstallPaths {
         }
         observed
     }
-}
-
-#[cfg(feature = "deterministic-test-seams")]
-#[doc(hidden)]
-pub fn commit_current_layout_for_test(
-    root: impl Into<PathBuf>,
-    version: &str,
-) -> Result<(), InstallError> {
-    let paths = FixedInstallPaths::under_test_root(root);
-    let _activation_lock = ActivationLock::acquire(
-        &paths.bootstrap_state(),
-        paths.expected_root_uid(),
-        Instant::now() + INSTALL_COMMAND_BUDGET,
-    )?;
-    let mut journal = TransactionJournal::begin_with_binding(&paths.bootstrap_state(), None)?;
-    journal.commit_layout(&paths, version, false)
 }
 
 #[cfg(feature = "deterministic-test-seams")]
@@ -743,36 +704,18 @@ pub(crate) fn classify_committed_replacement_local_custody(
 
 /// Fresh 专属 coordinator：只接受普通新 Host Enrollment 与完整已验证角色集合。
 /// Replacement authority 在构造任何 account/filesystem/systemd effect 前关闭。
-#[allow(dead_code)]
-#[cfg(test)]
 pub(crate) fn coordinate_fresh_install(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
 ) -> Result<(), InstallError> {
-    coordinate_fresh_install_with_admission(
-        components,
-        enrollment,
-        bundle,
-        trust,
-        BootstrapInstallAdmission::independent_for_test(),
-    )
-}
-
-pub(crate) fn coordinate_fresh_install_with_admission(
-    components: VerifiedCompleteFreshComponents<'_>,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    admission: BootstrapInstallAdmission<'_>,
-) -> Result<(), InstallError> {
     let verified = verify_fresh_install(components, enrollment, bundle, trust)?;
     let paths = FixedInstallPaths::production();
     let mut accounts = SystemAccounts::default();
     let mut systemd = SystemSystemd::default();
     let mut files = SystemInstallFiles;
-    activate_verified_fresh_install_with_admission(
+    activate_verified_fresh_install(
         verified.components.probe,
         Some((
             verified.components.observation_runtime,
@@ -794,7 +737,6 @@ pub(crate) fn coordinate_fresh_install_with_admission(
             files: &mut files,
         },
         InstallFailureSemantics::FreshRollback,
-        admission,
     )
 }
 
@@ -828,7 +770,6 @@ fn verify_fresh_install<'a>(
 /// 因此候选激活失败时保留 durable journal，绝不调用普通 fresh-install rollback。
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(test), allow(dead_code))]
-#[cfg(test)]
 pub(crate) fn activate_complete_replacement_current_probe(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -848,13 +789,10 @@ pub(crate) fn activate_complete_replacement_current_probe(
         accounts,
         systemd,
         InstallFailureSemantics::CommittedReplacement(resume_binding),
-        BootstrapInstallAdmission::independent_for_test(),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
-#[cfg(test)]
 pub(crate) fn activate_complete_replacement_current_probe_with_registration(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -865,33 +803,6 @@ pub(crate) fn activate_complete_replacement_current_probe_with_registration(
     systemd: &mut impl SystemdPort,
     resume_binding: &ReplacementResumeBinding,
     registration_binding: &ReplacementRegistrationBinding,
-) -> Result<(), InstallError> {
-    activate_complete_replacement_current_probe_with_registration_and_admission(
-        components,
-        enrollment,
-        bundle,
-        trust,
-        paths,
-        accounts,
-        systemd,
-        resume_binding,
-        registration_binding,
-        BootstrapInstallAdmission::independent_for_test(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn activate_complete_replacement_current_probe_with_registration_and_admission(
-    components: VerifiedCompleteFreshComponents<'_>,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    accounts: &mut impl AccountPort,
-    systemd: &mut impl SystemdPort,
-    resume_binding: &ReplacementResumeBinding,
-    registration_binding: &ReplacementRegistrationBinding,
-    admission: BootstrapInstallAdmission<'_>,
 ) -> Result<(), InstallError> {
     activate_complete_replacement_current_probe_with_semantics(
         components,
@@ -905,7 +816,6 @@ pub(crate) fn activate_complete_replacement_current_probe_with_registration_and_
             registration: registration_binding,
             resume: resume_binding,
         },
-        admission,
     )
 }
 
@@ -919,10 +829,9 @@ fn activate_complete_replacement_current_probe_with_semantics<'a>(
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
     semantics: InstallFailureSemantics<'a>,
-    admission: BootstrapInstallAdmission<'_>,
 ) -> Result<(), InstallError> {
     let mut files = SystemInstallFiles;
-    activate_verified_install_layout_with_admission(
+    activate_verified_install_layout(
         components.probe,
         Some((
             components.observation_runtime,
@@ -944,7 +853,6 @@ fn activate_complete_replacement_current_probe_with_semantics<'a>(
             files: &mut files,
         },
         semantics,
-        admission,
     )
 }
 
@@ -983,79 +891,20 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
     commit_store: &mut FileReplacementCommitStore,
     systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
-    if !commit.has_valid_binding()
-        || commit.resume_binding() != *resume_binding
-        || commit_store
-            .load()
-            .map_err(|_| InstallError::ExistingResidue)?
-            .as_ref()
-            != Some(commit)
-    {
-        return Err(InstallError::ExistingResidue);
-    }
+    finalize_complete_replacement_current_probe(paths, resume_binding, bundle, commit)?;
     let registration_binding = commit
         .registration_binding()
         .ok_or(InstallError::ExistingResidue)?;
-    let mut retained_commit = commit.clone();
     replacement_registration::converge_registered_identity_to_canonical(
         paths,
         &registration_binding,
     )?;
     replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
-    let identity_sha256 = replacement_registration::canonical_identity_sha256(
-        paths,
-        &registration_binding,
-        retained_commit.canonical_identity_sha256().is_none(),
-    )?;
-    retained_commit
-        .bind_canonical_identity_sha256(identity_sha256.clone())
-        .map_err(|()| InstallError::ExistingResidue)?;
-    if retained_commit != *commit {
-        commit_store
-            .persist_identity_binding_exact(commit, &retained_commit)
-            .map_err(|_| InstallError::ExistingResidue)?;
-    }
-    if commit_store
-        .load()
-        .map_err(|_| InstallError::ExistingResidue)?
-        .as_ref()
-        != Some(&retained_commit)
-        || replacement_registration::canonical_identity_sha256(paths, &registration_binding, false)?
-            != identity_sha256
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
-    finalize_complete_replacement_current_probe(paths, resume_binding, bundle, &retained_commit)?;
-    retire_replacement_registration_attempt_source(paths)?;
-    if replacement_registration::canonical_identity_sha256(paths, &registration_binding, false)?
-        != identity_sha256
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
     systemd.restart_canonical()?;
+    retire_replacement_registration_attempt_source(paths)?;
     commit_store
-        .retire_exact(&retained_commit)
+        .retire_exact(commit)
         .map_err(|_| InstallError::ExistingResidue)
-}
-
-/// Read-only predecessor/successor correlation at the root finalizer boundary.
-/// A retained commit is not authority for a different Enrollment: only the
-/// terminal-recovery Enrollment bound to the canonical Probe identity produced
-/// by that commit may retire it before beginning its own activation.
-pub(crate) fn completed_replacement_predecessor_matches_current_enrollment(
-    paths: &FixedInstallPaths,
-    predecessor: &ReplacementRegistrationBinding,
-    enrollment: &crate::handoff::Enrollment,
-    bundle: &VerifiedBundle,
-) -> bool {
-    replacement_registration::completed_predecessor_matches_current_enrollment(
-        paths,
-        predecessor,
-        enrollment,
-        bundle,
-    )
 }
 
 struct BootstrapRolePath {
@@ -1097,8 +946,6 @@ fn validate_bootstrap_roles(paths: &FixedInstallPaths) -> Result<(), InstallErro
 // The closed activation boundary makes every authority-bearing dependency
 // explicit; none of these values are caller-selected role collections.
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
-#[cfg(test)]
 fn activate_verified_install_layout(
     component: &mut File,
     observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
@@ -1110,7 +957,9 @@ fn activate_verified_install_layout(
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
     failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
-    activate_verified_install_layout_with_admission(
+    let mut observation_components = observation_components;
+    verify_fresh_install_inputs(component, observation_components.as_mut(), bundle, trust)?;
+    activate_verified_fresh_install(
         component,
         observation_components,
         bootstrap_components,
@@ -1120,37 +969,29 @@ fn activate_verified_install_layout(
         paths,
         ports,
         failure_semantics,
-        BootstrapInstallAdmission::independent_for_test(),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn activate_verified_install_layout_with_admission(
-    component: &mut File,
-    observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
-    bootstrap_components: Option<(&mut File, &mut File)>,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-    failure_semantics: InstallFailureSemantics<'_>,
-    admission: BootstrapInstallAdmission<'_>,
-) -> Result<(), InstallError> {
-    let mut observation_components = observation_components;
-    verify_fresh_install_inputs(component, observation_components.as_mut(), bundle, trust)?;
-    activate_verified_fresh_install_with_admission(
-        component,
-        observation_components,
-        bootstrap_components,
-        enrollment,
-        bundle,
-        trust,
-        paths,
-        ports,
-        failure_semantics,
-        admission,
-    )
+/// fresh 没有旧内容删除授权：只接受已重新证明为空的固定 state 壳，在新 journal 之前
+/// 退壳，再继续原严格 preflight 与普通创建。非空旧数据或不可信形态一律拒绝且不接管。
+fn retire_proven_empty_state_shell(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    let Some(state_root) =
+        ProbeStateRoot::resolve(&paths.state()).map_err(state_root_admission_error)?
+    else {
+        return Ok(());
+    };
+    state_root
+        .remove_empty_shell()
+        .map_err(state_root_admission_error)
+}
+
+fn state_root_admission_error(error: ProbeStateRootError) -> InstallError {
+    match error {
+        ProbeStateRootError::Untrusted | ProbeStateRootError::HoldsData => {
+            InstallError::ExistingResidue
+        }
+        ProbeStateRootError::Io(_) => InstallError::Io,
+    }
 }
 
 fn verify_fresh_install_inputs(
@@ -1195,8 +1036,6 @@ fn verify_fresh_install_inputs(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
-#[cfg(test)]
 fn activate_verified_fresh_install(
     component: &mut File,
     observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
@@ -1208,35 +1047,12 @@ fn activate_verified_fresh_install(
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
     failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
-    activate_verified_fresh_install_with_admission(
-        component,
-        observation_components,
-        bootstrap_components,
-        enrollment,
-        bundle,
-        trust,
-        paths,
-        ports,
-        failure_semantics,
-        BootstrapInstallAdmission::independent_for_test(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn activate_verified_fresh_install_with_admission(
-    component: &mut File,
-    observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
-    bootstrap_components: Option<(&mut File, &mut File)>,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-    failure_semantics: InstallFailureSemantics<'_>,
-    admission: BootstrapInstallAdmission<'_>,
-) -> Result<(), InstallError> {
     let install_observation = observation_components.is_some();
-    let _activation_lease = admission.enter(&paths.bootstrap_state(), paths.expected_root_uid())?;
+    let _activation_lock = ActivationLock::acquire(
+        &paths.bootstrap_state(),
+        paths.expected_root_uid(),
+        Instant::now() + INSTALL_COMMAND_BUDGET,
+    )?;
     let resumed_journal = match recover_interrupted_install(paths, ports, failure_semantics)? {
         InterruptedInstall::Fresh => None,
         InterruptedInstall::ResumeCommitted(journal) => Some(*journal),
@@ -1245,7 +1061,8 @@ fn activate_verified_fresh_install_with_admission(
     let is_committed_resume = resumed_journal.is_some();
     if !is_committed_resume {
         preflight_parent_chains(paths)?;
-        preflight_files_with_empty_state_shell(paths, true)?;
+        retire_proven_empty_state_shell(paths)?;
+        preflight_files(paths)?;
         preflight_fixed_metadata_directory(&paths.etc_enoki())?;
         if bootstrap_components.is_some() {
             require_bootstrap_roles_absent(paths)?;
@@ -1259,10 +1076,6 @@ fn activate_verified_fresh_install_with_admission(
     if !is_committed_resume {
         ports.accounts.require_absent()?;
         ports.systemd.require_absent()?;
-        retire_empty_state_shell_for_fresh(paths)?;
-        #[cfg(test)]
-        recreate_state_shell_after_fresh_retirement_for_test(paths)?;
-        preflight_files(paths)?;
     }
 
     let mut journal = match resumed_journal {
@@ -1626,25 +1439,6 @@ fn activate_verified_fresh_install_with_admission(
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn recreate_state_shell_after_fresh_retirement_for_test(
-    paths: &FixedInstallPaths,
-) -> Result<(), InstallError> {
-    RECREATE_STATE_SHELL_AFTER_FRESH_RETIRE.with(|recreate| {
-        if !recreate.replace(false) {
-            return Ok(());
-        }
-        fs::create_dir(paths.state()).map_err(|_| InstallError::Io)?;
-        fs::set_permissions(paths.state(), fs::Permissions::from_mode(0o750))
-            .map_err(|_| InstallError::Io)
-    })
-}
-
 fn abort_prepared_install(
     cause: InstallError,
     journal: &TransactionJournal,
@@ -1880,23 +1674,11 @@ fn recover_interrupted_install(
                     .accounts
                     .remove_transaction_identity(journal.transaction_id(), identity),
             ),
-            Ok(false) => {
-                match ports
-                    .accounts
-                    .fixed_ipc_group_is_absent_or_harmless(PROBE_IPC_GROUP)
-                {
-                    Ok(true) => {}
-                    Ok(false) => failures.push(RollbackFailure::new(
-                        RollbackStep::RemoveServiceIdentity,
-                        InstallErrorKind::ExistingResidue,
-                    )),
-                    Err(error) => record_rollback(
-                        &mut failures,
-                        RollbackStep::RemoveServiceIdentity,
-                        Err(error),
-                    ),
-                }
-            }
+            Ok(false) if identity.is_some() => failures.push(RollbackFailure::new(
+                RollbackStep::RemoveServiceIdentity,
+                InstallErrorKind::ExistingResidue,
+            )),
+            Ok(false) => {}
             Err(error) => record_rollback(
                 &mut failures,
                 RollbackStep::RemoveServiceIdentity,
@@ -2095,7 +1877,7 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -2105,11 +1887,7 @@ fn lifecycle_companion_socket_unit() -> &'static str {
 
 fn lifecycle_companion_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nStandardError=journal\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nExecStopPost=/usr/bin/rm -f -- /run/enoki-probe/runtime-repair-permit\nTimeoutStartSec=90s\nRuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nReadOnlyPaths=/run/systemd/system\nBindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\nBindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe\n"
-    )
-    .replace(
-        " /run/enoki-probe\n",
-        " /run/enoki-probe /run/lock\n",
+        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nExecStopPost=/usr/bin/rm -f -- /run/enoki-probe/runtime-repair-permit\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /var/lib/enoki-probe-registration /run/enoki-probe /run/systemd/system/enoki-observation-runtime.service.d /run/systemd/system/enoki-observation-runtime.socket\n"
     )
 }
 
@@ -2119,11 +1897,7 @@ fn lifecycle_upgrade_socket_unit() -> &'static str {
 
 fn lifecycle_upgrade_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Upgrade Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nStandardError=journal\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade\nTimeoutStartSec=90s\nRuntimeDirectory=enoki-probe\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nBindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe\n"
-    )
-    .replace(
-        " /run/enoki-probe\n",
-        " /run/enoki-probe /run/lock\n",
+        "[Unit]\nDescription=Enoki Probe Upgrade Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap\n"
     )
 }
 
@@ -2139,7 +1913,7 @@ fn observation_runtime_unit() -> String {
 
 fn observation_runtime_failure_recorder_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Observation Runtime failure recorder\nRefuseManualStart=yes\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure\nTimeoutStartSec=15s\nStateDirectory=enoki-probe/runtime-failure\nStateDirectoryMode=0700\nRuntimeDirectory=enoki-probe\nRuntimeDirectoryMode=0700\nRuntimeDirectoryPreserve=yes\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_DAC_READ_SEARCH\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=64M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nReadOnlyPaths=/etc/enoki/probe-install.toml /var/lib/enoki-probe/identity/probe-bootstrap.toml /etc/systemd/system/enoki-observation-runtime.service /etc/systemd/system/enoki-observation-runtime-failure.service\nBindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id\nReadWritePaths=/var/lib/enoki-probe/runtime-failure /run/enoki-probe\n"
+        "[Unit]\nDescription=Enoki Observation Runtime failure recorder\nRefuseManualStart=yes\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure\nTimeoutStartSec=15s\nStateDirectory=enoki-probe/runtime-failure\nStateDirectoryMode=0700\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=64M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nReadOnlyPaths=/etc/enoki/probe-install.toml /var/lib/enoki-probe/identity/probe-bootstrap.toml /etc/systemd/system/enoki-observation-runtime.service /etc/systemd/system/enoki-observation-runtime-failure.service /proc/sys/kernel/random/boot_id\nReadWritePaths=/var/lib/enoki-probe/runtime-failure\n"
     )
 }
 
@@ -2259,20 +2033,20 @@ fn single_systemd_value(bytes: &[u8]) -> Result<&str, InstallError> {
 pub use account::SystemAccounts;
 #[cfg(test)]
 use account::create_static_service_identity_with_commands;
-pub use account::fixed_ipc_group_is_harmless_records;
 #[cfg(feature = "acquirer")]
 pub use compatible_upgrade::run_compatible_upgrade;
 use filesystem::*;
+pub use state_root::{ProbeStateRoot, ProbeStateRootError};
 pub use systemd::SystemSystemd;
 #[cfg(feature = "acquirer")]
 pub(crate) use upgrade::{
-    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeOperationFailure,
+    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
     abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     upgrade_current_probe_for_operation,
 };
 #[cfg(all(test, not(feature = "acquirer")))]
 use upgrade::{
-    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeOperationFailure,
+    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
     abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     upgrade_current_probe_for_operation,
 };

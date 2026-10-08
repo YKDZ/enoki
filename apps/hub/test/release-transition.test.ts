@@ -1,70 +1,32 @@
-import { mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { generateKeyPairSync, sign } from "node:crypto";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+  rename,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  createProbeTrustDelegation,
+  releaseTransitionContractSigningInput,
+} from "@enoki/probe-release";
 import { describe, expect, it } from "vitest";
 
-import { terminalReplacementRecovery } from "../src/enrollment/routes.js";
-import type { VerifiedReleaseTransition } from "../src/probe/asset-set.js";
-import { readVerifiedReleaseTransitionFromDirectory } from "../src/probe/release-transition.js";
-import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture.js";
+import {
+  readVerifiedReleaseTransitionFromDirectory,
+  releaseTransitionMetadataFileNames,
+  verifiedReleaseTransitionFromMetadata,
+} from "../src/probe/release-transition.js";
+import {
+  type TestProbeReleaseAuthority,
+  writeSignedProbeAssetSet,
+} from "./probe-release-transition-fixture.js";
 
 describe("verified Probe release transition", () => {
-  it("selects terminal recovery components only from the exact verified asset closure", () => {
-    const transition = {
-      classification: "replacement-required" as const,
-      sourceAssetSetDigest: `sha256:${"1".repeat(64)}`,
-      sourceProbeSha256: ["a", "b", "c", "d"].map((value) => value.repeat(64)),
-      sourceProbeVersion: "1.3.0",
-      targetAssetSetDigest: `sha256:${"2".repeat(64)}`,
-      targetProbeSha256: ["e", "f", "0", "9"].map((value) => value.repeat(64)),
-      targetProbeVersion: "1.4.0",
-    } satisfies VerifiedReleaseTransition;
-    const predecessor = {
-      enrollmentId: "enr_terminal",
-      targetAssetSetDigest: `sha256:${"2".repeat(64)}`,
-      targetProbeVersion: "1.4.0",
-    } as NonNullable<
-      Parameters<typeof terminalReplacementRecovery>[0]["predecessor"]
-    >;
-
-    expect(
-      terminalReplacementRecovery({
-        predecessor,
-        releaseTransition: transition,
-      }),
-    ).toMatchObject({ sourceProbeSha256: transition.targetProbeSha256 });
-    expect(
-      terminalReplacementRecovery({
-        predecessor: {
-          ...predecessor,
-          targetAssetSetDigest: transition.sourceAssetSetDigest,
-          targetProbeVersion: transition.sourceProbeVersion,
-        },
-        releaseTransition: transition,
-      }),
-    ).toMatchObject({ sourceProbeSha256: transition.sourceProbeSha256 });
-    expect(
-      terminalReplacementRecovery({
-        predecessor: {
-          ...predecessor,
-          targetAssetSetDigest: `sha256:${"3".repeat(64)}`,
-        },
-        releaseTransition: transition,
-      }),
-    ).toBeNull();
-    expect(
-      terminalReplacementRecovery({
-        predecessor: {
-          ...predecessor,
-          targetAssetSetDigest: `sha256:${"4".repeat(64)}`,
-          targetProbeVersion: transition.sourceProbeVersion,
-        },
-        releaseTransition: transition,
-      }),
-    ).toBeNull();
-  });
-
   it("reads the exact Trust Epoch migration closure as replacement-required", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
     const fixture = await writeSignedProbeAssetSet(assetDir, {
@@ -81,10 +43,8 @@ describe("verified Probe release transition", () => {
       }),
     ).resolves.toEqual({
       classification: "replacement-required",
-      sourceAssetSetDigest: fixture.sourceAssetSetDigest,
       sourceProbeSha256: fixture.sourceProbeSha256,
       sourceProbeVersion: "0.1.74",
-      targetProbeSha256: fixture.targetProbeSha256,
       targetAssetSetDigest: fixture.targetAssetSetDigest,
       targetBundles: fixture.targetBundles,
       targetProbeVersion: "1.4.0",
@@ -108,7 +68,7 @@ describe("verified Probe release transition", () => {
     ).resolves.toBeNull();
   });
 
-  it("reads a root-authorized compatible source-to-target transition", async () => {
+  it("reads a delegation-authorized compatible source-to-target transition", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
     const fixture = await writeSignedProbeAssetSet(assetDir, {
       sourceVersion: "1.3.0",
@@ -123,10 +83,8 @@ describe("verified Probe release transition", () => {
       }),
     ).resolves.toEqual({
       classification: "compatible",
-      sourceAssetSetDigest: fixture.sourceAssetSetDigest,
       sourceProbeSha256: [5, 6, 7, 8].map((value) => String(value).repeat(64)),
       sourceProbeVersion: "1.3.0",
-      targetProbeSha256: fixture.targetProbeSha256,
       targetAssetSetDigest: fixture.targetAssetSetDigest,
       targetBundles: fixture.targetBundles,
       targetProbeVersion: "1.4.0",
@@ -233,4 +191,328 @@ describe("verified Probe release transition", () => {
       }),
     ).rejects.toMatchObject({ code: "EMFILE" });
   });
+
+  it("projects the same transition through the metadata entry", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+
+    expect(
+      verifiedReleaseTransitionFromMetadata({
+        files: await readTransitionMetadata(assetDir),
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).toEqual(
+      await readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    );
+  });
+
+  it("rejects an incomplete metadata set", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    await rm(path.join(assetDir, "trust-delegation.json.sig"));
+
+    expect(
+      verifiedReleaseTransitionFromMetadata({
+        files: await readTransitionMetadata(assetDir),
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects a contract signature that does not match the delegated Probe signing identity", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const signatureFile = path.join(
+      assetDir,
+      "release-transition-contract.json.sig",
+    );
+    const signature = await readFile(signatureFile);
+    signature.writeUInt8(
+      signature.readUInt8(signature.byteLength - 1) ^ 1,
+      signature.byteLength - 1,
+    );
+    await writeFile(signatureFile, signature);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a target closure that does not match the served asset set", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const contract = await readContract(assetDir);
+    contract.target.assetClosure[0]!.sha256 = "f".repeat(64);
+    await writeResignedContract(assetDir, fixture.release, contract);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a transition contract that does not bind a candidate commit", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const contract = await readContract(assetDir);
+    delete contract.candidateCommit;
+    await writeResignedContract(assetDir, fixture.release, contract);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a delegation that authorizes a different signing identity", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const otherRelease = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const delegation = createProbeTrustDelegation({
+      distribution: "enoki",
+      generation: 3,
+      releasePublicKeyPem: otherRelease.publicKey.export({
+        format: "pem",
+        type: "spki",
+      }),
+      rootPrivateKeyPem: fixture.authority.privateKey,
+    });
+
+    await Promise.all([
+      writeFile(path.join(assetDir, "trust-delegation.json"), delegation.bytes),
+      writeFile(
+        path.join(assetDir, "trust-delegation.json.sig"),
+        delegation.signature,
+      ),
+    ]);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a migration contract without its one-time root authorization", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.74",
+      targetVersion: "1.4.0",
+      transition: "replacement-required",
+      trustEpoch: true,
+    });
+    await rm(path.join(assetDir, "trust-epoch-migration-authorization.json"));
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a migration contract when no authorization is configured", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.74",
+      targetVersion: "1.4.0",
+      transition: "replacement-required",
+      trustEpoch: true,
+    });
+    await Promise.all([
+      rm(path.join(assetDir, "trust-epoch-migration-authorization.json")),
+      rm(path.join(assetDir, "trust-epoch-migration-authorization.json.sig")),
+    ]);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects a migration authorization bound to a different legacy release", async () => {
+    const authority = testAuthority();
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const otherAssetDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-transition-"),
+    );
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      authority,
+      sourceVersion: "0.1.74",
+      targetVersion: "1.4.0",
+      transition: "replacement-required",
+      trustEpoch: true,
+    });
+    const other = await writeSignedProbeAssetSet(otherAssetDir, {
+      authority,
+      sourceVersion: "0.1.74",
+      targetVersion: "1.4.0",
+      transition: "replacement-required",
+      trustEpoch: true,
+    });
+
+    await Promise.all([
+      writeFile(
+        path.join(assetDir, "trust-epoch-migration-authorization.json"),
+        await readFile(
+          path.join(otherAssetDir, "trust-epoch-migration-authorization.json"),
+        ),
+      ),
+      writeFile(
+        path.join(assetDir, "trust-epoch-migration-authorization.json.sig"),
+        await readFile(
+          path.join(
+            otherAssetDir,
+            "trust-epoch-migration-authorization.json.sig",
+          ),
+        ),
+      ),
+    ]);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("rejects an ordinary contract that carries a migration authorization", async () => {
+    const authority = testAuthority();
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const migrationAssetDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-transition-"),
+    );
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      authority,
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    await writeSignedProbeAssetSet(migrationAssetDir, {
+      authority,
+      sourceVersion: "0.1.74",
+      targetVersion: "1.4.0",
+      transition: "replacement-required",
+      trustEpoch: true,
+    });
+
+    await Promise.all([
+      writeFile(
+        path.join(assetDir, "trust-epoch-migration-authorization.json"),
+        await readFile(
+          path.join(
+            migrationAssetDir,
+            "trust-epoch-migration-authorization.json",
+          ),
+        ),
+      ),
+      writeFile(
+        path.join(assetDir, "trust-epoch-migration-authorization.json.sig"),
+        await readFile(
+          path.join(
+            migrationAssetDir,
+            "trust-epoch-migration-authorization.json.sig",
+          ),
+        ),
+      ),
+    ]);
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
 });
+
+type TamperedContract = {
+  candidateCommit?: string;
+  target: { assetClosure: { sha256: string }[] };
+};
+
+async function readContract(assetDir: string): Promise<TamperedContract> {
+  const bytes = await readFile(
+    path.join(assetDir, "release-transition-contract.json"),
+    "utf8",
+  );
+  return JSON.parse(bytes) as TamperedContract;
+}
+
+async function readTransitionMetadata(assetDir: string) {
+  const entries = await Promise.all(
+    releaseTransitionMetadataFileNames.map(
+      async (fileName) =>
+        [
+          fileName,
+          await readFile(path.join(assetDir, fileName)).catch(() => null),
+        ] as const,
+    ),
+  );
+  return Object.fromEntries(entries);
+}
+
+function testAuthority(): TestProbeReleaseAuthority {
+  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    privateKey: pair.privateKey.export({ format: "pem", type: "pkcs8" }),
+    publicKey: pair.publicKey.export({ format: "pem", type: "spki" }),
+  };
+}
+
+async function writeResignedContract(
+  assetDir: string,
+  signingIdentity: TestProbeReleaseAuthority,
+  contract: TamperedContract,
+) {
+  const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
+  await Promise.all([
+    writeFile(path.join(assetDir, "release-transition-contract.json"), bytes),
+    writeFile(
+      path.join(assetDir, "release-transition-contract.json.sig"),
+      sign(
+        "RSA-SHA256",
+        releaseTransitionContractSigningInput(bytes),
+        signingIdentity.privateKey,
+      ),
+    ),
+  ]);
+}

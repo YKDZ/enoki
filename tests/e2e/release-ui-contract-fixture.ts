@@ -1,28 +1,9 @@
 export const sourceReleaseUiCandidateVersion = "0.2.0";
-const sourceE2eHubUrl = "http://127.0.0.1:38200";
-const sourceE2eProbeApiUrl = "http://127.0.0.1:38201";
-const sourceE2eOwnerPassword = "correct horse battery staple";
-
-type ReleaseUiEnvironment = Readonly<Record<string, string | undefined>>;
-
-export function releaseUiBrowserRuntime(
-  environment: ReleaseUiEnvironment = process.env,
-) {
-  const hubUrl = environment.ENOKI_RELEASE_UI_BASE_URL ?? sourceE2eHubUrl;
-  const probeApiUrl =
-    environment.ENOKI_RELEASE_UI_PROBE_API_URL ??
-    environment.ENOKI_RELEASE_UI_BASE_URL ??
-    sourceE2eProbeApiUrl;
-  return {
-    hubUrl: hubUrl.replace(/\/+$/, ""),
-    ownerPassword:
-      environment.ENOKI_RELEASE_UI_OWNER_PASSWORD ?? sourceE2eOwnerPassword,
-    probeApiUrl: probeApiUrl.replace(/\/+$/, ""),
-  };
-}
 
 export function releaseUiLifecycleVersions(
-  environment: ReleaseUiEnvironment = process.env,
+  environment: Readonly<{
+    ENOKI_RELEASE_UI_CANDIDATE_VERSION?: string;
+  }> = process.env,
 ) {
   const candidateVersion =
     environment.ENOKI_RELEASE_UI_CANDIDATE_VERSION ??

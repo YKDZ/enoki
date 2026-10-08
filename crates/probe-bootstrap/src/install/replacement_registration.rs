@@ -1,5 +1,5 @@
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 use std::{
     collections::HashSet,
     ffi::OsStr,
@@ -8,17 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::replacement::ReplacementRegistrationBinding;
 use crate::secure_file::{
-    PrivateAtomicFileCustody, SystemdProbeDirectory,
-    open_systemd_probe_state_projection_for_finalization,
-};
-use crate::{
-    handoff::Enrollment,
-    replacement::{
-        ReplacementRegistrationAttemptProof, ReplacementRegistrationBinding,
-        prove_replacement_registration_attempt_capsule,
-    },
-    verifier::VerifiedBundle,
+    SystemdProbeDirectory, open_systemd_probe_state_projection_for_finalization,
 };
 
 use super::{FixedInstallPaths, InstallError, installed_layout, upgrade};
@@ -94,7 +86,7 @@ pub(super) fn publish_drop_in(paths: &FixedInstallPaths) -> Result<(), InstallEr
 }
 
 pub(super) fn retire_drop_in(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    retire_transient_file(
+    retire_private_file(
         &paths.replacement_registration_drop_in(),
         paths.expected_root_uid(),
         paths.expected_root_gid(),
@@ -102,7 +94,7 @@ pub(super) fn retire_drop_in(paths: &FixedInstallPaths) -> Result<(), InstallErr
 }
 
 pub(crate) fn retire_attempt_source(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    retire_custodied_file(
+    retire_private_file(
         &paths.replacement_registration_attempt_source(),
         paths.expected_root_uid(),
         paths.expected_root_gid(),
@@ -142,66 +134,6 @@ pub(super) fn converge_registered_identity_to_canonical(
         .ok_or(InstallError::ExistingResidue)
 }
 
-/// Returns an exact digest of the already-canonical identity.  A legacy
-/// commit may establish this custody only while its root-private attempt
-/// capsule is still present; a bound commit can later prove the same bytes
-/// after the capsule has been retired.
-pub(super) fn canonical_identity_sha256(
-    paths: &FixedInstallPaths,
-    binding: &ReplacementRegistrationBinding,
-    require_attempt_capsule: bool,
-) -> Result<String, InstallError> {
-    let (identity, _) = read_identity(paths)?;
-    if !canonical_identity_matches_contents(paths, &identity, binding)
-        || (require_attempt_capsule && !matches!(read_attempt_proof(paths), Ok(Some(_))))
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    Ok(format!("{:x}", Sha256::digest(identity.as_bytes())))
-}
-
-/// Projects only the already-canonical registered identity and correlates it
-/// with the independent terminal-recovery Enrollment. This is intentionally a
-/// read-only guard: the caller must reject before finalizer cleanup can retire
-/// the predecessor's commit or attempt capsule.
-pub(super) fn completed_predecessor_matches_current_enrollment(
-    paths: &FixedInstallPaths,
-    predecessor: &ReplacementRegistrationBinding,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-) -> bool {
-    let Some(current) = enrollment.replacement_migration() else {
-        return false;
-    };
-    let Some((current_probe_sha256, _)) = bundle.component_receipt("probe") else {
-        return false;
-    };
-    if enrollment.hub_origin() != predecessor.hub_origin
-        || current.target_host_id() != predecessor.host_id
-        || current.source_probe_version() != predecessor.target_probe_version
-        || !current
-            .source_probe_sha256()
-            .iter()
-            .any(|digest| digest == current_probe_sha256)
-        || current.target_probe_version() != predecessor.target_probe_version
-        || current.target_asset_set_digest() != predecessor.target_asset_set_digest
-        || bundle.target != predecessor.target_bundle_target
-        || bundle.version != predecessor.target_probe_version
-        || format!("sha256:{}", bundle.asset_set_manifest_sha256)
-            != predecessor.target_asset_set_digest
-        || bundle.manifest_sha256 != predecessor.target_manifest_sha256
-    {
-        return false;
-    }
-    let Ok((identity, _)) = read_identity(paths) else {
-        return false;
-    };
-    if !canonical_identity_matches_contents(paths, &identity, predecessor) {
-        return false;
-    }
-    upgrade::metadata_string(&identity, "probe_id").as_deref() == Some(current.expected_probe_id())
-}
-
 pub(super) fn registered_identity_matches(
     paths: &FixedInstallPaths,
     binding: &ReplacementRegistrationBinding,
@@ -228,12 +160,30 @@ pub(super) fn registered_identity_matches(
     else {
         return false;
     };
-    let Ok(Some(proof)) = read_attempt_proof(paths) else {
+    let Ok(capsule) = installed_layout::trusted_text(
+        &paths.replacement_registration_attempt_source(),
+        paths.expected_root_uid(),
+        paths.expected_root_gid(),
+        0o600,
+    )
+    .and_then(|contents| {
+        serde_json::from_str::<ReplacementRegistrationAttemptReceipt>(&contents)
+            .map_err(|_| InstallError::ExistingResidue)
+    }) else {
         return false;
     };
     let value = |key| upgrade::metadata_string(&identity, key);
     let private_key = value("probe_private_key_pem");
-    proof.binding() == binding
+    capsule.schema_version == 1
+        && capsule.hub_origin.trim_end_matches('/') == binding.hub_origin.trim_end_matches('/')
+        && capsule.local_clock_reference_ms > 0
+        && valid_lower_sha256(&capsule.enrollment_token_sha256)
+        && valid_lower_sha256(&capsule.signed_attempt_sha256)
+        && !capsule.request_hex.is_empty()
+        && capsule
+            .request_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         && value("enrollment_token").is_none()
         && value("hub_url")
             .as_deref()
@@ -244,7 +194,7 @@ pub(super) fn registered_identity_matches(
         && value("probe_id")
             .is_some_and(|probe_id| !probe_id.is_empty() && probe_id != binding.old_probe_id)
         && private_key.as_deref().is_some_and(|pem| {
-            pem == proof.candidate_private_key_pem() && RsaPrivateKey::from_pkcs8_pem(pem).is_ok()
+            pem == capsule.candidate_private_key_pem && RsaPrivateKey::from_pkcs8_pem(pem).is_ok()
         })
         && value("registration_attempt_credential_path").as_deref() == Some(ATTEMPT_CREDENTIAL)
         && value("registration_committed_source_probe_sha256").as_deref()
@@ -258,7 +208,7 @@ pub(super) fn registered_identity_matches(
         && value("registration_source_probe_version").as_deref()
             == Some(binding.source_probe_version.as_str())
         && value("registration_signed_attempt_sha256").as_deref()
-            == Some(proof.signed_attempt_sha256())
+            == Some(capsule.signed_attempt_sha256.as_str())
         && value("registration_target_asset_set_digest").as_deref()
             == Some(binding.target_asset_set_digest.as_str())
         && value("registration_target_bundle_target").as_deref()
@@ -276,18 +226,10 @@ fn canonical_identity_matches(
     let Ok((identity, _)) = read_identity(paths) else {
         return false;
     };
-    canonical_identity_matches_contents(paths, &identity, binding)
-}
-
-fn canonical_identity_matches_contents(
-    paths: &FixedInstallPaths,
-    identity: &str,
-    binding: &ReplacementRegistrationBinding,
-) -> bool {
-    if registration_identity_shape(identity) != Ok(RegistrationIdentityShape::Canonical) {
+    if registration_identity_shape(&identity) != Ok(RegistrationIdentityShape::Canonical) {
         return false;
     }
-    let value = |key| upgrade::metadata_string(identity, key);
+    let value = |key| upgrade::metadata_string(&identity, key);
     let Some(private_key) = value("probe_private_key_pem") else {
         return false;
     };
@@ -305,10 +247,8 @@ fn canonical_identity_matches_contents(
         return false;
     }
 
-    match read_attempt_proof(paths) {
-        Ok(Some(proof)) => {
-            proof.binding() == binding && private_key == proof.candidate_private_key_pem()
-        }
+    match read_attempt_receipt(paths) {
+        Ok(Some(capsule)) => private_key == capsule.candidate_private_key_pem,
         Ok(None) => true,
         Err(()) => false,
     }
@@ -377,9 +317,9 @@ fn write_identity(
         .map_err(|_| InstallError::ExistingResidue)
 }
 
-fn read_attempt_proof(
+fn read_attempt_receipt(
     paths: &FixedInstallPaths,
-) -> Result<Option<ReplacementRegistrationAttemptProof>, ()> {
+) -> Result<Option<ReplacementRegistrationAttemptReceipt>, ()> {
     match fs::symlink_metadata(paths.replacement_registration_attempt_source()) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
@@ -389,11 +329,12 @@ fn read_attempt_proof(
             paths.expected_root_gid(),
             0o600,
         )
-        .map_err(|_| ())
         .and_then(|contents| {
-            prove_replacement_registration_attempt_capsule(contents.as_bytes()).map_err(|_| ())
+            serde_json::from_str::<ReplacementRegistrationAttemptReceipt>(&contents)
+                .map_err(|_| InstallError::ExistingResidue)
         })
-        .map(Some),
+        .map(Some)
+        .map_err(|_| ()),
     }
 }
 
@@ -461,25 +402,13 @@ pub(super) fn append_bootstrap_config(
     ));
 }
 
-fn retire_custodied_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallError> {
-    let custody = match PrivateAtomicFileCustody::open(path, 0o600, (uid, gid), uid) {
-        Ok(custody) => custody,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(InstallError::ExistingResidue),
-    };
-    custody
-        .remove()
-        .and_then(|()| custody.remove_empty_parent())
-        .map_err(|_| InstallError::ExistingResidue)
-}
-
-fn retire_transient_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallError> {
-    match crate::secure_file::remove_transient_private_file(path, 0o600, (uid, gid)) {
+fn retire_private_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallError> {
+    match crate::secure_file::remove_private_regular_file(path, 0o600, (uid, gid)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(InstallError::ExistingResidue),
     }
-    match crate::secure_file::retire_transient_atomic_write_residue(path, 0o600, (uid, gid)) {
+    match crate::secure_file::retire_replacement_atomic_write_residue(path, 0o600, (uid, gid)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(InstallError::ExistingResidue),
@@ -489,4 +418,23 @@ fn retire_transient_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallE
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(InstallError::ExistingResidue),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReplacementRegistrationAttemptReceipt {
+    candidate_private_key_pem: String,
+    enrollment_token_sha256: String,
+    hub_origin: String,
+    local_clock_reference_ms: u64,
+    request_hex: String,
+    schema_version: u8,
+    signed_attempt_sha256: String,
+}
+
+fn valid_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }

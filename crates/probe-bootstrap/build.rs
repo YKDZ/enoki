@@ -3,7 +3,6 @@ use std::{env, fs, path::PathBuf};
 use rsa::{
     RsaPublicKey,
     pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding},
-    traits::PublicKeyParts,
 };
 use sha2::{Digest, Sha256};
 
@@ -38,7 +37,6 @@ fn main() {
     }
 
     for variable in [
-        "ENOKI_BOOT_PROBE",
         "ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION",
         "ENOKI_BOOTSTRAP_BUILD_ROOT_PEM",
         "ENOKI_BOOTSTRAP_BUILD_ROLE",
@@ -62,8 +60,6 @@ fn main() {
         panic!("ENOKI_BOOTSTRAP_BUILD_VERSION must be a stable SemVer tag");
     }
     let role = required("ENOKI_BOOTSTRAP_BUILD_ROLE");
-    let boot_probe = env::var("ENOKI_BOOT_PROBE").as_deref() == Ok("1");
-    let companion_activator_trust = feature_enabled("CARGO_FEATURE_COMPANION_ACTIVATOR_TRUST");
     let role_variant = match role.as_str() {
         "acquirer"
             if feature_enabled("CARGO_FEATURE_ACQUIRER")
@@ -73,8 +69,7 @@ fn main() {
         }
         "activator"
             if feature_enabled("CARGO_FEATURE_ACTIVATOR")
-                && (!feature_enabled("CARGO_FEATURE_ACQUIRER")
-                    || (boot_probe && companion_activator_trust)) =>
+                && !feature_enabled("CARGO_FEATURE_ACQUIRER") =>
         {
             "BootstrapRole::Activator"
         }
@@ -84,10 +79,7 @@ fn main() {
     };
 
     let root = RsaPublicKey::from_public_key_pem(&required("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM"))
-        .unwrap_or_else(|_| panic!("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM must be an RSA-4096 SPKI PEM"));
-    if root.n().bits() != 4096 {
-        panic!("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM must be an RSA-4096 SPKI PEM");
-    }
+        .unwrap_or_else(|_| panic!("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM must be an RSA SPKI PEM"));
     let canonical_root = root
         .to_public_key_pem(LineEnding::LF)
         .expect("RSA SPKI PEM encoding");

@@ -44,7 +44,6 @@ use crate::{
 };
 use prost::Message;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
 type FinalizedObservationBatch = (
@@ -1025,115 +1024,23 @@ fn request_lifecycle_companion_at(
     socket_path: &std::path::Path,
     request: &LifecycleRequest,
 ) -> Result<LifecycleResponse, ()> {
-    let request_frame = match request.encode() {
-        Ok(frame) => frame,
-        Err(_) => {
-            lifecycle_probe_diagnostic("phase=request_encode outcome=error");
-            return Err(());
-        }
-    };
-    let mut stream = match UnixStream::connect(socket_path) {
-        Ok(stream) => {
-            lifecycle_probe_diagnostic("phase=connect outcome=ok");
-            stream
-        }
-        Err(error) => {
-            lifecycle_probe_diagnostic(&format!(
-                "phase=connect outcome=error {}",
-                lifecycle_io_error_summary(&error)
-            ));
-            return Err(());
-        }
-    };
-    if let Err(error) = stream.set_read_timeout(Some(Duration::from_secs(90))) {
-        lifecycle_probe_diagnostic(&format!(
-            "phase=read_timeout outcome=error {}",
-            lifecycle_io_error_summary(&error)
-        ));
-        return Err(());
-    }
-    if let Err(error) = stream.set_write_timeout(Some(Duration::from_secs(5))) {
-        lifecycle_probe_diagnostic(&format!(
-            "phase=write_timeout outcome=error {}",
-            lifecycle_io_error_summary(&error)
-        ));
-        return Err(());
-    }
-    if let Err(error) = stream.write_all(&request_frame) {
-        lifecycle_probe_diagnostic(&format!(
-            "phase=request_write outcome=error {}",
-            lifecycle_io_error_summary(&error)
-        ));
-        return Err(());
-    }
-    lifecycle_probe_diagnostic("phase=request_write outcome=ok");
-    if let Err(error) = stream.shutdown(Shutdown::Write) {
-        lifecycle_probe_diagnostic(&format!(
-            "phase=request_eof outcome=error {}",
-            lifecycle_io_error_summary(&error)
-        ));
-        return Err(());
-    }
-    lifecycle_probe_diagnostic("phase=request_eof outcome=ok");
+    let mut stream = UnixStream::connect(socket_path).map_err(|_| ())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(90)))
+        .map_err(|_| ())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ())?;
+    stream
+        .write_all(&request.encode().map_err(|_| ())?)
+        .map_err(|_| ())?;
+    stream.shutdown(Shutdown::Write).map_err(|_| ())?;
     let mut bytes = Vec::new();
-    if let Err(error) = stream
+    stream
         .take(MAX_LIFECYCLE_REQUEST_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-    {
-        lifecycle_probe_diagnostic(&format!(
-            "phase=response_read outcome=error {}",
-            lifecycle_io_error_summary(&error)
-        ));
-        return Err(());
-    }
-    lifecycle_probe_diagnostic(&format!(
-        "phase=response_eof outcome=ok bytes={} sha256={:x}",
-        bytes.len(),
-        Sha256::digest(&bytes)
-    ));
-    match LifecycleResponse::decode(&bytes) {
-        Ok(response) => {
-            lifecycle_probe_diagnostic("phase=response_decode outcome=ok");
-            Ok(response)
-        }
-        Err(_) => {
-            lifecycle_probe_diagnostic("phase=response_decode outcome=error");
-            Err(())
-        }
-    }
-}
-
-fn lifecycle_probe_diagnostic(event: &str) {
-    write_lifecycle_probe_diagnostic(&mut std::io::stderr(), event);
-}
-
-fn write_lifecycle_probe_diagnostic(writer: &mut impl Write, event: &str) {
-    let _ = writeln!(writer, "enoki.lifecycle.diagnostic role=probe {event}");
-}
-
-fn lifecycle_io_error_summary(error: &std::io::Error) -> String {
-    let class = match error.kind() {
-        std::io::ErrorKind::NotFound => "not_found",
-        std::io::ErrorKind::PermissionDenied => "permission_denied",
-        std::io::ErrorKind::ConnectionRefused => "connection_refused",
-        std::io::ErrorKind::ConnectionReset => "connection_reset",
-        std::io::ErrorKind::ConnectionAborted => "connection_aborted",
-        std::io::ErrorKind::NotConnected => "not_connected",
-        std::io::ErrorKind::BrokenPipe => "broken_pipe",
-        std::io::ErrorKind::AlreadyExists => "already_exists",
-        std::io::ErrorKind::WouldBlock => "would_block",
-        std::io::ErrorKind::InvalidInput => "invalid_input",
-        std::io::ErrorKind::InvalidData => "invalid_data",
-        std::io::ErrorKind::TimedOut => "timed_out",
-        std::io::ErrorKind::WriteZero => "write_zero",
-        std::io::ErrorKind::Interrupted => "interrupted",
-        std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
-        _ => "other",
-    };
-    match error.raw_os_error() {
-        Some(errno) => format!("class={class} errno={errno}"),
-        None => format!("class={class} errno=none"),
-    }
+        .map_err(|_| ())?;
+    LifecycleResponse::decode(&bytes).map_err(|_| ())
 }
 
 pub fn request_local_probe_uninstall() -> Result<(), &'static str> {
@@ -1568,15 +1475,19 @@ mod operation_report_tests {
 
     #[test]
     fn unavailable_companion_acknowledges_once_without_retrying_the_operation() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
         let response = ProbeReportResponse {
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_owned(),
             pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
                 id: "operation-01".to_owned(),
-                operation: Some(Operation::ProbeUninstall(
-                    crate::protocol::enoki::v1::ProbeUninstallOperation {
+                operation: Some(Operation::ProbeUpgrade(
+                    crate::protocol::enoki::v1::ProbeUpgradeOperation {
+                        current_probe_version: "0.1.0".to_owned(),
+                        host_id: "7".to_owned(),
                         operation_token: "operation-token".to_owned(),
+                        target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                        target_manifest_sha256: "a".repeat(64),
+                        target_probe_version: "0.2.0".to_owned(),
                     },
                 )),
             }),
@@ -1585,11 +1496,11 @@ mod operation_report_tests {
         };
         let mut queue = ProbeOperationReportQueue::default();
         let mut runner = LifecycleCompanionOperationRunner {
-            probe_id: Some("probe_01".to_owned()),
-            install_state_sha256: Some("a".repeat(64)),
-            target_manifest_sha256: Some("b".repeat(64)),
-            bundle_version: Some("1.2.3".to_owned()),
-            socket_path: temporary.path().join("missing.sock"),
+            probe_id: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
+            socket_path: PathBuf::from(LIFECYCLE_COMPANION_SOCKET),
             upgrade_socket_path: PathBuf::from(LIFECYCLE_UPGRADE_SOCKET),
             upgrade_acquisition: Box::new(DisabledProbeUpgradeAcquisition),
         };
@@ -1603,7 +1514,7 @@ mod operation_report_tests {
         assert!(matches!(
             statuses[0].status,
             Some(Status::Failed(ref failure))
-                if failure.error_code == "lifecycle.companion_unavailable"
+                if failure.error_code == "lifecycle.install_receipt_missing"
                     && failure.message == "The local Probe lifecycle operation failed."
         ));
     }

@@ -446,58 +446,6 @@ function openWebSocket(
   });
 }
 
-let webSocketBarrierSequence = 0;
-
-async function sendAndSynchronizeWebSocketInput(
-  socket: WebSocket,
-  message: {
-    hostId: number;
-    type: "subscribe_host_detail" | "unsubscribe_host_detail";
-  },
-) {
-  socket.send(JSON.stringify(message));
-
-  const barrier = Buffer.from(
-    `enoki-test-input-barrier-${webSocketBarrierSequence++}`,
-  );
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      socket.off("close", onClose);
-      socket.off("error", onError);
-      socket.off("pong", onPong);
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error("WebSocket closed before it processed test input."));
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const onPong = (data: Buffer) => {
-      if (!data.equals(barrier)) {
-        return;
-      }
-
-      cleanup();
-      resolve();
-    };
-
-    socket.on("close", onClose);
-    socket.on("error", onError);
-    socket.on("pong", onPong);
-
-    try {
-      // The ws server handles an ordered text message before its following
-      // ping, then auto-pongs. This proves the Hub consumed the input above.
-      socket.ping(barrier);
-    } catch (error) {
-      cleanup();
-      reject(error);
-    }
-  });
-}
-
 function readWebSocketJson(socket: WebSocket) {
   return new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -558,6 +506,7 @@ function collectWebSocketJson(
   options: {
     quietMs?: number;
     timeoutMs?: number;
+    waitForAction?: () => Promise<unknown>;
   } = {},
 ) {
   const quietMs = options.quietMs ?? 50;
@@ -566,6 +515,7 @@ function collectWebSocketJson(
   return new Promise<unknown[]>((resolve, reject) => {
     const messages: unknown[] = [];
     let quietTimer: NodeJS.Timeout | null = null;
+    let actionCompleted = options.waitForAction === undefined;
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for WebSocket messages."));
@@ -576,6 +526,13 @@ function collectWebSocketJson(
       }
 
       quietTimer = setTimeout(() => {
+        if (!actionCompleted) {
+          // 触发本次收集的报告请求仍在途，后续消息可能晚于
+          // 当前静默窗口到达，故此时不结算。
+          finishAfterQuiet();
+          return;
+        }
+
         cleanup();
         resolve(messages);
       }, quietMs);
@@ -600,76 +557,19 @@ function collectWebSocketJson(
 
     socket.on("message", onMessage);
     socket.on("error", onError);
-  });
-}
-
-type HostSummaryWithDiskHealth = {
-  host: {
-    collectorCapabilities: {
-      official: {
-        diskHealth: unknown;
-      };
-    };
-    probeUpgradeProblem: unknown;
-  };
-  type: "host_summary";
-};
-
-function isHostSummaryWithDiskHealth(
-  message: unknown,
-): message is HostSummaryWithDiskHealth {
-  if (
-    typeof message !== "object" ||
-    message === null ||
-    !(
-      "type" in message &&
-      message.type === "host_summary" &&
-      "host" in message &&
-      typeof message.host === "object" &&
-      message.host !== null &&
-      "collectorCapabilities" in message.host &&
-      typeof message.host.collectorCapabilities === "object" &&
-      message.host.collectorCapabilities !== null &&
-      "official" in message.host.collectorCapabilities &&
-      typeof message.host.collectorCapabilities.official === "object" &&
-      message.host.collectorCapabilities.official !== null
-    )
-  ) {
-    return false;
-  }
-
-  return "diskHealth" in message.host.collectorCapabilities.official;
-}
-
-function waitForHostSummaryWithDiskHealth(socket: WebSocket) {
-  return new Promise<HostSummaryWithDiskHealth>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(
-        new Error("Timed out waiting for a Host summary with disk health."),
-      );
-    }, 500);
-    const onMessage = (data: WebSocket.RawData) => {
-      const message = JSON.parse(data.toString()) as unknown;
-      if (!isHostSummaryWithDiskHealth(message)) {
-        return;
-      }
-
-      cleanup();
-      resolve(message);
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    const cleanup = () => {
-      clearTimeout(timeout);
-      socket.off("message", onMessage);
-      socket.off("error", onError);
-    };
-
-    socket.on("message", onMessage);
-    socket.on("error", onError);
+    if (options.waitForAction) {
+      void Promise.resolve()
+        .then(options.waitForAction)
+        .then(
+          () => {
+            actionCompleted = true;
+          },
+          (error: unknown) => {
+            cleanup();
+            reject(error);
+          },
+        );
+    }
   });
 }
 
@@ -1056,65 +956,77 @@ describe("WebSocket live updates", () => {
     const initialOverview = (await initialOverviewResponse.json()) as {
       hosts: Array<{ probeUpgradeProblem: unknown }>;
     };
-    const summaryAfterSnapshotReplay = waitForHostSummaryWithDiskHealth(socket);
-    await sendReport(baseUrl, registration, {
-      bootId: "boot-live-summary",
-      diskAvailable: false,
-      sequence: 2,
+    const receivedSummaries = await collectWebSocketJson(socket, {
+      waitForAction: () =>
+        sendReport(baseUrl, registration, {
+          bootId: "boot-live-summary",
+          diskAvailable: false,
+          sequence: 2,
+        }),
     });
-
-    const receivedSummary = await summaryAfterSnapshotReplay;
-    expect(receivedSummary).toEqual({
-      host: {
-        id: 1,
-        collectorCapabilities: {
-          official: {
-            diskHealth: {
-              diagnostic: "SMART data is unsupported",
-              status: 6,
+    expect(receivedSummaries).toEqual(
+      expect.arrayContaining([
+        {
+          host: {
+            id: 1,
+            collectorCapabilities: {
+              official: {
+                diskHealth: {
+                  diagnostic: "SMART data is unsupported",
+                  status: 6,
+                },
+              },
+            },
+            lastSeenAtMs: 1_725_000_010_000,
+            latestMetrics: {
+              batteryPercent: null,
+              batteryState: null,
+              collectedAtMs: 1_725_000_009_500,
+              cpuIdlePercent: null,
+              cpuIowaitPercent: null,
+              cpuPercent: 42.5,
+              cpuStealPercent: null,
+              cpuSystemPercent: null,
+              cpuUserPercent: null,
+              diskTotalBytes: 2_048,
+              diskUsedBytes: 1_536,
+              memoryCacheBytes: null,
+              memoryTotalBytes: 2_147_483_648,
+              memoryUsedBytes: 1_073_741_824,
+              networkRxBitsPerSecond: 6_400,
+              networkRxBytesDelta: 4_000,
+              networkTxBitsPerSecond: 3_200,
+              networkTxBytesDelta: 2_000,
+              receivedAtMs: 1_725_000_010_000,
+              swapTotalBytes: null,
+              swapUsedBytes: null,
+              temperatureCelsius: null,
+              uptimeSeconds: 86_400,
+            },
+            probeUpgradeProblem: { status: "in_progress" },
+            status: "online",
+            warningFlags: {
+              clockSkew: false,
+              probeConfigurationError: false,
             },
           },
+          type: "host_summary",
         },
-        lastSeenAtMs: 1_725_000_010_000,
-        latestMetrics: {
-          batteryPercent: null,
-          batteryState: null,
-          collectedAtMs: 1_725_000_009_500,
-          cpuIdlePercent: null,
-          cpuIowaitPercent: null,
-          cpuPercent: 42.5,
-          cpuStealPercent: null,
-          cpuSystemPercent: null,
-          cpuUserPercent: null,
-          diskTotalBytes: 2_048,
-          diskUsedBytes: 1_536,
-          memoryCacheBytes: null,
-          memoryTotalBytes: 2_147_483_648,
-          memoryUsedBytes: 1_073_741_824,
-          networkRxBitsPerSecond: 6_400,
-          networkRxBytesDelta: 4_000,
-          networkTxBitsPerSecond: 3_200,
-          networkTxBytesDelta: 2_000,
-          receivedAtMs: 1_725_000_010_000,
-          swapTotalBytes: null,
-          swapUsedBytes: null,
-          temperatureCelsius: null,
-          uptimeSeconds: 86_400,
-        },
-        probeUpgradeProblem: { status: "in_progress" },
-        status: "online",
-        warningFlags: {
-          clockSkew: false,
-          probeConfigurationError: false,
-        },
-      },
-      type: "host_summary",
-    });
-    expect(receivedSummary.host.probeUpgradeProblem).toEqual(
+      ]),
+    );
+    const activeLiveSummary = receivedSummaries.find(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "host" in message &&
+        (message.host as { probeUpgradeProblem?: unknown })
+          .probeUpgradeProblem !== undefined,
+    ) as { host: { probeUpgradeProblem: unknown } } | undefined;
+    expect(activeLiveSummary?.host.probeUpgradeProblem).toEqual(
       initialOverview.hosts[0]?.probeUpgradeProblem,
     );
-    expect(JSON.stringify(receivedSummary)).not.toContain("failureCode");
-    expect(JSON.stringify(receivedSummary)).not.toContain("failureMessage");
+    expect(JSON.stringify(receivedSummaries)).not.toContain("failureCode");
+    expect(JSON.stringify(receivedSummaries)).not.toContain("failureMessage");
 
     const currentOperation = database.probeOperations.findLatestForHost(1);
     expect(currentOperation).not.toBeNull();
@@ -1341,10 +1253,12 @@ describe("WebSocket live updates", () => {
     );
     const hostTwoRegistration = await registerProbe(baseUrl, hostTwoEnrollment);
 
-    await sendAndSynchronizeWebSocketInput(socket, {
-      hostId: 1,
-      type: "subscribe_host_detail",
-    });
+    socket.send(
+      JSON.stringify({
+        hostId: 1,
+        type: "subscribe_host_detail",
+      }),
+    );
     const hostOneMessages = collectWebSocketJson(socket);
     await sendReport(baseUrl, hostOneRegistration, {
       bootId: "boot-host-one",
@@ -1430,10 +1344,12 @@ describe("WebSocket live updates", () => {
       }),
     ]);
 
-    await sendAndSynchronizeWebSocketInput(socket, {
-      hostId: 1,
-      type: "unsubscribe_host_detail",
-    });
+    socket.send(
+      JSON.stringify({
+        hostId: 1,
+        type: "unsubscribe_host_detail",
+      }),
+    );
     const unsubscribedMessages = collectWebSocketJson(socket);
     await sendReport(baseUrl, hostOneRegistration, {
       bootId: "boot-host-one",
@@ -1470,36 +1386,40 @@ describe("WebSocket live updates", () => {
       bootId: "boot-profile-live",
     });
 
-    await sendAndSynchronizeWebSocketInput(socket, {
-      hostId: 1,
-      type: "subscribe_host_detail",
-    });
-    const messages = collectWebSocketJson(socket);
-    await sendReport(baseUrl, registration, {
-      bootId: "boot-profile-live",
-      hostProfile: {
-        architecture: "x86_64",
-        collectorCapabilities: {
-          official: {
-            diskHealth: { diagnostic: "", status: 1 },
+    socket.send(
+      JSON.stringify({
+        hostId: 1,
+        type: "subscribe_host_detail",
+      }),
+    );
+    const messages = collectWebSocketJson(socket, {
+      waitForAction: () =>
+        sendReport(baseUrl, registration, {
+          bootId: "boot-profile-live",
+          hostProfile: {
+            architecture: "x86_64",
+            collectorCapabilities: {
+              official: {
+                diskHealth: { diagnostic: "", status: 1 },
+              },
+            },
+            cpuCount: 4,
+            cpuModel: "AMD EPYC 7B13",
+            filesystems: [],
+            hostname: "profile-live-host",
+            kernel: "6.9.0",
+            memoryTotalBytes: 4_294_967_296,
+            networkInterfaces: [
+              {
+                addresses: ["10.0.0.20"],
+                name: "eth0",
+              },
+            ],
+            os: "linux",
+            probeVersion: "0.2.0",
           },
-        },
-        cpuCount: 4,
-        cpuModel: "AMD EPYC 7B13",
-        filesystems: [],
-        hostname: "profile-live-host",
-        kernel: "6.9.0",
-        memoryTotalBytes: 4_294_967_296,
-        networkInterfaces: [
-          {
-            addresses: ["10.0.0.20"],
-            name: "eth0",
-          },
-        ],
-        os: "linux",
-        probeVersion: "0.2.0",
-      },
-      sequence: 2,
+          sequence: 2,
+        }),
     });
 
     await expect(messages).resolves.toEqual(

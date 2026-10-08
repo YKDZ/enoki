@@ -120,7 +120,6 @@ export function renderInstallCommand(
   input: InstallCommandInput,
 ): InstallCommandResult {
   const hubUrl = config.probeApiOrigin ?? "http://localhost";
-  const bootstrapRecipe = config.bootstrapRecipe ?? developmentRecipeRecord;
   const enrollmentInput = input.replacementMigration
     ? JSON.stringify({
         hubOrigin: hubUrl,
@@ -130,7 +129,7 @@ export function renderInstallCommand(
       })
     : input.enrollmentToken;
   return {
-    bootstrapRecipe,
+    bootstrapRecipe: config.bootstrapRecipe ?? developmentRecipeRecord,
     hubUrl,
     installCommand: [
       "printf",

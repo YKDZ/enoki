@@ -681,25 +681,16 @@ export function createProbeOperationRoutes(
       return hostMetadataError("probe_operation_not_found", 404);
     }
 
-    const status = probeUpgradeStatus(
-      operation,
-      operation.kind === "probe_repair"
-        ? (services.probeOperations?.findBoundFailedUpgradeForRepair(
-            operation,
-          ) ?? null)
-        : null,
-    );
-
     return context.json({
       probeOperation: {
-        ...status,
-        failure:
-          operation.kind === "probe_uninstall" && operation.failureCode
-            ? {
-                code: operation.failureCode,
-                message: operation.failureMessage ?? "",
-              }
-            : status.failure,
+        ...probeUpgradeStatus(
+          operation,
+          operation.kind === "probe_repair"
+            ? (services.probeOperations?.findBoundFailedUpgradeForRepair(
+                operation,
+              ) ?? null)
+            : null,
+        ),
         hostId: operation.hostId,
         kind: operation.kind,
       },

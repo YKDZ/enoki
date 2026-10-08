@@ -1,0 +1,18 @@
+name: Set up the Enoki release tool runtime
+description: Install the declared production workspace dependency used by release workflow Node entry points.
+inputs:
+  directory:
+    description: Checked-out workspace directory containing package.json and pnpm-lock.yaml.
+    required: false
+    default: "."
+runs:
+  using: composite
+  steps:
+    - name: Enable the declared package manager
+      shell: bash
+      run: corepack enable
+
+    - name: Install the declared release tool dependencies
+      shell: bash
+      working-directory: ${{ inputs.directory }}
+      run: pnpm install --frozen-lockfile --prod --filter "enoki..." --filter "@enoki/proto..."

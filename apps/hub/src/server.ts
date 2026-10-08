@@ -69,12 +69,6 @@ try {
   const config = createHubRuntimeConfigFromEnvironment(process.env, { logger });
   const probeDistributionRootPublicKeyPem =
     await readProbeDistributionRootPublicKeyFromImage();
-  const probeAssets = {
-    ...config.probeAssets,
-    ...(probeDistributionRootPublicKeyPem
-      ? { trustedRootPublicKeyPem: probeDistributionRootPublicKeyPem }
-      : {}),
-  };
   database = initializeHubDatabase(config.database);
   const liveUpdates = createLiveUpdateBroadcaster();
   metricsArchiveScheduler = createMetricsArchiveScheduler({
@@ -106,7 +100,12 @@ try {
       logger,
       liveUpdates,
       port,
-      probeAssets,
+      probeAssets: {
+        ...config.probeAssets,
+        ...(probeDistributionRootPublicKeyPem
+          ? { trustedRootPublicKeyPem: probeDistributionRootPublicKeyPem }
+          : {}),
+      },
       probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
       probeOperations: config.probeOperations,
       probeApiOrigin: config.network.probeApiOrigin,
@@ -131,7 +130,7 @@ try {
       liveUpdates,
       logger,
       port: probePort,
-      probeAssets,
+      probeAssets: config.probeAssets,
       probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
       probeApiOrigin: config.network.probeApiOrigin,
       trustedProxyCidrs: config.network.trustedProxyCidrs,

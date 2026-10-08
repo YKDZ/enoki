@@ -52,6 +52,20 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
     return createOwnerEnrollment(context, services, installation, now, target);
   });
 
+  routes.post("/existing-host/:hostId", (context) => {
+    const hostId = Number(context.req.param("hostId"));
+    if (!Number.isInteger(hostId) || hostId <= 0) {
+      return context.json(
+        { error: "existing_host_reenrollment_unavailable" },
+        409,
+      );
+    }
+    return createOwnerEnrollment(context, services, installation, now, {
+      hostId,
+      kind: "existing_host",
+    });
+  });
+
   routes.post("/manual-reinstall/:hostId", async (context) => {
     const hostId = positiveInteger(context.req.param("hostId"));
     if (!hostId || !services.hosts) {
@@ -67,15 +81,6 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
           trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
         })
       : unavailableProbeReleaseContext();
-    const terminalPredecessor =
-      services.enrollments.terminalReplacementPredecessorForHost({
-        currentProbeId: host.probeId,
-        hostId,
-      });
-    const terminalRecovery = terminalReplacementRecovery({
-      predecessor: terminalPredecessor,
-      releaseTransition: releaseContext.releaseTransition,
-    });
     const policy = manualProbeReinstallPolicy({
       eligibility: evaluateProbeUpgradeEligibility({
         probeAssetSetVersion: releaseContext.assetSet.version,
@@ -95,34 +100,12 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       targetAssetSetDigest: releaseContext.assetSet.targetAssetSetDigest,
       targetProbeVersion: releaseContext.assetSet.version,
     });
-    if (!policy && !terminalRecovery) {
+    if (!policy) {
       return context.json({ error: "manual_reinstall_not_required" }, 409);
     }
     const expectedHubOrigin = installation.probeApiOrigin;
     if (!expectedHubOrigin) {
       return context.json({ error: "manual_reinstall_unavailable" }, 409);
-    }
-    if (terminalRecovery) {
-      return createOwnerEnrollment(context, services, installation, now, {
-        expectedHubOrigin,
-        expectedProbeId: host.probeId,
-        expectedProbeVersion: terminalRecovery.predecessor.targetProbeVersion,
-        hostId,
-        kind: "manual_reinstall",
-        replacementPredecessorAssetSetDigest:
-          terminalRecovery.predecessor.targetAssetSetDigest,
-        replacementPredecessorEnrollmentId:
-          terminalRecovery.predecessor.enrollmentId,
-        sourceProbeSha256: terminalRecovery.sourceProbeSha256,
-        targetBundles: releaseContext.releaseTransition!.targetBundles ?? [],
-        targetAssetSetDigest:
-          releaseContext.releaseTransition!.targetAssetSetDigest,
-        targetProbeVersion:
-          releaseContext.releaseTransition!.targetProbeVersion,
-      });
-    }
-    if (!policy) {
-      return context.json({ error: "manual_reinstall_not_required" }, 409);
     }
     return createOwnerEnrollment(context, services, installation, now, {
       expectedHubOrigin,
@@ -131,7 +114,6 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       hostId,
       kind: "manual_reinstall",
       sourceProbeSha256: policy.sourceProbeSha256,
-      targetBundles: releaseContext.releaseTransition?.targetBundles ?? [],
       targetAssetSetDigest: policy.targetAssetSetDigest,
       targetProbeVersion: policy.targetProbeVersion,
     });
@@ -286,30 +268,4 @@ function createEnrollmentId() {
 function positiveInteger(value: string) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-export function terminalReplacementRecovery(input: {
-  predecessor: ReturnType<
-    EnrollmentRepository["terminalReplacementPredecessorForHost"]
-  >;
-  releaseTransition: ReturnType<
-    typeof unavailableProbeReleaseContext
-  >["releaseTransition"];
-}) {
-  if (!input.predecessor || !input.releaseTransition) return null;
-  const sourceProbeSha256 =
-    input.predecessor.targetProbeVersion ===
-      input.releaseTransition.targetProbeVersion &&
-    input.predecessor.targetAssetSetDigest ===
-      input.releaseTransition.targetAssetSetDigest
-      ? input.releaseTransition.targetProbeSha256
-      : input.predecessor.targetProbeVersion ===
-            input.releaseTransition.sourceProbeVersion &&
-          input.predecessor.targetAssetSetDigest ===
-            input.releaseTransition.sourceAssetSetDigest
-        ? input.releaseTransition.sourceProbeSha256
-        : null;
-  return sourceProbeSha256?.length === 4
-    ? { predecessor: input.predecessor, sourceProbeSha256 }
-    : null;
 }

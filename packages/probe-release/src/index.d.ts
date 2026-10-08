@@ -28,6 +28,94 @@ export type ProbeTrustDelegation = {
   };
 };
 
+export type ReleaseTransitionClassification =
+  | "compatible"
+  | "replacement-required";
+
+export type ReleaseTransitionProbeComponent = Readonly<{
+  file: "enoki-probe";
+  role: "probe";
+  sha256: string;
+  target: string;
+}>;
+
+export type ReleaseTransitionTargetBundle = Readonly<{
+  bundleManifestSha256: string;
+  file: string;
+  sha256: string;
+  size: number;
+  target: string;
+}>;
+
+export type ReleaseTransitionContractTarget = Readonly<{
+  assetClosure: readonly ReleaseTransitionTargetBundle[];
+  assetSetManifestSha256: string;
+  delegationGeneration: number;
+  signingKeyId: string;
+  version: string;
+}>;
+
+export type ReleaseTransitionLegacyAsset = Readonly<{
+  name: string;
+  sha256: string;
+  size: number;
+}>;
+
+export type GenericReleaseTransitionContract = Readonly<{
+  candidateCommit: string;
+  distribution: string;
+  kind: "enoki-release-transition-contract";
+  rootKeyId: string;
+  schemaVersion: 1;
+  source: Readonly<{
+    probeComponents: readonly ReleaseTransitionProbeComponent[];
+    version: string;
+  }>;
+  target: ReleaseTransitionContractTarget;
+  transition: ReleaseTransitionClassification;
+}>;
+
+export type TrustEpochMigrationReleaseTransitionContract = Readonly<{
+  candidateCommit: string;
+  distribution: string;
+  kind: "enoki-release-transition-contract";
+  migrationAuthorizationSha256: string;
+  migrationGeneration: 1;
+  rootKeyId: string;
+  schemaVersion: 1;
+  source: Readonly<{
+    assets: readonly ReleaseTransitionLegacyAsset[];
+    commit: string;
+    hubDigest: string;
+    hubImage: string;
+    legacySigningKeySha256: string;
+    probeComponents: readonly ReleaseTransitionProbeComponent[];
+    releaseId: number;
+    repository: string;
+    tag: string;
+    tagRefSha: string;
+    targetCommitish: string;
+  }>;
+  target: ReleaseTransitionContractTarget;
+  transition: "replacement-required";
+}>;
+
+export type ReleaseTransitionContract =
+  | GenericReleaseTransitionContract
+  | TrustEpochMigrationReleaseTransitionContract;
+
+export type ReleaseTransitionContractExpectation = Readonly<{
+  candidateCommit?: string;
+  classification?: string;
+  delegationGeneration?: number;
+  sourceCommit?: string;
+  sourceTag?: string;
+  sourceVersion?: string;
+  targetAssetClosure?: readonly unknown[];
+  targetAssetSetManifestSha256?: string;
+  targetVersion?: unknown;
+}>;
+
 export type SignedDocument<T> = {
   bytes: Buffer;
   signature: Buffer;
@@ -38,38 +126,15 @@ export const probeBundleComponentProfiles: Readonly<
 >;
 export const probeBundledBootstrapAssets: readonly ProbeBundledBootstrapAsset[];
 export const probeTargets: readonly string[];
-export function inspectProbeBundleArchiveBytes(
-  archive: Buffer,
-  input: {
-    bundledBootstrap: { distribution: string; rootKeyId: string };
-    requireEmbeddedProbeIdentity?: boolean;
-    target: string;
-    version: string;
-  },
-): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
-export function inspectHistoricalProbeBundleArchiveBytes(
-  archive: Buffer,
-  input: {
-    bundledBootstrap?: { distribution: string; rootKeyId: string };
-    requireEmbeddedProbeIdentity?: boolean;
-    target: string;
-    version: string;
-  },
-): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
-export function inspectRuntimeProbeBundleArchiveBytes(
-  archive: Buffer,
-  input: {
-    requireEmbeddedProbeIdentity?: boolean;
-    target: string;
-    version: string;
-  },
-): Promise<{ bundleManifestSha256: string; probeSha256: string }>;
-export function readRegularFileSnapshot(
-  filePath: string,
-  label: string,
-  bounds: { expectedSize: number; maximumSize: number },
-): Promise<{ bytes: Buffer; size: number }>;
 
+export function inspectProbeElf(
+  binary: Buffer,
+  options: {
+    requireEmbeddedProbeIdentity?: boolean;
+    target: string;
+    version: string;
+  },
+): void;
 export function canonicalPublicKeyPem(value: string | Buffer): Buffer;
 export function createProbeTrustDelegation(input: {
   distribution: string;
@@ -88,18 +153,75 @@ export function verifyProbeTrustDelegation(input: {
   signature: Uint8Array;
 }): ProbeTrustDelegation;
 
+export type ReleaseTransitionLegacyRelease = Readonly<{
+  assets: readonly ReleaseTransitionLegacyAsset[];
+  githubRelease: Readonly<{
+    id: number;
+    peeledCommitSha: string;
+    repository: string;
+    tag: string;
+    tagRefSha: string;
+    targetCommitish: string;
+  }>;
+  hub: Readonly<{ digest: string; image: string }>;
+  legacySigningKeySha256: string;
+}>;
+
+type ReleaseTransitionContractCreationCommon = Readonly<{
+  candidateCommit: string;
+  delegationBytes: Uint8Array;
+  delegationSignature: Uint8Array;
+  distribution: string;
+  releasePrivateKeyPem: string | Buffer;
+  rootPublicKeyPem: string | Buffer;
+  targetManifestBytes: Uint8Array;
+  targetVersion: string;
+}>;
+
+export type GenericReleaseTransitionContractCreationInput =
+  ReleaseTransitionContractCreationCommon &
+    Readonly<{
+      authorizationBytes?: undefined;
+      authorizationSignature?: undefined;
+      legacyRelease?: undefined;
+      sourceAssetDir?: undefined;
+      sourceProbeComponents: readonly ReleaseTransitionProbeComponent[];
+      sourceVersion: string;
+      transition: ReleaseTransitionClassification;
+    }>;
+
+export type TrustEpochMigrationContractCreationInput =
+  ReleaseTransitionContractCreationCommon &
+    Readonly<{
+      authorizationBytes: Uint8Array;
+      authorizationSignature: Uint8Array;
+      legacyRelease: ReleaseTransitionLegacyRelease;
+      sourceAssetDir: string;
+    }>;
+
+export type ReleaseTransitionContractCreationInput =
+  | GenericReleaseTransitionContractCreationInput
+  | TrustEpochMigrationContractCreationInput;
+
 export function createReleaseTransitionContract(
-  input: Record<string, unknown>,
-): Promise<SignedDocument<{ contract: Record<string, unknown> }>>;
+  input: ReleaseTransitionContractCreationInput,
+): Promise<SignedDocument<{ contract: ReleaseTransitionContract }>>;
 export function verifyReleaseTransitionContract(
-  input: Record<string, unknown>,
-): Record<string, unknown>;
+  input: Readonly<{
+    authorizationBytes?: Uint8Array;
+    authorizationSignature?: Uint8Array;
+    contractBytes: Uint8Array;
+    contractSignature: Uint8Array;
+    delegationBytes: Uint8Array;
+    delegationSignature: Uint8Array;
+    expected?: ReleaseTransitionContractExpectation;
+    expectedDistribution: string;
+    rootPublicKeyPem: string | Buffer;
+  }>,
+): ReleaseTransitionContract;
 export function releaseTransitionContractSigningInput(
   bytes: Uint8Array,
 ): Buffer;
-export function preflightReleaseMigrationConfiguration(
-  input: Record<string, unknown>,
-): unknown;
 
 export function createTrustEpochMigrationAuthorization(input: {
   candidateVersion: string;

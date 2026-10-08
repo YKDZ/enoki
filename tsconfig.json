@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
+    "allowImportingTsExtensions": true,
     "lib": ["DOM", "DOM.Iterable", "ES2024"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
@@ -12,7 +13,7 @@
     "oxlint.config.ts",
     "playwright.candidate.config.ts",
     "playwright.config.ts",
-    "scripts/standard-ci-evidence.ts",
+    "scripts/**/*.ts",
     "tests/e2e/**/*.ts"
   ]
 }

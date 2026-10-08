@@ -14,19 +14,8 @@
     "//#lint": { "outputs": [] },
     "//#lint:fix": { "cache": false },
     "//#rust:check": { "cache": false, "outputs": [] },
-    "//#test:ci": {
-      "dependsOn": [
-        "@enoki/api-client#test",
-        "@enoki/hub#test",
-        "@enoki/proto#test",
-        "@enoki/web#test"
-      ],
-      "outputs": []
-    },
-    "//#test:e2e": {
-      "dependsOn": ["^build", "//#test:ci"],
-      "cache": false
-    },
+    "//#test": { "outputs": [] },
+    "//#test:e2e": { "dependsOn": ["^build"], "cache": false },
     "//#typecheck": { "outputs": [] },
     "build": {
       "dependsOn": ["^build"],
@@ -38,10 +27,6 @@
     "lint": { "outputs": [] },
     "lint:fix": { "cache": false },
     "test": {
-      "dependsOn": ["build"],
-      "outputs": []
-    },
-    "test:built": {
       "dependsOn": ["build"],
       "outputs": []
     },

@@ -1,17 +1,15 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
   createProbeTrustDelegation,
+  createReleaseTransitionContract,
   createTrustEpochMigrationAuthorization,
   probeTargets,
-  releaseTransitionContractSigningInput,
+  type ReleaseTransitionProbeComponent,
 } from "@enoki/probe-release";
-import {
-  createGenericReleaseTransitionContractFixture,
-  createSignedLegacyProbeAssetSetFixture,
-} from "@enoki/probe-release/test-fixture";
+import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 
 export type TestProbeReleaseAuthority = ReturnType<typeof testKeyPair>;
 
@@ -37,12 +35,6 @@ export async function writeSignedProbeAssetSet(
       : component,
   );
   const authority = input.authority ?? testKeyPair();
-  const targetProbeComponents = probeTargets.map((target, index) => ({
-    file: "enoki-probe",
-    role: "probe",
-    sha256: ["a", "b", "c", "d"][index]!.repeat(64),
-    target,
-  }));
   const release = testKeyPair();
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",
@@ -86,24 +78,26 @@ export async function writeSignedProbeAssetSet(
     ? await createTrustEpochMigrationFixture({
         authority,
         delegation,
+        release,
         manifest,
         targetVersion: input.targetVersion,
-        targetProbeComponents,
       })
     : null;
   const contract =
     trustEpoch?.contract ??
-    createGenericReleaseTransitionContractFixture({
-      authority,
-      manifest,
-      sourceVersion: input.sourceVersion,
-      transition: input.transition,
+    (await createReleaseTransitionContract({
+      candidateCommit: "a".repeat(40),
+      delegationBytes: delegation.bytes,
+      delegationSignature: delegation.signature,
+      distribution: "enoki",
+      releasePrivateKeyPem: release.privateKey,
+      rootPublicKeyPem: authority.publicKey,
       sourceProbeComponents,
-      targetProbeComponents,
-    });
-  const contractValue = JSON.parse(contract.bytes.toString("utf8")) as {
-    source: { assetSetManifestSha256: string };
-  };
+      sourceVersion: input.sourceVersion,
+      targetManifestBytes: manifest,
+      targetVersion: input.targetVersion,
+      transition: input.transition,
+    }));
 
   await Promise.all([
     writeFile(path.join(assetDir, "manifest.json"), manifest),
@@ -149,6 +143,7 @@ export async function writeSignedProbeAssetSet(
   ]);
 
   return {
+    release,
     authority,
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
@@ -159,28 +154,21 @@ export async function writeSignedProbeAssetSet(
     sourceProbeSha256: (
       trustEpoch?.sourceProbeComponents ?? sourceProbeComponents
     ).map(({ sha256 }: { sha256: string }) => sha256),
-    sourceAssetSetDigest: `sha256:${contractValue.source.assetSetManifestSha256}`,
-    targetProbeSha256: targetProbeComponents.map(({ sha256 }) => sha256),
   };
 }
 
 async function createTrustEpochMigrationFixture({
   authority,
   delegation,
+  release,
   manifest,
   targetVersion,
-  targetProbeComponents,
 }: {
   authority: TestProbeReleaseAuthority;
   delegation: ReturnType<typeof createProbeTrustDelegation>;
+  release: TestProbeReleaseAuthority;
   manifest: Buffer;
   targetVersion: string;
-  targetProbeComponents: Array<{
-    file: string;
-    role: string;
-    sha256: string;
-    target: string;
-  }>;
 }) {
   const sourceRelease = testKeyPair();
   const source = await createSignedLegacyProbeAssetSetFixture({
@@ -210,56 +198,22 @@ async function createTrustEpochMigrationFixture({
     rootPrivateKeyPem: authority.privateKey,
   });
   try {
-    const targetManifest = JSON.parse(manifest.toString("utf8")) as {
-      assets: unknown;
-      signature: { delegationGeneration: number; delegationKeyId: string };
-    };
-    const contract = {
-      candidateCommit: "a".repeat(40),
-      distribution: "enoki",
-      kind: "enoki-release-transition-contract",
-      migrationAuthorizationSha256: sha256(authorization.bytes),
-      migrationGeneration: 1,
-      rootKeyId: sha256(Buffer.from(authority.publicKey)),
-      schemaVersion: 1,
-      source: {
-        assetSetManifestSha256: sha256(
-          await readFile(path.join(source.assetDir, "manifest.json")),
-        ),
-        assets: legacyRelease.assets,
-        commit: legacyRelease.githubRelease.peeledCommitSha,
-        hubDigest: legacyRelease.hub.digest,
-        hubImage: legacyRelease.hub.image,
-        legacySigningKeySha256: legacyRelease.legacySigningKeySha256,
-        probeComponents: source.probeComponents,
-        releaseId: legacyRelease.githubRelease.id,
-        repository: legacyRelease.githubRelease.repository,
-        tag: legacyRelease.githubRelease.tag,
-        tagRefSha: legacyRelease.githubRelease.tagRefSha,
-        targetCommitish: legacyRelease.githubRelease.targetCommitish,
-      },
-      target: {
-        assetClosure: targetManifest.assets,
-        assetSetManifestSha256: sha256(manifest),
-        delegationGeneration: targetManifest.signature.delegationGeneration,
-        probeComponents: targetProbeComponents,
-        signingKeyId: targetManifest.signature.delegationKeyId,
-        version: targetVersion,
-      },
-      transition: "replacement-required",
-    };
-    const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
     return {
       authorization,
-      contract: {
-        bytes,
-        contract,
-        signature: sign(
-          "RSA-SHA256",
-          releaseTransitionContractSigningInput(bytes),
-          authority.privateKey,
-        ),
-      },
+      contract: await createReleaseTransitionContract({
+        authorizationBytes: authorization.bytes,
+        authorizationSignature: authorization.signature,
+        candidateCommit: "a".repeat(40),
+        delegationBytes: delegation.bytes,
+        delegationSignature: delegation.signature,
+        distribution: "enoki",
+        legacyRelease,
+        releasePrivateKeyPem: release.privateKey,
+        rootPublicKeyPem: authority.publicKey,
+        sourceAssetDir: source.assetDir,
+        targetManifestBytes: manifest,
+        targetVersion,
+      }),
       sourceProbeComponents: source.probeComponents,
     };
   } finally {
@@ -267,7 +221,7 @@ async function createTrustEpochMigrationFixture({
   }
 }
 
-function sourceProbeComponentFixture() {
+function sourceProbeComponentFixture(): ReleaseTransitionProbeComponent[] {
   return probeTargets.map((target, index) => ({
     file: "enoki-probe",
     role: "probe",
@@ -281,7 +235,7 @@ function sha256(value: Buffer) {
 }
 
 function testKeyPair() {
-  const pair = generateKeyPairSync("rsa", { modulusLength: 4096 });
+  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return {
     privateKey: pair.privateKey.export({ format: "pem", type: "pkcs8" }),
     publicKey: pair.publicKey.export({ format: "pem", type: "spki" }),

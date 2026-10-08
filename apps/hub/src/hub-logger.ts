@@ -344,6 +344,12 @@ export function hubRouteId(method: string, pathname: string): HubRouteId {
     return "web_audit_log";
   if (method === "POST" && pathname === "/api/web/enrollments")
     return "web_enrollments";
+  if (
+    method === "POST" &&
+    /^\/api\/web\/enrollments\/existing-host\/[^/]+$/.test(pathname)
+  ) {
+    return "web_enrollments";
+  }
   if (method === "GET" && /^\/api\/web\/enrollments\/[^/]+$/.test(pathname))
     return "web_enrollment";
   if (method === "GET" && pathname === "/api/web/hosts") return "web_hosts";
@@ -499,7 +505,7 @@ async function requestOutcome(response: Response) {
           return body.error;
         }
       } catch {
-        // malformed error response 仍取得有界 HTTP outcome。
+        // A malformed error response still receives the bounded HTTP outcome.
       }
     }
 

@@ -1,19 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-
-use crate::secure_file::PrivateAtomicFileCustody;
-
-mod registration_attempt;
-#[cfg(test)]
-pub(crate) use registration_attempt::mutate_signed_replacement_capsule_for_test;
-#[cfg(test)]
-pub(crate) use registration_attempt::signed_replacement_registration_attempt_capsule_for_test;
-pub use registration_attempt::{
-    ReplacementRegistrationAttemptError, validate_replacement_registration_attempt_capsule,
-};
-pub(crate) use registration_attempt::{
-    ReplacementRegistrationAttemptProof, prove_replacement_registration_attempt_capsule,
+use std::{
+    fs::{self, OpenOptions},
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Path, PathBuf},
 };
 
 const MAX_COMMIT_FACT_BYTES: u64 = 16 * 1024;
@@ -42,8 +33,6 @@ pub struct ReplacementCommitFact {
     pub intent: ReplacementIntent,
     pub cleanup_complete: bool,
     pub candidate_layout_complete: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_identity_sha256: Option<String>,
 }
 
 /// Probe Local Lifecycle kernel 只持有这个不透明绑定；Enrollment、身份与候选语义
@@ -117,39 +106,10 @@ impl ReplacementCommitFact {
             })
     }
 
+    #[cfg(feature = "activator")]
     pub(crate) fn has_valid_binding(&self) -> bool {
-        (matches!(
-            (
-                self.schema_version,
-                self.canonical_identity_sha256.as_deref()
-            ),
-            (1, None)
-        ) || matches!(
-            (self.schema_version, self.canonical_identity_sha256.as_deref()),
-            (2, Some(digest)) if valid_lower_sha256(digest)
-        )) && canonical_intent_sha256(&self.intent).ok().as_deref()
+        canonical_intent_sha256(&self.intent).ok().as_deref()
             == Some(self.canonical_intent_sha256.as_str())
-    }
-
-    #[cfg(feature = "activator")]
-    pub(crate) fn canonical_identity_sha256(&self) -> Option<&str> {
-        self.canonical_identity_sha256.as_deref()
-    }
-
-    #[cfg(feature = "activator")]
-    pub(crate) fn bind_canonical_identity_sha256(&mut self, digest: String) -> Result<(), ()> {
-        if !self.has_valid_binding()
-            || !valid_lower_sha256(&digest)
-            || self
-                .canonical_identity_sha256
-                .as_ref()
-                .is_some_and(|existing| existing != &digest)
-        {
-            return Err(());
-        }
-        self.schema_version = 2;
-        self.canonical_identity_sha256 = Some(digest);
-        Ok(())
     }
 
     #[cfg(all(test, feature = "activator"))]
@@ -164,7 +124,6 @@ impl ReplacementCommitFact {
             intent,
             cleanup_complete,
             candidate_layout_complete,
-            canonical_identity_sha256: None,
         }
     }
 }
@@ -205,7 +164,6 @@ where
 }
 
 pub struct FileReplacementCommitStore {
-    custody: Option<PrivateAtomicFileCustody>,
     path: PathBuf,
     expected_owner_gid: u32,
     expected_owner_uid: u32,
@@ -214,7 +172,6 @@ pub struct FileReplacementCommitStore {
 impl FileReplacementCommitStore {
     pub fn at(path: impl Into<PathBuf>, expected_owner_uid: u32) -> Self {
         Self {
-            custody: None,
             path: path.into(),
             expected_owner_gid: unsafe { libc::getegid() },
             expected_owner_uid,
@@ -225,15 +182,18 @@ impl FileReplacementCommitStore {
     /// 删除与目录 fsync 之间的中断可由相同 finalizer 幂等重放。
     #[cfg(feature = "activator")]
     pub(crate) fn retire_exact(&mut self, expected: &ReplacementCommitFact) -> std::io::Result<()> {
-        let custody = self.custody()?;
-        let actual = load_commit_fact(custody)?;
+        let actual = self.load()?;
         match actual {
             Some(actual)
                 if actual == *expected
                     && actual.cleanup_complete
                     && actual.candidate_layout_complete => {}
             None => {
-                return Ok(());
+                return crate::secure_file::retire_replacement_atomic_write_residue(
+                    &self.path,
+                    0o600,
+                    (self.expected_owner_uid, self.expected_owner_gid),
+                );
             }
             Some(_) => {
                 return Err(std::io::Error::new(
@@ -243,48 +203,20 @@ impl FileReplacementCommitStore {
             }
         }
 
-        custody.remove()
-    }
-
-    /// Deepens only the exact retained commit; a caller cannot overwrite a
-    /// different replacement fact while establishing identity custody.
-    #[cfg(feature = "activator")]
-    pub(crate) fn persist_identity_binding_exact(
-        &mut self,
-        expected: &ReplacementCommitFact,
-        bound: &ReplacementCommitFact,
-    ) -> std::io::Result<()> {
-        let custody = self.custody()?;
-        if load_commit_fact(custody)?.as_ref() != Some(expected)
-            || expected.schema_version != 1
-            || expected.canonical_identity_sha256.is_some()
-            || !expected.has_valid_binding()
-            || !bound.has_valid_binding()
-            || bound.schema_version != 2
-            || bound.canonical_identity_sha256.is_none()
-            || bound.intent != expected.intent
-            || bound.canonical_intent_sha256 != expected.canonical_intent_sha256
-            || bound.cleanup_complete != expected.cleanup_complete
-            || bound.candidate_layout_complete != expected.candidate_layout_complete
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "replacement commit changed before identity custody persisted",
-            ));
+        match crate::secure_file::remove_private_regular_file(
+            &self.path,
+            0o600,
+            (self.expected_owner_uid, self.expected_owner_gid),
+        ) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        persist_commit_fact(custody, bound)
-    }
-
-    fn custody(&mut self) -> std::io::Result<&PrivateAtomicFileCustody> {
-        if self.custody.is_none() {
-            self.custody = Some(PrivateAtomicFileCustody::open(
-                &self.path,
-                0o600,
-                (self.expected_owner_uid, self.expected_owner_gid),
-                self.expected_owner_uid,
-            )?);
-        }
-        Ok(self.custody.as_ref().expect("commit custody initialized"))
+        crate::secure_file::retire_replacement_atomic_write_residue(
+            &self.path,
+            0o600,
+            (self.expected_owner_uid, self.expected_owner_gid),
+        )
     }
 }
 
@@ -292,47 +224,82 @@ impl ReplacementCommitStore for FileReplacementCommitStore {
     type Error = std::io::Error;
 
     fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
-        load_commit_fact(self.custody()?)
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&self.path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.uid() != self.expected_owner_uid
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.len() > MAX_COMMIT_FACT_BYTES
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid replacement commit fact",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_COMMIT_FACT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement commit fact is too large",
+            ));
+        }
+        let fact: ReplacementCommitFact = serde_json::from_slice(&bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid replacement commit fact",
+            )
+        })?;
+        if fact.schema_version != 1
+            || canonical_intent_sha256(&fact.intent).ok().as_deref()
+                != Some(&fact.canonical_intent_sha256)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid replacement commit binding",
+            ));
+        }
+        Ok(Some(fact))
     }
 
     fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
-        persist_commit_fact(self.custody()?, fact)
+        let parent = self.path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing commit parent")
+        })?;
+        validate_private_parent(parent, self.expected_owner_uid)?;
+        let bytes = serde_json::to_vec(fact).map_err(std::io::Error::other)?;
+        if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "replacement commit fact is too large",
+            ));
+        }
+        crate::secure_file::atomic_write(&self.path, &bytes, 0o600, None)
     }
 }
 
-fn load_commit_fact(
-    custody: &PrivateAtomicFileCustody,
-) -> std::io::Result<Option<ReplacementCommitFact>> {
-    let Some(bytes) = custody.read_bounded(MAX_COMMIT_FACT_BYTES as usize)? else {
-        return Ok(None);
-    };
-    let fact: ReplacementCommitFact = serde_json::from_slice(&bytes).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid replacement commit fact",
-        )
-    })?;
-    if !fact.has_valid_binding() {
+fn validate_private_parent(path: &Path, expected_owner_uid: u32) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != expected_owner_uid
+        || metadata.mode() & 0o077 != 0
+    {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "invalid replacement commit binding",
+            std::io::ErrorKind::PermissionDenied,
+            "replacement commit parent is not root-private",
         ));
     }
-    Ok(Some(fact))
-}
-
-fn persist_commit_fact(
-    custody: &PrivateAtomicFileCustody,
-    fact: &ReplacementCommitFact,
-) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(fact).map_err(std::io::Error::other)?;
-    if bytes.len() as u64 > MAX_COMMIT_FACT_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "replacement commit fact is too large",
-        ));
-    }
-    custody.publish(&bytes)
+    Ok(())
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -355,11 +322,24 @@ where
         canonical_intent_sha256(&intent).map_err(|_| ReplacementCommitError::ConflictingCommit)?;
     let mut fact = match store.load().map_err(ReplacementCommitError::Store)? {
         Some(existing)
-            if existing.has_valid_binding()
+            if existing.schema_version == 1
                 && existing.canonical_intent_sha256 == digest
                 && existing.intent == intent =>
         {
             existing
+        }
+        Some(existing) if existing.candidate_layout_complete => {
+            let committed = ReplacementCommitFact {
+                schema_version: 1,
+                canonical_intent_sha256: digest,
+                intent,
+                cleanup_complete: false,
+                candidate_layout_complete: false,
+            };
+            store
+                .persist(&committed)
+                .map_err(ReplacementCommitError::Store)?;
+            committed
         }
         Some(_) => return Err(ReplacementCommitError::ConflictingCommit),
         None => {
@@ -369,7 +349,6 @@ where
                 intent,
                 cleanup_complete: false,
                 candidate_layout_complete: false,
-                canonical_identity_sha256: None,
             };
             store
                 .persist(&committed)
@@ -412,20 +391,10 @@ fn canonical_intent_sha256(intent: &ReplacementIntent) -> Result<String, serde_j
     serde_json::to_vec(intent).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn valid_lower_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
-    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     #[derive(Default)]
     struct Store {
@@ -550,28 +519,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_layout_does_not_authorize_a_different_replacement_commit() {
-        let mut store = Store::default();
-        let mut cleanup = Cleanup::default();
-        let committed = commit_and_cleanup_replacement(intent(), &mut store, &mut cleanup).unwrap();
-        record_replacement_candidate_layout(&mut store, &committed.canonical_intent_sha256)
-            .unwrap();
-        let mut different = intent();
-        different.enrollment_id.push_str("_new");
-        let mut replacement_cleanup = Cleanup::default();
-
-        assert_eq!(
-            commit_and_cleanup_replacement(different, &mut store, &mut replacement_cleanup),
-            Err(ReplacementCommitError::ConflictingCommit)
-        );
-        assert_eq!(replacement_cleanup.calls, 0);
-        assert_eq!(
-            store.load().unwrap().unwrap().canonical_intent_sha256,
-            committed.canonical_intent_sha256
-        );
-    }
-
-    #[test]
     fn filesystem_store_publishes_one_private_canonical_commit_fact() {
         let temporary = tempfile::tempdir().unwrap();
         fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -598,193 +545,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [std::ffi::OsString::from("replacement-migration.json")]
         );
-    }
-
-    #[cfg(feature = "activator")]
-    #[test]
-    fn commit_residue_never_authorizes_publish_or_cleanup() {
-        for residue in ["exact", "different", "malformed", "wrong-mode", "symlink"] {
-            let temporary = tempfile::tempdir().unwrap();
-            fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
-            let path = temporary.path().join("replacement-migration.json");
-            let residue_path = temporary
-                .path()
-                .join(".replacement-migration.json-enoki-write-123-1");
-            let expected = ReplacementCommitFact::for_test(intent(), false, false);
-            let residue_bytes = match residue {
-                "exact" => serde_json::to_vec(&expected).unwrap(),
-                "different" => serde_json::to_vec(&ReplacementCommitFact::for_test(
-                    {
-                        let mut intent = intent();
-                        intent.enrollment_id.push_str("_other");
-                        intent
-                    },
-                    false,
-                    false,
-                ))
-                .unwrap(),
-                "malformed" | "wrong-mode" => b"not a commit fact".to_vec(),
-                "symlink" => Vec::new(),
-                _ => unreachable!(),
-            };
-            if residue == "symlink" {
-                symlink(&path, &residue_path).unwrap();
-            } else {
-                fs::write(&residue_path, &residue_bytes).unwrap();
-                fs::set_permissions(
-                    &residue_path,
-                    fs::Permissions::from_mode(if residue == "wrong-mode" {
-                        0o644
-                    } else {
-                        0o600
-                    }),
-                )
-                .unwrap();
-            }
-            let mut store = FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() });
-            let mut cleanup = Cleanup::default();
-
-            assert!(
-                matches!(
-                    commit_and_cleanup_replacement(intent(), &mut store, &mut cleanup),
-                    Err(ReplacementCommitError::Store(_))
-                ),
-                "{residue} residue must fail before commit or cleanup"
-            );
-            assert_eq!(cleanup.calls, 0, "{residue} has zero cleanup effect");
-            assert!(!path.exists(), "{residue} cannot publish a commit");
-            if residue != "symlink" {
-                assert_eq!(fs::read(&residue_path).unwrap(), residue_bytes);
-            }
-        }
-    }
-
-    #[cfg(feature = "activator")]
-    #[test]
-    fn identity_custody_schema_only_upgrades_legacy_facts_with_a_valid_digest() {
-        let temporary = tempfile::tempdir().unwrap();
-        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let path = temporary.path().join("replacement-migration.json");
-        let mut store = FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() });
-        let mut legacy = ReplacementCommitFact::for_test(intent(), true, true);
-        store.persist(&legacy).unwrap();
-        assert_eq!(store.load().unwrap(), Some(legacy.clone()));
-
-        let mut upgraded = legacy.clone();
-        upgraded
-            .bind_canonical_identity_sha256("d".repeat(64))
-            .unwrap();
-        store.persist(&upgraded).unwrap();
-        assert_eq!(store.load().unwrap(), Some(upgraded));
-
-        let mut different_intent = intent();
-        different_intent.enrollment_id.push_str("_other");
-        let different = ReplacementCommitFact::for_test(different_intent, true, true);
-        store.persist(&different).unwrap();
-        let mut attempted_overwrite = legacy.clone();
-        attempted_overwrite
-            .bind_canonical_identity_sha256("d".repeat(64))
-            .unwrap();
-        assert!(
-            store
-                .persist_identity_binding_exact(&legacy, &attempted_overwrite)
-                .is_err()
-        );
-        assert_eq!(store.load().unwrap(), Some(different));
-
-        legacy.canonical_identity_sha256 = Some("d".repeat(64));
-        store.persist(&legacy).unwrap();
-        assert!(
-            store.load().is_err(),
-            "schema 1 cannot claim identity custody"
-        );
-
-        let mut malformed = ReplacementCommitFact::for_test(intent(), true, true);
-        malformed.schema_version = 2;
-        malformed.canonical_identity_sha256 = Some("not-a-digest".into());
-        store.persist(&malformed).unwrap();
-        assert!(
-            store.load().is_err(),
-            "malformed schema 2 custody fails closed"
-        );
-
-        let mut missing = ReplacementCommitFact::for_test(intent(), true, true);
-        missing.schema_version = 2;
-        store.persist(&missing).unwrap();
-        assert!(
-            store.load().is_err(),
-            "schema 2 requires durable identity custody"
-        );
-    }
-
-    #[cfg(feature = "activator")]
-    #[test]
-    fn identity_custody_cas_rejects_a_replaced_parent_namespace() {
-        if let Some(path) = std::env::var_os("ENOKI_TEST_REPLACEMENT_COMMIT_CAS_PATH") {
-            let path = PathBuf::from(path);
-            let legacy = ReplacementCommitFact::for_test(intent(), true, true);
-            let mut bound = legacy.clone();
-            bound
-                .bind_canonical_identity_sha256("d".repeat(64))
-                .unwrap();
-            FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() })
-                .persist_identity_binding_exact(&legacy, &bound)
-                .expect("exact schema 1 commit advances to identity custody");
-            return;
-        }
-
-        let temporary = tempfile::tempdir().unwrap();
-        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        let parent = temporary.path().join("commit-custody");
-        fs::create_dir(&parent).unwrap();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
-        let path = parent.join("replacement-migration.json");
-        let legacy = ReplacementCommitFact::for_test(intent(), true, true);
-        FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() })
-            .persist(&legacy)
-            .unwrap();
-        let legacy_bytes = fs::read(&path).unwrap();
-        let signal = temporary.path().join("commit-cas-scanned");
-        let resume = temporary.path().join("commit-cas-resume");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-        child
-            .args([
-                "--exact",
-                "replacement::tests::identity_custody_cas_rejects_a_replaced_parent_namespace",
-                "--nocapture",
-            ])
-            .env("ENOKI_TEST_REPLACEMENT_COMMIT_CAS_PATH", &path)
-            .env("ENOKI_TEST_PRIVATE_ATOMIC_PATH", &path)
-            .env("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL", &signal)
-            .env("ENOKI_TEST_PRIVATE_ATOMIC_RESUME", &resume);
-        let mut child = child.spawn().unwrap();
-        for _ in 0..2_000 {
-            if signal.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert!(signal.exists(), "schema CAS reached its first custody scan");
-
-        let original = temporary.path().join("commit-custody-original");
-        fs::rename(&parent, &original).unwrap();
-        fs::create_dir(&parent).unwrap();
-        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
-        let residue = parent.join("new-namespace-residue");
-        fs::write(&residue, b"new namespace commit custody").unwrap();
-        fs::write(&resume, b"resume").unwrap();
-
-        assert!(!child.wait().unwrap().success());
-        assert_eq!(
-            fs::read(original.join("replacement-migration.json")).unwrap(),
-            legacy_bytes,
-            "rejected CAS retains the exact schema 1 custody"
-        );
-        assert!(
-            !path.exists(),
-            "CAS cannot publish into the replacement namespace"
-        );
-        assert_eq!(fs::read(residue).unwrap(), b"new namespace commit custody");
     }
 
     #[cfg(feature = "activator")]

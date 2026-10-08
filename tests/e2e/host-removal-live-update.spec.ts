@@ -1,12 +1,10 @@
-import { type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-import {
-  closeFakeLiveWebSocket,
-  emitFakeLiveWebSocketMessage,
-  fakeLiveSocketGeneration,
-  installFakeLiveWebSocket,
-} from "./fake-live-websocket";
-import { expect, test } from "./security-console";
+declare global {
+  interface Window {
+    __enokiLiveSocketGeneration?: number;
+  }
+}
 
 test("removes a Host from open cards immediately and tolerates unrelated or duplicate hints", async ({
   page,
@@ -45,17 +43,62 @@ test("recovers a Host removal that occurs in the reconnect window from HTTP afte
   await expect(page.getByText("Realtime removal host")).toBeVisible();
 
   state.hosts = [];
-  await closeFakeLiveWebSocket(page);
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __enokiLiveSocket?: { close: () => void };
+      }
+    ).__enokiLiveSocket?.close();
+  });
 
   await expect(page.getByText("Realtime removal host")).toBeHidden({
     timeout: 3_000,
   });
-  await expect.poll(() => fakeLiveSocketGeneration(page)).toBeGreaterThan(1);
+  await expect
+    .poll(() => page.evaluate(() => window.__enokiLiveSocketGeneration ?? 0))
+    .toBeGreaterThan(1);
 });
 
 async function prepareLiveRemovalOverview(page: Page) {
   const state: { hosts: unknown[] } = { hosts: [removalHost()] };
-  await installFakeLiveWebSocket(page);
+  await page.addInitScript(() => {
+    class FakeWebSocket extends EventTarget {
+      static readonly CLOSED = 3;
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+
+      readyState = FakeWebSocket.OPEN;
+
+      constructor() {
+        super();
+        const liveWindow = window as typeof window & {
+          __enokiLiveSocket?: FakeWebSocket;
+          __enokiLiveSocketGeneration?: number;
+        };
+        liveWindow.__enokiLiveSocket = this;
+        liveWindow.__enokiLiveSocketGeneration =
+          (liveWindow.__enokiLiveSocketGeneration ?? 0) + 1;
+        setTimeout(() => this.dispatchEvent(new Event("open")), 0);
+      }
+
+      close() {
+        this.readyState = FakeWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+
+      emit(message: unknown) {
+        this.dispatchEvent(
+          new MessageEvent("message", {
+            data: JSON.stringify(message),
+          }),
+        );
+      }
+
+      send() {}
+    }
+
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  });
   await page.route("**/api/web/hosts", async (route) => {
     if (route.request().method() !== "GET") {
       await route.continue();
@@ -72,10 +115,16 @@ async function prepareLiveRemovalOverview(page: Page) {
 }
 
 async function emitHostRemoved(page: Page, hostId: number) {
-  await emitFakeLiveWebSocketMessage(page, {
-    hostId,
-    type: "host_removed",
-  });
+  await page.evaluate((removedHostId) => {
+    (
+      window as typeof window & {
+        __enokiLiveSocket?: { emit: (message: unknown) => void };
+      }
+    ).__enokiLiveSocket?.emit({
+      hostId: removedHostId,
+      type: "host_removed",
+    });
+  }, hostId);
 }
 
 function removalHost() {

@@ -781,12 +781,6 @@ fn require_absent(path: &Path) -> Result<(), InstallError> {
     }
 }
 
-fn sync_parent(path: &Path) -> Result<(), InstallError> {
-    File::open(path.parent().ok_or(InstallError::Io)?)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|_| InstallError::Io)
-}
-
 fn sync_trusted_journal_parent(path: &Path, expected_uid: u32) -> Result<(), InstallError> {
     let parent = path.parent().ok_or(InstallError::Io)?;
     let metadata = fs::symlink_metadata(parent).map_err(|_| InstallError::Io)?;
@@ -798,6 +792,12 @@ fn sync_trusted_journal_parent(path: &Path, expected_uid: u32) -> Result<(), Ins
         return Err(InstallError::ExistingResidue);
     }
     File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| InstallError::Io)
+}
+
+fn sync_parent(path: &Path) -> Result<(), InstallError> {
+    File::open(path.parent().ok_or(InstallError::Io)?)
         .and_then(|directory| directory.sync_all())
         .map_err(|_| InstallError::Io)
 }

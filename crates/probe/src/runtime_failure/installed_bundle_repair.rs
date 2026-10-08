@@ -3,9 +3,7 @@ use super::*;
 mod live;
 pub(crate) use live::{LiveInstalledBundleRepairError, drive_live_installed_bundle_repair};
 
-#[cfg(test)]
 pub(super) const OPERATION_STATUS_PATH: &str = "/var/lib/enoki-probe/probe-operation-status.toml";
-#[cfg(test)]
 pub(super) const REPAIR_INTENT_PATH: &str =
     "/var/lib/enoki-probe/runtime-failure/repair-intent.json";
 
@@ -75,9 +73,7 @@ impl InstalledBundleRepairGrant {
 
     pub fn persist_failure(&self, error_code: &str) -> Result<(), InstalledBundleRepairError> {
         let bytes = trusted_file(
-            &runtime_failure_paths(&self.root)
-                .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-                .repair_intent,
+            &rooted(&self.root, REPAIR_INTENT_PATH),
             self.expected_uid,
             0o600,
         )
@@ -111,29 +107,6 @@ impl InstalledBundleRepairGrant {
         stage_receipt: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
         stage_owner_uid: u32,
     ) -> Result<(), InstalledBundleRepairError> {
-        if stage_receipt.operation_id != self.authority.repair_operation_id
-            || stage_receipt.target_version != self.authority.bundle_version
-            || stage_receipt.target_manifest_sha256 != self.authority.manifest_sha256
-            || stage_receipt.target_asset_set_digest != self.authority.target_asset_set_digest
-        {
-            return Err(InstalledBundleRepairError::InvalidBoundary);
-        }
-        let _lock = acquire_runtime_failure_pair_lock_at(&self.root, self.expected_uid)
-            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-        let (epoch, _, _) = current_epoch_at_locked(&self.root, self.expected_uid)
-            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-        if epoch.generation != self.authority.generation
-            || runtime_failure_consumption_pending_at(
-                &self.root,
-                self.expected_uid,
-                &epoch.generation,
-            )
-            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-            || runtime_failure_creation_reserved_at(&self.root, self.expected_uid)
-                .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-        {
-            return Err(InstalledBundleRepairError::RecoveryPending);
-        }
         write_installed_bundle_repair_intent(
             &self.root,
             &InstalledBundleRepairIntent {
@@ -172,7 +145,7 @@ impl InstalledBundleRepairGrant {
 
     fn transition_intent(&self, state: InstalledBundleRepairProgress) -> std::io::Result<()> {
         let bytes = trusted_file(
-            &runtime_failure_paths(&self.root)?.repair_intent,
+            &rooted(&self.root, REPAIR_INTENT_PATH),
             self.expected_uid,
             0o600,
         )?;
@@ -437,16 +410,13 @@ pub(super) fn installed_bundle_failure_is_current_at(
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
 ) -> bool {
-    let Ok(_lock) = acquire_runtime_failure_pair_lock_at(root, expected_uid) else {
-        return false;
-    };
     if matches!(
-        resume_installed_bundle_repair_at_locked(root, expected_uid),
+        resume_installed_bundle_repair_at(root, expected_uid),
         Ok(Some(_))
     ) {
         return true;
     }
-    let Ok((epoch, _, _)) = current_epoch_at_locked(root, expected_uid) else {
+    let Ok((epoch, _)) = current_epoch_at(root, expected_uid) else {
         return false;
     };
     valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result).is_ok()
@@ -456,43 +426,9 @@ pub(super) fn resume_installed_bundle_repair_at(
     root: &Path,
     expected_uid: u32,
 ) -> Result<Option<ResumableInstalledBundleRepair>, InstalledBundleRepairError> {
-    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
-        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    resume_installed_bundle_repair_at_locked(root, expected_uid)
-}
-
-fn resume_installed_bundle_repair_at_locked(
-    root: &Path,
-    expected_uid: u32,
-) -> Result<Option<ResumableInstalledBundleRepair>, InstalledBundleRepairError> {
-    let Some(intent) = load_validated_installed_bundle_repair_intent_at(root, expected_uid)? else {
+    let path = rooted(root, REPAIR_INTENT_PATH);
+    if !path.exists() {
         return Ok(None);
-    };
-    Ok(Some(ResumableInstalledBundleRepair {
-        grant: InstalledBundleRepairGrant {
-            authority: intent.authority,
-            authority_signature: intent.authority_signature,
-            signed_evidence: intent.signed_evidence,
-            root: root.to_path_buf(),
-            expected_uid,
-        },
-        progress: intent.state,
-        stage_owner_uid: intent.stage_owner_uid,
-        stage_receipt: intent.stage_receipt,
-    }))
-}
-
-pub(super) fn load_validated_installed_bundle_repair_intent_at(
-    root: &Path,
-    expected_uid: u32,
-) -> Result<Option<InstalledBundleRepairIntent>, InstalledBundleRepairError> {
-    let path = runtime_failure_paths(root)
-        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-        .repair_intent;
-    match fs::symlink_metadata(&path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(InstalledBundleRepairError::RecoveryPending),
     }
     let bytes = trusted_file(&path, expected_uid, 0o600)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
@@ -509,7 +445,6 @@ pub(super) fn load_validated_installed_bundle_repair_intent_at(
         .and_then(|value| decode_lower_hex_32(&value))
         .ok_or(InstalledBundleRepairError::RecoveryPending)?;
     if intent.schema_version != 2
-        || decode_lower_hex_32(&intent.authority.generation).is_none()
         || !intent
             .signed_evidence
             .evidence
@@ -528,7 +463,18 @@ pub(super) fn load_validated_installed_bundle_repair_intent_at(
     {
         return Err(InstalledBundleRepairError::RecoveryPending);
     }
-    Ok(Some(intent))
+    Ok(Some(ResumableInstalledBundleRepair {
+        grant: InstalledBundleRepairGrant {
+            authority: intent.authority,
+            authority_signature: intent.authority_signature,
+            signed_evidence: intent.signed_evidence,
+            root: root.to_path_buf(),
+            expected_uid,
+        },
+        progress: intent.state,
+        stage_owner_uid: intent.stage_owner_uid,
+        stage_receipt: intent.stage_receipt,
+    }))
 }
 
 fn repair_generation_is_still_terminal(
@@ -539,20 +485,14 @@ fn repair_generation_is_still_terminal(
     if intent.state.is_forward_only() {
         return Ok(intent.authority.generation == intent.signed_evidence.evidence.generation);
     }
-    if let Ok((epoch, _, _)) = current_epoch_at_locked(root, expected_uid) {
+    if let Ok((epoch, _)) = current_epoch_at(root, expected_uid) {
         return Ok(intent.authority.generation == epoch.generation);
     }
     if intent.state != InstalledBundleRepairProgress::TemporaryRuntimeHealthy {
         return Ok(false);
     }
-    let latch = trusted_file(
-        &runtime_failure_paths(root)
-            .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-            .latch,
-        expected_uid,
-        0o600,
-    )
-    .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+    let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)
+        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     Ok(latch == intent.authority.generation.as_bytes())
 }
 
@@ -563,7 +503,7 @@ pub(super) fn write_installed_bundle_repair_intent(
     let bytes =
         serde_json::to_vec(intent).map_err(|_| std::io::Error::other("repair intent invalid"))?;
     atomic_write(
-        &runtime_failure_paths(root)?.repair_intent,
+        &rooted(root, REPAIR_INTENT_PATH),
         &bytes,
         0o600,
         Some((0, 0)),
@@ -575,11 +515,12 @@ pub(super) fn invalidate_installed_bundle_failure_at(
     expected_uid: u32,
     authority: &InstalledBundleRepairAuthorityV1,
 ) -> Result<(), InstalledBundleRepairError> {
-    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
+    let intent_path = rooted(root, REPAIR_INTENT_PATH);
+    let intent_bytes = trusted_file(&intent_path, expected_uid, 0o600)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    let mut intent = load_validated_installed_bundle_repair_intent_at(root, expected_uid)?
-        .ok_or(InstalledBundleRepairError::RecoveryPending)?;
-    if intent.authority != *authority {
+    let mut intent: InstalledBundleRepairIntent = serde_json::from_slice(&intent_bytes)
+        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+    if intent.schema_version != 2 || intent.authority != *authority {
         return Err(InstalledBundleRepairError::RecoveryPending);
     }
     if intent.state == InstalledBundleRepairProgress::ProbeActive {
@@ -589,12 +530,10 @@ pub(super) fn invalidate_installed_bundle_failure_at(
     } else if !intent.state.is_forward_only() {
         return Err(InstalledBundleRepairError::RecoveryPending);
     }
-    let paths =
-        runtime_failure_paths(root).map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    let epoch_path = paths.epoch;
+    let epoch_path = rooted(root, EPOCH_PATH);
     let generation_matches = if epoch_path.exists() {
-        current_epoch_at_locked(root, expected_uid)
-            .map(|(epoch, _, _)| epoch.generation == authority.generation)
+        current_epoch_at(root, expected_uid)
+            .map(|(epoch, _)| epoch.generation == authority.generation)
             .unwrap_or(false)
     } else {
         intent.state.is_forward_only()
@@ -609,19 +548,7 @@ pub(super) fn invalidate_installed_bundle_failure_at(
             .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     }
     if intent.state == InstalledBundleRepairProgress::EpochRemoved {
-        let latch_path = paths.latch;
-        match fs::symlink_metadata(&latch_path) {
-            Ok(_) => {
-                let latch = trusted_file(&latch_path, expected_uid, 0o600)
-                    .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-                if latch != authority.generation.as_bytes() {
-                    return Err(InstalledBundleRepairError::RecoveryPending);
-                }
-                remove_regular_file_if_present(&latch_path, 0o600, expected_uid)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err(InstalledBundleRepairError::RecoveryPending),
-        }
+        remove_regular_file_if_present(&rooted(root, LATCH_PATH), 0o600, expected_uid)?;
         intent.state = InstalledBundleRepairProgress::LatchRemoved;
         write_installed_bundle_repair_intent(root, &intent)
             .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
@@ -634,9 +561,7 @@ pub(super) fn publish_installed_bundle_repair_success_at(
     expected_uid: u32,
     authority: &InstalledBundleRepairAuthorityV1,
 ) -> Result<(String, String), InstalledBundleRepairError> {
-    let intent_path = runtime_failure_paths(root)
-        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-        .repair_intent;
+    let intent_path = rooted(root, REPAIR_INTENT_PATH);
     let intent_bytes = trusted_file(&intent_path, expected_uid, 0o600)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     let mut intent: InstalledBundleRepairIntent = serde_json::from_slice(&intent_bytes)
@@ -663,9 +588,7 @@ pub(super) fn finish_installed_bundle_repair_success_at(
     expected_uid: u32,
     authority: &InstalledBundleRepairAuthorityV1,
 ) -> Result<(), InstalledBundleRepairError> {
-    let intent_path = runtime_failure_paths(root)
-        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?
-        .repair_intent;
+    let intent_path = rooted(root, REPAIR_INTENT_PATH);
     let intent_bytes = trusted_file(&intent_path, expected_uid, 0o600)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     let intent: InstalledBundleRepairIntent = serde_json::from_slice(&intent_bytes)
@@ -735,7 +658,7 @@ pub(super) fn write_installed_bundle_repair_status(
     }
     .encode();
     atomic_write(
-        &runtime_failure_paths(root)?.operation_status,
+        &rooted(root, OPERATION_STATUS_PATH),
         contents.as_bytes(),
         0o644,
         Some((unsafe { libc::geteuid() }, unsafe { libc::getegid() })),

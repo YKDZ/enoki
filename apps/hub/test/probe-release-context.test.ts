@@ -39,7 +39,6 @@ describe("Probe release context", () => {
       },
       releaseTransition: {
         classification: "compatible",
-        sourceAssetSetDigest: fixture.sourceAssetSetDigest,
         sourceProbeSha256: [5, 6, 7, 8].map((value) =>
           String(value).repeat(64),
         ),
@@ -54,9 +53,6 @@ describe("Probe release context", () => {
           bundleManifestSha256: String(index + 1).repeat(64),
           target,
         })),
-        targetProbeSha256: ["a", "b", "c", "d"].map((value) =>
-          value.repeat(64),
-        ),
         targetProbeVersion: "1.4.0",
       },
     });

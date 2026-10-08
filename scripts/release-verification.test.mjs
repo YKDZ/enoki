@@ -1,19 +1,24 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { createProbeHostHarness } from "./release-e2e-lib.mjs";
+import { standardCiJobNames } from "./release-ci-evidence.ts";
+import { createProbeHostHarness } from "./release-e2e-orchestration.ts";
+import {
+  hostProfileCollectorId,
+  probeRepairLocalCompletionOutput,
+} from "./release-repair-closure-evidence.ts";
 import {
   createMatrixGateResult as createMatrixGateResultFromManifest,
   createReleaseVerificationSummary,
   createUiGateResult,
   renderReleaseVerificationEvidenceMarkdown,
-} from "./release-verification-lib.mjs";
+} from "./release-verification-lib.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -69,48 +74,25 @@ describe("verify-only release workflow", () => {
   });
 
   it("keeps every private artifact handoff run-scoped and resumable across failed-job attempts", async () => {
-    const [
-      bootstrapWorkflow,
-      candidateWorkflow,
-      probeWorkflow,
-      publicationWorkflow,
-    ] = await Promise.all([
-      readFile(".github/workflows/reusable-build-probe-bootstrap.yml", "utf8"),
-      readFile(
-        ".github/workflows/reusable-build-release-candidate.yml",
-        "utf8",
-      ),
-      readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
-      readFile(
-        ".github/workflows/reusable-publish-release-candidate.yml",
-        "utf8",
-      ),
-    ]);
+    const [candidateWorkflow, probeWorkflow, publicationWorkflow] =
+      await Promise.all([
+        readFile(
+          ".github/workflows/reusable-build-release-candidate.yml",
+          "utf8",
+        ),
+        readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
+        readFile(
+          ".github/workflows/reusable-publish-release-candidate.yml",
+          "utf8",
+        ),
+      ]);
     const run = "${{ github.run_id }}";
 
     expect(probeWorkflow).toContain(
       `name: enoki-probe-${"${{ matrix.target }}"}-${run}`,
     );
-    expect(bootstrapWorkflow).toContain(
-      `name: enoki-probe-bootstrap-${"${{ matrix.target }}"}-${run}`,
-    );
     expect(probeWorkflow).toContain("overwrite: true");
-    const targets = [
-      "x86_64-unknown-linux-musl",
-      "aarch64-unknown-linux-musl",
-      "x86_64-unknown-linux-gnu",
-      "aarch64-unknown-linux-gnu",
-    ];
-    for (const target of targets) {
-      expect(candidateWorkflow).toContain(`name: enoki-probe-${target}-${run}`);
-      expect(candidateWorkflow).toContain(
-        `name: enoki-probe-bootstrap-${target}-${run}`,
-      );
-    }
-    expect(candidateWorkflow).not.toContain(`pattern: enoki-probe-*-${run}`);
-    expect(candidateWorkflow).not.toContain(
-      `pattern: enoki-probe-bootstrap-*-${run}`,
-    );
+    expect(candidateWorkflow).toContain(`pattern: enoki-probe-*-${run}`);
     for (const name of [
       "candidate-release-baseline",
       "candidate-unsigned-probe-assets",
@@ -182,8 +164,8 @@ describe("verify-only release workflow", () => {
     expect(workflow).toContain("record-ui-gate");
     expect(workflow).toContain("  finalize-verification:");
     expect(workflow).toContain("if: ${{ always() }}");
-    expect(workflow).toContain("release-verification.mjs summarize");
-    expect(workflow).toContain("release-verification.mjs assert-verified");
+    expect(workflow).toContain("release-verification.ts summarize");
+    expect(workflow).toContain("release-verification.ts assert-verified");
     expect(workflow).toContain("release-verification-summary.json");
     expect(workflow).toContain("$GITHUB_STEP_SUMMARY");
     expect(workflow).toContain("pattern: release-e2e-*");
@@ -275,7 +257,7 @@ describe("verify-only release workflow", () => {
       outcome: "succeeded",
     };
 
-    const validSummaryInput = {
+    const summary = createReleaseVerificationSummary({
       artifactIndex: releaseArtifactIndex(hostGates, uiGate),
       candidateManifest,
       gateResults: {
@@ -293,8 +275,7 @@ describe("verify-only release workflow", () => {
       },
       standardCi: standardCiEvidence(candidateManifest.candidate),
       uiGate,
-    };
-    const summary = createReleaseVerificationSummary(validSummaryInput);
+    });
 
     expect(summary).toMatchObject({
       candidate: candidateManifest.candidate,
@@ -326,30 +307,6 @@ describe("verify-only release workflow", () => {
       "https://github.com/YKDZ/enoki/actions/runs/12345/artifacts/9000",
     );
 
-    for (const invalidStandardCi of [
-      { ...validSummaryInput.standardCi, schemaVersion: 1 },
-      (({ event: _event, ...evidence }) => evidence)(
-        validSummaryInput.standardCi,
-      ),
-      {
-        ...validSummaryInput.standardCi,
-        candidateCommit: "0".repeat(40),
-      },
-      { ...validSummaryInput.standardCi, event: "repository_dispatch" },
-      { ...validSummaryInput.standardCi, runAttempt: 0 },
-      {
-        ...validSummaryInput.standardCi,
-        jobs: validSummaryInput.standardCi.jobs.slice(1),
-      },
-    ]) {
-      const failedSummary = createReleaseVerificationSummary({
-        ...validSummaryInput,
-        standardCi: invalidStandardCi,
-      });
-      expect(failedSummary.verified).toBe(false);
-      expect(failedSummary.missingIdentities).toContain("standard-ci-evidence");
-    }
-
     const workDir = await mkdtemp(
       path.join(tmpdir(), "enoki-schema4-verification-summary-"),
     );
@@ -358,7 +315,7 @@ describe("verify-only release workflow", () => {
       await writeFile(summaryPath, `${JSON.stringify(summary)}\n`);
       await expect(
         execFileAsync(process.execPath, [
-          "scripts/release-verification.mjs",
+          "scripts/release-verification.ts",
           "assert-verified",
           "--summary",
           summaryPath,
@@ -366,28 +323,6 @@ describe("verify-only release workflow", () => {
       ).resolves.toMatchObject({
         stdout: "Release Verification Evidence is complete\n",
       });
-
-      for (const identityError of [
-        "Probe Asset Set identity unavailable: Probe Asset Set root key does not match the trusted Probe Distribution Trust Root",
-        "Hub OCI identity unavailable: Hub OCI embedded Probe asset differs from enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
-      ]) {
-        const failedSummary = createReleaseVerificationSummary({
-          ...validSummaryInput,
-          evidenceErrors: [identityError],
-        });
-        expect(failedSummary.verified).toBe(false);
-        expect(failedSummary.failureReasons).toContain(identityError);
-
-        await writeFile(summaryPath, `${JSON.stringify(failedSummary)}\n`);
-        await expect(
-          execFileAsync(process.execPath, [
-            "scripts/release-verification.mjs",
-            "assert-verified",
-            "--summary",
-            summaryPath,
-          ]),
-        ).rejects.toMatchObject({ code: 1 });
-      }
     } finally {
       await rm(workDir, { force: true, recursive: true });
     }
@@ -434,6 +369,70 @@ describe("verify-only release workflow", () => {
       verified: true,
     });
   });
+
+  it("accepts the evidence the release prerequisite CLI generates for the same candidate", async () => {
+    const candidateManifest = releaseCandidateManifest();
+    const evidence = await generateStandardCiEvidence(
+      candidateManifest.candidate.commit,
+    );
+    expect(evidence).toMatchObject({
+      candidateCommit: candidateManifest.candidate.commit,
+      event: "workflow_dispatch",
+      runAttempt: 2,
+      schemaVersion: 2,
+    });
+
+    const summary = await summaryForCandidate(candidateManifest, evidence);
+    expect(summary.verified).toBe(true);
+    expect(summary.standardCi).toEqual(evidence);
+    expect(summary.gates.standardCi).toEqual({
+      outcome: "success",
+      runUrl: evidence.runUrl,
+    });
+  });
+
+  for (const { evidence, label } of [
+    {
+      evidence: (base) => ({ ...base, schemaVersion: 1 }),
+      label: "keeps the retired schema version",
+    },
+    {
+      evidence: (base) => withoutEvidenceKey(base, "event"),
+      label: "omits the triggering event",
+    },
+    {
+      evidence: (base) => withoutEvidenceKey(base, "runAttempt"),
+      label: "omits the current run attempt",
+    },
+    {
+      evidence: (base) => ({ ...base, runAttempt: 0 }),
+      label: "reports a run attempt below one",
+    },
+    {
+      evidence: (base) => ({ ...base, event: "pull_request" }),
+      label: "comes from an ineligible event",
+    },
+    {
+      evidence: (base) => ({ ...base, jobs: base.jobs.slice(0, 6) }),
+      label: "carries six of the seven checks",
+    },
+    {
+      evidence: (base) => ({ ...base, candidateCommit: "f".repeat(40) }),
+      label: "belongs to another candidate",
+    },
+  ]) {
+    it(`does not verify a release whose standard CI evidence ${label}`, async () => {
+      const candidateManifest = releaseCandidateManifest();
+      const summary = await summaryForCandidate(
+        candidateManifest,
+        evidence(standardCiEvidence(candidateManifest.candidate)),
+      );
+
+      expect(summary.verified).toBe(false);
+      expect(summary.missingIdentities).toContain("standard-ci-evidence");
+      expect(summary.standardCi).toBeNull();
+    });
+  }
 
   it("rejects a schema 4 Candidate Manifest whose Probe Asset Set closure is incomplete", async () => {
     const matrix = JSON.parse(
@@ -569,7 +568,7 @@ describe("verify-only release workflow", () => {
       await execFileAsync(
         process.execPath,
         [
-          "scripts/release-verification.mjs",
+          "scripts/release-verification.ts",
           "summarize",
           "--candidate-dir",
           path.join(workDir, "missing-candidate"),
@@ -628,7 +627,7 @@ describe("verify-only release workflow", () => {
       expect(summary.failureReasons.join("\n")).toContain("Candidate Manifest");
       await expect(
         execFileAsync(process.execPath, [
-          "scripts/release-verification.mjs",
+          "scripts/release-verification.ts",
           "assert-verified",
           "--summary",
           summaryPath,
@@ -638,133 +637,6 @@ describe("verify-only release workflow", () => {
         "not-a-valid-commit",
       );
     } finally {
-      await rm(workDir, { force: true, recursive: true });
-    }
-  });
-
-  it("independently verifies the downloaded Probe Asset Set with the finalizer trust root", async () => {
-    const workDir = await mkdtemp(
-      path.join(tmpdir(), "enoki-attempt-identities-"),
-    );
-    const hubDir = path.join(workDir, "hub");
-    const summaryPath = path.join(workDir, "summary.json");
-    const markdownPath = path.join(workDir, "summary.md");
-    const trustedRootPublicKeyPem = "trusted external root";
-    const inspectProbeAssetSet = vi.fn(async () => ({
-      files: [{ file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz" }],
-      signingIdentity: { rootKeyId: "root-key-id" },
-      version: "1.2.3",
-    }));
-    let capturedIdentities;
-    const candidateManifest = {
-      candidate: { commit: "a".repeat(40), version: "v1.2.3" },
-      hub: { digest: "sha256:candidate" },
-      probeAssetSet: { version: "1.2.3" },
-      releaseBaseline: { version: "v1.2.2" },
-    };
-
-    vi.doMock("./release-candidate-lib.mjs", () => ({
-      inspectProbeAssetSet,
-      releaseTransitionForValidatedCandidate: () => ({}),
-      validateReleaseCandidate: async () => candidateManifest,
-    }));
-    vi.doMock("./release-baseline-lib.mjs", () => ({
-      validateResolvedReleaseBaseline: async () => ({ version: "v1.2.2" }),
-    }));
-    vi.doMock("./release-candidate-oci.mjs", () => ({
-      inspectHubOciArchive: async () => ({ digest: "sha256:downloaded" }),
-    }));
-    vi.doMock("./release-e2e-matrix.mjs", () => ({
-      readReleaseE2EMatrix: async () => [],
-    }));
-    vi.doMock("./release-scenario-plan.mjs", () => ({
-      compileReleaseScenarioPlan: () => ({}),
-    }));
-    vi.doMock("./release-verification-lib.mjs", () => ({
-      createMatrixGateResult: vi.fn(),
-      createReleaseVerificationSummary: ({ identities }) => {
-        capturedIdentities = identities;
-        return { identities };
-      },
-      createUiGateResult: vi.fn(),
-      renderReleaseVerificationEvidenceMarkdown: () => "summary\n",
-    }));
-
-    const originalArgv = process.argv;
-    const originalExitCode = process.exitCode;
-    const originalTrustRoot = process.env.TEST_FINALIZER_ROOT;
-    try {
-      await mkdir(hubDir);
-      await writeFile(path.join(hubDir, "enoki-hub-v1.2.3.oci.tar"), "oci");
-      process.argv = [
-        process.execPath,
-        "scripts/release-verification.mjs",
-        "summarize",
-        "--candidate-dir",
-        path.join(workDir, "candidate"),
-        "--root-public-key-env",
-        "TEST_FINALIZER_ROOT",
-        "--release-baseline-dir",
-        path.join(workDir, "baseline"),
-        "--probe-assets-dir",
-        path.join(workDir, "probe-assets"),
-        "--hub-oci-dir",
-        hubDir,
-        "--matrix",
-        path.join(workDir, "matrix.json"),
-        "--matrix-evidence-root",
-        path.join(workDir, "host-evidence"),
-        "--ui-gate",
-        path.join(workDir, "ui-gate.json"),
-        "--component-results",
-        path.join(workDir, "component-results.json"),
-        "--artifact-index",
-        path.join(workDir, "artifact-index.json"),
-        "--requested-commit",
-        candidateManifest.candidate.commit,
-        "--requested-version",
-        candidateManifest.candidate.version,
-        "--standard-ci",
-        path.join(workDir, "standard-ci.json"),
-        "--run-id",
-        "33331428561",
-        "--run-attempt",
-        "1",
-        "--run-url",
-        "https://github.com/YKDZ/enoki/actions/runs/33331428561",
-        "--output",
-        summaryPath,
-        "--markdown",
-        markdownPath,
-      ];
-      process.env.TEST_FINALIZER_ROOT = trustedRootPublicKeyPem;
-      await import("./release-verification.mjs?finalizer-trust-root-test");
-
-      expect(inspectProbeAssetSet).toHaveBeenCalledWith(
-        path.join(workDir, "probe-assets"),
-        { trustedRootPublicKeyPem },
-      );
-      expect(capturedIdentities.errors).not.toEqual(
-        expect.arrayContaining([
-          expect.stringContaining("Probe Asset Set identity unavailable"),
-          expect.stringContaining("Hub OCI identity unavailable"),
-        ]),
-      );
-    } finally {
-      if (originalTrustRoot === undefined) {
-        delete process.env.TEST_FINALIZER_ROOT;
-      } else {
-        process.env.TEST_FINALIZER_ROOT = originalTrustRoot;
-      }
-      process.argv = originalArgv;
-      process.exitCode = originalExitCode;
-      vi.doUnmock("./release-candidate-lib.mjs");
-      vi.doUnmock("./release-baseline-lib.mjs");
-      vi.doUnmock("./release-candidate-oci.mjs");
-      vi.doUnmock("./release-e2e-matrix.mjs");
-      vi.doUnmock("./release-scenario-plan.mjs");
-      vi.doUnmock("./release-verification-lib.mjs");
-      vi.resetModules();
       await rm(workDir, { force: true, recursive: true });
     }
   });
@@ -1140,29 +1012,15 @@ describe("verify-only release workflow", () => {
     );
   });
 
-  it("rejects transient Probe service failure as Installed Bundle Failure Repair evidence", () => {
+  it("rejects the retired start-limit-hit Runtime result as Installed Bundle Failure Repair evidence", () => {
     const candidate = releaseCandidateManifest().candidate;
     const evidence = successfulHostEvidence(
       "fresh-install-uninstall",
       candidate,
     );
-    evidence.installedBundleFailureRepair = {
-      failure: {
-        cause: "installed_bundle_restart_failure",
-        probeVersion: "1.2.3",
-        status: "failed",
-      },
-      host: evidenceHost("1.2.3"),
-      hostBoundary: installedHostBoundary("1.2.3"),
-      identity: {
-        after: probeIdentityEvidence(),
-        before: probeIdentityEvidence(),
-      },
-      repair: {
-        probeId: "probe_release_01",
-        repairedVersion: "1.2.3",
-      },
-    };
+    const failure = evidence.installedBundleFailureRepair.failure;
+    failure.result = "start-limit-hit";
+    failure.epochResult = "start-limit-hit";
 
     const gate = createMatrixGateResult({
       artifactName:
@@ -1179,6 +1037,76 @@ describe("verify-only release workflow", () => {
       "Installed Bundle Failure Repair evidence is invalid",
     );
   });
+
+  it.each([
+    [
+      "local CLI and local validation only",
+      (closure) => {
+        closure.capture = null;
+        closure.hubHostProfile = null;
+        closure.hubOperation = null;
+      },
+      /closure_capture_missing,repair_authorization_missing,final_boot_report_missing,produced_profile_missing,hub_host_profile_read_missing,hub_repair_operation_missing/,
+    ],
+    [
+      "a single Boot",
+      (closure) => {
+        closure.capture.producedProfile = null;
+        closure.hubHostProfile = null;
+      },
+      /produced_profile_missing,hub_host_profile_read_missing/,
+    ],
+    [
+      "a stale Hub Host Profile",
+      (closure) => {
+        closure.hubHostProfile.probeVersion = "1.2.2";
+      },
+      /produced_profile_not_current_on_hub/,
+    ],
+    [
+      "closure facts from another Probe",
+      (closure) => {
+        closure.capture.probeId = "probe_release_02";
+      },
+      /closure_capture_identity_mismatch/,
+    ],
+    [
+      "a Repair Operation that never succeeded",
+      (closure) => {
+        closure.hubOperation.state = "failed";
+      },
+      /hub_repair_operation_not_succeeded/,
+    ],
+  ])(
+    "rejects an Installed Bundle Failure Repair closed only by %s",
+    (_label, corrupt, reason) => {
+      const candidate = releaseCandidateManifest().candidate;
+      const evidence = successfulHostEvidence(
+        "fresh-install-uninstall",
+        candidate,
+      );
+      corrupt(evidence.installedBundleFailureRepair.closure);
+      const gate = createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+      expect(gate.outcome).toBe("failed");
+      expect(
+        gate.evidenceValidationErrors.some(
+          (error) =>
+            error.startsWith(
+              "Installed Bundle Failure Repair is not closed by the recorded report facts and the Hub Repair Operation:",
+            ) && reason.test(error),
+        ),
+      ).toBe(true);
+    },
+  );
 
   it("rejects fresh evidence made only of non-empty containers without business semantics", () => {
     const candidate = releaseCandidateManifest().candidate;
@@ -1950,7 +1878,7 @@ describe("verify-only release workflow", () => {
     const output = path.join(workDir, "gate-result.json");
     try {
       await execFileAsync(process.execPath, [
-        "scripts/release-verification.mjs",
+        "scripts/release-verification.ts",
         "record-ui-gate",
         "--candidate-manifest",
         path.join(workDir, "missing-candidate-manifest.json"),
@@ -2136,33 +2064,110 @@ function standardCiEvidence(candidate) {
   return {
     candidateCommit: candidate.commit,
     event: "push",
-    jobs: [
-      { conclusion: "success", name: "Node checks / Node checks" },
-      { conclusion: "success", name: "Rust checks / Rust checks" },
-      { conclusion: "success", name: "Hub Docker image / Hub Docker image" },
-      {
-        conclusion: "success",
-        name: "Probe binaries / Probe binary (aarch64-unknown-linux-gnu)",
-      },
-      {
-        conclusion: "success",
-        name: "Probe binaries / Probe binary (aarch64-unknown-linux-musl)",
-      },
-      {
-        conclusion: "success",
-        name: "Probe binaries / Probe binary (x86_64-unknown-linux-gnu)",
-      },
-      {
-        conclusion: "success",
-        name: "Probe binaries / Probe binary (x86_64-unknown-linux-musl)",
-      },
-    ],
+    jobs: standardCiJobNames.map((name) => ({
+      conclusion: "success",
+      name,
+    })),
     kind: "enoki-standard-ci-evidence",
     runAttempt: 1,
     runId: 42,
     runUrl: "https://github.com/YKDZ/enoki/actions/runs/42",
     schemaVersion: 2,
   };
+}
+
+async function generateStandardCiEvidence(commit) {
+  const directory = await mkdtemp(
+    path.join(tmpdir(), "enoki-standard-ci-evidence-"),
+  );
+  try {
+    const runsPath = path.join(directory, "runs.json");
+    const jobsPath = path.join(directory, "jobs.json");
+    const evidencePath = path.join(directory, "evidence.json");
+    await writeFile(
+      runsPath,
+      JSON.stringify({
+        workflow_runs: [
+          {
+            conclusion: "success",
+            event: "workflow_dispatch",
+            head_branch: "main",
+            head_sha: commit,
+            html_url: "https://github.com/YKDZ/enoki/actions/runs/4242",
+            id: 4242,
+            run_attempt: 2,
+            status: "completed",
+          },
+        ],
+      }),
+    );
+    await writeFile(
+      jobsPath,
+      JSON.stringify({
+        jobs: standardCiJobNames.map((name) => ({
+          conclusion: "success",
+          head_sha: commit,
+          name,
+          run_attempt: 2,
+          run_id: 4242,
+          status: "completed",
+        })),
+      }),
+    );
+    await execFileAsync(process.execPath, [
+      "scripts/release-ci.ts",
+      "verify",
+      "--commit",
+      commit,
+      "--jobs",
+      jobsPath,
+      "--output",
+      evidencePath,
+      "--workflow-runs",
+      runsPath,
+    ]);
+    return JSON.parse(await readFile(evidencePath, "utf8"));
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+}
+
+async function summaryForCandidate(candidateManifest, standardCi) {
+  const matrix = JSON.parse(
+    await readFile("scripts/release-e2e-matrix.json", "utf8"),
+  );
+  const hostGates = expectedHostGateResults(matrix, candidateManifest);
+  const uiGate = {
+    artifactName: "release-ui-contract-12345-1",
+    candidate: candidateManifest.candidate,
+    outcome: "succeeded",
+  };
+  return createReleaseVerificationSummary({
+    artifactIndex: releaseArtifactIndex(hostGates, uiGate),
+    candidateManifest,
+    gateResults: {
+      candidateBuild: "success",
+      matrixExpansion: "success",
+      matrixJob: "success",
+      uiJob: "success",
+    },
+    hostGates,
+    scenarioPlan: matrix,
+    requested: candidateManifest.candidate,
+    run: {
+      attempt: 1,
+      id: "12345",
+      url: "https://github.com/YKDZ/enoki/actions/runs/12345",
+    },
+    standardCi,
+    uiGate,
+  });
+}
+
+function withoutEvidenceKey(evidence, key) {
+  return Object.fromEntries(
+    Object.entries(evidence).filter(([name]) => name !== key),
+  );
 }
 
 function expectedHostGateResults(matrix, candidateManifest) {
@@ -2356,15 +2361,59 @@ function successfulHostEvidence(
         runId,
       }),
       installedBundleFailureRepair: {
-        failure: { status: "recorded" },
-        host: evidenceHost("1.2.3"),
+        closure: repairClosureFacts({
+          epoch: {
+            bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+            generation: "8".repeat(64),
+            hostId: "7",
+          },
+          identity: initialIdentity,
+          version: "1.2.3",
+        }),
+        failure: {
+          activeState: "failed",
+          bundle: {
+            installStateSha256: "4".repeat(64),
+            manifestSha256: "5".repeat(64),
+            runtimeFaultSha256: "6".repeat(64),
+            runtimeSha256: "7".repeat(64),
+            version: "1.2.3",
+          },
+          failureEpoch: {
+            bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+            generation: "8".repeat(64),
+            hostId: "7",
+            identityReceiptSha256: "9".repeat(64),
+            links: 1,
+            mode: "0600",
+            ownerUid: 0,
+            probeId: initialIdentity.probeId,
+          },
+          latch: {
+            generation: "8".repeat(64),
+            links: 1,
+            mode: "0600",
+            ownerUid: 0,
+          },
+          recoveryBudget: {
+            observedStarts: 3,
+            startLimitBurst: 3,
+            startLimitIntervalSeconds: 60,
+          },
+          epochResult: "protocol",
+          result: "protocol",
+          role: "observation_runtime",
+          status: "latched",
+          unit: "enoki-observation-runtime.service",
+          unitSha256: "a".repeat(64),
+        },
         hostBoundary: installedHostBoundary("1.2.3"),
         identity: { after: initialIdentity, before: initialIdentity },
         repair: {
+          failureEpochRemoved: true,
           faultRemoved: true,
-          output: "本机恢复与最终探针启动已完成；修复最终结果以 Hub 为准",
-          probeId: initialIdentity.probeId,
-          repairedVersion: "1.2.3",
+          latchRemoved: true,
+          output: probeRepairLocalCompletionOutput,
           runtimeSha256: "7".repeat(64),
           sameBundle: true,
           unit: "enoki-observation-runtime.service",
@@ -2481,7 +2530,7 @@ function successfulHostEvidence(
         state: "failed",
         targetProbeVersion: "1.2.3",
       }),
-      repair: { probeId: "probe_release_01", repairedVersion: "1.2.3" },
+      repair: { output: probeRepairLocalCompletionOutput },
       probeConfiguration: {
         afterRepair: probeConfigurationEvidence("host-7-2"),
         beforeUpgrade: probeConfigurationEvidence("host-7-1"),
@@ -2977,6 +3026,89 @@ function probeConfigurationValues(version) {
     enabledCollectorIds: ["official.cpu", "official.memory"],
     metricsCollectionIntervalSeconds: 2,
     version,
+  };
+}
+
+// 结案事实记录：形状与正式场景经共享 transport 与 Hub 普通读数采集到的原始事实一致。
+function repairClosureFacts({ epoch, identity, version }) {
+  const reportSessionBootId = "boot-repaired-session-01";
+  const hubHostProfile = {
+    architecture: "x86_64",
+    cpuCount: 4,
+    hostname: "release-host-01",
+    kernel: "5.15.0-139-generic",
+    os: "Ubuntu 22.04.5 LTS",
+    probeVersion: version,
+  };
+  return {
+    capture: {
+      bootId: reportSessionBootId,
+      failedWindows: [],
+      finalBoot: {
+        acceptedSequenceEnd: 1,
+        ackObservedAtMs: 1_725_000_000_100,
+        bootId: reportSessionBootId,
+        bytes: 220,
+        payloadSha256: "1".repeat(64),
+        probeAssetBundleVersion: version,
+        probeId: identity.probeId,
+        responseSha256: "2".repeat(64),
+        sequence: 1,
+        upstreamStatus: 200,
+      },
+      kind: "installed-bundle-repair-closure-capture",
+      probeId: identity.probeId,
+      producedProfile: {
+        acceptedSequenceEnd: 3,
+        ...hubHostProfile,
+        bootId: reportSessionBootId,
+        bytes: 1_024,
+        collectorId: hostProfileCollectorId,
+        payloadSha256: "3".repeat(64),
+        probeAssetBundleVersion: version,
+        probeId: identity.probeId,
+        responseSha256: "4".repeat(64),
+        sequence: 3,
+        snapshotHash: "c".repeat(64),
+        upstreamStatus: 200,
+      },
+      repairAuthorization: {
+        bootId: epoch.bootId,
+        bundleVersion: version,
+        epochGeneration: epoch.generation,
+        hostId: epoch.hostId,
+        operationId: "42",
+        probeId: identity.probeId,
+        requestPayloadSha256: "9".repeat(64),
+        responseSha256: "8".repeat(64),
+        upstreamStatus: 200,
+      },
+      schemaVersion: 1,
+    },
+    expectation: {
+      failureEpochBootId: epoch.bootId,
+      failureEpochGeneration: epoch.generation,
+      hostId: Number(epoch.hostId),
+      identitySha256: identity.identitySha256,
+      probeId: identity.probeId,
+      targetProbeVersion: version,
+    },
+    hubHostProfile,
+    hubOperation: {
+      hostId: Number(epoch.hostId),
+      id: "42",
+      kind: "probe_repair",
+      source: "owner-probe-operation-read",
+      state: "succeeded",
+      targetProbeVersion: version,
+    },
+    localCompletion: {
+      completedAtMs: 1_725_000_000_200,
+      identitySha256: identity.identitySha256,
+      output: probeRepairLocalCompletionOutput,
+      probeId: identity.probeId,
+      repairedVersion: version,
+    },
   };
 }
 

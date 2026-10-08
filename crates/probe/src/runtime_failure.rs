@@ -1,52 +1,74 @@
 //! Observation Runtime 启动预算耗尽的固定 recorder 与终止性 latch。
 
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Read,
-    os::fd::AsRawFd,
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::Command,
     thread,
     time::Duration,
 };
 
-#[cfg(test)]
-use std::os::unix::fs::PermissionsExt;
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 use enoki_probe_bootstrap::lifecycle::{
     InstalledBundleFailureEvidenceV1, InstalledBundleRepairAuthorityV1,
 };
-use enoki_probe_bootstrap::secure_file::PrivateAtomicFileCustody;
+
+use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
 const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
 const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
-#[cfg(test)]
 const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
-const BOOT_ID_PATH: &str = "/run/enoki-probe/runtime-failure-boot-id";
-const HOST_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
-#[cfg(test)]
+const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
-#[cfg(test)]
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
-const STATE_DIRECTORY_PATH: &str = "/var/lib/enoki-probe";
-const CANONICAL_PRIVATE_STATE_DIRECTORY_PATH: &str = "/var/lib/private/enoki-probe";
-const CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET: &[u8] = b"private/enoki-probe";
-const PAIR_LOCK_PATH: &str = "/run/enoki-probe/runtime-failure-pair.lock";
-#[cfg(test)]
-const LOCAL_RETRY_RECEIPT_PATH: &str =
-    "/var/lib/enoki-probe/runtime-failure/local-retry-receipt.json";
-const UPGRADE_ATTEMPT_PATH: &str = "/var/lib/enoki-probe-bootstrap/probe-upgrade-attempt.toml";
+
+/// manager 必须实际加载的固定恢复预算：`Restart=on-failure`、`RestartSec=5s`、`3 次/60s`。
+const FIXED_RESTART: &str = "on-failure";
+const FIXED_RESTART_USEC: &str = "5s";
+const FIXED_START_LIMIT_BURST: &str = "3";
+const FIXED_START_LIMIT_INTERVAL_USEC: &str = "1min";
+const FIXED_RESTART_INTERVAL_MONOTONIC_USEC: u64 = 5_000_000;
+const FIXED_START_LIMIT_INTERVAL_MONOTONIC_USEC: u64 = 60_000_000;
+
+const RECORDER_PROPERTIES: [&str; 6] = [
+    "InvocationID",
+    "MainPID",
+    "FragmentPath",
+    "DropInPaths",
+    "NeedDaemonReload",
+    "RefuseManualStart",
+];
+const RUNTIME_PROPERTIES: [&str; 20] = [
+    "LoadState",
+    "ActiveState",
+    "SubState",
+    "Result",
+    "NRestarts",
+    "MainPID",
+    "ControlPID",
+    "Job",
+    "InvocationID",
+    "StateChangeTimestampMonotonic",
+    "ExecMainStartTimestampMonotonic",
+    "ExecMainExitTimestampMonotonic",
+    "FragmentPath",
+    "DropInPaths",
+    "NeedDaemonReload",
+    "Restart",
+    "RestartUSec",
+    "StartLimitBurst",
+    "StartLimitIntervalUSec",
+    "OnFailure",
+];
 
 mod installed_bundle_repair;
 use installed_bundle_repair::write_installed_bundle_repair_status;
@@ -64,12 +86,7 @@ pub(crate) use installed_bundle_repair::{
     drive_live_installed_bundle_repair, resume_installed_bundle_repair,
 };
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RuntimeUnitState {
-    pub active_state: String,
-    pub result: String,
-}
-
+/// manager 交出的一份 recorder 完整 property closure。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RecorderUnitSnapshot {
     invocation_id: String,
@@ -80,6 +97,7 @@ pub(crate) struct RecorderUnitSnapshot {
     refuse_manual_start: String,
 }
 
+/// manager 交出的一份 Runtime 完整 property closure。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RuntimeUnitSnapshot {
     load_state: String,
@@ -104,6 +122,7 @@ pub(crate) struct RuntimeUnitSnapshot {
     on_failure: String,
 }
 
+/// 同一轮观察：两份完整 closure 加上观察时刻。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RuntimeFailureSnapshot {
     recorder: RecorderUnitSnapshot,
@@ -111,79 +130,38 @@ pub(crate) struct RuntimeFailureSnapshot {
     observed_monotonic_usec: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConfirmedFixedRuntimeBudgetExhaustion {
+/// 资格只在本次调用内存活：不可序列化、字段私有，调用方与测试都无法构造。
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ConfirmedFixedRuntimeBudgetExhaustion {
     result: String,
 }
 
+/// raw observation seam：只交出 `systemctl show` 原始文本与观察时刻；解析、固定闭包、
+/// 终态形状与跨 horizon 判定全部留在本模块，fake 无法直接交出结论。
 pub(crate) trait RuntimeFailureSystemd {
-    fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState>;
-
-    fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-        Err(std::io::Error::other(
-            "runtime failure snapshot unavailable",
-        ))
-    }
+    fn recorder_unit_show(&mut self) -> std::io::Result<String>;
+    fn runtime_unit_show(&mut self) -> std::io::Result<String>;
+    fn observe_monotonic_usec(&mut self) -> std::io::Result<u64>;
 
     fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
-        thread::sleep(Duration::from_secs(5));
+        thread::sleep(Duration::from_micros(FIXED_RESTART_INTERVAL_MONOTONIC_USEC));
         Ok(())
     }
 }
 
-pub(crate) struct SystemRuntimeFailureSystemd;
+pub struct SystemRuntimeFailureSystemd;
 
 impl RuntimeFailureSystemd for SystemRuntimeFailureSystemd {
-    fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-        let snapshot = self.fixed_runtime_snapshot()?;
-        Ok(RuntimeUnitState {
-            active_state: snapshot.runtime.active_state,
-            result: snapshot.runtime.result,
-        })
+    fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+        systemctl_show(RECORDER_UNIT, &RECORDER_PROPERTIES)
     }
 
-    fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-        let recorder = parse_recorder_unit_snapshot(&systemctl_show(
-            RECORDER_UNIT,
-            &[
-                "InvocationID",
-                "MainPID",
-                "FragmentPath",
-                "DropInPaths",
-                "NeedDaemonReload",
-                "RefuseManualStart",
-            ],
-        )?)?;
-        let runtime = parse_runtime_unit_snapshot(&systemctl_show(
-            RUNTIME_UNIT,
-            &[
-                "LoadState",
-                "ActiveState",
-                "SubState",
-                "Result",
-                "NRestarts",
-                "MainPID",
-                "ControlPID",
-                "Job",
-                "InvocationID",
-                "StateChangeTimestampMonotonic",
-                "ExecMainStartTimestampMonotonic",
-                "ExecMainExitTimestampMonotonic",
-                "FragmentPath",
-                "DropInPaths",
-                "NeedDaemonReload",
-                "Restart",
-                "RestartUSec",
-                "StartLimitBurst",
-                "StartLimitIntervalUSec",
-                "OnFailure",
-            ],
-        )?)?;
-        Ok(RuntimeFailureSnapshot {
-            recorder,
-            runtime,
-            observed_monotonic_usec: monotonic_usec()?,
-        })
+    fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+        systemctl_show(RUNTIME_UNIT, &RUNTIME_PROPERTIES)
+    }
+
+    fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+        monotonic_usec()
     }
 }
 
@@ -202,11 +180,24 @@ fn systemctl_show(unit: &str, properties: &[&str]) -> std::io::Result<String> {
     String::from_utf8(output.stdout).map_err(|_| std::io::Error::other("systemd state invalid"))
 }
 
+fn fixed_snapshot(
+    systemd: &mut impl RuntimeFailureSystemd,
+) -> std::io::Result<RuntimeFailureSnapshot> {
+    let recorder = parse_recorder_unit_snapshot(&systemd.recorder_unit_show()?)?;
+    let runtime = parse_runtime_unit_snapshot(&systemd.runtime_unit_show()?)?;
+    Ok(RuntimeFailureSnapshot {
+        recorder,
+        runtime,
+        observed_monotonic_usec: systemd.observe_monotonic_usec()?,
+    })
+}
+
+/// 完整 property closure 的逐 key 解析；缺、重、额外 key 或无法拆分的行都 fail closed。
 fn exact_systemd_properties<'a>(
     text: &'a str,
     expected: &[&str],
-) -> std::io::Result<std::collections::BTreeMap<&'a str, &'a str>> {
-    let mut values = std::collections::BTreeMap::new();
+) -> std::io::Result<BTreeMap<&'a str, &'a str>> {
+    let mut values = BTreeMap::new();
     for line in text.lines() {
         let (key, value) = line
             .split_once('=')
@@ -221,10 +212,7 @@ fn exact_systemd_properties<'a>(
     Ok(values)
 }
 
-fn property<'a>(
-    values: &std::collections::BTreeMap<&'a str, &'a str>,
-    name: &str,
-) -> std::io::Result<String> {
+fn property(values: &BTreeMap<&str, &str>, name: &str) -> std::io::Result<String> {
     values
         .get(name)
         .map(|value| (*value).to_owned())
@@ -232,17 +220,7 @@ fn property<'a>(
 }
 
 fn parse_recorder_unit_snapshot(text: &str) -> std::io::Result<RecorderUnitSnapshot> {
-    let values = exact_systemd_properties(
-        text,
-        &[
-            "InvocationID",
-            "MainPID",
-            "FragmentPath",
-            "DropInPaths",
-            "NeedDaemonReload",
-            "RefuseManualStart",
-        ],
-    )?;
+    let values = exact_systemd_properties(text, &RECORDER_PROPERTIES)?;
     Ok(RecorderUnitSnapshot {
         invocation_id: property(&values, "InvocationID")?,
         main_pid: property(&values, "MainPID")?,
@@ -254,31 +232,7 @@ fn parse_recorder_unit_snapshot(text: &str) -> std::io::Result<RecorderUnitSnaps
 }
 
 fn parse_runtime_unit_snapshot(text: &str) -> std::io::Result<RuntimeUnitSnapshot> {
-    let values = exact_systemd_properties(
-        text,
-        &[
-            "LoadState",
-            "ActiveState",
-            "SubState",
-            "Result",
-            "NRestarts",
-            "MainPID",
-            "ControlPID",
-            "Job",
-            "InvocationID",
-            "StateChangeTimestampMonotonic",
-            "ExecMainStartTimestampMonotonic",
-            "ExecMainExitTimestampMonotonic",
-            "FragmentPath",
-            "DropInPaths",
-            "NeedDaemonReload",
-            "Restart",
-            "RestartUSec",
-            "StartLimitBurst",
-            "StartLimitIntervalUSec",
-            "OnFailure",
-        ],
-    )?;
+    let values = exact_systemd_properties(text, &RUNTIME_PROPERTIES)?;
     Ok(RuntimeUnitSnapshot {
         load_state: property(&values, "LoadState")?,
         active_state: property(&values, "ActiveState")?,
@@ -321,6 +275,8 @@ fn monotonic_usec() -> std::io::Result<u64> {
         .ok_or_else(|| std::io::Error::other("monotonic clock invalid"))
 }
 
+/// OBS-0002：受支持主机在 `3/60/5` 上的真实终态 Result 是 `exit-code`；
+/// `start-limit-hit` 从未出现，与 `success`、`exec-condition` 一样不构成耗尽资格。
 fn restart_eligible_result(value: &str) -> bool {
     matches!(
         value,
@@ -364,10 +320,13 @@ fn fixed_runtime_unit_bytes() -> std::io::Result<Vec<u8>> {
 fn fixed_recorder_unit_bytes() -> std::io::Result<Vec<u8>> {
     enoki_probe_bootstrap::install::fixed_observation_unit_contents()
         .into_iter()
-        .last()
+        .find(|unit| {
+            unit.starts_with(b"[Unit]\nDescription=Enoki Observation Runtime failure recorder\n")
+        })
         .ok_or_else(|| std::io::Error::other("fixed recorder unit unavailable"))
 }
 
+/// manager 实际加载的固定 unit 与配置闭包，并且磁盘 fragment 逐 byte 等于本 build 渲染值。
 fn valid_fixed_unit_closure(
     root: &Path,
     expected_uid: u32,
@@ -381,10 +340,10 @@ fn valid_fixed_unit_closure(
         || !snapshot.runtime.drop_in_paths.is_empty()
         || snapshot.runtime.need_daemon_reload != "no"
         || snapshot.runtime.load_state != "loaded"
-        || snapshot.runtime.restart != "on-failure"
-        || snapshot.runtime.restart_usec != "5s"
-        || snapshot.runtime.start_limit_burst != "3"
-        || snapshot.runtime.start_limit_interval_usec != "1min"
+        || snapshot.runtime.restart != FIXED_RESTART
+        || snapshot.runtime.restart_usec != FIXED_RESTART_USEC
+        || snapshot.runtime.start_limit_burst != FIXED_START_LIMIT_BURST
+        || snapshot.runtime.start_limit_interval_usec != FIXED_START_LIMIT_INTERVAL_USEC
         || snapshot.runtime.on_failure != RECORDER_UNIT
     {
         return Err(std::io::Error::other("fixed systemd closure invalid"));
@@ -398,6 +357,7 @@ fn valid_fixed_unit_closure(
     Ok(())
 }
 
+/// 一份 snapshot 的终态形状与 freshness；时间戳非法仍 fail closed。
 fn valid_fixed_terminal_snapshot(
     root: &Path,
     expected_uid: u32,
@@ -417,13 +377,14 @@ fn valid_fixed_terminal_snapshot(
         }
     }
     if snapshot.observed_monotonic_usec < state_change
-        || snapshot.observed_monotonic_usec - state_change >= 60_000_000
+        || snapshot.observed_monotonic_usec - state_change
+            >= FIXED_START_LIMIT_INTERVAL_MONOTONIC_USEC
         || runtime.active_state != "failed"
         || runtime.sub_state != "failed"
         || runtime.main_pid != "0"
         || runtime.control_pid != "0"
         || !runtime.job.is_empty()
-        || runtime.restart_count != "3"
+        || runtime.restart_count != FIXED_START_LIMIT_BURST
         || !restart_eligible_result(&runtime.result)
         || !canonical_invocation_id(&runtime.invocation_id)
     {
@@ -432,6 +393,7 @@ fn valid_fixed_terminal_snapshot(
     Ok(true)
 }
 
+/// 唯一的复合资格判定：来源自证、固定闭包、终态形状、freshness 与跨 RestartSec 稳定。
 fn confirm_fixed_runtime_budget_exhaustion(
     root: &Path,
     expected_uid: u32,
@@ -442,7 +404,7 @@ fn confirm_fixed_runtime_budget_exhaustion(
     if !canonical_invocation_id(recorder_invocation_id) {
         return Ok(None);
     }
-    let first = systemd.fixed_runtime_snapshot()?;
+    let first = fixed_snapshot(systemd)?;
     if !valid_fixed_terminal_snapshot(root, expected_uid, &first)? {
         return Ok(None);
     }
@@ -453,14 +415,15 @@ fn confirm_fixed_runtime_budget_exhaustion(
         return Ok(None);
     }
     systemd.wait_for_fixed_restart_interval()?;
-    let second = systemd.fixed_runtime_snapshot()?;
+    let second = fixed_snapshot(systemd)?;
     if !valid_fixed_terminal_snapshot(root, expected_uid, &second)? {
         return Ok(None);
     }
     if second.recorder != first.recorder
         || second.runtime != first.runtime
         || second.observed_monotonic_usec < first.observed_monotonic_usec
-        || second.observed_monotonic_usec - first.observed_monotonic_usec < 5_000_000
+        || second.observed_monotonic_usec - first.observed_monotonic_usec
+            < FIXED_RESTART_INTERVAL_MONOTONIC_USEC
     {
         return Ok(None);
     }
@@ -469,13 +432,14 @@ fn confirm_fixed_runtime_budget_exhaustion(
     }))
 }
 
+/// 消费端只做当前性复核：固定闭包、failed 无 PID 无 job、Result 与 durable epoch 一致。
 fn valid_current_failure_evidence_snapshot(
     root: &Path,
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
     epoch_result: &str,
 ) -> std::io::Result<()> {
-    let snapshot = systemd.fixed_runtime_snapshot()?;
+    let snapshot = fixed_snapshot(systemd)?;
     valid_fixed_unit_closure(root, expected_uid, &snapshot)?;
     let runtime = &snapshot.runtime;
     if runtime.active_state != "failed"
@@ -491,6 +455,7 @@ fn valid_current_failure_evidence_snapshot(
     Ok(())
 }
 
+/// OnFailure recorder 只能由 manager 自己拉起的 invocation 调用。
 fn recorder_caller_identity() -> std::io::Result<(String, u32)> {
     let invocation_id = std::env::var("INVOCATION_ID")
         .map_err(|_| std::io::Error::other("recorder invocation unavailable"))?;
@@ -500,15 +465,7 @@ fn recorder_caller_identity() -> std::io::Result<(String, u32)> {
     Ok((invocation_id, std::process::id()))
 }
 
-#[cfg(test)]
-fn test_recorder_caller_identity() -> (String, u32) {
-    (
-        "0123456789abcdef0123456789abcdef".to_owned(),
-        std::process::id(),
-    )
-}
-
-pub(crate) trait RuntimeRetrySystemd: RuntimeFailureSystemd {
+pub trait RuntimeRetrySystemd {
     fn retry_fixed_runtime(&mut self) -> std::io::Result<()>;
 }
 
@@ -571,276 +528,6 @@ struct RuntimeFailureEpoch {
     result: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum LocalRetryProgress {
-    Committed,
-    EpochRemoved,
-    LatchRemoved,
-    RetryInvoked,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LocalRetryReceipt {
-    schema_version: u16,
-    generation: String,
-    epoch_sha256: String,
-    progress: LocalRetryProgress,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum UpgradeRuntimeFailureProgress {
-    None,
-    NoneConsumed,
-    Bound,
-    EpochRemoved,
-    LatchRemoved,
-}
-
-#[derive(Debug)]
-struct UpgradeRuntimeFailureIntent {
-    phase: String,
-    progress: Option<UpgradeRuntimeFailureProgress>,
-    generation: Option<String>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LocalRetryCrashPoint {
-    ReceiptCommitted,
-    EpochUnlinked,
-    EpochRemovedReceipt,
-    LatchUnlinked,
-    LatchRemovedReceipt,
-    SystemdInvoked,
-}
-
-#[cfg(test)]
-thread_local! {
-    static LOCAL_RETRY_CRASH_POINT: std::cell::Cell<Option<LocalRetryCrashPoint>> = const {
-        std::cell::Cell::new(None)
-    };
-}
-
-#[cfg(test)]
-thread_local! {
-    static RECORDER_POST_PUBLISH_CHILD_SWAP: std::cell::RefCell<Option<(PathBuf, u8)>> = const {
-        std::cell::RefCell::new(None)
-    };
-    static RECORDER_POST_PUBLISH_IDENTITY_SWAP: std::cell::RefCell<Option<(PathBuf, u8)>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-#[cfg(test)]
-fn fail_recorder_after_latch_publish_with_child_swap(root: &Path) {
-    fail_recorder_after_publication_with_child_swap(root, 3);
-}
-
-#[cfg(test)]
-fn fail_recorder_after_publication_with_child_swap(root: &Path, at_check: u8) {
-    RECORDER_POST_PUBLISH_CHILD_SWAP.with(|swap| {
-        *swap.borrow_mut() = Some((root.to_owned(), at_check));
-    });
-}
-
-#[cfg(test)]
-fn fail_recorder_after_latch_publish_with_identity_swap(root: &Path) {
-    RECORDER_POST_PUBLISH_IDENTITY_SWAP.with(|swap| {
-        *swap.borrow_mut() = Some((root.to_owned(), 3));
-    });
-}
-
-#[cfg(test)]
-fn recorder_boundary_recheck_for_test() -> std::io::Result<()> {
-    let child = RECORDER_POST_PUBLISH_CHILD_SWAP.with(|swap| {
-        let mut swap = swap.borrow_mut();
-        let Some((root, checks)) = swap.as_mut() else {
-            return Ok(());
-        };
-        *checks -= 1;
-        if *checks != 0 {
-            return Ok(());
-        }
-        let root = root.clone();
-        *swap = None;
-        let private = rooted(&root, CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
-        let child = private.join("runtime-failure");
-        fs::rename(&child, root.join("replaced-runtime-failure"))?;
-        fs::create_dir(&child)?;
-        fs::set_permissions(&child, fs::Permissions::from_mode(0o700))
-    });
-    child?;
-    RECORDER_POST_PUBLISH_IDENTITY_SWAP.with(|swap| {
-        let mut swap = swap.borrow_mut();
-        let Some((root, checks)) = swap.as_mut() else {
-            return Ok(());
-        };
-        *checks -= 1;
-        if *checks != 0 {
-            return Ok(());
-        }
-        let root = root.clone();
-        *swap = None;
-        let identity = rooted(
-            &root,
-            "/var/lib/private/enoki-probe/identity/probe-bootstrap.toml",
-        );
-        let replacement = root.join("replaced-identity");
-        let bytes = fs::read(&identity)?;
-        fs::rename(&identity, replacement)?;
-        fs::write(&identity, bytes)?;
-        fs::set_permissions(identity, fs::Permissions::from_mode(0o600))
-    })
-}
-
-#[cfg(not(test))]
-fn recorder_boundary_recheck_for_test() -> std::io::Result<()> {
-    Ok(())
-}
-
-#[cfg(test)]
-fn fail_local_retry_after(point: LocalRetryCrashPoint) {
-    LOCAL_RETRY_CRASH_POINT.set(Some(point));
-}
-
-#[cfg(test)]
-fn local_retry_crash_after(point: LocalRetryCrashPoint) -> std::io::Result<()> {
-    if LOCAL_RETRY_CRASH_POINT.get() == Some(point) {
-        LOCAL_RETRY_CRASH_POINT.set(None);
-        return Err(std::io::Error::other("injected abrupt local retry exit"));
-    }
-    Ok(())
-}
-
-/// The OS releases this guard after an abrupt process exit.  Recovery never
-/// interprets the lock as a durable fact; it only serializes one short pair
-/// transition against recorder, evidence, and typed consumers.
-pub(crate) struct RuntimeFailurePairLock {
-    _file: File,
-}
-
-pub(crate) fn acquire_runtime_failure_pair_lock_for_state(
-    state_dir: &Path,
-    expected_uid: u32,
-) -> std::io::Result<RuntimeFailurePairLock> {
-    let path = runtime_failure_pair_lock_path_for_state(state_dir)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("runtime failure lock path invalid"))?;
-    ensure_directory(parent, 0o700, Some((expected_uid, expected_uid)))?;
-    let parent_metadata = fs::symlink_metadata(parent)?;
-    if !parent_metadata.is_dir()
-        || parent_metadata.file_type().is_symlink()
-        || parent_metadata.uid() != expected_uid
-        || parent_metadata.mode() & 0o7777 != 0o700
-    {
-        return Err(std::io::Error::other("runtime failure lock parent invalid"));
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)?;
-    let opened = file.metadata()?;
-    if !opened.is_file()
-        || opened.uid() != expected_uid
-        || opened.mode() & 0o7777 != 0o600
-        || opened.nlink() != 1
-    {
-        return Err(std::io::Error::other(
-            "runtime failure lock boundary invalid",
-        ));
-    }
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(RuntimeFailurePairLock { _file: file })
-}
-
-#[cfg(test)]
-pub(crate) fn acquire_runtime_failure_pair_cleanup_lock_for_state(
-    state_dir: &Path,
-    expected_uid: u32,
-) -> std::io::Result<RuntimeFailurePairLock> {
-    acquire_runtime_failure_pair_cleanup_lock_for_logical_and_concrete_state(
-        state_dir,
-        state_dir,
-        expected_uid,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn acquire_runtime_failure_pair_cleanup_lock_for_logical_and_concrete_state(
-    logical_state_dir: &Path,
-    concrete_state_dir: &Path,
-    expected_uid: u32,
-) -> std::io::Result<RuntimeFailurePairLock> {
-    let lock = acquire_runtime_failure_pair_lock_for_state(logical_state_dir, expected_uid)?;
-    cleanup_runtime_failure_pair_at_concrete_state(concrete_state_dir, expected_uid)?;
-    Ok(lock)
-}
-
-pub(crate) fn cleanup_runtime_failure_pair_at_concrete_state(
-    concrete_state_dir: &Path,
-    expected_uid: u32,
-) -> std::io::Result<()> {
-    let failure_dir = concrete_state_dir.join("runtime-failure");
-    let metadata = match fs::symlink_metadata(&failure_dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    if !metadata.is_dir()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != expected_uid
-        || metadata.mode() & 0o7777 != 0o700
-    {
-        return Err(std::io::Error::other(
-            "runtime failure cleanup boundary invalid",
-        ));
-    }
-    let directory = File::open(&failure_dir)?;
-    for name in ["epoch.toml", "latch"] {
-        match fs::remove_file(failure_dir.join(name)) {
-            Ok(()) => directory.sync_all()?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn runtime_failure_pair_lock_path_for_state(
-    state_dir: &Path,
-) -> std::io::Result<PathBuf> {
-    let root = if state_dir.ends_with("var/lib/enoki-probe") {
-        state_dir
-            .ancestors()
-            .nth(3)
-            .ok_or_else(|| std::io::Error::other("Probe state path invalid"))?
-    } else {
-        state_dir
-            .parent()
-            .ok_or_else(|| std::io::Error::other("Probe state path invalid"))?
-    };
-    Ok(root.join(PAIR_LOCK_PATH.trim_start_matches('/')))
-}
-
-fn acquire_runtime_failure_pair_lock_at(
-    root: &Path,
-    expected_uid: u32,
-) -> std::io::Result<RuntimeFailurePairLock> {
-    debug_assert_eq!(
-        rooted(root, PAIR_LOCK_PATH),
-        runtime_failure_pair_lock_path_for_state(&rooted(root, "/var/lib/enoki-probe"))?
-    );
-    acquire_runtime_failure_pair_lock_for_state(&rooted(root, "/var/lib/enoki-probe"), expected_uid)
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct SignedInstalledBundleFailureEvidence {
     pub evidence: InstalledBundleFailureEvidenceV1,
@@ -897,7 +584,7 @@ pub fn record_runtime_failure() -> std::io::Result<RuntimeFailureRecordOutcome> 
         ));
     }
     let (recorder_invocation_id, recorder_pid) = recorder_caller_identity()?;
-    record_runtime_failure_at_with_caller(
+    record_runtime_failure_at(
         Path::new("/"),
         0,
         &mut SystemRuntimeFailureSystemd,
@@ -924,202 +611,34 @@ fn retry_runtime_at(
     expected_uid: u32,
     systemd: &mut impl RuntimeRetrySystemd,
 ) -> std::io::Result<()> {
-    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
-    let paths = runtime_failure_paths(root)?;
-    let epoch_path = paths.epoch;
-    let latch_path = paths.latch;
-    let receipt_path = paths.local_retry_receipt;
-    let epoch_present = path_present(&epoch_path)?;
-    let latch_present = path_present(&latch_path)?;
-    let mut receipt = if path_present(&receipt_path)? {
-        let bytes = trusted_file(&receipt_path, expected_uid, 0o600)?;
-        parse_local_retry_receipt(&bytes)?
-    } else {
-        if !epoch_present && !latch_present {
-            if runtime_failure_creation_reserved_at(root, expected_uid)? {
-                return Err(std::io::Error::other("failure pair creation reserved"));
-            }
-            return systemd.retry_fixed_runtime();
-        }
-        let state = systemd.fixed_runtime_state()?;
-        if state.active_state != "failed" || !restart_eligible_result(&state.result) {
-            return Err(std::io::Error::other("failure pair is not terminal"));
-        }
-        match (epoch_present, latch_present) {
-            (true, false) => {
-                let (epoch, _, _) = current_epoch_binding_for_local_retry_at(root, expected_uid)?;
-                if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
-                    || runtime_failure_creation_reserved_at(root, expected_uid)?
-                {
-                    return Err(std::io::Error::other("failure pair consumption pending"));
-                }
-                atomic_write(
-                    &latch_path,
-                    epoch.generation.as_bytes(),
-                    0o600,
-                    Some((expected_uid, expected_uid)),
-                )?;
-            }
-            (false, true) => {
-                let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
-                let generation = std::str::from_utf8(&latch)
-                    .ok()
-                    .filter(|value| decode_lower_hex_32(value).is_some())
-                    .ok_or_else(|| std::io::Error::other("failure latch invalid"))?;
-                if runtime_failure_consumption_pending_at(root, expected_uid, generation)?
-                    || runtime_failure_creation_reserved_at(root, expected_uid)?
-                {
-                    return Err(std::io::Error::other("failure pair consumption pending"));
-                }
-                let epoch =
-                    build_current_epoch_for_local_retry(root, expected_uid, &state, generation)?;
-                let encoded = toml::to_string(&epoch)
-                    .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-                atomic_write(
-                    &epoch_path,
-                    encoded.as_bytes(),
-                    0o600,
-                    Some((expected_uid, expected_uid)),
-                )?;
-            }
-            (true, true) => {}
-            (false, false) => unreachable!(),
-        }
-        let (epoch, _, epoch_bytes) = current_epoch_for_local_retry_at_locked(root, expected_uid)?;
-        if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
-            || runtime_failure_creation_reserved_at(root, expected_uid)?
-        {
-            return Err(std::io::Error::other("failure pair consumption pending"));
-        }
-        let receipt = LocalRetryReceipt {
-            schema_version: 1,
-            generation: epoch.generation,
-            epoch_sha256: sha256(&epoch_bytes),
-            progress: LocalRetryProgress::Committed,
-        };
-        write_local_retry_receipt(root, expected_uid, &receipt)?;
-        #[cfg(test)]
-        local_retry_crash_after(LocalRetryCrashPoint::ReceiptCommitted)?;
-        receipt
-    };
-
-    if receipt.progress == LocalRetryProgress::RetryInvoked {
-        if path_present(&epoch_path)? || path_present(&latch_path)? {
-            return Err(std::io::Error::other("local retry receipt binding invalid"));
-        }
-        if runtime_failure_creation_reserved_at(root, expected_uid)? {
-            return Err(std::io::Error::other("failure pair creation reserved"));
-        }
-        return systemd.retry_fixed_runtime();
-    }
-
-    if receipt.progress == LocalRetryProgress::Committed {
-        let epoch_present = path_present(&epoch_path)?;
-        let latch_present = path_present(&latch_path)?;
-        if epoch_present {
-            let (epoch, _, epoch_bytes) =
-                current_epoch_binding_for_local_retry_at(root, expected_uid)?;
-            if !latch_present {
-                return Err(std::io::Error::other("local retry receipt binding invalid"));
-            }
-            let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
-            if epoch.generation != receipt.generation
-                || sha256(&epoch_bytes) != receipt.epoch_sha256
-                || latch != receipt.generation.as_bytes()
-            {
-                return Err(std::io::Error::other("local retry receipt binding invalid"));
-            }
-            remove_regular_file(&epoch_path, 0o600, Some((expected_uid, expected_uid)))?;
-            #[cfg(test)]
-            local_retry_crash_after(LocalRetryCrashPoint::EpochUnlinked)?;
-        } else if latch_present {
-            let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
-            if latch != receipt.generation.as_bytes() {
-                return Err(std::io::Error::other("local retry receipt binding invalid"));
-            }
-        }
-        receipt.progress = LocalRetryProgress::EpochRemoved;
-        write_local_retry_receipt(root, expected_uid, &receipt)?;
-        #[cfg(test)]
-        local_retry_crash_after(LocalRetryCrashPoint::EpochRemovedReceipt)?;
-    }
-
-    if receipt.progress == LocalRetryProgress::EpochRemoved {
-        if path_present(&epoch_path)? {
-            return Err(std::io::Error::other("local retry receipt binding invalid"));
-        }
-        match trusted_file(&latch_path, expected_uid, 0o600) {
-            Ok(latch) if latch == receipt.generation.as_bytes() => {
-                remove_regular_file(&latch_path, 0o600, Some((expected_uid, expected_uid)))?;
-                #[cfg(test)]
-                local_retry_crash_after(LocalRetryCrashPoint::LatchUnlinked)?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(std::io::Error::other("local retry receipt binding invalid")),
-        }
-        receipt.progress = LocalRetryProgress::LatchRemoved;
-        write_local_retry_receipt(root, expected_uid, &receipt)?;
-        #[cfg(test)]
-        local_retry_crash_after(LocalRetryCrashPoint::LatchRemovedReceipt)?;
-    }
-
-    if receipt.progress != LocalRetryProgress::LatchRemoved {
-        return Err(std::io::Error::other("local retry recovery invalid"));
-    }
-    if runtime_failure_creation_reserved_at(root, expected_uid)? {
-        return Err(std::io::Error::other("failure pair creation reserved"));
-    }
-    let retry_result = systemd.retry_fixed_runtime();
-    #[cfg(test)]
-    local_retry_crash_after(LocalRetryCrashPoint::SystemdInvoked)?;
-    receipt.progress = LocalRetryProgress::RetryInvoked;
-    write_local_retry_receipt(root, expected_uid, &receipt)?;
-    retry_result
-}
-
-fn path_present(path: &Path) -> std::io::Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-fn write_local_retry_receipt(
-    root: &Path,
-    expected_uid: u32,
-    receipt: &LocalRetryReceipt,
-) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(receipt)
-        .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
-    atomic_write(
-        &runtime_failure_paths(root)?.local_retry_receipt,
-        &bytes,
-        0o600,
-        Some((expected_uid, expected_uid)),
+    let epoch_path = rooted(root, EPOCH_PATH);
+    let latch_path = rooted(root, LATCH_PATH);
+    let epoch_bytes = trusted_file(&epoch_path, expected_uid, 0o600)?;
+    let epoch: RuntimeFailureEpoch = toml::from_str(
+        std::str::from_utf8(&epoch_bytes)
+            .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
     )
+    .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
+    let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
+    if latch != epoch.generation.as_bytes()
+        || epoch.boot_id
+            != String::from_utf8(trusted_file(
+                &rooted(root, BOOT_ID_PATH),
+                expected_uid,
+                0o444,
+            )?)
+            .map_err(|_| std::io::Error::other("boot binding invalid"))?
+            .trim()
+    {
+        return Err(std::io::Error::other("failure epoch binding invalid"));
+    }
+    fs::remove_file(&latch_path)?;
+    fs::remove_file(&epoch_path)?;
+    File::open(rooted(root, FAILURE_DIR))?.sync_all()?;
+    systemd.retry_fixed_runtime()
 }
 
 fn issue_installed_bundle_failure_evidence_at(
-    root: &Path,
-    expected_uid: u32,
-    systemd: &mut impl RuntimeFailureSystemd,
-    issued_at_ms: u64,
-    expires_at_ms: u64,
-    request_nonce: &str,
-) -> std::io::Result<SignedInstalledBundleFailureEvidence> {
-    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
-    issue_installed_bundle_failure_evidence_at_locked(
-        root,
-        expected_uid,
-        systemd,
-        issued_at_ms,
-        expires_at_ms,
-        request_nonce,
-    )
-}
-
-fn issue_installed_bundle_failure_evidence_at_locked(
     root: &Path,
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
@@ -1133,13 +652,8 @@ fn issue_installed_bundle_failure_evidence_at_locked(
     {
         return Err(std::io::Error::other("failure evidence lifetime invalid"));
     }
-    let (epoch, metadata, _) = current_epoch_at_locked(root, expected_uid)?;
+    let (epoch, metadata) = current_epoch_at(root, expected_uid)?;
     valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result)?;
-    if runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
-        || runtime_failure_creation_reserved_at(root, expected_uid)?
-    {
-        return Err(std::io::Error::other("failure pair consumption pending"));
-    }
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
         .ok_or_else(|| std::io::Error::other("install authority unavailable"))?;
@@ -1177,9 +691,7 @@ fn validate_installed_bundle_repair_authority_at(
     authority_signature: &str,
     now_ms: u64,
 ) -> Result<InstalledBundleRepairGrant, InstalledBundleRepairError> {
-    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)
-        .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
-    let current = issue_installed_bundle_failure_evidence_at_locked(
+    let current = issue_installed_bundle_failure_evidence_at(
         root,
         expected_uid,
         systemd,
@@ -1188,7 +700,7 @@ fn validate_installed_bundle_repair_authority_at(
         &signed.evidence.request_nonce,
     )
     .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
-    let (_, metadata, _) = current_epoch_at_locked(root, expected_uid)
+    let (_, metadata) = current_epoch_at(root, expected_uid)
         .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
@@ -1217,78 +729,30 @@ fn validate_installed_bundle_repair_authority_at(
     })
 }
 
-fn current_epoch_at_locked(
+fn current_epoch_at(
     root: &Path,
     expected_uid: u32,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    current_epoch_with_boot_id_source_at_locked(
-        root,
-        expected_uid,
-        FixedBootIdSource::NamespaceAlias,
-    )
-}
-
-fn current_epoch_for_local_retry_at_locked(
-    root: &Path,
-    expected_uid: u32,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    current_epoch_with_boot_id_source_at_locked(root, expected_uid, FixedBootIdSource::HostProc)
-}
-
-fn current_epoch_with_boot_id_source_at_locked(
-    root: &Path,
-    expected_uid: u32,
-    boot_id_source: FixedBootIdSource,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    let (epoch, metadata, epoch_bytes) =
-        current_epoch_binding_with_boot_id_source(root, expected_uid, boot_id_source)?;
-    let state_directory = trusted_state_directory(root)?;
-    let latch = trusted_file(
-        &state_directory.path.join("runtime-failure/latch"),
-        expected_uid,
-        0o600,
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value)> {
+    trusted_state_directory(
+        &rooted(root, "/var/lib/enoki-probe"),
+        &rooted(root, IDENTITY_PATH),
     )?;
-    if latch != epoch.generation.as_bytes() {
-        return Err(std::io::Error::other("failure epoch binding invalid"));
-    }
-    Ok((epoch, metadata, epoch_bytes))
-}
-
-fn current_epoch_binding_at(
-    root: &Path,
-    expected_uid: u32,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    current_epoch_binding_with_boot_id_source(root, expected_uid, FixedBootIdSource::NamespaceAlias)
-}
-
-fn current_epoch_binding_for_local_retry_at(
-    root: &Path,
-    expected_uid: u32,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    current_epoch_binding_with_boot_id_source(root, expected_uid, FixedBootIdSource::HostProc)
-}
-
-fn current_epoch_binding_with_boot_id_source(
-    root: &Path,
-    expected_uid: u32,
-    boot_id_source: FixedBootIdSource,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, Vec<u8>)> {
-    let state_directory = trusted_state_directory(root)?;
-    let epoch_bytes = trusted_file(
-        &state_directory.path.join("runtime-failure/epoch.toml"),
-        expected_uid,
-        0o600,
-    )?;
+    let epoch_bytes = trusted_file(&rooted(root, EPOCH_PATH), expected_uid, 0o600)?;
     let epoch: RuntimeFailureEpoch = toml::from_str(
         std::str::from_utf8(&epoch_bytes)
             .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
     )
     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
+    let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)?;
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let identity =
-        trusted_identity_file(&state_directory.path.join("identity/probe-bootstrap.toml"))?;
+    let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
-    let boot_id = trusted_fixed_boot_id(root, expected_uid, boot_id_source)?;
+    let boot_id = String::from_utf8(trusted_file(
+        &rooted(root, BOOT_ID_PATH),
+        expected_uid,
+        0o444,
+    )?)
+    .map_err(|_| std::io::Error::other("boot binding invalid"))?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata_bytes)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -1302,7 +766,7 @@ fn current_epoch_binding_with_boot_id_source(
     if epoch.schema_version != 1
         || !restart_eligible_result(&epoch.result)
         || epoch.unit != RUNTIME_UNIT
-        || decode_lower_hex_32(&epoch.generation).is_none()
+        || latch != epoch.generation.as_bytes()
         || epoch.boot_id != boot_id.trim()
         || epoch.unit_sha256 != sha256(&unit)
         || epoch.identity_receipt_sha256 != sha256(&identity)
@@ -1318,31 +782,10 @@ fn current_epoch_binding_with_boot_id_source(
     {
         return Err(std::io::Error::other("failure epoch binding invalid"));
     }
-    Ok((epoch, metadata, epoch_bytes))
+    Ok((epoch, metadata))
 }
 
-#[cfg(test)]
 fn record_runtime_failure_at(
-    root: &Path,
-    expected_uid: u32,
-    systemd: &mut impl RuntimeFailureSystemd,
-    generations: &mut impl FailureGenerationSource,
-) -> std::io::Result<RuntimeFailureRecordOutcome> {
-    #[cfg(test)]
-    let (recorder_invocation_id, recorder_pid) = test_recorder_caller_identity();
-    #[cfg(not(test))]
-    let (recorder_invocation_id, recorder_pid) = recorder_caller_identity()?;
-    record_runtime_failure_at_with_caller(
-        root,
-        expected_uid,
-        systemd,
-        generations,
-        &recorder_invocation_id,
-        recorder_pid,
-    )
-}
-
-fn record_runtime_failure_at_with_caller(
     root: &Path,
     expected_uid: u32,
     systemd: &mut impl RuntimeFailureSystemd,
@@ -1350,118 +793,18 @@ fn record_runtime_failure_at_with_caller(
     recorder_invocation_id: &str,
     recorder_pid: u32,
 ) -> std::io::Result<RuntimeFailureRecordOutcome> {
-    let _lock = acquire_runtime_failure_pair_lock_at(root, expected_uid)?;
-    let state_directory = trusted_state_directory(root)?;
-    let failure_dir = state_directory.path.join("runtime-failure");
-    let epoch_path = failure_dir.join("epoch.toml");
-    let latch_path = failure_dir.join("latch");
-    let creation_reserved = runtime_failure_creation_reserved_at(root, expected_uid)?;
-    match (path_present(&epoch_path)?, path_present(&latch_path)?) {
-        (true, true) => {
-            let (epoch, _, _) = current_epoch_at_locked(root, expected_uid)?;
-            if creation_reserved
-                || runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
-            {
-                return Err(std::io::Error::other("failure pair consumption pending"));
-            }
-            return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
-        }
-        (true, false) => {
-            let Some(confirmation) = confirm_fixed_runtime_budget_exhaustion(
-                root,
-                expected_uid,
-                systemd,
-                recorder_invocation_id,
-                recorder_pid,
-            )?
-            else {
-                return Ok(RuntimeFailureRecordOutcome::Ignored);
-            };
-            let (epoch, _, _) = current_epoch_binding_at(root, expected_uid)?;
-            if epoch.result != confirmation.result {
-                return Ok(RuntimeFailureRecordOutcome::Ignored);
-            }
-            if creation_reserved
-                || runtime_failure_consumption_pending_at(root, expected_uid, &epoch.generation)?
-            {
-                return Err(std::io::Error::other("failure pair consumption pending"));
-            }
-            let failure_directory = fs::symlink_metadata(&failure_dir)?;
-            let custody = PrivateAtomicFileCustody::open(
-                &latch_path,
-                0o600,
-                (expected_uid, expected_uid),
-                expected_uid,
-            )?;
-            custody.publish_absent_checked(epoch.generation.as_bytes(), || {
-                recheck_runtime_failure_publication_boundary(
-                    root,
-                    &state_directory,
-                    &failure_dir,
-                    &failure_directory,
-                    expected_uid,
-                )
-            })?;
-            return Ok(RuntimeFailureRecordOutcome::Latched);
-        }
-        (false, true) => {
-            let Some(confirmation) = confirm_fixed_runtime_budget_exhaustion(
-                root,
-                expected_uid,
-                systemd,
-                recorder_invocation_id,
-                recorder_pid,
-            )?
-            else {
-                return Ok(RuntimeFailureRecordOutcome::Ignored);
-            };
-            let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
-            let generation = std::str::from_utf8(&latch)
-                .ok()
-                .filter(|value| decode_lower_hex_32(value).is_some())
-                .ok_or_else(|| std::io::Error::other("failure latch invalid"))?;
-            if creation_reserved
-                || runtime_failure_consumption_pending_at(root, expected_uid, generation)?
-            {
-                return Err(std::io::Error::other("failure pair consumption pending"));
-            }
-            let epoch = build_current_epoch(
-                root,
-                expected_uid,
-                &RuntimeUnitState {
-                    active_state: "failed".to_owned(),
-                    result: confirmation.result,
-                },
-                generation,
-            )?;
-            let encoded = toml::to_string(&epoch)
-                .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-            let failure_directory = fs::symlink_metadata(&failure_dir)?;
-            let custody = PrivateAtomicFileCustody::open(
-                &epoch_path,
-                0o600,
-                (expected_uid, expected_uid),
-                expected_uid,
-            )?;
-            custody.publish_absent_checked(encoded.as_bytes(), || {
-                recheck_runtime_failure_publication_boundary(
-                    root,
-                    &state_directory,
-                    &failure_dir,
-                    &failure_directory,
-                    expected_uid,
-                )
-            })?;
-            return Ok(RuntimeFailureRecordOutcome::Latched);
-        }
-        (false, false) => {}
+    let failure_dir = rooted(root, FAILURE_DIR);
+    let epoch_path = rooted(root, EPOCH_PATH);
+    let latch_path = rooted(root, LATCH_PATH);
+    trusted_state_directory(
+        &rooted(root, "/var/lib/enoki-probe"),
+        &rooted(root, IDENTITY_PATH),
+    )?;
+    if epoch_path.exists() || latch_path.exists() {
+        current_epoch_at(root, expected_uid)?;
+        return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
     }
-
-    if creation_reserved {
-        return Err(std::io::Error::other("failure pair creation reserved"));
-    }
-
-    let Some(confirmation) = confirm_fixed_runtime_budget_exhaustion(
+    let Some(exhaustion) = confirm_fixed_runtime_budget_exhaustion(
         root,
         expected_uid,
         systemd,
@@ -1472,513 +815,14 @@ fn record_runtime_failure_at_with_caller(
         return Ok(RuntimeFailureRecordOutcome::Ignored);
     };
 
-    let retry_receipt = runtime_failure_paths(root)?.local_retry_receipt;
-    if path_present(&retry_receipt)? {
-        let bytes = trusted_file(&retry_receipt, expected_uid, 0o600)?;
-        let receipt = parse_local_retry_receipt(&bytes)?;
-        if receipt.progress != LocalRetryProgress::RetryInvoked {
-            return Err(std::io::Error::other("local retry recovery pending"));
-        }
-        remove_regular_file(&retry_receipt, 0o600, Some((expected_uid, expected_uid)))?;
-    }
-
-    if path_present(&failure_dir)? {
+    if failure_dir.exists() {
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
-    } else if state_directory.canonical {
-        return Err(std::io::Error::other("canonical failure child missing"));
     } else {
         ensure_directory(&failure_dir, 0o700, Some((expected_uid, expected_uid)))?;
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
     }
-    let failure_directory = fs::symlink_metadata(&failure_dir)?;
-    let epoch_custody = PrivateAtomicFileCustody::open(
-        &epoch_path,
-        0o600,
-        (expected_uid, expected_uid),
-        expected_uid,
-    )?;
-    let latch_custody = PrivateAtomicFileCustody::open(
-        &latch_path,
-        0o600,
-        (expected_uid, expected_uid),
-        expected_uid,
-    )?;
-    let mut generation = [0_u8; 32];
-    generations.fill_generation(&mut generation)?;
-    let epoch = build_current_epoch(
-        root,
-        expected_uid,
-        &RuntimeUnitState {
-            active_state: "failed".to_owned(),
-            result: confirmation.result,
-        },
-        &hex(&generation),
-    )?;
-    let encoded =
-        toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    PrivateAtomicFileCustody::publish_epoch_then_latch_absent_checked(
-        (&epoch_custody, encoded.as_bytes()),
-        (&latch_custody, epoch.generation.as_bytes()),
-        || {
-            recheck_runtime_failure_publication_boundary(
-                root,
-                &state_directory,
-                &failure_dir,
-                &failure_directory,
-                expected_uid,
-            )
-        },
-    )?;
-    Ok(RuntimeFailureRecordOutcome::Latched)
-}
-
-fn runtime_failure_consumption_pending_at(
-    root: &Path,
-    expected_uid: u32,
-    generation: &str,
-) -> std::io::Result<bool> {
-    let paths = runtime_failure_paths(root)?;
-    if let Some(bytes) = trusted_optional_file(&paths.local_retry_receipt, expected_uid, 0o600)? {
-        let receipt = parse_local_retry_receipt(&bytes)?;
-        if receipt.generation != generation {
-            return Err(std::io::Error::other("local retry receipt binding invalid"));
-        }
-        if receipt.progress != LocalRetryProgress::RetryInvoked {
-            return Ok(true);
-        }
-        return Err(std::io::Error::other(
-            "completed local retry retained a latch",
-        ));
-    }
-
-    if let Some(_bytes) = trusted_optional_file(&paths.repair_intent, expected_uid, 0o600)? {
-        let intent = installed_bundle_repair::load_validated_installed_bundle_repair_intent_at(
-            root,
-            expected_uid,
-        )
-        .map_err(|_| std::io::Error::other("repair intent invalid"))?
-        .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
-        let state = intent.state;
-        if matches!(
-            state,
-            installed_bundle_repair::InstalledBundleRepairProgress::Admitted
-                | installed_bundle_repair::InstalledBundleRepairProgress::ValidationPending
-                | installed_bundle_repair::InstalledBundleRepairProgress::TemporaryRuntimeHealthy
-                | installed_bundle_repair::InstalledBundleRepairProgress::ProbeActive
-                | installed_bundle_repair::InstalledBundleRepairProgress::InvalidationCommitted
-                | installed_bundle_repair::InstalledBundleRepairProgress::EpochRemoved
-        ) {
-            if intent.authority.generation != generation {
-                return Err(std::io::Error::other("repair intent binding invalid"));
-            }
-            return Ok(true);
-        }
-        if matches!(
-            state,
-            installed_bundle_repair::InstalledBundleRepairProgress::LatchRemoved
-                | installed_bundle_repair::InstalledBundleRepairProgress::CanonicalRuntimeHealthy
-                | installed_bundle_repair::InstalledBundleRepairProgress::StatusPublished
-        ) && intent.authority.generation == generation
-        {
-            return Err(std::io::Error::other(
-                "completed repair retained a failure pair",
-            ));
-        }
-    }
-
-    if let Some(bytes) =
-        trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
-    {
-        let intent = parse_upgrade_runtime_failure_intent(&bytes)?;
-        if intent.phase == "aborted" {
-            return Ok(false);
-        }
-        let Some(progress) = intent.progress else {
-            return Ok(true);
-        };
-        match progress {
-            UpgradeRuntimeFailureProgress::Bound | UpgradeRuntimeFailureProgress::EpochRemoved => {
-                if intent.generation.as_deref() != Some(generation) {
-                    return Err(std::io::Error::other("upgrade intent binding invalid"));
-                }
-                return Ok(true);
-            }
-            UpgradeRuntimeFailureProgress::LatchRemoved => {
-                if intent.generation.as_deref() == Some(generation) {
-                    return Err(std::io::Error::other(
-                        "completed upgrade retained a failure pair",
-                    ));
-                }
-            }
-            UpgradeRuntimeFailureProgress::None => {
-                return Err(std::io::Error::other(
-                    "absent-pair upgrade intent retained a failure pair",
-                ));
-            }
-            UpgradeRuntimeFailureProgress::NoneConsumed => return Ok(intent.phase != "activated"),
-        }
-    }
-    Ok(false)
-}
-
-fn runtime_failure_creation_reserved_at(root: &Path, expected_uid: u32) -> std::io::Result<bool> {
-    let paths = runtime_failure_paths(root)?;
-    if let Some(_bytes) = trusted_optional_file(&paths.repair_intent, expected_uid, 0o600)? {
-        let intent = installed_bundle_repair::load_validated_installed_bundle_repair_intent_at(
-            root,
-            expected_uid,
-        )
-        .map_err(|_| std::io::Error::other("repair intent invalid"))?
-        .ok_or_else(|| std::io::Error::other("repair intent invalid"))?;
-        // validated Repair intent 在其 durable retirement 删除文件前始终独占消费权。
-        // progress 不是释放信号：pair-none Local Retry 不能在此窗口启动 Runtime。
-        let _ = intent;
-        return Ok(true);
-    }
-    let Some(bytes) =
-        trusted_optional_file(&rooted(root, UPGRADE_ATTEMPT_PATH), expected_uid, 0o600)?
-    else {
-        return Ok(false);
-    };
-    let intent = parse_upgrade_runtime_failure_intent(&bytes)?;
-    if intent.phase == "aborted" {
-        return Ok(false);
-    }
-    Ok(!matches!(
-        (&intent.phase, intent.progress),
-        (phase, Some(UpgradeRuntimeFailureProgress::NoneConsumed))
-            | (phase, Some(UpgradeRuntimeFailureProgress::LatchRemoved))
-            if phase == "activated"
-    ))
-}
-
-fn parse_local_retry_receipt(bytes: &[u8]) -> std::io::Result<LocalRetryReceipt> {
-    let receipt: LocalRetryReceipt = serde_json::from_slice(bytes)
-        .map_err(|_| std::io::Error::other("local retry receipt invalid"))?;
-    if receipt.schema_version != 1
-        || decode_lower_hex_32(&receipt.generation).is_none()
-        || decode_lower_hex_32(&receipt.epoch_sha256).is_none()
-    {
-        return Err(std::io::Error::other("local retry receipt invalid"));
-    }
-    Ok(receipt)
-}
-
-fn parse_upgrade_runtime_failure_intent(
-    bytes: &[u8],
-) -> std::io::Result<UpgradeRuntimeFailureIntent> {
-    let journal =
-        std::str::from_utf8(bytes).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
-    let value: toml::Value =
-        toml::from_str(journal).map_err(|_| std::io::Error::other("upgrade intent invalid"))?;
-    let schema = value
-        .get("schema_version")
-        .and_then(toml::Value::as_integer)
-        .filter(|schema| (1..=4).contains(schema))
-        .and_then(|schema| u16::try_from(schema).ok())
-        .ok_or_else(|| std::io::Error::other("upgrade intent schema invalid"))?;
-    let operation_id = upgrade_journal_string(&value, "operation_id")?;
-    let _stage_owner_uid: u32 = upgrade_journal_usize(&value, "stage_owner_uid")?
-        .try_into()
-        .map_err(|_| std::io::Error::other("upgrade intent binding invalid"))?;
-    let authority_sha256 = upgrade_journal_string(&value, "authority_sha256")?;
-    let source_probe_id = upgrade_journal_string(&value, "source_probe_id")?;
-    let source_bundle_version = upgrade_journal_string(&value, "source_bundle_version")?;
-    let source_install_state_sha256 =
-        upgrade_journal_string(&value, "source_install_state_sha256")?;
-    let source_manifest_sha256 = upgrade_journal_string(&value, "source_manifest_sha256")?;
-    let target_bundle_version = upgrade_journal_string(&value, "target_bundle_version")?;
-    let target_install_state_present = value.get("target_install_state_sha256").is_some();
-    let target_install_state_sha256 = metadata_string(&value, "target_install_state_sha256");
-    let target_manifest_sha256 = upgrade_journal_string(&value, "target_manifest_sha256")?;
-    if !valid_upgrade_identifier(&operation_id)
-        || !valid_upgrade_identifier(&source_probe_id)
-        || decode_lower_hex_32(&authority_sha256).is_none()
-        || !valid_upgrade_version(&source_bundle_version)
-        || !valid_upgrade_version(&target_bundle_version)
-        || decode_lower_hex_32(&source_install_state_sha256).is_none()
-        || decode_lower_hex_32(&source_manifest_sha256).is_none()
-        || (target_install_state_present
-            && target_install_state_sha256
-                .as_deref()
-                .and_then(decode_lower_hex_32)
-                .is_none())
-        || decode_lower_hex_32(&target_manifest_sha256).is_none()
-    {
-        return Err(std::io::Error::other("upgrade intent binding invalid"));
-    }
-    let has_authority_scope = [
-        "hub_origin",
-        "host_id",
-        "target_asset_set_digest",
-        "verified_stage_sha256",
-    ]
-    .iter()
-    .any(|key| value.get(*key).is_some());
-    if has_authority_scope {
-        let hub_origin = upgrade_journal_string(&value, "hub_origin")?;
-        let host_id = upgrade_journal_string(&value, "host_id")?;
-        let target_asset_set_digest = upgrade_journal_string(&value, "target_asset_set_digest")?;
-        let verified_stage_sha256 = upgrade_journal_string(&value, "verified_stage_sha256")?;
-        if hub_origin.is_empty()
-            || !valid_upgrade_identifier(&host_id)
-            || target_asset_set_digest
-                .strip_prefix("sha256:")
-                .and_then(decode_lower_hex_32)
-                .is_none()
-            || decode_lower_hex_32(&verified_stage_sha256).is_none()
-        {
-            return Err(std::io::Error::other("upgrade intent authority invalid"));
-        }
-    } else {
-        if schema == 2 {
-            return Err(std::io::Error::other("upgrade intent authority missing"));
-        }
-        if target_install_state_sha256.is_none() {
-            return Err(std::io::Error::other(
-                "upgrade intent target binding missing",
-            ));
-        }
-    }
-    let phase = upgrade_journal_string(&value, "phase")?;
-    let activated_targets = upgrade_journal_usize(&value, "activated_targets")?;
-    let finalized_targets = upgrade_journal_usize(&value, "finalized_targets")?;
-    let activation_started = match schema {
-        3 | 4 => value
-            .get("activation_started")
-            .and_then(toml::Value::as_bool)
-            .ok_or_else(|| std::io::Error::other("upgrade intent activation marker invalid"))?,
-        2 => match value.get("activation_started") {
-            Some(value) => value
-                .as_bool()
-                .ok_or_else(|| std::io::Error::other("upgrade intent activation marker invalid"))?,
-            None => infer_upgrade_activation_started(&phase, activated_targets, finalized_targets)?,
-        },
-        1 => infer_upgrade_activation_started(&phase, activated_targets, finalized_targets)?,
-        _ => unreachable!(),
-    };
-    validate_upgrade_attempt_tuple(
-        &phase,
-        activation_started,
-        activated_targets,
-        finalized_targets,
-    )?;
-    let progress = metadata_string(&value, "runtime_failure_consumption");
-    let generation = metadata_string(&value, "runtime_failure_generation");
-    let epoch_sha256 = metadata_string(&value, "runtime_failure_epoch_sha256");
-    if schema != 4 {
-        if value.get("runtime_failure_consumption").is_some()
-            || value.get("runtime_failure_generation").is_some()
-            || value.get("runtime_failure_epoch_sha256").is_some()
-        {
-            return Err(std::io::Error::other("legacy upgrade intent invalid"));
-        }
-        return Ok(UpgradeRuntimeFailureIntent {
-            phase,
-            progress: None,
-            generation: None,
-        });
-    }
-    let generation_present = value.get("runtime_failure_generation").is_some();
-    let epoch_sha256_present = value.get("runtime_failure_epoch_sha256").is_some();
-    let (progress, generation) = match (progress.as_deref(), generation, epoch_sha256) {
-        (Some("none"), None, None) if !generation_present && !epoch_sha256_present => {
-            (UpgradeRuntimeFailureProgress::None, None)
-        }
-        (Some("none-consumed"), None, None) if !generation_present && !epoch_sha256_present => {
-            (UpgradeRuntimeFailureProgress::NoneConsumed, None)
-        }
-        (Some("bound"), Some(generation), Some(digest))
-            if decode_lower_hex_32(&generation).is_some()
-                && decode_lower_hex_32(&digest).is_some() =>
-        {
-            (UpgradeRuntimeFailureProgress::Bound, Some(generation))
-        }
-        (Some("epoch-removed"), Some(generation), Some(digest))
-            if decode_lower_hex_32(&generation).is_some()
-                && decode_lower_hex_32(&digest).is_some() =>
-        {
-            (
-                UpgradeRuntimeFailureProgress::EpochRemoved,
-                Some(generation),
-            )
-        }
-        (Some("latch-removed"), Some(generation), Some(digest))
-            if decode_lower_hex_32(&generation).is_some()
-                && decode_lower_hex_32(&digest).is_some() =>
-        {
-            (
-                UpgradeRuntimeFailureProgress::LatchRemoved,
-                Some(generation),
-            )
-        }
-        _ => return Err(std::io::Error::other("upgrade intent progress invalid")),
-    };
-    if !upgrade_runtime_failure_progress_matches_phase(progress, &phase) {
-        return Err(std::io::Error::other("upgrade intent progress incoherent"));
-    }
-    Ok(UpgradeRuntimeFailureIntent {
-        phase,
-        progress: Some(progress),
-        generation,
-    })
-}
-
-fn upgrade_runtime_failure_progress_matches_phase(
-    progress: UpgradeRuntimeFailureProgress,
-    phase: &str,
-) -> bool {
-    match progress {
-        UpgradeRuntimeFailureProgress::None | UpgradeRuntimeFailureProgress::Bound => matches!(
-            phase,
-            "consumed"
-                | "admitted"
-                | "prepared"
-                | "aborted"
-                | "activation-started"
-                | "repair-required"
-                | "finalizing"
-                | "stage-cleanup-required"
-        ),
-        UpgradeRuntimeFailureProgress::EpochRemoved => matches!(
-            phase,
-            "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
-        ),
-        UpgradeRuntimeFailureProgress::NoneConsumed
-        | UpgradeRuntimeFailureProgress::LatchRemoved => matches!(
-            phase,
-            "activation-started"
-                | "repair-required"
-                | "finalizing"
-                | "stage-cleanup-required"
-                | "activated"
-        ),
-    }
-}
-
-fn infer_upgrade_activation_started(
-    phase: &str,
-    activated: usize,
-    finalized: usize,
-) -> std::io::Result<bool> {
-    match phase {
-        "consumed" | "admitted" | "prepared" | "aborted" => Ok(false),
-        "activation-started" | "finalizing" | "stage-cleanup-required" | "activated" => Ok(true),
-        "repair-required" if activated > 0 || finalized > 0 => Ok(true),
-        _ => Err(std::io::Error::other("upgrade intent phase invalid")),
-    }
-}
-
-fn validate_upgrade_attempt_tuple(
-    phase: &str,
-    activation_started: bool,
-    activated: usize,
-    finalized: usize,
-) -> std::io::Result<()> {
-    const UPGRADE_TARGET_COUNT: usize = 21;
-
-    if finalized > activated || activated > UPGRADE_TARGET_COUNT {
-        return Err(std::io::Error::other(
-            "upgrade intent progress tuple invalid",
-        ));
-    }
-    let valid = match phase {
-        "consumed" | "admitted" | "prepared" | "aborted" => {
-            !activation_started && activated == 0 && finalized == 0
-        }
-        "activation-started" => activation_started && finalized == 0,
-        "repair-required" => activation_started,
-        "finalizing" => activation_started && activated == UPGRADE_TARGET_COUNT,
-        "stage-cleanup-required" | "activated" => {
-            activation_started
-                && activated == UPGRADE_TARGET_COUNT
-                && finalized == UPGRADE_TARGET_COUNT
-        }
-        _ => false,
-    };
-    valid
-        .then_some(())
-        .ok_or_else(|| std::io::Error::other("upgrade intent progress tuple invalid"))
-}
-
-fn upgrade_journal_string(value: &toml::Value, key: &str) -> std::io::Result<String> {
-    metadata_string(value, key).ok_or_else(|| std::io::Error::other("upgrade intent field invalid"))
-}
-
-fn upgrade_journal_usize(value: &toml::Value, key: &str) -> std::io::Result<usize> {
-    value
-        .get(key)
-        .and_then(toml::Value::as_integer)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| std::io::Error::other("upgrade intent field invalid"))
-}
-
-fn valid_upgrade_identifier(value: &str) -> bool {
-    (1..=96).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-fn valid_upgrade_version(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_whitespace)
-}
-
-fn trusted_optional_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Option<Vec<u8>>> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => trusted_file(path, uid, mode).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn build_current_epoch(
-    root: &Path,
-    expected_uid: u32,
-    state: &RuntimeUnitState,
-    generation: &str,
-) -> std::io::Result<RuntimeFailureEpoch> {
-    build_current_epoch_with_boot_id_source(
-        root,
-        expected_uid,
-        state,
-        generation,
-        FixedBootIdSource::NamespaceAlias,
-    )
-}
-
-fn build_current_epoch_for_local_retry(
-    root: &Path,
-    expected_uid: u32,
-    state: &RuntimeUnitState,
-    generation: &str,
-) -> std::io::Result<RuntimeFailureEpoch> {
-    build_current_epoch_with_boot_id_source(
-        root,
-        expected_uid,
-        state,
-        generation,
-        FixedBootIdSource::HostProc,
-    )
-}
-
-fn build_current_epoch_with_boot_id_source(
-    root: &Path,
-    expected_uid: u32,
-    state: &RuntimeUnitState,
-    generation: &str,
-    boot_id_source: FixedBootIdSource,
-) -> std::io::Result<RuntimeFailureEpoch> {
-    if decode_lower_hex_32(generation).is_none() {
-        return Err(std::io::Error::other("failure generation invalid"));
-    }
-    if state.active_state != "failed" || !restart_eligible_result(&state.result) {
-        return Err(std::io::Error::other("Runtime failure is not terminal"));
-    }
     let metadata = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let state_directory = trusted_state_directory(root)?;
-    let identity =
-        trusted_identity_file(&state_directory.path.join("identity/probe-bootstrap.toml"))?;
+    let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
     let expected_unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
         .into_iter()
@@ -1987,7 +831,12 @@ fn build_current_epoch_with_boot_id_source(
     if unit != expected_unit {
         return Err(std::io::Error::other("runtime unit binding mismatch"));
     }
-    let boot_id = trusted_fixed_boot_id(root, expected_uid, boot_id_source)?;
+    let boot_id = String::from_utf8(trusted_file(
+        &rooted(root, BOOT_ID_PATH),
+        expected_uid,
+        0o444,
+    )?)
+    .map_err(|_| std::io::Error::other("boot binding invalid"))?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -2010,9 +859,11 @@ fn build_current_epoch_with_boot_id_source(
     if string(&identity_value, "hub_url")? != hub_origin {
         return Err(std::io::Error::other("identity binding mismatch"));
     }
-    Ok(RuntimeFailureEpoch {
+    let mut generation = [0_u8; 32];
+    generations.fill_generation(&mut generation)?;
+    let epoch = RuntimeFailureEpoch {
         schema_version: 1,
-        generation: generation.to_owned(),
+        generation: hex(&generation),
         boot_id: boot_id.trim().to_owned(),
         unit: RUNTIME_UNIT.to_owned(),
         unit_sha256: sha256(&unit),
@@ -2023,8 +874,23 @@ fn build_current_epoch_with_boot_id_source(
         install_state_sha256: string(&metadata, "install_state_sha256")?,
         manifest_sha256: string(&metadata, "target_manifest_sha256")?,
         bundle_version: string(&metadata, "bundle_version")?,
-        result: state.result.clone(),
-    })
+        result: exhaustion.result,
+    };
+    let encoded =
+        toml::to_string(&epoch).map_err(|_| std::io::Error::other("failure epoch invalid"))?;
+    atomic_write(
+        &epoch_path,
+        encoded.as_bytes(),
+        0o600,
+        Some((expected_uid, expected_uid)),
+    )?;
+    atomic_write(
+        &latch_path,
+        epoch.generation.as_bytes(),
+        0o600,
+        Some((expected_uid, expected_uid)),
+    )?;
+    Ok(RuntimeFailureRecordOutcome::Latched)
 }
 
 fn rooted(root: &Path, absolute: &str) -> PathBuf {
@@ -2052,67 +918,6 @@ fn trusted_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Vec<u8>> {
         return Err(std::io::Error::other("trusted file changed"));
     }
     Ok(bytes)
-}
-
-#[derive(Clone, Copy)]
-enum FixedBootIdSource {
-    NamespaceAlias,
-    HostProc,
-}
-
-fn trusted_fixed_boot_id(
-    root: &Path,
-    expected_uid: u32,
-    source: FixedBootIdSource,
-) -> std::io::Result<String> {
-    let path = rooted(
-        root,
-        match source {
-            FixedBootIdSource::NamespaceAlias => BOOT_ID_PATH,
-            FixedBootIdSource::HostProc => HOST_BOOT_ID_PATH,
-        },
-    );
-    let metadata = fs::symlink_metadata(&path)?;
-    let valid = |metadata: &fs::Metadata| {
-        metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata.uid() == expected_uid
-            && metadata.mode() & 0o7777 == 0o444
-            && metadata.nlink() == 1
-    };
-    if !valid(&metadata) {
-        return Err(std::io::Error::other("boot binding invalid"));
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&path)?;
-    let opened = file.metadata()?;
-    if !valid(&opened)
-        || opened.dev() != metadata.dev()
-        || opened.ino() != metadata.ino()
-        || opened.uid() != metadata.uid()
-        || opened.mode() != metadata.mode()
-        || opened.nlink() != metadata.nlink()
-    {
-        return Err(std::io::Error::other("boot binding changed"));
-    }
-    let mut bytes = Vec::new();
-    file.take(65).read_to_end(&mut bytes)?;
-    if bytes.len() > 64 {
-        return Err(std::io::Error::other("boot binding invalid"));
-    }
-    let current = fs::symlink_metadata(&path)?;
-    if !valid(&current)
-        || current.dev() != opened.dev()
-        || current.ino() != opened.ino()
-        || current.uid() != opened.uid()
-        || current.mode() != opened.mode()
-        || current.nlink() != opened.nlink()
-    {
-        return Err(std::io::Error::other("boot binding changed"));
-    }
-    String::from_utf8(bytes).map_err(|_| std::io::Error::other("boot binding invalid"))
 }
 
 fn trusted_identity_file(path: &Path) -> std::io::Result<Vec<u8>> {
@@ -2157,131 +962,20 @@ fn trusted_directory(path: &Path, uid: u32, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct RuntimeFailureStateDirectory {
-    path: PathBuf,
-    canonical: bool,
-    state_dev: u64,
-    state_ino: u64,
-    identity_directory_dev: u64,
-    identity_directory_ino: u64,
-    identity_dev: u64,
-    identity_ino: u64,
-}
-
-struct RuntimeFailurePaths {
-    epoch: PathBuf,
-    latch: PathBuf,
-    local_retry_receipt: PathBuf,
-    repair_intent: PathBuf,
-    operation_status: PathBuf,
-}
-
-fn runtime_failure_paths(root: &Path) -> std::io::Result<RuntimeFailurePaths> {
-    let state = trusted_state_directory(root)?;
-    let failure = state.path.join("runtime-failure");
-    Ok(RuntimeFailurePaths {
-        epoch: failure.join("epoch.toml"),
-        latch: failure.join("latch"),
-        local_retry_receipt: failure.join("local-retry-receipt.json"),
-        repair_intent: failure.join("repair-intent.json"),
-        operation_status: state.path.join("probe-operation-status.toml"),
-    })
-}
-
-fn trusted_state_directory(root: &Path) -> std::io::Result<RuntimeFailureStateDirectory> {
-    let public = rooted(root, STATE_DIRECTORY_PATH);
-    let public_metadata = fs::symlink_metadata(&public)?;
-    let (state_directory, canonical) = if public_metadata.is_dir()
-        && !public_metadata.file_type().is_symlink()
-    {
-        (public.clone(), false)
-    } else if public_metadata.file_type().is_symlink()
-        && public_metadata.uid() == 0
-        && public_metadata.gid() == 0
-        && public_metadata.nlink() == 1
-        && fs::read_link(&public)?.as_os_str().as_bytes() == CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET
-    {
-        (rooted(root, CANONICAL_PRIVATE_STATE_DIRECTORY_PATH), true)
-    } else {
-        return Err(std::io::Error::other("state directory boundary invalid"));
-    };
-    crate::secure_file::managed_path_exists(&state_directory)?;
-    let metadata = fs::symlink_metadata(&state_directory)?;
-    let identity_directory = state_directory.join("identity");
-    let identity_path = state_directory.join("identity/probe-bootstrap.toml");
-    crate::secure_file::managed_path_exists(&identity_directory)?;
-    crate::secure_file::managed_path_exists(&identity_path)?;
-    let identity_directory_metadata = fs::symlink_metadata(&identity_directory)?;
-    let identity = fs::symlink_metadata(&identity_path)?;
+fn trusted_state_directory(path: &Path, identity_path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    let identity = fs::symlink_metadata(identity_path)?;
     if !metadata.is_dir()
         || metadata.file_type().is_symlink()
         || metadata.mode() & 0o7777 != 0o750
-        || !identity_directory_metadata.is_dir()
-        || identity_directory_metadata.file_type().is_symlink()
         || !identity.is_file()
         || identity.file_type().is_symlink()
         || identity.mode() & 0o7777 != 0o600
-        || identity.nlink() != 1
         || metadata.uid() != identity.uid()
         || metadata.gid() != identity.gid()
-        || metadata.uid() != identity_directory_metadata.uid()
-        || metadata.gid() != identity_directory_metadata.gid()
         || metadata.nlink() < 2
     {
         return Err(std::io::Error::other("state directory boundary invalid"));
-    }
-    if public_metadata.file_type().is_symlink() {
-        let current = fs::symlink_metadata(&public)?;
-        if !current.file_type().is_symlink()
-            || current.dev() != public_metadata.dev()
-            || current.ino() != public_metadata.ino()
-            || current.uid() != 0
-            || current.gid() != 0
-            || current.nlink() != 1
-            || fs::read_link(&public)?.as_os_str().as_bytes()
-                != CANONICAL_PUBLIC_STATE_DIRECTORY_TARGET
-        {
-            return Err(std::io::Error::other("state directory boundary changed"));
-        }
-    }
-    Ok(RuntimeFailureStateDirectory {
-        path: state_directory,
-        canonical,
-        state_dev: metadata.dev(),
-        state_ino: metadata.ino(),
-        identity_directory_dev: identity_directory_metadata.dev(),
-        identity_directory_ino: identity_directory_metadata.ino(),
-        identity_dev: identity.dev(),
-        identity_ino: identity.ino(),
-    })
-}
-
-fn recheck_runtime_failure_publication_boundary(
-    root: &Path,
-    state_directory: &RuntimeFailureStateDirectory,
-    failure_directory: &Path,
-    expected_failure_directory: &fs::Metadata,
-    expected_uid: u32,
-) -> std::io::Result<()> {
-    recorder_boundary_recheck_for_test()?;
-    if trusted_state_directory(root)? != *state_directory {
-        return Err(std::io::Error::other("state directory boundary changed"));
-    }
-    crate::secure_file::managed_path_exists(failure_directory)?;
-    let current = fs::symlink_metadata(failure_directory)?;
-    if !current.is_dir()
-        || current.file_type().is_symlink()
-        || current.uid() != expected_uid
-        || current.gid() != expected_uid
-        || current.mode() & 0o7777 != 0o700
-        || current.nlink() < 2
-        || current.dev() != expected_failure_directory.dev()
-        || current.ino() != expected_failure_directory.ino()
-    {
-        return Err(std::io::Error::other(
-            "runtime failure directory boundary changed",
-        ));
     }
     Ok(())
 }
@@ -2329,227 +1023,229 @@ fn valid_identifier(value: &str) -> bool {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{collections::VecDeque, os::unix::fs::PermissionsExt};
 
-    thread_local! {
-        static TEST_SNAPSHOT_AFTER_WAIT: std::cell::Cell<bool> = const {
-            std::cell::Cell::new(false)
-        };
+    const RECORDER_INVOCATION: &str = "0123456789abcdef0123456789abcdef";
+    const RUNTIME_INVOCATION: &str = "fedcba9876543210fedcba9876543210";
+    const TERMINAL_STATE_CHANGE_USEC: u64 = 7_000_000_000;
+    const TERMINAL_OBSERVED_USEC: u64 = 7_000_200_000;
+
+    fn show(properties: &[(&str, &str)]) -> String {
+        properties
+            .iter()
+            .map(|(key, value)| format!("{key}={value}\n"))
+            .collect()
     }
 
-    fn test_snapshot_after_wait() {
-        TEST_SNAPSHOT_AFTER_WAIT.with(|after_wait| after_wait.set(true));
+    /// 固定 recorder 的 manager property closure。
+    #[derive(Clone, Debug)]
+    struct RecorderView {
+        invocation_id: String,
+        main_pid: String,
+        fragment_path: String,
+        drop_in_paths: String,
+        need_daemon_reload: String,
+        refuse_manual_start: String,
     }
 
-    fn scheduled_test_runtime_snapshot(state: RuntimeUnitState) -> RuntimeFailureSnapshot {
-        let mut snapshot = test_runtime_snapshot(state);
-        TEST_SNAPSHOT_AFTER_WAIT.with(|after_wait| {
-            if after_wait.replace(false) {
-                snapshot.observed_monotonic_usec = 6_000_000;
-            }
-        });
-        snapshot
-    }
-
-    struct State(RuntimeUnitState);
-    impl RuntimeFailureSystemd for State {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(self.0.clone())
-        }
-
-        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-            Ok(scheduled_test_runtime_snapshot(self.0.clone()))
-        }
-
-        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
-            test_snapshot_after_wait();
-            Ok(())
-        }
-    }
-    struct Generation(u8);
-    impl FailureGenerationSource for Generation {
-        fn fill_generation(&mut self, bytes: &mut [u8; 32]) -> std::io::Result<()> {
-            bytes.fill(self.0);
-            Ok(())
-        }
-    }
-
-    enum CustodySwap {
-        Identity,
-        PrivateState,
-        FailureChild,
-    }
-
-    struct SwapGeneration {
-        root: PathBuf,
-        custody: CustodySwap,
-    }
-
-    impl FailureGenerationSource for SwapGeneration {
-        fn fill_generation(&mut self, bytes: &mut [u8; 32]) -> std::io::Result<()> {
-            bytes.fill(84);
-            let private = rooted(&self.root, CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
-            match self.custody {
-                CustodySwap::Identity => {
-                    let identity = private.join("identity/probe-bootstrap.toml");
-                    let receipt = fs::read(&identity)?;
-                    fs::rename(&identity, self.root.join("replaced-identity"))?;
-                    fs::write(&identity, receipt)?;
-                    fs::set_permissions(identity, fs::Permissions::from_mode(0o600))?;
-                }
-                CustodySwap::PrivateState => {
-                    let replaced = self.root.join("replaced-private-state");
-                    let receipt = fs::read(private.join("identity/probe-bootstrap.toml"))?;
-                    fs::rename(&private, &replaced)?;
-                    fs::create_dir_all(private.join("identity"))?;
-                    fs::set_permissions(&private, fs::Permissions::from_mode(0o750))?;
-                    fs::write(private.join("identity/probe-bootstrap.toml"), receipt)?;
-                    fs::set_permissions(
-                        private.join("identity/probe-bootstrap.toml"),
-                        fs::Permissions::from_mode(0o600),
-                    )?;
-                    fs::create_dir(private.join("runtime-failure"))?;
-                    fs::set_permissions(
-                        private.join("runtime-failure"),
-                        fs::Permissions::from_mode(0o700),
-                    )?;
-                }
-                CustodySwap::FailureChild => {
-                    let child = private.join("runtime-failure");
-                    fs::rename(&child, self.root.join("replaced-runtime-failure"))?;
-                    fs::create_dir(&child)?;
-                    fs::set_permissions(&child, fs::Permissions::from_mode(0o700))?;
-                }
-            }
-            Ok(())
-        }
-    }
-    #[derive(Default)]
-    struct RetrySystemd(usize);
-    impl RuntimeFailureSystemd for RetrySystemd {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            })
-        }
-
-        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-            Ok(scheduled_test_runtime_snapshot(self.fixed_runtime_state()?))
-        }
-
-        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
-            test_snapshot_after_wait();
-            Ok(())
-        }
-    }
-    impl RuntimeRetrySystemd for RetrySystemd {
-        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
-            self.0 += 1;
-            Ok(())
-        }
-    }
-    struct FailedRuntime(usize);
-    impl RuntimeFailureSystemd for FailedRuntime {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            })
-        }
-
-        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-            Ok(scheduled_test_runtime_snapshot(self.fixed_runtime_state()?))
-        }
-
-        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
-            test_snapshot_after_wait();
-            Ok(())
-        }
-    }
-    impl RuntimeRetrySystemd for FailedRuntime {
-        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
-            self.0 += 1;
-            Ok(())
-        }
-    }
-    struct RejectedRepair;
-    impl RuntimeFailureSystemd for RejectedRepair {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Ok(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            })
-        }
-
-        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-            Ok(scheduled_test_runtime_snapshot(self.fixed_runtime_state()?))
-        }
-
-        fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
-            test_snapshot_after_wait();
-            Ok(())
-        }
-    }
-
-    fn test_runtime_snapshot(state: RuntimeUnitState) -> RuntimeFailureSnapshot {
-        let (invocation_id, pid) = test_recorder_caller_identity();
-        RuntimeFailureSnapshot {
-            recorder: RecorderUnitSnapshot {
-                invocation_id,
-                main_pid: pid.to_string(),
+    impl RecorderView {
+        fn terminal() -> Self {
+            Self {
+                invocation_id: RECORDER_INVOCATION.to_owned(),
+                main_pid: std::process::id().to_string(),
                 fragment_path: RECORDER_UNIT_PATH.to_owned(),
                 drop_in_paths: String::new(),
                 need_daemon_reload: "no".to_owned(),
                 refuse_manual_start: "yes".to_owned(),
-            },
-            runtime: RuntimeUnitSnapshot {
+            }
+        }
+
+        fn show(&self) -> String {
+            show(&[
+                ("InvocationID", self.invocation_id.as_str()),
+                ("MainPID", self.main_pid.as_str()),
+                ("FragmentPath", self.fragment_path.as_str()),
+                ("DropInPaths", self.drop_in_paths.as_str()),
+                ("NeedDaemonReload", self.need_daemon_reload.as_str()),
+                ("RefuseManualStart", self.refuse_manual_start.as_str()),
+            ])
+        }
+    }
+
+    /// Runtime 的 manager property closure。
+    #[derive(Clone, Debug)]
+    struct RuntimeView {
+        load_state: String,
+        active_state: String,
+        sub_state: String,
+        result: String,
+        restart_count: String,
+        main_pid: String,
+        control_pid: String,
+        job: String,
+        invocation_id: String,
+        state_change_monotonic: String,
+        exec_start_monotonic: String,
+        exec_exit_monotonic: String,
+        fragment_path: String,
+        drop_in_paths: String,
+        need_daemon_reload: String,
+        restart: String,
+        restart_usec: String,
+        start_limit_burst: String,
+        start_limit_interval_usec: String,
+        on_failure: String,
+    }
+
+    impl RuntimeView {
+        fn terminal() -> Self {
+            Self {
                 load_state: "loaded".to_owned(),
-                active_state: state.active_state,
+                active_state: "failed".to_owned(),
                 sub_state: "failed".to_owned(),
-                result: state.result,
-                restart_count: "3".to_owned(),
+                result: "exit-code".to_owned(),
+                restart_count: FIXED_START_LIMIT_BURST.to_owned(),
                 main_pid: "0".to_owned(),
                 control_pid: "0".to_owned(),
                 job: String::new(),
-                invocation_id: "abcdef0123456789abcdef0123456789".to_owned(),
-                state_change_monotonic: "1000000".to_owned(),
-                exec_start_monotonic: "900000".to_owned(),
-                exec_exit_monotonic: "950000".to_owned(),
+                invocation_id: RUNTIME_INVOCATION.to_owned(),
+                state_change_monotonic: TERMINAL_STATE_CHANGE_USEC.to_string(),
+                exec_start_monotonic: (TERMINAL_STATE_CHANGE_USEC - 2_000_000).to_string(),
+                exec_exit_monotonic: (TERMINAL_STATE_CHANGE_USEC - 1_000_000).to_string(),
                 fragment_path: UNIT_PATH.to_owned(),
                 drop_in_paths: String::new(),
                 need_daemon_reload: "no".to_owned(),
-                restart: "on-failure".to_owned(),
-                restart_usec: "5s".to_owned(),
-                start_limit_burst: "3".to_owned(),
-                start_limit_interval_usec: "1min".to_owned(),
+                restart: FIXED_RESTART.to_owned(),
+                restart_usec: FIXED_RESTART_USEC.to_owned(),
+                start_limit_burst: FIXED_START_LIMIT_BURST.to_owned(),
+                start_limit_interval_usec: FIXED_START_LIMIT_INTERVAL_USEC.to_owned(),
                 on_failure: RECORDER_UNIT.to_owned(),
-            },
-            observed_monotonic_usec: 1_000_000,
+            }
+        }
+
+        fn show(&self) -> String {
+            show(&[
+                ("LoadState", self.load_state.as_str()),
+                ("ActiveState", self.active_state.as_str()),
+                ("SubState", self.sub_state.as_str()),
+                ("Result", self.result.as_str()),
+                ("NRestarts", self.restart_count.as_str()),
+                ("MainPID", self.main_pid.as_str()),
+                ("ControlPID", self.control_pid.as_str()),
+                ("Job", self.job.as_str()),
+                ("InvocationID", self.invocation_id.as_str()),
+                (
+                    "StateChangeTimestampMonotonic",
+                    self.state_change_monotonic.as_str(),
+                ),
+                (
+                    "ExecMainStartTimestampMonotonic",
+                    self.exec_start_monotonic.as_str(),
+                ),
+                (
+                    "ExecMainExitTimestampMonotonic",
+                    self.exec_exit_monotonic.as_str(),
+                ),
+                ("FragmentPath", self.fragment_path.as_str()),
+                ("DropInPaths", self.drop_in_paths.as_str()),
+                ("NeedDaemonReload", self.need_daemon_reload.as_str()),
+                ("Restart", self.restart.as_str()),
+                ("RestartUSec", self.restart_usec.as_str()),
+                ("StartLimitBurst", self.start_limit_burst.as_str()),
+                (
+                    "StartLimitIntervalUSec",
+                    self.start_limit_interval_usec.as_str(),
+                ),
+                ("OnFailure", self.on_failure.as_str()),
+            ])
         }
     }
 
-    struct SnapshotSequence {
-        snapshots: std::collections::VecDeque<RuntimeFailureSnapshot>,
+    /// 一份完整观察：两份 closure 加上观察时刻。
+    #[derive(Clone, Debug)]
+    struct Observation {
+        recorder: RecorderView,
+        runtime: RuntimeView,
+        observed_usec: u64,
+    }
+
+    impl Observation {
+        fn terminal() -> Self {
+            Self {
+                recorder: RecorderView::terminal(),
+                runtime: RuntimeView::terminal(),
+                observed_usec: TERMINAL_OBSERVED_USEC,
+            }
+        }
+
+        /// 第 `index` 份稳定观察：与第一份相隔 `index * RestartSec`，其余逐字段相同。
+        fn stable(index: usize) -> Self {
+            Self {
+                observed_usec: TERMINAL_OBSERVED_USEC
+                    + index as u64 * FIXED_RESTART_INTERVAL_MONOTONIC_USEC,
+                ..Self::terminal()
+            }
+        }
+    }
+
+    /// 按顺序交出预置 raw 观察的替身；一轮观察在交出观察时刻后结束。
+    struct Snapshots {
+        rounds: VecDeque<(String, String, u64)>,
         waits: usize,
     }
 
-    impl RuntimeFailureSystemd for SnapshotSequence {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            let snapshot = self
-                .snapshots
-                .front()
-                .ok_or_else(|| std::io::Error::other("test snapshot exhausted"))?;
-            Ok(RuntimeUnitState {
-                active_state: snapshot.runtime.active_state.clone(),
-                result: snapshot.runtime.result.clone(),
-            })
+    impl Snapshots {
+        fn observations(observations: impl IntoIterator<Item = Observation>) -> Self {
+            Self {
+                rounds: observations
+                    .into_iter()
+                    .map(|observation| {
+                        (
+                            observation.recorder.show(),
+                            observation.runtime.show(),
+                            observation.observed_usec,
+                        )
+                    })
+                    .collect(),
+                waits: 0,
+            }
         }
 
-        fn fixed_runtime_snapshot(&mut self) -> std::io::Result<RuntimeFailureSnapshot> {
-            self.snapshots
+        fn terminal(count: usize) -> Self {
+            Self::observations((0..count).map(Observation::stable))
+        }
+
+        fn raw(rounds: impl IntoIterator<Item = (String, String)>) -> Self {
+            Self {
+                rounds: rounds
+                    .into_iter()
+                    .map(|(recorder, runtime)| (recorder, runtime, TERMINAL_OBSERVED_USEC))
+                    .collect(),
+                waits: 0,
+            }
+        }
+    }
+
+    impl RuntimeFailureSystemd for Snapshots {
+        fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+            self.rounds
+                .front()
+                .map(|(recorder, ..)| recorder.clone())
+                .ok_or_else(|| std::io::Error::other("snapshot unavailable"))
+        }
+
+        fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+            self.rounds
+                .front()
+                .map(|(_, runtime, _)| runtime.clone())
+                .ok_or_else(|| std::io::Error::other("snapshot unavailable"))
+        }
+
+        fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+            self.rounds
                 .pop_front()
-                .ok_or_else(|| std::io::Error::other("test snapshot exhausted"))
+                .map(|(_, _, observed)| observed)
+                .ok_or_else(|| std::io::Error::other("snapshot unavailable"))
         }
 
         fn wait_for_fixed_restart_interval(&mut self) -> std::io::Result<()> {
@@ -2558,17 +1254,109 @@ pub(super) mod tests {
         }
     }
 
-    struct NoSystemdObservation;
+    /// 消费端替身：持续交出同一份当前观察；`retry_fails` 保留 Repair 被拒绝的行为。
+    #[derive(Clone, Debug)]
+    struct ObservationFake {
+        recorder: RecorderView,
+        runtime: RuntimeView,
+        retry_fails: bool,
+        retry_calls: usize,
+    }
 
-    impl RuntimeFailureSystemd for NoSystemdObservation {
-        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
-            Err(std::io::Error::other("exact pair must not inspect systemd"))
+    impl ObservationFake {
+        fn terminal() -> Self {
+            let observation = Observation::terminal();
+            Self {
+                recorder: observation.recorder,
+                runtime: observation.runtime,
+                retry_fails: false,
+                retry_calls: 0,
+            }
+        }
+
+        fn repair_rejected() -> Self {
+            Self {
+                retry_fails: true,
+                ..Self::terminal()
+            }
         }
     }
-    impl RuntimeRetrySystemd for RejectedRepair {
-        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
-            Err(std::io::Error::other("完整 Bundle 恢复失败"))
+
+    impl RuntimeFailureSystemd for ObservationFake {
+        fn recorder_unit_show(&mut self) -> std::io::Result<String> {
+            Ok(self.recorder.show())
         }
+
+        fn runtime_unit_show(&mut self) -> std::io::Result<String> {
+            Ok(self.runtime.show())
+        }
+
+        fn observe_monotonic_usec(&mut self) -> std::io::Result<u64> {
+            Ok(TERMINAL_OBSERVED_USEC)
+        }
+    }
+
+    impl RuntimeRetrySystemd for ObservationFake {
+        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
+            self.retry_calls += 1;
+            if self.retry_fails {
+                return Err(std::io::Error::other("完整 Bundle 恢复失败"));
+            }
+            Ok(())
+        }
+    }
+
+    struct Generation(u8);
+    impl FailureGenerationSource for Generation {
+        fn fill_generation(&mut self, bytes: &mut [u8; 32]) -> std::io::Result<()> {
+            bytes.fill(self.0);
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct RetrySystemd(usize);
+    impl RuntimeRetrySystemd for RetrySystemd {
+        fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
+            self.0 += 1;
+            Ok(())
+        }
+    }
+
+    /// 正式 record 入口：固定 recorder 身份加两份跨 RestartSec 的稳定观察。
+    fn record_terminal(
+        root: &Path,
+        generation_byte: u8,
+    ) -> std::io::Result<RuntimeFailureRecordOutcome> {
+        record_runtime_failure_at(
+            root,
+            unsafe { libc::geteuid() },
+            &mut Snapshots::terminal(2),
+            &mut Generation(generation_byte),
+            RECORDER_INVOCATION,
+            std::process::id(),
+        )
+    }
+
+    fn record_with(
+        root: &Path,
+        observations: impl IntoIterator<Item = Observation>,
+        generation_byte: u8,
+    ) -> std::io::Result<RuntimeFailureRecordOutcome> {
+        record_runtime_failure_at(
+            root,
+            unsafe { libc::geteuid() },
+            &mut Snapshots::observations(observations),
+            &mut Generation(generation_byte),
+            RECORDER_INVOCATION,
+            std::process::id(),
+        )
+    }
+
+    fn record_latched(root: &Path, generation_byte: u8) {
+        assert_eq!(
+            record_terminal(root, generation_byte).unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
     }
 
     pub(super) fn repair_test_bundle() -> enoki_probe_bootstrap::verifier::VerifiedBundle {
@@ -2588,18 +1376,12 @@ pub(super) mod tests {
             "var/lib/enoki-probe/identity",
             "etc/systemd/system",
             "proc/sys/kernel/random",
-            "run/enoki-probe",
         ] {
             fs::create_dir_all(root.path().join(directory)).unwrap();
         }
         fs::set_permissions(
             root.path().join("var/lib/enoki-probe"),
             fs::Permissions::from_mode(0o750),
-        )
-        .unwrap();
-        fs::set_permissions(
-            root.path().join("run/enoki-probe"),
-            fs::Permissions::from_mode(0o700),
         )
         .unwrap();
         let metadata = format!(
@@ -2612,37 +1394,19 @@ pub(super) mod tests {
         );
         write_fixture(root.path(), METADATA_PATH, metadata.as_bytes(), 0o600);
         write_fixture(root.path(), IDENTITY_PATH, identity.as_bytes(), 0o600);
-        let unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
-            .into_iter()
-            .find(|(role, _)| *role == "observation-runtime-v4")
-            .unwrap()
-            .1;
-        write_fixture(root.path(), UNIT_PATH, &unit, 0o644);
-        let recorder_unit = enoki_probe_bootstrap::install::fixed_observation_unit_contents()
-            .into_iter()
-            .last()
-            .unwrap();
-        write_fixture(root.path(), RECORDER_UNIT_PATH, &recorder_unit, 0o644);
+        write_fixture(
+            root.path(),
+            UNIT_PATH,
+            &fixed_runtime_unit_bytes().unwrap(),
+            0o644,
+        );
+        write_fixture(
+            root.path(),
+            RECORDER_UNIT_PATH,
+            &fixed_recorder_unit_bytes().unwrap(),
+            0o644,
+        );
         write_fixture(root.path(), BOOT_ID_PATH, b"boot-01\n", 0o444);
-        write_fixture(root.path(), HOST_BOOT_ID_PATH, b"boot-01\n", 0o444);
-        root
-    }
-
-    fn canonical_dynamic_user_fixture() -> tempfile::TempDir {
-        let root = fixture();
-        let public = rooted(root.path(), "/var/lib/enoki-probe");
-        let private = rooted(root.path(), "/var/lib/private/enoki-probe");
-        fs::create_dir_all(&private).unwrap();
-        fs::rename(public.join("identity"), private.join("identity")).unwrap();
-        fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).unwrap();
-        fs::create_dir(private.join("runtime-failure")).unwrap();
-        fs::set_permissions(
-            private.join("runtime-failure"),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        fs::remove_dir(&public).unwrap();
-        std::os::unix::fs::symlink("private/enoki-probe", &public).unwrap();
         root
     }
 
@@ -2652,491 +1416,30 @@ pub(super) mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    fn upgrade_journal_fixture(
-        phase: &str,
-        activation_started: bool,
-        activated_targets: usize,
-        finalized_targets: usize,
-        progress: &str,
-        binding: Option<(&str, &str)>,
-    ) -> String {
-        let mut journal = format!(
-            "schema_version = 4\noperation_id = \"runtime-failure-test\"\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host_01\"\nsource_probe_id = \"probe_01\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = {phase:?}\nactivation_started = {activation_started}\nactivated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\nruntime_failure_consumption = {progress:?}\n",
-            unsafe { libc::geteuid() },
-            "1a".repeat(32),
-            "2b".repeat(32),
-            "3c".repeat(32),
-            format!("sha256:{}", "4d".repeat(32)),
-            "5e".repeat(32),
-            "6f".repeat(32),
-        );
-        if let Some((generation, epoch_sha256)) = binding {
-            journal.push_str(&format!(
-                "runtime_failure_generation = {generation:?}\nruntime_failure_epoch_sha256 = {epoch_sha256:?}\n"
-            ));
-        }
-        journal
-    }
-
-    fn scope_less_upgrade_journal_fixture(
-        journal: &str,
-        target_install_state: Option<&str>,
-    ) -> String {
-        let mut output = String::new();
-        for line in journal.lines() {
-            if [
-                "hub_origin = ",
-                "host_id = ",
-                "target_asset_set_digest = ",
-                "verified_stage_sha256 = ",
-            ]
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-            {
-                continue;
-            }
-            if line.starts_with("target_manifest_sha256 = ")
-                && let Some(digest) = target_install_state
-            {
-                output.push_str(&format!("target_install_state_sha256 = {digest:?}\n"));
-            }
-            output.push_str(line);
-            output.push('\n');
-        }
-        output
-    }
-
     #[test]
     fn systemd_249_intermediate_on_failure_does_not_write_an_epoch() {
         let root = fixture();
-        let outcome = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "activating".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(1),
-        )
-        .unwrap();
-        assert_eq!(outcome, RuntimeFailureRecordOutcome::Ignored);
+        // 中间态 OnFailure 通知：预算尚未耗尽，普通通知不产生 durable authority。
+        let mut intermediate = RuntimeView::terminal();
+        intermediate.active_state = "activating".into();
+        intermediate.sub_state = "start".into();
+        intermediate.main_pid = "4242".into();
+        intermediate.job = "12 enoki-observation-runtime.service/start".into();
+        intermediate.restart_count = "1".into();
+        assert_eq!(
+            record_with(
+                root.path(),
+                [Observation {
+                    runtime: intermediate,
+                    ..Observation::terminal()
+                }],
+                1,
+            )
+            .unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
-    }
-
-    #[test]
-    fn canonical_dynamic_user_state_directory_records_the_existing_exact_pair() {
-        let root = canonical_dynamic_user_fixture();
-        let uid = unsafe { libc::geteuid() };
-
-        assert_eq!(
-            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(82))
-                .unwrap(),
-            RuntimeFailureRecordOutcome::Latched
-        );
-        assert!(
-            rooted(
-                root.path(),
-                "/var/lib/private/enoki-probe/runtime-failure/epoch.toml"
-            )
-            .is_file()
-        );
-        assert!(
-            rooted(
-                root.path(),
-                "/var/lib/private/enoki-probe/runtime-failure/latch"
-            )
-            .is_file()
-        );
-    }
-
-    #[test]
-    fn canonical_fresh_pair_retracts_after_latch_publish_child_replacement() {
-        let root = canonical_dynamic_user_fixture();
-        let uid = unsafe { libc::geteuid() };
-        let sentinel = root.path().join("outside-sentinel");
-        fs::write(&sentinel, b"unchanged").unwrap();
-        fail_recorder_after_latch_publish_with_child_swap(root.path());
-
-        assert!(record_runtime_failure_at(
-            root.path(),
-            uid,
-            &mut FailedRuntime(0),
-            &mut Generation(82),
-        )
-        .is_err());
-        let current = rooted(root.path(), "/var/lib/private/enoki-probe/runtime-failure");
-        assert!(!current.join("epoch.toml").exists());
-        assert!(!current.join("latch").exists());
-        let replaced = root.path().join("replaced-runtime-failure");
-        assert!(!replaced.join("epoch.toml").exists());
-        assert!(!replaced.join("latch").exists());
-        assert!(
-            issue_installed_bundle_failure_evidence_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "post_publish_child_swap",
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
-    }
-
-    #[test]
-    fn rollback_crash_after_epoch_removal_leaves_only_safe_latch_only_state() {
-        if let Some(root) = std::env::var_os("ENOKI_FORMAL44_ROLLBACK_CRASH_ROOT") {
-            let root = PathBuf::from(root);
-            let uid = unsafe { libc::geteuid() };
-            let epoch = rooted(
-                &root,
-                "/var/lib/private/enoki-probe/runtime-failure/epoch.toml",
-            );
-            // This process immediately aborts at the fixed crash seam.
-            unsafe {
-                std::env::set_var("ENOKI_TEST_SECURE_FILE_PATH", &epoch);
-                std::env::set_var("ENOKI_TEST_SECURE_FILE_CRASH_POINT", "after-checked-unlink");
-            }
-            fail_recorder_after_latch_publish_with_identity_swap(&root);
-            let _ =
-                record_runtime_failure_at(&root, uid, &mut FailedRuntime(0), &mut Generation(85));
-            panic!("rollback crash seam did not abort");
-        }
-
-        let root = canonical_dynamic_user_fixture();
-        let uid = unsafe { libc::geteuid() };
-        let sentinel = root.path().join("outside-sentinel");
-        fs::write(&sentinel, b"unchanged").unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("runtime_failure::tests::rollback_crash_after_epoch_removal_leaves_only_safe_latch_only_state")
-            .arg("--nocapture")
-            .env("ENOKI_FORMAL44_ROLLBACK_CRASH_ROOT", root.path())
-            .status()
-            .unwrap();
-        assert!(!status.success());
-        let failure = rooted(root.path(), "/var/lib/private/enoki-probe/runtime-failure");
-        assert!(!failure.join("epoch.toml").exists());
-        assert!(failure.join("latch").is_file());
-        assert!(
-            issue_installed_bundle_failure_evidence_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "rollback_crash_latch_only",
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
-    }
-
-    #[test]
-    fn canonical_partial_completion_retracts_only_the_new_half_after_replacement() {
-        let uid = unsafe { libc::geteuid() };
-        for (missing, preserved) in [("epoch.toml", "latch"), ("latch", "epoch.toml")] {
-            let root = canonical_dynamic_user_fixture();
-            let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
-            let failure = private.join("runtime-failure");
-            let sentinel = root.path().join("outside-sentinel");
-            fs::write(&sentinel, b"unchanged").unwrap();
-            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(83))
-                .unwrap();
-            fs::remove_file(failure.join(missing)).unwrap();
-            fail_recorder_after_publication_with_child_swap(root.path(), 2);
-
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(83),
-                )
-                .is_err(),
-                "missing {missing}"
-            );
-            let replaced = root.path().join("replaced-runtime-failure");
-            assert!(replaced.join(preserved).is_file(), "missing {missing}");
-            assert!(!replaced.join(missing).exists(), "missing {missing}");
-            assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
-        }
-    }
-
-    #[test]
-    fn canonical_custody_rejects_an_intermediate_identity_symlink_before_publication() {
-        let root = canonical_dynamic_user_fixture();
-        let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
-        let outside_identity = root.path().join("outside-identity");
-        let sentinel = root.path().join("outside-sentinel");
-        fs::rename(private.join("identity"), &outside_identity).unwrap();
-        std::os::unix::fs::symlink(&outside_identity, private.join("identity")).unwrap();
-        fs::write(&sentinel, b"unchanged").unwrap();
-
-        assert!(
-            record_runtime_failure_at(
-                root.path(),
-                unsafe { libc::geteuid() },
-                &mut FailedRuntime(0),
-                &mut Generation(83),
-            )
-            .is_err()
-        );
-        assert!(
-            !private.join("runtime-failure/epoch.toml").exists()
-                && !private.join("runtime-failure/latch").exists()
-        );
-        assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
-    }
-
-    #[test]
-    fn canonical_custody_rejects_validation_to_publication_inode_swaps_without_a_pair() {
-        for custody in [
-            CustodySwap::Identity,
-            CustodySwap::PrivateState,
-            CustodySwap::FailureChild,
-        ] {
-            let root = canonical_dynamic_user_fixture();
-            let sentinel = root.path().join("outside-sentinel");
-            fs::write(&sentinel, b"unchanged").unwrap();
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    unsafe { libc::geteuid() },
-                    &mut FailedRuntime(0),
-                    &mut SwapGeneration {
-                        root: root.path().to_owned(),
-                        custody,
-                    },
-                )
-                .is_err()
-            );
-            let failure = rooted(root.path(), "/var/lib/private/enoki-probe/runtime-failure");
-            assert!(
-                !failure.join("epoch.toml").exists() && !failure.join("latch").exists(),
-                "swap must not publish into the replacement child"
-            );
-            assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
-        }
-    }
-
-    #[test]
-    fn canonical_custody_rejects_aggregate_unsafe_shapes_without_a_pair() {
-        let assert_rejected = |root: &tempfile::TempDir| {
-            let sentinel = root.path().join("outside-sentinel");
-            fs::write(&sentinel, b"unchanged").unwrap();
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    unsafe { libc::geteuid() },
-                    &mut FailedRuntime(0),
-                    &mut Generation(83),
-                )
-                .is_err()
-            );
-            assert!(
-                !rooted(
-                    root.path(),
-                    "/var/lib/private/enoki-probe/runtime-failure/epoch.toml"
-                )
-                .exists()
-            );
-            assert!(
-                !rooted(
-                    root.path(),
-                    "/var/lib/private/enoki-probe/runtime-failure/latch"
-                )
-                .exists()
-            );
-            assert_eq!(fs::read(sentinel).unwrap(), b"unchanged");
-        };
-
-        let wrong_target = canonical_dynamic_user_fixture();
-        let public = rooted(wrong_target.path(), STATE_DIRECTORY_PATH);
-        fs::remove_file(&public).unwrap();
-        std::os::unix::fs::symlink("private/other", &public).unwrap();
-        assert_rejected(&wrong_target);
-
-        let absolute_target = canonical_dynamic_user_fixture();
-        let public = rooted(absolute_target.path(), STATE_DIRECTORY_PATH);
-        fs::remove_file(&public).unwrap();
-        std::os::unix::fs::symlink("/var/lib/private/enoki-probe", &public).unwrap();
-        assert_rejected(&absolute_target);
-
-        let non_root_link = canonical_dynamic_user_fixture();
-        let public = rooted(non_root_link.path(), STATE_DIRECTORY_PATH);
-        let public = std::ffi::CString::new(public.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::lchown(public.as_ptr(), 1, 1) }, 0);
-        assert_rejected(&non_root_link);
-
-        let multi_link = canonical_dynamic_user_fixture();
-        fs::hard_link(
-            rooted(multi_link.path(), STATE_DIRECTORY_PATH),
-            multi_link.path().join("var/lib/enoki-probe-link"),
-        )
-        .unwrap();
-        assert_rejected(&multi_link);
-
-        let private_mode = canonical_dynamic_user_fixture();
-        fs::set_permissions(
-            rooted(private_mode.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH),
-            fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        assert_rejected(&private_mode);
-
-        let identity_mode = canonical_dynamic_user_fixture();
-        fs::set_permissions(
-            rooted(
-                identity_mode.path(),
-                "/var/lib/private/enoki-probe/identity/probe-bootstrap.toml",
-            ),
-            fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
-        assert_rejected(&identity_mode);
-
-        let missing_child = canonical_dynamic_user_fixture();
-        fs::remove_dir(rooted(
-            missing_child.path(),
-            "/var/lib/private/enoki-probe/runtime-failure",
-        ))
-        .unwrap();
-        assert_rejected(&missing_child);
-    }
-
-    #[test]
-    fn recorder_requires_two_stable_fixed_snapshots_and_authenticated_caller() {
-        let uid = unsafe { libc::geteuid() };
-        let root = fixture();
-        let first = test_runtime_snapshot(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        let mut second = test_runtime_snapshot(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        second.observed_monotonic_usec = 6_000_000;
-        let mut stable = SnapshotSequence {
-            snapshots: [first, second].into(),
-            waits: 0,
-        };
-        let (caller, pid) = test_recorder_caller_identity();
-        assert_eq!(
-            record_runtime_failure_at_with_caller(
-                root.path(),
-                uid,
-                &mut stable,
-                &mut Generation(71),
-                &caller,
-                pid,
-            )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::Latched
-        );
-        assert_eq!(stable.waits, 1);
-        let epoch = fs::read_to_string(rooted(root.path(), EPOCH_PATH)).unwrap();
-        assert!(epoch.contains("result = \"exit-code\""));
-
-        let unstable_root = fixture();
-        let first_unstable = test_runtime_snapshot(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        let mut changed = test_runtime_snapshot(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        changed.observed_monotonic_usec = 6_000_000;
-        changed.runtime.job = "42".to_owned();
-        let mut unstable = SnapshotSequence {
-            snapshots: [first_unstable, changed].into(),
-            waits: 0,
-        };
-        assert_eq!(
-            record_runtime_failure_at_with_caller(
-                unstable_root.path(),
-                uid,
-                &mut unstable,
-                &mut Generation(72),
-                &caller,
-                pid,
-            )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::Ignored
-        );
-        assert_eq!(unstable.waits, 1);
-        assert!(
-            issue_installed_bundle_failure_evidence_at(
-                unstable_root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "unstable_runtime_snapshot",
-            )
-            .is_err()
-        );
-
-        let direct_root = fixture();
-        let direct_first = test_runtime_snapshot(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        let mut direct_second = test_runtime_snapshot(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        direct_second.observed_monotonic_usec = 6_000_000;
-        let mut direct = SnapshotSequence {
-            snapshots: [direct_first, direct_second].into(),
-            waits: 0,
-        };
-        assert_eq!(
-            record_runtime_failure_at_with_caller(
-                direct_root.path(),
-                uid,
-                &mut direct,
-                &mut Generation(73),
-                "ffffffffffffffffffffffffffffffff",
-                pid,
-            )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::Ignored
-        );
-        assert_eq!(direct.waits, 0);
-        assert!(
-            issue_installed_bundle_failure_evidence_at(
-                direct_root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "direct_runtime_recorder",
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn exact_pair_does_not_replay_the_temporal_horizon() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(74))
-            .unwrap();
-        assert_eq!(
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut NoSystemdObservation,
-                &mut Generation(75),
-            )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::AlreadyLatched
-        );
     }
 
     #[test]
@@ -3148,18 +1451,7 @@ pub(super) mod tests {
             b"hub_url = \"https://hub.example\"\nprobe_id = \"probe_01\"\n",
             0o600,
         );
-        assert!(
-            record_runtime_failure_at(
-                root.path(),
-                unsafe { libc::geteuid() },
-                &mut State(RuntimeUnitState {
-                    active_state: "failed".into(),
-                    result: "exit-code".into(),
-                }),
-                &mut Generation(2),
-            )
-            .is_err()
-        );
+        assert!(record_terminal(root.path(), 2).is_err());
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
     }
@@ -3167,16 +1459,7 @@ pub(super) mod tests {
     #[test]
     fn failure_epoch_rejects_a_later_identity_with_a_different_host_id() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(3),
-        )
-        .unwrap();
+        record_latched(root.path(), 3);
         write_fixture(
             root.path(),
             IDENTITY_PATH,
@@ -3187,7 +1470,7 @@ pub(super) mod tests {
             issue_installed_bundle_failure_evidence_at(
                 root.path(),
                 unsafe { libc::geteuid() },
-                &mut FailedRuntime(0),
+                &mut ObservationFake::terminal(),
                 100,
                 60_100,
                 "request_nonce_wrong_host",
@@ -3196,968 +1479,300 @@ pub(super) mod tests {
         );
     }
 
-    #[test]
-    fn failure_evidence_accepts_only_the_current_exact_epoch_latch_pair() {
-        let uid = unsafe { libc::geteuid() };
-        let issue = |root: &Path| {
-            issue_installed_bundle_failure_evidence_at(
-                root,
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "request_nonce_pair_classification",
-            )
-        };
+    type RuntimeDeviation = (&'static str, fn(&mut RuntimeView));
+    type ClosureDeviation = (&'static str, fn(&mut RecorderView, &mut RuntimeView));
 
-        let none = fixture();
-        assert!(issue(none.path()).is_err());
-
-        let epoch_only = fixture();
-        record_runtime_failure_at(
-            epoch_only.path(),
-            uid,
-            &mut FailedRuntime(0),
-            &mut Generation(4),
-        )
-        .unwrap();
-        remove_regular_file(
-            &rooted(epoch_only.path(), LATCH_PATH),
-            0o600,
-            Some((uid, uid)),
-        )
-        .unwrap();
-        assert!(issue(epoch_only.path()).is_err());
-
-        let latch_only = fixture();
-        record_runtime_failure_at(
-            latch_only.path(),
-            uid,
-            &mut FailedRuntime(0),
-            &mut Generation(5),
-        )
-        .unwrap();
-        remove_regular_file(
-            &rooted(latch_only.path(), EPOCH_PATH),
-            0o600,
-            Some((uid, uid)),
-        )
-        .unwrap();
-        assert!(issue(latch_only.path()).is_err());
-
-        let exact = fixture();
-        record_runtime_failure_at(exact.path(), uid, &mut FailedRuntime(0), &mut Generation(6))
-            .unwrap();
-        assert!(issue(exact.path()).is_ok());
-
-        let mismatch = fixture();
-        record_runtime_failure_at(
-            mismatch.path(),
-            uid,
-            &mut FailedRuntime(0),
-            &mut Generation(7),
-        )
-        .unwrap();
-        write_fixture(mismatch.path(), LATCH_PATH, &b"aa".repeat(32), 0o600);
-        assert!(issue(mismatch.path()).is_err());
-        assert!(rooted(mismatch.path(), LATCH_PATH).exists());
-
-        let corrupt = fixture();
-        record_runtime_failure_at(
-            corrupt.path(),
-            uid,
-            &mut FailedRuntime(0),
-            &mut Generation(8),
-        )
-        .unwrap();
-        write_fixture(corrupt.path(), EPOCH_PATH, b"not toml", 0o600);
-        assert!(issue(corrupt.path()).is_err());
-        assert!(rooted(corrupt.path(), LATCH_PATH).exists());
+    fn assert_no_pair(root: &Path) {
+        assert!(!rooted(root, EPOCH_PATH).exists());
+        assert!(!rooted(root, LATCH_PATH).exists());
     }
 
     #[test]
-    fn systemd_255_latches_the_terminal_exit_code_and_rejects_start_limit_hit() {
+    fn two_stable_terminal_observations_with_the_real_result_latch_the_exact_pair() {
         let root = fixture();
-        let ignored = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "start-limit-hit".into(),
-            }),
-            &mut Generation(1),
-        )
-        .unwrap();
-        assert_eq!(ignored, RuntimeFailureRecordOutcome::Ignored);
-        let latched = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(2),
-        )
-        .unwrap();
-        assert_eq!(latched, RuntimeFailureRecordOutcome::Latched);
-        assert!(rooted(root.path(), EPOCH_PATH).exists());
+        assert_eq!(
+            record_terminal(root.path(), 1).unwrap(),
+            RuntimeFailureRecordOutcome::Latched
+        );
+        let epoch = fs::read_to_string(rooted(root.path(), EPOCH_PATH)).unwrap();
+        assert!(
+            epoch.contains("result = \"exit-code\""),
+            "epoch 必须记录 manager 交出的真实 Result：{epoch}"
+        );
         assert_eq!(
             fs::read_to_string(rooted(root.path(), LATCH_PATH)).unwrap(),
-            "02".repeat(32)
+            "01".repeat(32)
         );
-        let before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
-        let repeated = record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(3),
-        )
-        .unwrap();
-        assert_eq!(repeated, RuntimeFailureRecordOutcome::AlreadyLatched);
-        assert_eq!(fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(), before);
     }
 
     #[test]
-    fn typed_local_retry_invalidates_epoch_before_one_fixed_retry() {
+    fn eligibility_consumes_two_observations_one_restart_interval_apart() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(4),
-        )
-        .unwrap();
-        let mut systemd = RetrySystemd::default();
-        retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut systemd).unwrap();
-        assert_eq!(systemd.0, 1);
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-        assert!(!rooted(root.path(), LATCH_PATH).exists());
-        let receipt: LocalRetryReceipt = serde_json::from_slice(
-            &fs::read(rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(receipt.progress, LocalRetryProgress::RetryInvoked);
-    }
-
-    #[test]
-    fn canonical_local_retry_consumes_the_existing_exact_pair() {
-        let root = canonical_dynamic_user_fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(4))
-            .unwrap();
-        let mut systemd = RetrySystemd::default();
-        retry_runtime_at(root.path(), uid, &mut systemd).unwrap();
-        assert_eq!(systemd.0, 1);
-    }
-
-    #[test]
-    fn canonical_retry_invoked_receipt_allows_the_next_failure_generation() {
-        let root = canonical_dynamic_user_fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(50))
-            .unwrap();
-        let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
-        let first_generation = fs::read(private.join("runtime-failure/latch")).unwrap();
-
-        assert!(retry_runtime_at(root.path(), uid, &mut RejectedRepair).is_err());
-        assert_eq!(
-            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(51))
-                .unwrap(),
-            RuntimeFailureRecordOutcome::Latched,
-        );
-        assert_ne!(
-            fs::read(private.join("runtime-failure/latch")).unwrap(),
-            first_generation
-        );
-    }
-
-    #[test]
-    fn canonical_repair_consumer_uses_the_same_concrete_runtime_failure_root() {
-        let root = canonical_dynamic_user_fixture();
-        let uid = unsafe { libc::geteuid() };
-        let authority =
-            repair_completion_fixture_at(&root, InstalledBundleRepairProgress::Admitted, 0x54);
-
-        let resumed = resume_installed_bundle_repair_at(root.path(), uid)
-            .unwrap()
-            .unwrap();
-        assert_eq!(resumed.progress, InstalledBundleRepairProgress::Admitted);
-        assert_eq!(resumed.grant.authority(), &authority);
-        resumed
-            .grant
-            .persist_failure("canonical_repair_pending")
-            .unwrap();
-        let private = rooted(root.path(), CANONICAL_PRIVATE_STATE_DIRECTORY_PATH);
-        assert!(private.join("runtime-failure/repair-intent.json").is_file());
-        assert!(private.join("probe-operation-status.toml").is_file());
-        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
-    }
-
-    #[test]
-    fn production_local_retry_uses_host_boot_id_without_namespace_alias() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(
-            root.path(),
-            uid,
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(4),
-        )
-        .unwrap();
-        fs::remove_file(rooted(root.path(), BOOT_ID_PATH)).unwrap();
-
-        let mut systemd = RetrySystemd::default();
-        retry_runtime_at(root.path(), uid, &mut systemd).unwrap();
-
-        assert_eq!(systemd.0, 1);
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-        assert!(!rooted(root.path(), LATCH_PATH).exists());
-    }
-
-    #[test]
-    fn completed_local_retry_receipt_rechecks_active_upgrade_reservation_before_systemd() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(5))
-            .unwrap();
-        retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).unwrap();
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-        assert!(!rooted(root.path(), LATCH_PATH).exists());
-
-        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
-        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
-        write_fixture(
-            root.path(),
-            UPGRADE_ATTEMPT_PATH,
-            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
-            0o600,
-        );
-
-        let mut retry = RetrySystemd::default();
-        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
-        assert_eq!(retry.0, 0);
-    }
-
-    #[test]
-    fn pending_local_retry_receipt_rechecks_active_upgrade_reservation_before_systemd() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(6))
-            .unwrap();
-        fail_local_retry_after(LocalRetryCrashPoint::LatchRemovedReceipt);
-        assert!(retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err());
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-        assert!(!rooted(root.path(), LATCH_PATH).exists());
-
-        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
-        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
-        write_fixture(
-            root.path(),
-            UPGRADE_ATTEMPT_PATH,
-            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
-            0o600,
-        );
-
-        let mut retry = RetrySystemd::default();
-        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
-        assert_eq!(retry.0, 0);
-    }
-
-    #[test]
-    fn fixed_retry_reconciles_clean_and_legal_partial_pair_states() {
-        let uid = unsafe { libc::geteuid() };
-
-        let clean = fixture();
-        let mut clean_systemd = FailedRuntime(0);
-        retry_runtime_at(clean.path(), uid, &mut clean_systemd).unwrap();
-        assert_eq!(clean_systemd.0, 1);
-
-        for missing in [EPOCH_PATH, LATCH_PATH] {
-            let root = fixture();
-            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(19))
-                .unwrap();
-            remove_regular_file(&rooted(root.path(), missing), 0o600, Some((uid, uid))).unwrap();
-
-            let mut restarted_systemd = FailedRuntime(0);
-            retry_runtime_at(root.path(), uid, &mut restarted_systemd).unwrap();
-            assert_eq!(restarted_systemd.0, 1, "missing {missing}");
-            assert!(
-                issue_installed_bundle_failure_evidence_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    100,
-                    60_100,
-                    "request_nonce_partial_retry",
-                )
-                .is_err(),
-                "missing {missing}",
-            );
-        }
-    }
-
-    #[test]
-    fn recorder_reconciles_exact_single_file_publish_windows_and_rejects_corrupt_latch() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        let mut terminal = State(RuntimeUnitState {
-            active_state: "failed".into(),
-            result: "exit-code".into(),
-        });
-        record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(20)).unwrap();
-        let generation = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-
-        remove_regular_file(&rooted(root.path(), LATCH_PATH), 0o600, Some((uid, uid))).unwrap();
-        assert_eq!(
-            record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(21))
-                .unwrap(),
-            RuntimeFailureRecordOutcome::Latched
-        );
-        assert_eq!(
-            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
-            generation
-        );
-
-        remove_regular_file(&rooted(root.path(), EPOCH_PATH), 0o600, Some((uid, uid))).unwrap();
-        assert_eq!(
-            record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(22))
-                .unwrap(),
-            RuntimeFailureRecordOutcome::Latched
-        );
-        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
-
-        remove_regular_file(&rooted(root.path(), EPOCH_PATH), 0o600, Some((uid, uid))).unwrap();
-        write_fixture(root.path(), LATCH_PATH, b"not-a-generation", 0o600);
-        assert!(
-            record_runtime_failure_at(root.path(), uid, &mut terminal, &mut Generation(23))
-                .is_err()
-        );
-        assert_eq!(
-            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
-            b"not-a-generation"
-        );
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-    }
-
-    #[test]
-    fn explicit_local_retry_resumes_every_effect_receipt_crash_from_fresh_durable_facts() {
-        let uid = unsafe { libc::geteuid() };
-        for (index, crash) in [
-            LocalRetryCrashPoint::ReceiptCommitted,
-            LocalRetryCrashPoint::EpochUnlinked,
-            LocalRetryCrashPoint::EpochRemovedReceipt,
-            LocalRetryCrashPoint::LatchUnlinked,
-            LocalRetryCrashPoint::LatchRemovedReceipt,
-            LocalRetryCrashPoint::SystemdInvoked,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let root = fixture();
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(24 + index as u8),
-            )
-            .unwrap();
-            fail_local_retry_after(crash);
-            assert!(
-                retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err(),
-                "{crash:?} must interrupt the production retry entrypoint",
-            );
-
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(40),
-                )
-                .is_err(),
-                "{crash:?} must not let recorder revive or replace consumed authority",
-            );
-            assert!(
-                issue_installed_bundle_failure_evidence_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    100,
-                    60_100,
-                    "request_nonce_retry_crash",
-                )
-                .is_err(),
-                "{crash:?} must not expose authority after typed consumption",
-            );
-
-            let mut restarted_systemd = RetrySystemd::default();
-            retry_runtime_at(root.path(), uid, &mut restarted_systemd).unwrap();
-            assert_eq!(restarted_systemd.0, 1);
-            assert!(!rooted(root.path(), EPOCH_PATH).exists());
-            assert!(!rooted(root.path(), LATCH_PATH).exists());
-            let completed: LocalRetryReceipt = serde_json::from_slice(
-                &fs::read(rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH)).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(completed.progress, LocalRetryProgress::RetryInvoked);
-        }
-    }
-
-    #[test]
-    fn local_retry_systemd_failure_is_durable_and_only_a_new_recorder_generation_returns() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(50))
-            .unwrap();
-        let old_generation = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-
-        assert!(retry_runtime_at(root.path(), uid, &mut RejectedRepair).is_err());
-        let attempted: LocalRetryReceipt = serde_json::from_slice(
-            &fs::read(rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(attempted.progress, LocalRetryProgress::RetryInvoked);
-
+        let mut systemd = Snapshots::terminal(2);
         assert_eq!(
             record_runtime_failure_at(
                 root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(51),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                &mut Generation(1),
+                RECORDER_INVOCATION,
+                std::process::id(),
             )
             .unwrap(),
-            RuntimeFailureRecordOutcome::Latched,
+            RuntimeFailureRecordOutcome::Latched
         );
-        assert_ne!(
-            fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
-            old_generation
-        );
-        assert!(!rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH).exists());
+        assert_eq!(systemd.waits, 1, "两份观察之间必须等待一个 RestartSec");
+        assert!(systemd.rounds.is_empty(), "两份完整观察都要被消费");
     }
 
     #[test]
-    fn recorder_never_revives_latch_only_pair_owned_by_repair_or_upgrade_intent() {
-        for (path, contents) in [
-            (
-                installed_bundle_repair::REPAIR_INTENT_PATH,
-                serde_json::json!({
-                    "state": "epoch-removed",
-                    "authority": { "generation": "1b".repeat(32) }
-                })
-                .to_string(),
-            ),
-            (
-                UPGRADE_ATTEMPT_PATH,
-                upgrade_journal_fixture(
-                    "activation-started",
-                    true,
-                    21,
-                    0,
-                    "epoch-removed",
-                    Some((&"1b".repeat(32), &"2c".repeat(32))),
-                ),
-            ),
-        ] {
-            let root = fixture();
-            let uid = unsafe { libc::geteuid() };
-            record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(27))
-                .unwrap();
-            remove_regular_file(&rooted(root.path(), EPOCH_PATH), 0o600, Some((uid, uid))).unwrap();
-            let intent = rooted(root.path(), path);
-            fs::create_dir_all(intent.parent().unwrap()).unwrap();
-            write_fixture(root.path(), path, contents.as_bytes(), 0o600);
-
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(28),
-                )
-                .is_err()
-            );
-            assert!(!rooted(root.path(), EPOCH_PATH).exists());
-            assert_eq!(
-                fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
-                b"1b".repeat(32)
-            );
-            assert_eq!(fs::read(intent).unwrap(), contents.as_bytes());
-
-            remove_regular_file(&rooted(root.path(), LATCH_PATH), 0o600, Some((uid, uid))).unwrap();
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(29),
-                )
-                .is_err(),
-                "typed consumer must close the latch-unlink-before-receipt window",
-            );
-            assert!(!rooted(root.path(), EPOCH_PATH).exists());
-            assert!(!rooted(root.path(), LATCH_PATH).exists());
-        }
-    }
-
-    #[test]
-    fn recorder_cannot_race_an_upgrade_that_reserved_an_absent_pair() {
+    fn a_single_terminal_notification_does_not_establish_eligibility() {
         let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        let journal_path = rooted(root.path(), UPGRADE_ATTEMPT_PATH);
-        fs::create_dir_all(journal_path.parent().unwrap()).unwrap();
-        write_fixture(
-            root.path(),
-            UPGRADE_ATTEMPT_PATH,
-            upgrade_journal_fixture("prepared", false, 0, 0, "none", None).as_bytes(),
-            0o600,
+        // 第二份观察时预算仍在推进：单次通知跨不过 RestartSec。
+        let mut advancing = Observation::stable(1);
+        advancing.runtime.restart_count = "2".into();
+        assert_eq!(
+            record_with(root.path(), [Observation::terminal(), advancing], 1).unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
         );
-
-        assert!(
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(60),
-            )
-            .is_err()
-        );
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-        assert!(!rooted(root.path(), LATCH_PATH).exists());
-
-        write_fixture(
-            root.path(),
-            UPGRADE_ATTEMPT_PATH,
-            upgrade_journal_fixture("activation-started", true, 0, 0, "none-consumed", None)
-                .as_bytes(),
-            0o600,
-        );
-        assert!(
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(61),
-            )
-            .is_err(),
-            "none-consumed cannot release a non-terminal Upgrade reservation",
-        );
-
-        write_fixture(
-            root.path(),
-            UPGRADE_ATTEMPT_PATH,
-            upgrade_journal_fixture("activated", true, 21, 21, "none-consumed", None).as_bytes(),
-            0o600,
-        );
-        record_runtime_failure_at(root.path(), uid, &mut FailedRuntime(0), &mut Generation(62))
-            .unwrap();
-
-        write_fixture(
-            root.path(),
-            UPGRADE_ATTEMPT_PATH,
-            upgrade_journal_fixture(
-                "prepared",
-                false,
-                0,
-                0,
-                "bound",
-                Some((&"3d".repeat(32), &"4e".repeat(32))),
-            )
-            .as_bytes(),
-            0o600,
-        );
-        assert!(retry_runtime_at(root.path(), uid, &mut RetrySystemd::default()).is_err());
-        assert!(
-            issue_installed_bundle_failure_evidence_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "request_nonce_upgrade_custody",
-            )
-            .is_err()
-        );
-        assert!(!rooted(root.path(), LOCAL_RETRY_RECEIPT_PATH).exists());
-        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
+        assert_no_pair(root.path());
     }
 
     #[test]
-    fn unknown_typed_consumer_state_retains_pair_and_exposes_no_authority_or_effect() {
-        for (path, contents) in [
-            (
-                LOCAL_RETRY_RECEIPT_PATH,
-                serde_json::json!({
-                    "schemaVersion": 1,
-                    "generation": "6a".repeat(32),
-                    "epochSha256": "7b".repeat(32),
-                    "progress": "future-retry-state",
-                })
-                .to_string(),
-            ),
-            (
-                installed_bundle_repair::REPAIR_INTENT_PATH,
-                serde_json::json!({
-                    "schemaVersion": 2,
-                    "state": "future-repair-state",
-                })
-                .to_string(),
-            ),
-            (
-                UPGRADE_ATTEMPT_PATH,
-                "schema_version = 4\nphase = \"activation-started\"\nruntime_failure_consumption = \"future-upgrade-state\"\n"
-                    .to_owned(),
-            ),
-            (
-                UPGRADE_ATTEMPT_PATH,
-                format!(
-                    "schema_version = 4\nphase = \"prepared\"\nruntime_failure_consumption = \"latch-removed\"\nruntime_failure_generation = {:?}\nruntime_failure_epoch_sha256 = {:?}\n",
-                    "8c".repeat(32),
-                    "9d".repeat(32),
-                ),
-            ),
-        ] {
-            let root = fixture();
-            let uid = unsafe { libc::geteuid() };
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(0x6a),
-            )
-            .unwrap();
-            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
-            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-            fs::create_dir_all(rooted(root.path(), path).parent().unwrap()).unwrap();
-            write_fixture(root.path(), path, contents.as_bytes(), 0o600);
-
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(0x6b),
-                )
-                .is_err(),
-                "unknown typed state at {path} must fail closed",
-            );
-            assert!(
-                issue_installed_bundle_failure_evidence_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    100,
-                    60_100,
-                    "request_nonce_unknown_typed_state",
-                )
-                .is_err(),
-            );
-            let mut retry = RetrySystemd::default();
-            assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
-            assert_eq!(retry.0, 0);
-            assert_eq!(fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(), epoch_before);
-            assert_eq!(fs::read(rooted(root.path(), LATCH_PATH)).unwrap(), latch_before);
-            assert_eq!(fs::read(rooted(root.path(), path)).unwrap(), contents.as_bytes());
-        }
+    fn observations_closer_than_the_restart_interval_are_not_eligible() {
+        let root = fixture();
+        let mut too_close = Observation::terminal();
+        too_close.observed_usec = TERMINAL_OBSERVED_USEC + 1_000_000;
+        assert_eq!(
+            record_with(root.path(), [Observation::terminal(), too_close], 1).unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert_no_pair(root.path());
     }
 
     #[test]
-    fn incoherent_full_upgrade_journal_retains_pair_and_blocks_all_runtime_effects() {
-        let completed_generation = "a7".repeat(32);
-        let completed_digest = "b8".repeat(32);
-        let valid = upgrade_journal_fixture(
-            "activated",
-            true,
-            21,
-            21,
-            "latch-removed",
-            Some((&completed_generation, &completed_digest)),
-        );
-        let invalid = [
-            upgrade_journal_fixture(
-                "activated",
-                false,
-                0,
-                0,
-                "latch-removed",
-                Some((&completed_generation, &completed_digest)),
-            ),
-            upgrade_journal_fixture(
-                "finalizing",
-                true,
-                20,
-                7,
-                "latch-removed",
-                Some((&completed_generation, &completed_digest)),
-            ),
-            upgrade_journal_fixture(
-                "activation-started",
-                true,
-                21,
-                1,
-                "latch-removed",
-                Some((&completed_generation, &completed_digest)),
-            ),
-            valid.replacen("operation_id = \"runtime-failure-test\"\n", "", 1),
-            valid.replacen(
-                &format!("authority_sha256 = {:?}", "1a".repeat(32)),
-                "authority_sha256 = \"invalid\"",
-                1,
-            ),
-            valid.replacen("activation_started = true\n", "", 1),
+    fn a_single_property_deviation_never_establishes_eligibility() {
+        let deviations: [RuntimeDeviation; 9] = [
+            ("start-limit-hit 从未在受支持主机出现", |runtime| {
+                runtime.result = "start-limit-hit".into()
+            }),
+            ("成功结束", |runtime| runtime.result = "success".into()),
+            ("ExecCondition 拒绝", |runtime| {
+                runtime.result = "exec-condition".into()
+            }),
+            ("预算未用满", |runtime| {
+                runtime.restart_count = "2".into()
+            }),
+            ("仍有主进程", |runtime| {
+                runtime.main_pid = "4242".into()
+            }),
+            ("仍有控制进程", |runtime| {
+                runtime.control_pid = "4243".into()
+            }),
+            ("仍有排队 job", |runtime| {
+                runtime.job = "21 enoki-observation-runtime.service/start".into()
+            }),
+            ("终态观察已过期", |runtime| {
+                runtime.state_change_monotonic = (TERMINAL_OBSERVED_USEC
+                    - FIXED_START_LIMIT_INTERVAL_MONOTONIC_USEC)
+                    .to_string();
+            }),
+            ("invocation 非 canonical", |runtime| {
+                runtime.invocation_id = "nope".into()
+            }),
         ];
-        for (index, journal) in invalid.into_iter().enumerate() {
+        for (case, mutate) in deviations {
             let root = fixture();
-            let uid = unsafe { libc::geteuid() };
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(0x76),
-            )
-            .unwrap();
-            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
-            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-            fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap())
-                .unwrap();
-            write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
-
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(0x77),
-                )
-                .is_err(),
-                "invalid full upgrade journal case {index} must block the recorder",
-            );
-            assert!(
-                issue_installed_bundle_failure_evidence_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    100,
-                    60_100,
-                    "request_nonce_incoherent_upgrade",
-                )
-                .is_err(),
-                "invalid full upgrade journal case {index} must expose no Evidence",
-            );
-            let mut retry = RetrySystemd::default();
-            assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
-            assert_eq!(retry.0, 0);
+            let mut first = Observation::terminal();
+            mutate(&mut first.runtime);
+            let mut second = first.clone();
+            second.observed_usec += FIXED_RESTART_INTERVAL_MONOTONIC_USEC;
             assert_eq!(
-                fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
-                epoch_before
+                record_with(root.path(), [first, second], 1).unwrap(),
+                RuntimeFailureRecordOutcome::Ignored,
+                "{case}"
             );
-            assert_eq!(
-                fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
-                latch_before
-            );
-            assert_eq!(
-                fs::read(rooted(root.path(), UPGRADE_ATTEMPT_PATH)).unwrap(),
-                journal.as_bytes(),
-            );
+            assert_no_pair(root.path());
         }
     }
 
     #[test]
-    fn scope_less_upgrade_journal_requires_a_valid_target_install_binding() {
-        let scoped = upgrade_journal_fixture("aborted", false, 0, 0, "none-consumed", None)
-            .replacen("schema_version = 4", "schema_version = 3", 1)
-            .replacen("runtime_failure_consumption = \"none-consumed\"\n", "", 1);
-        for journal in [
-            scope_less_upgrade_journal_fixture(&scoped, None),
-            scope_less_upgrade_journal_fixture(&scoped, Some("invalid")),
-        ] {
-            let root = fixture();
-            let uid = unsafe { libc::geteuid() };
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(0x78),
-            )
-            .unwrap();
-            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
-            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-            fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap())
-                .unwrap();
-            write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
-
-            assert!(
-                record_runtime_failure_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(0x79),
-                )
-                .is_err()
-            );
-            assert!(
-                issue_installed_bundle_failure_evidence_at(
-                    root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    100,
-                    60_100,
-                    "request_nonce_scope_less_target_binding",
-                )
-                .is_err()
-            );
-            let mut retry = RetrySystemd::default();
-            assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
-            assert_eq!(retry.0, 0);
-            assert_eq!(
-                fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
-                epoch_before
-            );
-            assert_eq!(
-                fs::read(rooted(root.path(), LATCH_PATH)).unwrap(),
-                latch_before
-            );
-            assert_eq!(
-                fs::read(rooted(root.path(), UPGRADE_ATTEMPT_PATH)).unwrap(),
-                journal.as_bytes(),
-            );
-        }
-
+    fn a_caller_that_is_not_the_managers_recorder_is_not_eligible() {
         let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap()).unwrap();
-        let journal = scope_less_upgrade_journal_fixture(&scoped, Some(&"ca".repeat(32)));
-        write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
-        assert_eq!(
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(0x7a),
-            )
-            .unwrap(),
-            RuntimeFailureRecordOutcome::Latched,
-        );
-        issue_installed_bundle_failure_evidence_at(
-            root.path(),
-            uid,
-            &mut FailedRuntime(0),
-            100,
-            60_100,
-            "request_nonce_valid_scope_less_target_binding",
-        )
-        .unwrap();
-        let mut retry = RetrySystemd::default();
-        retry_runtime_at(root.path(), uid, &mut retry).unwrap();
-        assert_eq!(retry.0, 1);
-    }
-
-    #[test]
-    fn strictly_completed_upgrade_journal_allows_a_later_runtime_failure_generation() {
-        for (progress, binding) in [
-            ("none-consumed", None),
-            ("latch-removed", Some(("c9".repeat(32), "da".repeat(32)))),
-        ] {
-            let root = fixture();
-            let uid = unsafe { libc::geteuid() };
-            fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap())
-                .unwrap();
-            let journal = upgrade_journal_fixture(
-                "activated",
-                true,
-                21,
-                21,
-                progress,
-                binding
-                    .as_ref()
-                    .map(|(generation, digest)| (generation.as_str(), digest.as_str())),
-            );
-            write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, journal.as_bytes(), 0o600);
-
+        let cases: [(&str, &str, u32); 3] = [
+            (
+                "invocation 与 manager 不同",
+                "99999999999999999999999999999999",
+                std::process::id(),
+            ),
+            ("invocation 缺失", "", std::process::id()),
+            (
+                "pid 与 recorder 主进程不同",
+                RECORDER_INVOCATION,
+                std::process::id() + 1,
+            ),
+        ];
+        for (case, invocation_id, pid) in cases {
             assert_eq!(
                 record_runtime_failure_at(
                     root.path(),
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(0xeb),
+                    unsafe { libc::geteuid() },
+                    &mut Snapshots::terminal(2),
+                    &mut Generation(1),
+                    invocation_id,
+                    pid,
                 )
                 .unwrap(),
-                RuntimeFailureRecordOutcome::Latched,
+                RuntimeFailureRecordOutcome::Ignored,
+                "{case}"
             );
-            issue_installed_bundle_failure_evidence_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "request_nonce_completed_upgrade",
-            )
-            .unwrap();
-            let mut retry = RetrySystemd::default();
-            retry_runtime_at(root.path(), uid, &mut retry).unwrap();
-            assert_eq!(retry.0, 1);
-            assert!(!rooted(root.path(), EPOCH_PATH).exists());
-            assert!(!rooted(root.path(), LATCH_PATH).exists());
+        }
+        assert_no_pair(root.path());
+    }
+
+    #[test]
+    fn a_deviated_manager_closure_or_stale_fragment_fails_closed() {
+        let deviations: [ClosureDeviation; 11] = [
+            ("Runtime 有 drop-in", |_, runtime| {
+                runtime.drop_in_paths =
+                    "/etc/systemd/system/enoki-observation-runtime.service.d/override.conf".into();
+            }),
+            ("Runtime 未加载", |_, runtime| {
+                runtime.load_state = "masked".into()
+            }),
+            ("Restart 被改", |_, runtime| {
+                runtime.restart = "always".into()
+            }),
+            ("RestartSec 被改", |_, runtime| {
+                runtime.restart_usec = "10s".into()
+            }),
+            ("burst 被改", |_, runtime| {
+                runtime.start_limit_burst = "10".into()
+            }),
+            ("interval 被改", |_, runtime| {
+                runtime.start_limit_interval_usec = "2min".into()
+            }),
+            ("OnFailure 被改", |_, runtime| {
+                runtime.on_failure = "other.service".into()
+            }),
+            ("fragment 等待 reload", |_, runtime| {
+                runtime.need_daemon_reload = "yes".into()
+            }),
+            ("Runtime fragment 路径被换", |_, runtime| {
+                runtime.fragment_path = "/run/other.service".into()
+            }),
+            ("recorder 允许手工启动", |recorder, _| {
+                recorder.refuse_manual_start = "no".into()
+            }),
+            ("recorder 有 drop-in", |recorder, _| {
+                recorder.drop_in_paths =
+                    "/etc/systemd/system/enoki-observation-runtime-failure.service.d/override.conf"
+                        .into();
+            }),
+        ];
+        for (case, mutate) in deviations {
+            let root = fixture();
+            let mut first = Observation::terminal();
+            mutate(&mut first.recorder, &mut first.runtime);
+            let mut second = first.clone();
+            second.observed_usec += FIXED_RESTART_INTERVAL_MONOTONIC_USEC;
+            assert!(
+                record_with(root.path(), [first, second], 1).is_err(),
+                "{case} 必须 fail closed"
+            );
+            assert_no_pair(root.path());
+        }
+        let root = fixture();
+        write_fixture(
+            root.path(),
+            RECORDER_UNIT_PATH,
+            b"[Unit]\nDescription=stale recorder\n\n[Service]\n",
+            0o644,
+        );
+        assert!(record_terminal(root.path(), 1).is_err());
+        assert_no_pair(root.path());
+    }
+
+    #[test]
+    fn malformed_property_closures_fail_closed() {
+        let recorder = RecorderView::terminal().show();
+        let runtime = RuntimeView::terminal().show();
+        let anomalies: [(&str, String, String); 5] = [
+            (
+                "缺少 Result",
+                recorder.clone(),
+                runtime.replace("Result=exit-code\n", ""),
+            ),
+            (
+                "重复 ActiveState",
+                recorder.clone(),
+                runtime.replace("Job=\n", "Job=\nActiveState=failed\n"),
+            ),
+            ("额外 key", recorder.clone(), format!("{runtime}Foo=bar\n")),
+            (
+                "无法拆分的行",
+                recorder.clone(),
+                "no-separator\n".to_owned(),
+            ),
+            (
+                "recorder 缺 RefuseManualStart",
+                recorder.replace("RefuseManualStart=yes\n", ""),
+                runtime,
+            ),
+        ];
+        for (case, recorder_text, runtime_text) in anomalies {
+            let root = fixture();
+            let rounds = vec![
+                (recorder_text.clone(), runtime_text.clone()),
+                (recorder_text, runtime_text),
+            ];
+            assert!(
+                record_runtime_failure_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut Snapshots::raw(rounds),
+                    &mut Generation(1),
+                    RECORDER_INVOCATION,
+                    std::process::id(),
+                )
+                .is_err(),
+                "{case} 必须 fail closed"
+            );
+            assert_no_pair(root.path());
         }
     }
 
     #[test]
-    fn legacy_activated_upgrade_without_typed_completion_blocks_a_new_generation() {
-        let typed = upgrade_journal_fixture("activated", true, 21, 21, "none-consumed", None);
-        let legacy = typed
-            .replacen("schema_version = 4", "schema_version = 3", 1)
-            .replacen("runtime_failure_consumption = \"none-consumed\"\n", "", 1);
+    fn a_repeat_notification_after_latching_keeps_the_exact_pair_unconfirmed() {
         let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap()).unwrap();
-        write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, legacy.as_bytes(), 0o600);
-
-        assert!(
-            record_runtime_failure_at(
-                root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                &mut Generation(0xec),
-            )
-            .is_err(),
-        );
-        assert!(!rooted(root.path(), EPOCH_PATH).exists());
-        assert!(!rooted(root.path(), LATCH_PATH).exists());
-
-        let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            uid,
-            &mut FailedRuntime(0),
-            &mut Generation(0xed),
-        )
-        .unwrap();
+        record_latched(root.path(), 1);
         let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
         let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-        fs::create_dir_all(rooted(root.path(), UPGRADE_ATTEMPT_PATH).parent().unwrap()).unwrap();
-        write_fixture(root.path(), UPGRADE_ATTEMPT_PATH, legacy.as_bytes(), 0o600);
-        assert!(
-            issue_installed_bundle_failure_evidence_at(
+        // 60s 窗口过期或 reset-failed 后计数归零：latch 仍在，record 不重跑确认、不产生新 generation。
+        let mut expired = RuntimeView::terminal();
+        expired.restart_count = "0".into();
+        let mut systemd = Snapshots::observations([Observation {
+            runtime: expired,
+            ..Observation::terminal()
+        }]);
+        assert_eq!(
+            record_runtime_failure_at(
                 root.path(),
-                uid,
-                &mut FailedRuntime(0),
-                100,
-                60_100,
-                "request_nonce_legacy_upgrade",
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                &mut Generation(9),
+                RECORDER_INVOCATION,
+                std::process::id(),
             )
-            .is_err(),
+            .unwrap(),
+            RuntimeFailureRecordOutcome::AlreadyLatched
         );
-        let mut retry = RetrySystemd::default();
-        assert!(retry_runtime_at(root.path(), uid, &mut retry).is_err());
-        assert_eq!(retry.0, 0);
+        assert_eq!(systemd.waits, 0);
+        assert_eq!(
+            systemd.rounds.len(),
+            1,
+            "已有精确 pair 时不得再次查询 manager"
+        );
         assert_eq!(
             fs::read(rooted(root.path(), EPOCH_PATH)).unwrap(),
             epoch_before
@@ -4169,46 +1784,260 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn concurrent_recorders_publish_one_exact_pair() {
-        let root = fixture();
-        let uid = unsafe { libc::geteuid() };
-        let path = root.path().to_path_buf();
-        let outcomes = std::thread::scope(|scope| {
-            let first_path = path.clone();
-            let first = scope.spawn(move || {
-                record_runtime_failure_at(
-                    &first_path,
-                    uid,
-                    &mut FailedRuntime(0),
-                    &mut Generation(25),
+    fn an_interrupted_publication_is_not_authority() {
+        for (case, missing) in [("缺 latch", LATCH_PATH), ("缺 epoch", EPOCH_PATH)] {
+            let root = fixture();
+            record_latched(root.path(), 2);
+            let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
+            let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
+            fs::remove_file(rooted(root.path(), missing)).unwrap();
+            let remaining = if missing == LATCH_PATH {
+                EPOCH_PATH
+            } else {
+                LATCH_PATH
+            };
+            assert!(
+                record_terminal(root.path(), 3).is_err(),
+                "{case} 的半途状态必须被拒绝"
+            );
+            assert!(
+                !rooted(root.path(), missing).exists(),
+                "{case} 不得被补全或产生新 authority"
+            );
+            let remaining_bytes = fs::read(rooted(root.path(), remaining)).unwrap();
+            if missing == LATCH_PATH {
+                assert_eq!(remaining_bytes, epoch_before);
+            } else {
+                assert_eq!(remaining_bytes, latch_before);
+            }
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut ObservationFake::terminal(),
+                    100,
+                    60_100,
+                    "request_nonce_partial",
                 )
-                .unwrap()
-            });
-            let second = scope.spawn(move || {
-                record_runtime_failure_at(&path, uid, &mut FailedRuntime(0), &mut Generation(26))
-                    .unwrap()
-            });
-            [first.join().unwrap(), second.join().unwrap()]
-        });
-        assert!(outcomes.contains(&RuntimeFailureRecordOutcome::Latched));
-        assert!(outcomes.contains(&RuntimeFailureRecordOutcome::AlreadyLatched));
-        assert!(current_epoch_at_locked(root.path(), uid).is_ok());
+                .is_err(),
+                "{case} 不能签发 Evidence"
+            );
+            assert!(
+                !installed_bundle_failure_is_current_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut ObservationFake::terminal(),
+                ),
+                "{case} 不能授权 Repair"
+            );
+            let mut retry = RetrySystemd::default();
+            assert!(
+                retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut retry).is_err(),
+                "{case} 的 Local Retry 必须 fail closed"
+            );
+            assert_eq!(retry.0, 0, "{case} 不得触发任何 systemd 动作");
+        }
+    }
+
+    #[test]
+    fn a_changed_install_receipt_invalidates_the_latched_pair() {
+        let root = fixture();
+        record_latched(root.path(), 4);
+        let metadata = fs::read_to_string(rooted(root.path(), METADATA_PATH))
+            .unwrap()
+            .replace("bundle_version = \"1.2.3\"", "bundle_version = \"9.9.9\"");
+        write_fixture(root.path(), METADATA_PATH, metadata.as_bytes(), 0o600);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut ObservationFake::terminal(),
+                100,
+                60_100,
+                "request_nonce_reinstall",
+            )
+            .is_err()
+        );
+        assert!(!installed_bundle_failure_is_current_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut ObservationFake::terminal(),
+        ));
+        assert!(record_terminal(root.path(), 5).is_err());
+    }
+
+    #[test]
+    fn evidence_issuance_revalidates_the_current_shape_instead_of_historical_counts() {
+        let root = fixture();
+        record_latched(root.path(), 5);
+        let mut systemd = ObservationFake::terminal();
+        let signed = issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+            100,
+            60_100,
+            "request_nonce_current",
+        )
+        .unwrap();
+        assert_eq!(signed.evidence.generation, "05".repeat(32));
+        // 60s 窗口过期后计数归零：同一终态形状的 durable authority 保持。
+        let mut expired = ObservationFake::terminal();
+        expired.runtime.restart_count = "0".into();
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut expired,
+                100,
+                60_100,
+                "request_nonce_expired",
+            )
+            .is_ok()
+        );
+        // 签发只做当前性复核：不重演跨 RestartSec 的两份观察。
+        let mut single = Snapshots::terminal(1);
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut single,
+                100,
+                60_100,
+                "request_nonce_single",
+            )
+            .is_ok()
+        );
+        assert_eq!(single.waits, 0);
+        assert!(single.rounds.is_empty());
+        let non_current: [RuntimeDeviation; 3] = [
+            ("Runtime 已成功启动", |runtime| {
+                runtime.active_state = "active".into();
+                runtime.sub_state = "running".into();
+                runtime.main_pid = "4242".into();
+            }),
+            ("reset-failed 清除了 Result", |runtime| {
+                runtime.result = "success".into();
+                runtime.restart_count = "0".into();
+            }),
+            ("仍有排队 job", |runtime| {
+                runtime.job = "21 enoki-observation-runtime.service/start".into()
+            }),
+        ];
+        for (case, mutate) in non_current {
+            let mut stale = ObservationFake::terminal();
+            mutate(&mut stale.runtime);
+            assert!(
+                issue_installed_bundle_failure_evidence_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut stale,
+                    100,
+                    60_100,
+                    "request_nonce_stale",
+                )
+                .is_err(),
+                "{case} 时旧资格不可用"
+            );
+            assert!(
+                !installed_bundle_failure_is_current_at(
+                    root.path(),
+                    unsafe { libc::geteuid() },
+                    &mut stale,
+                ),
+                "{case} 时 Repair 不得认为资格当前"
+            );
+        }
+    }
+
+    #[test]
+    fn local_retry_invalidates_the_generation_and_a_later_failure_starts_over() {
+        let root = fixture();
+        record_latched(root.path(), 6);
+        let mut systemd = ObservationFake::terminal();
+        let signed = issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+            100,
+            60_100,
+            "request_nonce_before",
+        )
+        .unwrap();
+        let authority = installed_authority(&signed, "46");
+        let signature = test_hmac(
+            &[0x11; 32],
+            b"enoki/installed-bundle-repair-authority/hmac-sha256/v1\0",
+            &authority.canonical_bytes(),
+        );
+        let mut retry = RetrySystemd::default();
+        retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut retry).unwrap();
+        assert_eq!(retry.0, 1);
+        assert!(!installed_bundle_failure_is_current_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+        ));
+        assert!(matches!(
+            validate_installed_bundle_repair_authority_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                &signed,
+                &authority,
+                &signature,
+                101,
+            ),
+            Err(InstalledBundleRepairError::InvalidBoundary)
+        ));
+        // 清除后的一次启动失败不会复活旧 generation：必须重新走完整确认。
+        let mut partial = Observation::terminal();
+        partial.runtime.restart_count = "1".into();
+        assert_eq!(
+            record_with(root.path(), [partial, Observation::stable(1)], 7).unwrap(),
+            RuntimeFailureRecordOutcome::Ignored
+        );
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut systemd,
+                100,
+                60_100,
+                "request_nonce_after",
+            )
+            .is_err()
+        );
+        record_latched(root.path(), 8);
+        let reissued = issue_installed_bundle_failure_evidence_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut systemd,
+            100,
+            60_100,
+            "request_nonce_new",
+        )
+        .unwrap();
+        assert_eq!(reissued.evidence.generation, "08".repeat(32));
+        assert_ne!(reissued.evidence.generation, signed.evidence.generation);
+    }
+
+    #[test]
+    fn typed_local_retry_consumes_the_latch_before_one_fixed_retry() {
+        let root = fixture();
+        record_latched(root.path(), 4);
+        let mut systemd = RetrySystemd::default();
+        retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut systemd).unwrap();
+        assert_eq!(systemd.0, 1);
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
     }
 
     #[test]
     fn signed_installed_bundle_authority_consumes_only_the_current_generation() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(5),
-        )
-        .unwrap();
-        let mut systemd = FailedRuntime(0);
+        record_latched(root.path(), 5);
+        let mut systemd = ObservationFake::terminal();
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -4253,24 +2082,6 @@ pub(super) mod tests {
             101,
         )
         .unwrap();
-        let mut mismatched_receipt =
-            enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt {
-                operation_id: "another-operation".into(),
-                target_asset_set_digest: authority.target_asset_set_digest.clone(),
-                target_manifest_sha256: authority.manifest_sha256.clone(),
-                target_version: authority.bundle_version.clone(),
-                verified_stage_sha256: "b".repeat(64),
-            };
-        assert_eq!(
-            grant.persist_intent(&mismatched_receipt, 12345),
-            Err(InstalledBundleRepairError::InvalidBoundary)
-        );
-        mismatched_receipt.operation_id = authority.repair_operation_id.clone();
-        mismatched_receipt.target_manifest_sha256 = "c".repeat(64);
-        assert_eq!(
-            grant.persist_intent(&mismatched_receipt, 12345),
-            Err(InstalledBundleRepairError::InvalidBoundary)
-        );
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
@@ -4339,7 +2150,7 @@ pub(super) mod tests {
             grant.authority(),
         )
         .unwrap();
-        assert_eq!(systemd.0, 0);
+        assert_eq!(systemd.retry_calls, 0, "成功恢复链路不得再触发固定 Retry");
         assert!(!rooted(root.path(), LATCH_PATH).exists());
         assert_eq!(
             fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH)).unwrap(),
@@ -4350,19 +2161,10 @@ pub(super) mod tests {
     #[test]
     fn failed_installed_bundle_repair_keeps_the_exact_epoch_latched_and_unresolved() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(6),
-        )
-        .unwrap();
+        record_latched(root.path(), 6);
         let epoch_before = fs::read(rooted(root.path(), EPOCH_PATH)).unwrap();
         let latch_before = fs::read(rooted(root.path(), LATCH_PATH)).unwrap();
-        let mut systemd = RejectedRepair;
+        let mut systemd = ObservationFake::repair_rejected();
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -4412,17 +2214,8 @@ pub(super) mod tests {
     #[test]
     fn admitted_installed_bundle_repair_resumes_without_new_authority() {
         let root = fixture();
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(7),
-        )
-        .unwrap();
-        let mut systemd = FailedRuntime(0);
+        record_latched(root.path(), 7);
+        let mut systemd = ObservationFake::terminal();
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
@@ -4445,14 +2238,13 @@ pub(super) mod tests {
             target_version: authority.bundle_version.clone(),
             verified_stage_sha256: "b".repeat(64),
         };
-        let invoking_uid = 12345;
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
                 schema_version: 2,
                 state: InstalledBundleRepairProgress::ValidationPending,
                 last_error_code: None,
-                stage_owner_uid: invoking_uid,
+                stage_owner_uid: unsafe { libc::geteuid() },
                 stage_receipt: receipt.clone(),
                 signed_evidence: signed,
                 authority: authority.clone(),
@@ -4469,7 +2261,6 @@ pub(super) mod tests {
             InstalledBundleRepairProgress::ValidationPending
         );
         assert_eq!(resumed.stage_receipt, receipt);
-        assert_eq!(resumed.stage_owner_uid, invoking_uid);
         assert_eq!(resumed.grant.authority(), &authority);
         assert!(rooted(root.path(), LATCH_PATH).exists());
 
@@ -4599,51 +2390,6 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn repair_reentry_removes_only_the_exact_bound_latch_and_converges_if_already_absent() {
-        for (index, progress) in [
-            InstalledBundleRepairProgress::InvalidationCommitted,
-            InstalledBundleRepairProgress::EpochRemoved,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            for latch in [b"ff".repeat(32), b"corrupt-generation".to_vec()] {
-                let (root, authority) = repair_completion_fixture(progress, (0x70 + index) as u8);
-                if progress == InstalledBundleRepairProgress::EpochRemoved {
-                    fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
-                }
-                write_fixture(root.path(), LATCH_PATH, &latch, 0o600);
-
-                assert_eq!(
-                    invalidate_installed_bundle_failure_at(
-                        root.path(),
-                        unsafe { libc::geteuid() },
-                        &authority,
-                    ),
-                    Err(InstalledBundleRepairError::RecoveryPending),
-                );
-                assert_eq!(fs::read(rooted(root.path(), LATCH_PATH)).unwrap(), latch);
-                let intent: InstalledBundleRepairIntent = serde_json::from_slice(
-                    &fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap(),
-                )
-                .unwrap();
-                assert_eq!(intent.state, progress);
-            }
-        }
-
-        let (root, authority) =
-            repair_completion_fixture(InstalledBundleRepairProgress::EpochRemoved, 0x72);
-        fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
-        fs::remove_file(rooted(root.path(), LATCH_PATH)).unwrap();
-        invalidate_installed_bundle_failure_at(root.path(), unsafe { libc::geteuid() }, &authority)
-            .unwrap();
-        let intent: InstalledBundleRepairIntent =
-            serde_json::from_slice(&fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap())
-                .unwrap();
-        assert_eq!(intent.state, InstalledBundleRepairProgress::LatchRemoved);
-    }
-
     #[derive(Default)]
     struct RepairEffects {
         restored: usize,
@@ -4699,6 +2445,15 @@ pub(super) mod tests {
             }
         }
 
+        fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error> {
+            self.final_ordinary_activations += 1;
+            Ok(())
+        }
+
+        fn quiesce_status_published(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
@@ -4726,15 +2481,6 @@ pub(super) mod tests {
         }
 
         fn remove_stage(&mut self, _: &str, _: u32) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn activate_final_ordinary_probe(&mut self) -> Result<(), Self::Error> {
-            self.final_ordinary_activations += 1;
-            Ok(())
-        }
-
-        fn quiesce_status_published(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -4834,9 +2580,7 @@ pub(super) mod tests {
     #[test]
     fn upgrader_adapter_cannot_observe_or_drive_private_repair_checkpoints() {
         let upgrader = include_str!("upgrader.rs");
-        let coordinator = include_str!("upgrader/repair.rs");
-        assert!(coordinator.contains("drive_live_installed_bundle_repair"));
-        assert!(!upgrader.contains("drive_live_installed_bundle_repair"));
+        assert!(upgrader.contains("drive_live_installed_bundle_repair"));
         for private_detail in [
             "InstalledBundleRepairProgress",
             "mark_validation_pending",
@@ -4847,8 +2591,8 @@ pub(super) mod tests {
             "publish_success",
         ] {
             assert!(
-                !upgrader.contains(private_detail) && !coordinator.contains(private_detail),
-                "Repair coordinator Interface 不得观察私有 checkpoint：{private_detail}"
+                !upgrader.contains(private_detail),
+                "upgrader Adapter 不得观察 Repair 私有 checkpoint：{private_detail}"
             );
         }
     }
@@ -4979,29 +2723,11 @@ pub(super) mod tests {
         generation_byte: u8,
     ) -> (tempfile::TempDir, InstalledBundleRepairAuthorityV1) {
         let root = fixture();
-        let authority = repair_completion_fixture_at(&root, progress, generation_byte);
-        (root, authority)
-    }
-
-    fn repair_completion_fixture_at(
-        root: &tempfile::TempDir,
-        progress: InstalledBundleRepairProgress,
-        generation_byte: u8,
-    ) -> InstalledBundleRepairAuthorityV1 {
-        record_runtime_failure_at(
-            root.path(),
-            unsafe { libc::geteuid() },
-            &mut State(RuntimeUnitState {
-                active_state: "failed".into(),
-                result: "exit-code".into(),
-            }),
-            &mut Generation(generation_byte),
-        )
-        .unwrap();
+        record_latched(root.path(), generation_byte);
         let signed = issue_installed_bundle_failure_evidence_at(
             root.path(),
             unsafe { libc::geteuid() },
-            &mut FailedRuntime(0),
+            &mut ObservationFake::terminal(),
             100,
             60_100,
             "request_nonce_04",
@@ -5033,7 +2759,7 @@ pub(super) mod tests {
             },
         )
         .unwrap();
-        authority
+        (root, authority)
     }
 
     fn installed_authority(

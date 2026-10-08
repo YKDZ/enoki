@@ -1,1 +1,0 @@
-ALTER TABLE `snapshot_replay_requests` ADD `fulfilled_snapshot_hash` text;

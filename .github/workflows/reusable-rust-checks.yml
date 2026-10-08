@@ -12,27 +12,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Set up Node.js for Bootstrap verifier
-        uses: actions/setup-node@v6
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: package.json
-          cache: pnpm
 
-      - name: Install Node workspace dependencies for Bootstrap verifier
-        run: pnpm install --frozen-lockfile
+      - name: Set up pnpm
+        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
+        with:
+          cache: true
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
+          toolchain: 1.97.1
           components: rustfmt, clippy
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Check Rust formatting
         run: cargo fmt --all --check
@@ -41,15 +45,4 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: |
-          cleanup() {
-            local status=$?
-            if [[ -d target ]] && ! sudo chown -R "$(id -u):$(id -g)" target; then
-              exit 1
-            fi
-            exit "$status"
-          }
-          trap cleanup EXIT
-          export RUSTUP_HOME="${RUSTUP_HOME:-"$HOME/.rustup"}"
-          cargo="$(command -v cargo)"
-          sudo --preserve-env=PATH,CARGO_HOME,RUSTUP_HOME "$cargo" test --workspace
+        run: sudo env "PATH=$PATH" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" cargo test --workspace

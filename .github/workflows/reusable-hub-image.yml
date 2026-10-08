@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout exact source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: source
@@ -57,15 +57,19 @@ jobs:
           echo "::error::A packaged Hub artifact requires signed Probe assets and reproducibility verification."
           exit 1
 
-      - name: Set up workspace dependencies for release verification
-        if: inputs.package-artifact
-        uses: ./source/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js for release verification
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: source
+          node-version-file: source/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./source/.github/actions/setup-release-tool
+        with:
+          directory: source
 
       - name: Download signed Probe Asset Set
         if: inputs.probe-assets-artifact-name != ''
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ inputs.probe-assets-artifact-name }}
           path: source/probe-assets
@@ -91,12 +95,33 @@ jobs:
           --output source/probe-bootstrap-publication
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
+      # 标准 CI 不签署也不下载 Probe Asset Set，但 Dockerfile 与生产启动无条件要求
+      # 根公钥和 Bootstrap 发布记录，因此这里只复用现有正式 publication 生产者，
+      # 记录版本固定为非发布值 0.0.0，与镜像标签 inputs.version 分开。
+      - name: Prepare the CI Probe Distribution root public key
+        if: ${{ !inputs.package-artifact && inputs.probe-assets-artifact-name == '' }}
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: |
+          mkdir -p source/probe-assets
+          printf '%s\n' "$ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM" > source/probe-assets/root-key.pem
+
+      - name: Derive the non-release Probe Bootstrap publication
+        if: ${{ !inputs.package-artifact && inputs.probe-assets-artifact-name == '' }}
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: >-
+          node source/scripts/release-candidate.mjs write-bootstrap-publication
+          --source-dir source
+          --version 0.0.0
+          --output source/probe-bootstrap-publication
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
+
       - name: Build the standard CI Hub image
         if: ${{ !inputs.package-artifact }}
         run: >-
           DOCKER_BUILDKIT=1 docker build
           --file source/apps/hub/Dockerfile
-          --build-arg ENOKI_HUB_IMAGE_INPUTS=standard-ci-non-production
           --tag "enoki-hub:${{ inputs.version }}"
           source
 
@@ -109,7 +134,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: inputs.package-artifact
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Build the Hub OCI archive twice from clean state
         if: inputs.package-artifact
@@ -138,7 +163,6 @@ jobs:
         if: inputs.package-artifact && inputs.verify-reproducible
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
-          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node source/scripts/release-candidate.mjs compare-hub-builds
           --first "hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
@@ -148,7 +172,7 @@ jobs:
 
       - name: Upload Hub OCI archive
         if: inputs.package-artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-hub-oci-${{ github.run_id }}
           path: hub-reproducibility-first/*.oci.tar

@@ -1,12 +1,11 @@
 use enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding as BootstrapReplacementRegistrationBinding;
-use enoki_probe_bootstrap::secure_file::PrivateAtomicFileCustody;
 use prost::Message;
 use rsa::{
-    RsaPrivateKey,
-    pkcs1v15::SigningKey,
-    pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey},
+    RsaPrivateKey, RsaPublicKey,
+    pkcs1v15::{Signature as RsaPkcs1v15Signature, SigningKey, VerifyingKey},
+    pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey},
     rand_core::{OsRng, RngCore},
-    signature::{RandomizedSigner, SignatureEncoding},
+    signature::{RandomizedSigner, SignatureEncoding, Verifier},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -15,7 +14,10 @@ use std::path::Path;
 use crate::{
     hub_url,
     protocol::enoki::v1::{ProbeRegistrationAttempt, ProbeRegistrationRequest},
-    secure_file::{ensure_directory, read_registration_attempt_credential_bytes},
+    secure_file::{
+        atomic_write, ensure_directory, read_private_regular_file,
+        read_registration_attempt_credential_bytes,
+    },
 };
 
 use super::{
@@ -68,7 +70,7 @@ struct ProbeRegistrationAttemptCapsule {
     signed_attempt_sha256: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct ReplacementRegistrationBinding {
     committed_source_probe_sha256: String,
     enrollment_id: String,
@@ -321,6 +323,26 @@ impl ReplacementRegistrationBinding {
             target_probe_version: self.target_probe_version.clone(),
         }
     }
+
+    fn matches_proto(&self, attempt: &ProbeRegistrationAttempt) -> bool {
+        attempt.schema_version == 1
+            && attempt.enrollment_id == self.enrollment_id
+            && attempt.host_id == self.host_id
+            && attempt.hub_origin == self.hub_origin
+            && attempt.old_probe_id == self.old_probe_id
+            && attempt.source_probe_version == self.source_probe_version
+            && attempt.committed_source_probe_sha256 == self.committed_source_probe_sha256
+            && attempt.target_probe_version == self.target_probe_version
+            && attempt.target_bundle_target == self.target_bundle_target
+            && attempt.target_asset_set_digest == self.target_asset_set_digest
+            && attempt.target_manifest_sha256 == self.target_manifest_sha256
+            && attempt.replacement_commit_sha256 == self.replacement_commit_sha256
+            && attempt.nonce.len() == 64
+            && attempt
+                .nonce
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }
 }
 
 /// 具备 root 生命周期权限的主体会在允许 Replacement Probe 发出首次网络请求前，
@@ -338,79 +360,22 @@ pub fn prepare_root_replacement_registration_attempt(
         "invalid replacement registration capsule path",
     ))?;
     ensure_directory(parent, 0o700, Some(ROOT_CAPSULE_OWNER))?;
-    let custody =
-        PrivateAtomicFileCustody::open(path, 0o600, ROOT_CAPSULE_OWNER, ROOT_CAPSULE_OWNER.0)?;
     let binding = ReplacementRegistrationBinding::from(input.binding);
     let registration_input = ProbeRegistrationInput {
         bootstrap_config_path: Default::default(),
         enrollment_token: input.enrollment_token,
         hub_url: binding.hub_origin.clone(),
     };
-    match read_registration_attempt_capsule(&custody) {
+    match read_registration_attempt_capsule(path) {
         Ok(Some(capsule)) => {
             validate_registration_attempt_capsule(&capsule, &registration_input, &binding)
         }
         Ok(None) => {
             let capsule = create_registration_attempt(&registration_input, &binding)?;
-            persist_registration_attempt_capsule(&custody, &capsule)
+            persist_registration_attempt_capsule(path, &capsule)
         }
         Err(error) => Err(RegistrationError::Io(error)),
     }
-}
-
-/// Validates the durable root capsule against one already-retained Replacement
-/// commit before the coordinator may resume any destructive effect.
-pub(crate) fn validate_root_replacement_registration_attempt(
-    path: &Path,
-    input: RootReplacementRegistrationAttemptInput,
-) -> Result<(), RegistrationError> {
-    let binding = ReplacementRegistrationBinding::from(input.binding);
-    let custody =
-        PrivateAtomicFileCustody::open(path, 0o600, ROOT_CAPSULE_OWNER, ROOT_CAPSULE_OWNER.0)?;
-    let capsule = read_registration_attempt_capsule(&custody)?.ok_or(
-        RegistrationError::InvalidResponse("missing replacement registration capsule"),
-    )?;
-    validate_registration_attempt_capsule(
-        &capsule,
-        &ProbeRegistrationInput {
-            bootstrap_config_path: Default::default(),
-            enrollment_token: input.enrollment_token,
-            hub_url: binding.hub_origin.clone(),
-        },
-        &binding,
-    )
-}
-
-/// 仅替换仍精确绑定当前 Probe、Hub、Host 与 source 的 precommit capsule。
-/// coordinator 只能在新 inspection 成功且 Replacement commit 缺失后调用。
-pub fn replace_stale_root_replacement_registration_attempt(
-    path: &Path,
-    input: RootReplacementRegistrationAttemptInput,
-) -> Result<(), RegistrationError> {
-    let binding = ReplacementRegistrationBinding::from(input.binding.clone());
-    let custody =
-        PrivateAtomicFileCustody::open(path, 0o600, ROOT_CAPSULE_OWNER, ROOT_CAPSULE_OWNER.0)?;
-    let capsule = read_registration_attempt_capsule(&custody)?.ok_or(
-        RegistrationError::InvalidResponse("missing replacement registration capsule"),
-    )?;
-    let stale_binding = validate_self_bound_registration_attempt_capsule(&capsule)?;
-    if stale_binding.hub_origin != binding.hub_origin
-        || stale_binding.host_id != binding.host_id
-        || stale_binding.old_probe_id != binding.old_probe_id
-        || stale_binding.source_probe_version != binding.source_probe_version
-        || stale_binding.committed_source_probe_sha256 != binding.committed_source_probe_sha256
-    {
-        return Err(RegistrationError::InvalidResponse(
-            "stale registration attempt does not match installed source",
-        ));
-    }
-    let registration_input = ProbeRegistrationInput {
-        bootstrap_config_path: Default::default(),
-        enrollment_token: input.enrollment_token,
-        hub_url: binding.hub_origin.clone(),
-    };
-    let replacement = create_registration_attempt(&registration_input, &binding)?;
-    persist_registration_attempt_capsule(&custody, &replacement)
 }
 
 fn create_registration_attempt(
@@ -457,7 +422,7 @@ fn create_registration_attempt(
 }
 
 fn persist_registration_attempt_capsule(
-    custody: &PrivateAtomicFileCustody,
+    path: &Path,
     capsule: &ProbeRegistrationAttemptCapsule,
 ) -> Result<(), RegistrationError> {
     let bytes = serde_json::to_vec(capsule)
@@ -467,15 +432,22 @@ fn persist_registration_attempt_capsule(
             "registration attempt capsule is too large",
         ));
     }
-    custody.publish(&bytes)?;
+    atomic_write(path, &bytes, 0o600, Some(ROOT_CAPSULE_OWNER))?;
     Ok(())
 }
 
 fn read_registration_attempt_capsule(
-    custody: &PrivateAtomicFileCustody,
+    path: &Path,
 ) -> Result<Option<ProbeRegistrationAttemptCapsule>, std::io::Error> {
-    let Some(bytes) = custody.read_bounded(MAX_REGISTRATION_ATTEMPT_CAPSULE_BYTES)? else {
-        return Ok(None);
+    let bytes = match read_private_regular_file(
+        path,
+        0o600,
+        ROOT_CAPSULE_OWNER,
+        MAX_REGISTRATION_ATTEMPT_CAPSULE_BYTES,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
     };
     serde_json::from_slice(&bytes).map(Some).map_err(|_| {
         std::io::Error::new(
@@ -509,29 +481,60 @@ fn validate_registration_attempt_capsule(
     input: &ProbeRegistrationInput,
     binding: &ReplacementRegistrationBinding,
 ) -> Result<(), RegistrationError> {
-    let stored_binding = validate_self_bound_registration_attempt_capsule(capsule)?;
-    if capsule.enrollment_token_sha256 != sha256_hex(input.enrollment_token.as_bytes())
+    if capsule.schema_version != 1
+        || capsule.local_clock_reference_ms == 0
+        || capsule.enrollment_token_sha256 != sha256_hex(input.enrollment_token.as_bytes())
         || capsule.hub_origin != input.hub_url
-        || stored_binding != *binding
     {
         return Err(RegistrationError::InvalidResponse(
             "registration attempt capsule binding mismatch",
         ));
     }
+    let request_body = decode_lower_hex(&capsule.request_hex).ok_or(
+        RegistrationError::InvalidResponse("invalid registration attempt capsule"),
+    )?;
+    let request = ProbeRegistrationRequest::decode(request_body.as_slice())
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    let attempt = ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    if attempt.encode_to_vec() != request.canonical_attempt
+        || request.enrollment_token != input.enrollment_token
+        || request.installation_inspection.is_some()
+        || request.installation_rejection.is_some()
+        || !request.snapshots.is_empty()
+        || !binding.matches_proto(&attempt)
+    {
+        return Err(RegistrationError::InvalidResponse(
+            "registration attempt capsule binding mismatch",
+        ));
+    }
+    let private_key = RsaPrivateKey::from_pkcs8_pem(&capsule.candidate_private_key_pem)
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    let public_key = RsaPublicKey::from(&private_key)
+        .to_public_key_pem(Default::default())
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    if public_key != request.probe_public_key_pem
+        || public_key != attempt.candidate_public_key_pem
+        || capsule.signed_attempt_sha256
+            != signed_attempt_sha256(&request.canonical_attempt, &request.candidate_signature)
+    {
+        return Err(RegistrationError::InvalidResponse(
+            "registration attempt capsule key mismatch",
+        ));
+    }
+    let signature = RsaPkcs1v15Signature::try_from(request.candidate_signature.as_slice())
+        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
+    VerifyingKey::<Sha256>::new(
+        RsaPublicKey::from_public_key_pem(&public_key).map_err(|_| {
+            RegistrationError::InvalidResponse("invalid registration attempt capsule")
+        })?,
+    )
+    .verify(
+        registration_attempt_signature_payload(&request.canonical_attempt).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
     Ok(())
-}
-
-fn validate_self_bound_registration_attempt_capsule(
-    capsule: &ProbeRegistrationAttemptCapsule,
-) -> Result<ReplacementRegistrationBinding, RegistrationError> {
-    let bytes = serde_json::to_vec(capsule)
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    let binding =
-        enoki_probe_bootstrap::replacement::validate_replacement_registration_attempt_capsule(
-            &bytes,
-        )
-        .map_err(|_| RegistrationError::InvalidResponse("invalid registration attempt capsule"))?;
-    Ok(ReplacementRegistrationBinding::from(binding))
 }
 
 fn registration_request(
@@ -609,238 +612,4 @@ fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
             Some(((high << 4) | low) as u8)
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    fn binding() -> BootstrapReplacementRegistrationBinding {
-        BootstrapReplacementRegistrationBinding {
-            committed_source_probe_sha256: "a".repeat(64),
-            enrollment_id: "enr_0123456789abcdef".into(),
-            host_id: "7".into(),
-            hub_origin: "https://hub.example".into(),
-            old_probe_id: "probe_old_01".into(),
-            replacement_commit_sha256: "b".repeat(64),
-            source_probe_version: "1.2.3".into(),
-            target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
-            target_bundle_target: "x86_64-unknown-linux-gnu".into(),
-            target_manifest_sha256: "d".repeat(64),
-            target_probe_version: "1.2.4".into(),
-        }
-    }
-
-    #[test]
-    fn stale_capsule_replacement_requires_the_exact_installed_source_binding() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("attempt.json");
-        let old = binding();
-        let old_input = RootReplacementRegistrationAttemptInput {
-            enrollment_token: "enk_old".into(),
-            binding: old.clone(),
-        };
-        prepare_root_replacement_registration_attempt(&path, old_input).unwrap();
-        let original = std::fs::read(&path).unwrap();
-        let mut next = old.clone();
-        next.enrollment_id = "enr_abcdef0123456789".into();
-        next.replacement_commit_sha256 = "e".repeat(64);
-        replace_stale_root_replacement_registration_attempt(
-            &path,
-            RootReplacementRegistrationAttemptInput {
-                enrollment_token: "enk_new".into(),
-                binding: next,
-            },
-        )
-        .unwrap();
-        assert_ne!(std::fs::read(&path).unwrap(), original);
-        let mut wrong = old;
-        wrong.old_probe_id = "probe_other".into();
-        assert!(
-            replace_stale_root_replacement_registration_attempt(
-                &path,
-                RootReplacementRegistrationAttemptInput {
-                    enrollment_token: "enk_third".into(),
-                    binding: wrong
-                }
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn stale_capsule_must_self_validate_before_replacement() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("attempt.json");
-        let old = binding();
-        prepare_root_replacement_registration_attempt(
-            &path,
-            RootReplacementRegistrationAttemptInput {
-                enrollment_token: "enk_old".into(),
-                binding: old.clone(),
-            },
-        )
-        .unwrap();
-        let original: ProbeRegistrationAttemptCapsule =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let mut next = old;
-        next.enrollment_id = "enr_abcdef0123456789".into();
-        next.replacement_commit_sha256 = "e".repeat(64);
-        let next = RootReplacementRegistrationAttemptInput {
-            enrollment_token: "enk_new".into(),
-            binding: next,
-        };
-
-        for mutation in [
-            "token-hash",
-            "raw-token",
-            "key",
-            "signature",
-            "signed-digest",
-            "binding",
-        ] {
-            let mut capsule = serde_json::from_slice::<ProbeRegistrationAttemptCapsule>(
-                &serde_json::to_vec(&original).unwrap(),
-            )
-            .unwrap();
-            match mutation {
-                "token-hash" => {
-                    let replacement = if capsule.enrollment_token_sha256.starts_with('a') {
-                        "b"
-                    } else {
-                        "a"
-                    };
-                    capsule
-                        .enrollment_token_sha256
-                        .replace_range(..1, replacement);
-                }
-                "raw-token" => {
-                    let mut request = ProbeRegistrationRequest::decode(
-                        decode_lower_hex(&capsule.request_hex).unwrap().as_slice(),
-                    )
-                    .unwrap();
-                    request.enrollment_token.push_str("_tampered");
-                    capsule.request_hex = encode_lower_hex(&request.encode_to_vec());
-                }
-                "key" => capsule.candidate_private_key_pem = "not a private key".into(),
-                "signature" => {
-                    let mut request = ProbeRegistrationRequest::decode(
-                        decode_lower_hex(&capsule.request_hex).unwrap().as_slice(),
-                    )
-                    .unwrap();
-                    request.candidate_signature[0] ^= 1;
-                    capsule.request_hex = encode_lower_hex(&request.encode_to_vec());
-                }
-                "signed-digest" => {
-                    let replacement = if capsule.signed_attempt_sha256.starts_with('0') {
-                        "1"
-                    } else {
-                        "0"
-                    };
-                    capsule
-                        .signed_attempt_sha256
-                        .replace_range(..1, replacement);
-                }
-                "binding" => {
-                    let mut request = ProbeRegistrationRequest::decode(
-                        decode_lower_hex(&capsule.request_hex).unwrap().as_slice(),
-                    )
-                    .unwrap();
-                    let mut attempt =
-                        ProbeRegistrationAttempt::decode(request.canonical_attempt.as_slice())
-                            .unwrap();
-                    attempt.target_manifest_sha256 = "z".repeat(64);
-                    request.canonical_attempt = attempt.encode_to_vec();
-                    let private_key =
-                        RsaPrivateKey::from_pkcs8_pem(&capsule.candidate_private_key_pem).unwrap();
-                    request.candidate_signature = SigningKey::<Sha256>::new(private_key)
-                        .sign_with_rng(
-                            &mut OsRng,
-                            registration_attempt_signature_payload(&request.canonical_attempt)
-                                .as_bytes(),
-                        )
-                        .to_bytes()
-                        .to_vec();
-                    capsule.signed_attempt_sha256 = signed_attempt_sha256(
-                        &request.canonical_attempt,
-                        &request.candidate_signature,
-                    );
-                    capsule.request_hex = encode_lower_hex(&request.encode_to_vec());
-                }
-                _ => unreachable!(),
-            }
-            let corrupt = serde_json::to_vec(&capsule).unwrap();
-            std::fs::write(&path, &corrupt).unwrap();
-            assert!(
-                replace_stale_root_replacement_registration_attempt(&path, next.clone()).is_err(),
-                "{mutation} mutation must fail closed"
-            );
-            assert_eq!(std::fs::read(&path).unwrap(), corrupt);
-        }
-
-        let original_bytes = serde_json::to_vec(&original).unwrap();
-        std::fs::write(&path, &original_bytes).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(replace_stale_root_replacement_registration_attempt(&path, next.clone()).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
-
-        std::fs::remove_file(&path).unwrap();
-        assert!(replace_stale_root_replacement_registration_attempt(&path, next).is_err());
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn retained_commit_validation_covers_the_complete_durable_capsule_binding() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("attempt.json");
-        let exact = RootReplacementRegistrationAttemptInput {
-            enrollment_token: "enk_exact".into(),
-            binding: binding(),
-        };
-        prepare_root_replacement_registration_attempt(&path, exact.clone()).unwrap();
-        let original = std::fs::read(&path).unwrap();
-        validate_root_replacement_registration_attempt(&path, exact.clone()).unwrap();
-
-        let mutations: [fn(&mut RootReplacementRegistrationAttemptInput); 12] = [
-            |input| input.enrollment_token.push_str("_other"),
-            |input| input.binding.enrollment_id.push_str("_other"),
-            |input| input.binding.host_id.push('8'),
-            |input| input.binding.hub_origin.push_str("/other"),
-            |input| input.binding.old_probe_id.push_str("_other"),
-            |input| input.binding.source_probe_version.push_str("+other"),
-            |input| {
-                input
-                    .binding
-                    .committed_source_probe_sha256
-                    .replace_range(..1, "f")
-            },
-            |input| {
-                input
-                    .binding
-                    .replacement_commit_sha256
-                    .replace_range(..1, "f")
-            },
-            |input| input.binding.target_probe_version.push_str("+other"),
-            |input| {
-                input
-                    .binding
-                    .target_asset_set_digest
-                    .replace_range(7..8, "f")
-            },
-            |input| input.binding.target_bundle_target.push_str("-other"),
-            |input| input.binding.target_manifest_sha256.replace_range(..1, "f"),
-        ];
-        for mutate in mutations {
-            let mut changed = exact.clone();
-            mutate(&mut changed);
-            assert!(validate_root_replacement_registration_attempt(&path, changed).is_err());
-            assert_eq!(std::fs::read(&path).unwrap(), original);
-        }
-
-        let corrupt = b"corrupt durable capsule";
-        std::fs::write(&path, corrupt).unwrap();
-        assert!(validate_root_replacement_registration_attempt(&path, exact).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), corrupt);
-    }
 }

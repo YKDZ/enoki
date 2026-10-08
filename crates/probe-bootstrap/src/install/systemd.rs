@@ -97,23 +97,12 @@ impl SystemSystemd {
         }
     }
 
-    fn preserves_live_companion_stop_or_verify_unit(&self, unit: &str) -> bool {
+    fn preserves_live_companion_unit(&self, unit: &str) -> bool {
         match self.preserve_live_companion {
             Some(LiveCompanionFamily::General) => is_live_general_companion_unit(unit),
             Some(LiveCompanionFamily::Upgrade) => is_live_upgrade_companion_unit(unit),
             None => false,
         }
-    }
-
-    fn preserves_live_companion_reset_unit(&self, unit: &str) -> bool {
-        self.preserves_live_companion_stop_or_verify_unit(unit)
-    }
-
-    fn uses_general_restore_adapter(&self) -> bool {
-        matches!(
-            self.preserve_live_companion,
-            Some(LiveCompanionFamily::General)
-        )
     }
 }
 
@@ -130,71 +119,6 @@ fn is_live_upgrade_companion_unit(unit: &str) -> bool {
         "enoki-probe-lifecycle-upgrade.socket" | "enoki-probe-lifecycle-upgrade@*.service"
     )
 }
-
-fn require_absent_from_load_state(loaded: &command::BoundedOutput) -> Result<(), InstallError> {
-    if !loaded.status.success() || single_systemd_value(&loaded.stdout)? != "not-found" {
-        return Err(InstallError::ExistingResidue);
-    }
-    Ok(())
-}
-
-fn fixed_unit_is_instance_glob(unit: &str) -> bool {
-    matches!(
-        unit,
-        "enoki-cpu-resource-provider@*.service"
-            | "enoki-disk-health-resource-provider@*.service"
-            | "enoki-probe-lifecycle-companion@*.service"
-            | "enoki-probe-lifecycle-upgrade@*.service"
-    )
-}
-
-fn require_fixed_unit_absent(
-    unit: &str,
-    loaded: &command::BoundedOutput,
-) -> Result<(), InstallError> {
-    if fixed_unit_is_instance_glob(unit) && loaded.status.success() && loaded.stdout.is_empty() {
-        return Ok(());
-    }
-    require_absent_from_load_state(loaded)
-}
-
-fn require_rollback_unit_absent(
-    unit: &str,
-    output: &command::BoundedOutput,
-) -> Result<(), InstallError> {
-    // systemd 255 对没有任何实例匹配的已知 instance glob 返回 status=4 且没有 stdout。
-    // 这只说明该编译期 fixed glob 已收敛；普通 unit 的同样输出仍必须 fail closed。
-    if fixed_unit_is_instance_glob(unit)
-        && output.status.code() == Some(4)
-        && output.stdout.is_empty()
-    {
-        return Ok(());
-    }
-    let state = std::str::from_utf8(&output.stdout).map_err(|_| InstallError::Systemd)?;
-    if state.lines().count() != 1 || !state.lines().all(rollback_unit_is_absent) {
-        return Err(InstallError::Systemd);
-    }
-    Ok(())
-}
-
-fn require_general_restore_unit_absent(
-    unit: &str,
-    output: &command::BoundedOutput,
-    manager_matches: &command::BoundedOutput,
-) -> Result<(), InstallError> {
-    if fixed_unit_is_instance_glob(unit)
-        && output.status.code() == Some(3)
-        && output.stdout.is_empty()
-        && output.stderr.is_empty()
-        && manager_matches.status.success()
-        && manager_matches.stdout.is_empty()
-        && manager_matches.stderr.is_empty()
-    {
-        return Ok(());
-    }
-    require_rollback_unit_absent(unit, output)
-}
-
 impl SystemdPort for SystemSystemd {
     fn set_command_deadline(&mut self, deadline: Instant) {
         self.command_deadline = Some(deadline);
@@ -203,15 +127,31 @@ impl SystemdPort for SystemSystemd {
         let deadline = self
             .command_deadline
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-        for unit in ROLLBACK_VERIFY_UNITS {
-            let loaded = run_bounded(
-                "/usr/bin/systemctl",
-                &["show", "--property=LoadState", "--value", unit],
-                InstallError::Systemd,
-                deadline,
-                COMMAND_STEP_BUDGET,
-            )?;
-            require_fixed_unit_absent(unit, &loaded)?;
+        let enabled = run_bounded(
+            "/usr/bin/systemctl",
+            &["is-enabled", "--full", "--no-pager", "enoki-probe.service"],
+            InstallError::Systemd,
+            deadline,
+            COMMAND_STEP_BUDGET,
+        )?;
+        let enabled_value = single_systemd_value(&enabled.stdout)?;
+        if enabled_value != "not-found" || !matches!(enabled.status.code(), Some(1) | Some(4)) {
+            return Err(InstallError::ExistingResidue);
+        }
+        let loaded = run_bounded(
+            "/usr/bin/systemctl",
+            &[
+                "show",
+                "--property=LoadState",
+                "--value",
+                "enoki-probe.service",
+            ],
+            InstallError::Systemd,
+            deadline,
+            COMMAND_STEP_BUDGET,
+        )?;
+        if !loaded.status.success() || single_systemd_value(&loaded.stdout)? != "not-found" {
+            return Err(InstallError::ExistingResidue);
         }
         Ok(())
     }
@@ -302,7 +242,7 @@ impl SystemdPort for SystemSystemd {
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
         // 先关闭激活 socket，阻止回滚期间产生新进程，再收敛所有固定角色。
         let mut first_error = attempt_all_fixed_units(ROLLBACK_STOP_UNITS, |unit| {
-            if self.preserves_live_companion_stop_or_verify_unit(unit) {
+            if self.preserves_live_companion_unit(unit) {
                 return Ok(());
             }
             require_success(
@@ -314,7 +254,7 @@ impl SystemdPort for SystemSystemd {
         })
         .err();
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_RESET_UNITS, |unit| {
-            if self.preserves_live_companion_reset_unit(unit) {
+            if self.preserves_live_companion_unit(unit) {
                 return Ok(());
             }
             require_success(
@@ -328,7 +268,7 @@ impl SystemdPort for SystemSystemd {
             first_error = Some(error);
         }
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_VERIFY_UNITS, |unit| {
-            if self.preserves_live_companion_stop_or_verify_unit(unit) {
+            if self.preserves_live_companion_unit(unit) {
                 return Ok(());
             }
             let output = run_bounded(
@@ -338,26 +278,11 @@ impl SystemdPort for SystemSystemd {
                 deadline,
                 COMMAND_STEP_BUDGET,
             )?;
-            if self.uses_general_restore_adapter() && fixed_unit_is_instance_glob(unit) {
-                let manager_matches = run_bounded(
-                    "/usr/bin/systemctl",
-                    &[
-                        "list-units",
-                        "--all",
-                        "--plain",
-                        "--no-legend",
-                        "--no-pager",
-                        "--full",
-                        unit,
-                    ],
-                    InstallError::Systemd,
-                    deadline,
-                    COMMAND_STEP_BUDGET,
-                )?;
-                require_general_restore_unit_absent(unit, &output, &manager_matches)
-            } else {
-                require_rollback_unit_absent(unit, &output)
+            let state = String::from_utf8(output.stdout).map_err(|_| InstallError::Systemd)?;
+            if state.lines().count() != 1 || !state.lines().all(rollback_unit_is_absent) {
+                return Err(InstallError::Systemd);
             }
+            Ok(())
         }) && first_error.is_none()
         {
             first_error = Some(error);
@@ -379,201 +304,10 @@ impl SystemdPort for SystemSystemd {
 mod tests {
     use super::{
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        SystemSystemd, attempt_all_fixed_units, canonical_restart_deadline, command,
-        fixed_unit_is_instance_glob, require_absent_from_load_state, require_fixed_unit_absent,
-        require_general_restore_unit_absent, require_rollback_unit_absent, rollback_unit_is_absent,
+        attempt_all_fixed_units, canonical_restart_deadline, is_live_general_companion_unit,
+        is_live_upgrade_companion_unit, rollback_unit_is_absent,
     };
-    use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn systemd_249_missing_unit_is_absent_when_load_state_is_not_found() {
-        let loaded = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(0),
-            stdout: b"not-found\n".to_vec(),
-            stderr: Vec::new(),
-        };
-
-        assert_eq!(require_absent_from_load_state(&loaded), Ok(()));
-    }
-
-    #[test]
-    fn loaded_unit_is_existing_residue() {
-        let loaded = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(0),
-            stdout: b"loaded\n".to_vec(),
-            stderr: Vec::new(),
-        };
-
-        assert_eq!(
-            require_absent_from_load_state(&loaded),
-            Err(InstallError::ExistingResidue)
-        );
-    }
-
-    #[test]
-    fn failed_load_state_query_fails_closed() {
-        let loaded = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(1 << 8),
-            stdout: b"not-found\n".to_vec(),
-            stderr: Vec::new(),
-        };
-
-        assert_eq!(
-            require_absent_from_load_state(&loaded),
-            Err(InstallError::ExistingResidue)
-        );
-    }
-
-    #[test]
-    fn ambiguous_load_state_output_fails_closed() {
-        for stdout in [b"".as_slice(), b"not-found\nloaded\n", b"not-found\r\n"] {
-            let loaded = command::BoundedOutput {
-                status: std::process::ExitStatus::from_raw(0),
-                stdout: stdout.to_vec(),
-                stderr: Vec::new(),
-            };
-
-            assert_eq!(
-                require_absent_from_load_state(&loaded),
-                Err(InstallError::Systemd)
-            );
-        }
-    }
-
-    #[test]
-    fn fresh_absence_accepts_only_an_empty_fixed_instance_set() {
-        let empty = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        assert!(fixed_unit_is_instance_glob(
-            "enoki-probe-lifecycle-companion@*.service"
-        ));
-        assert!(
-            require_fixed_unit_absent("enoki-probe-lifecycle-companion@*.service", &empty).is_ok()
-        );
-        assert_eq!(
-            require_fixed_unit_absent("enoki-probe.service", &empty),
-            Err(InstallError::Systemd)
-        );
-    }
-
-    #[test]
-    fn fixed_provider_glob_empty_systemd_255_is_active_result_is_absent() {
-        let empty_no_match = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(4 << 8),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-
-        for unit in [
-            "enoki-cpu-resource-provider@*.service",
-            "enoki-disk-health-resource-provider@*.service",
-        ] {
-            assert_eq!(require_rollback_unit_absent(unit, &empty_no_match), Ok(()));
-        }
-    }
-
-    #[test]
-    fn rollback_verify_rejects_empty_non_glob_and_non_absent_output() {
-        let empty_no_match = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(4 << 8),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        assert_eq!(
-            require_rollback_unit_absent("enoki-probe.service", &empty_no_match),
-            Err(InstallError::Systemd)
-        );
-        let empty_command_failure = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(1 << 8),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        assert_eq!(
-            require_rollback_unit_absent(
-                "enoki-cpu-resource-provider@*.service",
-                &empty_command_failure
-            ),
-            Err(InstallError::Systemd)
-        );
-
-        for stdout in [b"active\n".as_slice(), b"failed\n", b"inactive\nactive\n"] {
-            let output = command::BoundedOutput {
-                status: std::process::ExitStatus::from_raw(3 << 8),
-                stdout: stdout.to_vec(),
-                stderr: Vec::new(),
-            };
-            assert_eq!(
-                require_rollback_unit_absent("enoki-cpu-resource-provider@*.service", &output),
-                Err(InstallError::Systemd)
-            );
-        }
-    }
-
-    #[test]
-    fn general_restore_accepts_only_systemd_249_empty_instance_glob_with_no_manager_matches() {
-        let status_3 = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(3 << 8),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        let empty_manager = command::BoundedOutput {
-            status: std::process::ExitStatus::from_raw(0),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-        };
-        let unit = "enoki-probe-lifecycle-companion@*.service";
-
-        assert_eq!(
-            require_general_restore_unit_absent(unit, &status_3, &empty_manager),
-            Ok(())
-        );
-
-        for (output, matches) in [
-            (
-                command::BoundedOutput {
-                    status: std::process::ExitStatus::from_raw(3 << 8),
-                    stdout: Vec::new(),
-                    stderr: b"unexpected error".to_vec(),
-                },
-                &empty_manager,
-            ),
-            (
-                command::BoundedOutput {
-                    status: std::process::ExitStatus::from_raw(1 << 8),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                },
-                &empty_manager,
-            ),
-            (
-                command::BoundedOutput {
-                    status: std::process::ExitStatus::from_raw(3 << 8),
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                },
-                &command::BoundedOutput {
-                    status: std::process::ExitStatus::from_raw(0),
-                    stdout: b"enoki-probe-lifecycle-companion@9.service loaded active running"
-                        .to_vec(),
-                    stderr: Vec::new(),
-                },
-            ),
-        ] {
-            assert_eq!(
-                require_general_restore_unit_absent(unit, &output, matches),
-                Err(InstallError::Systemd)
-            );
-        }
-
-        assert_eq!(
-            require_general_restore_unit_absent("enoki-probe.service", &status_3, &empty_manager),
-            Err(InstallError::Systemd)
-        );
-    }
 
     #[test]
     fn canonical_restart_gets_a_new_bounded_deadline_after_install_deadline() {
@@ -587,65 +321,30 @@ mod tests {
 
     #[test]
     fn live_upgrade_preserves_only_its_fixed_recovery_socket_and_instance() {
-        let systemd = SystemSystemd::for_live_upgrade();
-
-        assert!(
-            systemd.preserves_live_companion_stop_or_verify_unit(
-                "enoki-probe-lifecycle-upgrade.socket"
-            )
-        );
-        assert!(systemd.preserves_live_companion_stop_or_verify_unit(
+        assert!(is_live_upgrade_companion_unit(
+            "enoki-probe-lifecycle-upgrade.socket"
+        ));
+        assert!(is_live_upgrade_companion_unit(
             "enoki-probe-lifecycle-upgrade@*.service"
         ));
-        assert!(!systemd.preserves_live_companion_stop_or_verify_unit("enoki-probe.service"));
-        assert!(!systemd.preserves_live_companion_stop_or_verify_unit(
+        assert!(!is_live_upgrade_companion_unit("enoki-probe.service"));
+        assert!(!is_live_upgrade_companion_unit(
             "enoki-probe-lifecycle-companion.socket"
         ));
-        assert!(
-            systemd.preserves_live_companion_reset_unit("enoki-probe-lifecycle-upgrade.socket")
-        );
     }
 
     #[test]
-    fn live_general_companion_preserves_its_entry_family_across_restore_actions() {
-        let systemd = SystemSystemd::for_live_general_companion();
-
-        assert!(systemd.preserves_live_companion_stop_or_verify_unit(
-            "enoki-probe-lifecycle-companion@*.service"
-        ));
-        assert!(systemd.preserves_live_companion_stop_or_verify_unit(
+    fn general_companion_preserves_only_its_own_fixed_socket_and_instance() {
+        assert!(is_live_general_companion_unit(
             "enoki-probe-lifecycle-companion.socket"
         ));
-        assert!(
-            systemd
-                .preserves_live_companion_reset_unit("enoki-probe-lifecycle-companion@*.service")
-        );
-        assert!(
-            systemd.preserves_live_companion_reset_unit("enoki-probe-lifecycle-companion.socket")
-        );
-        assert!(!systemd.preserves_live_companion_stop_or_verify_unit(
-            "enoki-probe-lifecycle-upgrade@*.service"
+        assert!(is_live_general_companion_unit(
+            "enoki-probe-lifecycle-companion@*.service"
         ));
-        assert!(!systemd.preserves_live_companion_stop_or_verify_unit("enoki-probe.service"));
-        assert_eq!(
-            ROLLBACK_STOP_UNITS
-                .iter()
-                .copied()
-                .filter(|unit| !systemd.preserves_live_companion_stop_or_verify_unit(unit))
-                .collect::<Vec<_>>(),
-            [
-                "enoki-observation-runtime-failure.service",
-                "enoki-observation-runtime.socket",
-                "enoki-cpu-resource-provider.socket",
-                "enoki-disk-health-resource-provider.socket",
-                "enoki-probe-lifecycle-upgrade.socket",
-                "enoki-probe.service",
-                "enoki-observation-runtime.service",
-                "enoki-cpu-resource-provider@*.service",
-                "enoki-disk-health-resource-provider@*.service",
-                "enoki-probe-lifecycle-upgrade@*.service",
-            ]
-        );
+        assert!(!is_live_general_companion_unit("enoki-probe.service"));
+        assert!(!is_live_general_companion_unit(
+            "enoki-probe-lifecycle-upgrade.socket"
+        ));
     }
 
     #[test]

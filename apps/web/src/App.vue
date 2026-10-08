@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import type { EnrollmentTarget } from "@enoki/api-client";
 import {
   LayoutGrid,
   List,
@@ -640,12 +639,8 @@ async function applyAuthoritativeEnrollmentStatus(
 
 async function createExistingHostEnrollment(hostId: number) {
   try {
-    const target = {
-      hostId,
-      kind: "existing_host",
-    } satisfies EnrollmentTarget;
     const response = await fetch("/api/web/enrollments", {
-      body: JSON.stringify({ target }),
+      body: JSON.stringify({ target: { hostId, kind: "existing_host" } }),
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
       method: "POST",
@@ -1469,7 +1464,6 @@ function routePath() {
             :highlighted-host-id="highlightedReadyHostId"
             :page="hostListPage"
             :page-size="hostListPageSize"
-            @create-existing-host-enrollment="createExistingHostEnrollment"
             @open-host-detail="openHostDetail"
           />
           <OverviewPagination
@@ -1488,7 +1482,6 @@ function routePath() {
           :is-loading-more="isLoadingMoreHostCards"
           :skeleton-count="hostCardBatchSize"
           :visible-count="hostCardVisibleCount"
-          @create-existing-host-enrollment="createExistingHostEnrollment"
           @load-more="loadMoreHostCards"
           @open-host-detail="openHostDetail"
         />

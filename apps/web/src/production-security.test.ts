@@ -1,31 +1,18 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { build } from "vite";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
-const temporaryDirectories: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((directory) => rm(directory, { force: true, recursive: true })),
-  );
-});
+const productionDist = join(
+  resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+  ".scratch",
+  "production-security-dist",
+);
 
 describe("production Web security boundary", () => {
   it("emits only external scripts and same-origin static resources", async () => {
-    const outDir = await mkdtemp(join(tmpdir(), "enoki-web-security-"));
-    temporaryDirectories.push(outDir);
-    await build({
-      build: { outDir },
-      configFile: "vite.config.ts",
-      logLevel: "silent",
-    });
-
-    const index = await readFile(join(outDir, "index.html"), "utf8");
+    const index = await readFile(join(productionDist, "index.html"), "utf8");
     const scriptTags = [
       ...index.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi),
     ];
@@ -35,13 +22,13 @@ describe("production Web security boundary", () => {
     );
     expect(scriptTags.some(([tag]) => /theme-init\.js/.test(tag))).toBe(true);
 
-    for (const assetPath of await textAssets(outDir)) {
+    for (const assetPath of await textAssets(productionDist)) {
       const content = await readFile(assetPath, "utf8");
       expect(content).not.toMatch(
         /(?:\b(?:href|src)=["']https?:|@import\s+(?:url\()?['"]?https?:|url\(\s*['"]?https?:)/i,
       );
     }
-  }, 30_000);
+  });
 });
 
 async function textAssets(directory: string): Promise<string[]> {

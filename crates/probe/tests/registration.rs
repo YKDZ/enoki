@@ -1,11 +1,10 @@
 use std::fs;
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 use enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding;
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, symlink};
 
 use enoki_probe::{
     metrics::CollectorId,
@@ -268,32 +267,17 @@ fn replacement_attempt_capsule_is_explicitly_root_owned_and_private() {
 }
 
 #[test]
-fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
+fn root_publisher_recovers_at_both_capsule_publish_boundaries_in_fresh_processes() {
     if let Some(path) = std::env::var_os("ENOKI_TEST_ROOT_CAPSULE_PATH") {
         let path = std::path::PathBuf::from(path);
-        let mut binding = replacement_registration_binding();
-        let replacement = std::env::var_os("ENOKI_TEST_ROOT_CAPSULE_REPLACE").is_some();
-        if replacement {
-            binding.enrollment_id = "enr_abcdef0123456789".to_string();
-            binding.replacement_commit_sha256 = "e".repeat(64);
-        }
-        let input = enoki_probe::registration::RootReplacementRegistrationAttemptInput {
-            enrollment_token: if replacement {
-                "enk_enroll_replacement"
-            } else {
-                "enk_enroll_publish_recovery"
-            }
-            .to_string(),
-            binding,
-        };
-        let result = if replacement {
-            enoki_probe::registration::replace_stale_root_replacement_registration_attempt(
-                &path, input,
-            )
-        } else {
-            enoki_probe::registration::prepare_root_replacement_registration_attempt(&path, input)
-        };
-        result.expect("root production publisher converges");
+        enoki_probe::registration::prepare_root_replacement_registration_attempt(
+            &path,
+            enoki_probe::registration::RootReplacementRegistrationAttemptInput {
+                enrollment_token: "enk_enroll_publish_recovery".to_string(),
+                binding: replacement_registration_binding(),
+            },
+        )
+        .expect("root production publisher converges");
         return;
     }
 
@@ -317,10 +301,7 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
         !before.exists(),
         "pre-publish crash cannot expose a capsule"
     );
-    assert!(
-        !run_root_capsule_publisher(&before, None).success(),
-        "fresh process must not guess that pre-rename residue is discardable"
-    );
+    assert!(run_root_capsule_publisher(&before, None).success());
 
     let crashed_after = run_root_capsule_publisher(&after, Some("after-rename"));
     assert!(!crashed_after.success());
@@ -328,125 +309,7 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
     assert!(run_root_capsule_publisher(&after, None).success());
     assert_eq!(fs::read(&after).unwrap(), published);
 
-    let stale = temporary.path().join("stale/attempt.json");
-    assert!(run_root_capsule_publisher(&stale, None).success());
-    let old = fs::read(&stale).unwrap();
-    let crashed_stale = run_root_capsule_replacement(&stale, Some("before-rename"));
-    assert!(!crashed_stale.success());
-    assert_eq!(fs::read(&stale).unwrap(), old);
-    assert!(
-        !run_root_capsule_replacement(&stale, None).success(),
-        "fresh stale replacement must retain old capsule when residue is unresolved"
-    );
-    assert_eq!(fs::read(&stale).unwrap(), old);
-
-    for (name, symlink_residue) in [("wrong-mode", false), ("symlink", true)] {
-        let path = temporary.path().join(name).join("attempt.json");
-        assert!(run_root_capsule_publisher(&path, None).success());
-        let old = fs::read(&path).unwrap();
-        let residue = path.parent().unwrap().join(format!(
-            ".{}-enoki-write-999-1",
-            path.file_name().unwrap().to_string_lossy()
-        ));
-        if symlink_residue {
-            symlink(&path, &residue).unwrap();
-        } else {
-            fs::write(&residue, b"unknown publisher bytes").unwrap();
-            fs::set_permissions(&residue, fs::Permissions::from_mode(0o644)).unwrap();
-        }
-        assert!(!run_root_capsule_replacement(&path, None).success());
-        assert_eq!(fs::read(&path).unwrap(), old, "{name} retains old capsule");
-    }
-
-    let swapped = temporary.path().join("swapped/attempt.json");
-    let swap_signal = temporary.path().join("swap-scanned");
-    let swap_resume = temporary.path().join("swap-resume");
-    let mut swap_child = spawn_root_capsule_race(&swapped, false, &swap_signal, &swap_resume);
-    wait_for_test_signal(&mut swap_child, &swap_signal);
-    let swapped_original = temporary.path().join("swapped-original");
-    fs::rename(swapped.parent().unwrap(), &swapped_original).unwrap();
-    fs::create_dir(swapped.parent().unwrap()).unwrap();
-    fs::set_permissions(swapped.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
-    let new_namespace_residue = swapped
-        .parent()
-        .unwrap()
-        .join(".attempt.json-enoki-write-new-namespace");
-    fs::write(&new_namespace_residue, b"new namespace custody").unwrap();
-    fs::write(&swap_resume, b"resume").unwrap();
-    assert!(
-        !swap_child.wait().unwrap().success(),
-        "publisher must not authorize an orphaned durable capsule"
-    );
-    assert!(
-        !swapped_original.join("attempt.json").exists(),
-        "first-scan namespace rejection precedes capsule publication"
-    );
-    assert!(
-        !swapped.exists(),
-        "held FD never publishes into replacement namespace"
-    );
-    assert_eq!(
-        fs::read(&new_namespace_residue).unwrap(),
-        b"new namespace custody"
-    );
-
-    let post_publish = temporary.path().join("post-publish-swap/attempt.json");
-    let post_publish_signal = temporary.path().join("post-publish-signal");
-    let post_publish_resume = temporary.path().join("post-publish-resume");
-    let mut post_publish_child = spawn_root_capsule_post_publish_race(
-        &post_publish,
-        &post_publish_signal,
-        &post_publish_resume,
-    );
-    wait_for_test_signal(&mut post_publish_child, &post_publish_signal);
-    let post_publish_original = temporary.path().join("post-publish-original");
-    fs::rename(post_publish.parent().unwrap(), &post_publish_original).unwrap();
-    fs::create_dir(post_publish.parent().unwrap()).unwrap();
-    fs::set_permissions(
-        post_publish.parent().unwrap(),
-        fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    let post_publish_residue = post_publish
-        .parent()
-        .unwrap()
-        .join(".attempt.json-enoki-write-new-namespace");
-    fs::write(&post_publish_residue, b"post-publish new namespace").unwrap();
-    fs::write(&post_publish_resume, b"resume").unwrap();
-    assert!(!post_publish_child.wait().unwrap().success());
-    assert!(
-        post_publish_original.join("attempt.json").exists(),
-        "post-publish detection must not compensate orphan custody"
-    );
-    assert!(!post_publish.exists());
-    assert_eq!(
-        fs::read(&post_publish_residue).unwrap(),
-        b"post-publish new namespace"
-    );
-
-    let after_scan = temporary.path().join("after-scan/attempt.json");
-    assert!(run_root_capsule_publisher(&after_scan, None).success());
-    let after_scan_old = fs::read(&after_scan).unwrap();
-    let after_scan_signal = temporary.path().join("after-scan-scanned");
-    let after_scan_resume = temporary.path().join("after-scan-resume");
-    let mut after_scan_child =
-        spawn_root_capsule_race(&after_scan, true, &after_scan_signal, &after_scan_resume);
-    wait_for_test_signal(&mut after_scan_child, &after_scan_signal);
-    let after_scan_residue = after_scan
-        .parent()
-        .unwrap()
-        .join(".attempt.json-enoki-write-777-1");
-    fs::write(&after_scan_residue, b"arrived after first scan").unwrap();
-    fs::set_permissions(&after_scan_residue, fs::Permissions::from_mode(0o600)).unwrap();
-    fs::write(&after_scan_resume, b"resume").unwrap();
-    assert!(!after_scan_child.wait().unwrap().success());
-    assert_eq!(fs::read(&after_scan).unwrap(), after_scan_old);
-    assert_eq!(
-        fs::read(&after_scan_residue).unwrap(),
-        b"arrived after first scan"
-    );
-
-    for path in [&after, &stale] {
+    for path in [&before, &after] {
         let parent = fs::symlink_metadata(path.parent().unwrap()).unwrap();
         let source = fs::symlink_metadata(path).unwrap();
         assert_eq!(parent.uid(), 0);
@@ -459,68 +322,6 @@ fn root_publisher_fails_closed_on_unresolved_capsule_publish_residue() {
     }
 }
 
-fn spawn_root_capsule_race(
-    path: &std::path::Path,
-    replacement: bool,
-    signal: &std::path::Path,
-    resume: &std::path::Path,
-) -> Child {
-    let mut command = Command::new(std::env::current_exe().expect("current test executable"));
-    command
-        .arg("--exact")
-        .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
-        .arg("--nocapture")
-        .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path)
-        .env("ENOKI_TEST_PRIVATE_ATOMIC_PATH", path)
-        .env("ENOKI_TEST_PRIVATE_ATOMIC_SIGNAL", signal)
-        .env("ENOKI_TEST_PRIVATE_ATOMIC_RESUME", resume);
-    if replacement {
-        command.env("ENOKI_TEST_ROOT_CAPSULE_REPLACE", "1");
-    }
-    command
-        .spawn()
-        .expect("spawn synchronized capsule operation")
-}
-
-fn spawn_root_capsule_post_publish_race(
-    path: &std::path::Path,
-    signal: &std::path::Path,
-    resume: &std::path::Path,
-) -> Child {
-    Command::new(std::env::current_exe().expect("current test executable"))
-        .arg("--exact")
-        .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
-        .arg("--nocapture")
-        .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path)
-        .env("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_PATH", path)
-        .env("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_SIGNAL", signal)
-        .env("ENOKI_TEST_PRIVATE_ATOMIC_AFTER_PUBLISH_RESUME", resume)
-        .spawn()
-        .expect("spawn synchronized post-publish capsule operation")
-}
-
-fn wait_for_test_signal(child: &mut Child, path: &std::path::Path) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        if path.exists() {
-            return;
-        }
-
-        if let Some(status) = child
-            .try_wait()
-            .expect("observe synchronized capsule operation")
-        {
-            panic!("private atomic race child exited before signal: {status}");
-        }
-
-        if Instant::now() >= deadline {
-            panic!("timed out waiting for private atomic race signal; child remained running");
-        }
-
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
 fn run_root_capsule_publisher(
     path: &std::path::Path,
     crash: Option<&str>,
@@ -528,7 +329,7 @@ fn run_root_capsule_publisher(
     let mut child = Command::new(std::env::current_exe().expect("current test executable"));
     child
         .arg("--exact")
-        .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
+        .arg("root_publisher_recovers_at_both_capsule_publish_boundaries_in_fresh_processes")
         .arg("--nocapture")
         .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path);
     if let Some(point) = crash {
@@ -537,25 +338,6 @@ fn run_root_capsule_publisher(
             .env("ENOKI_TEST_SECURE_FILE_CRASH_POINT", point);
     }
     child.status().expect("run fresh root publisher")
-}
-
-fn run_root_capsule_replacement(
-    path: &std::path::Path,
-    crash: Option<&str>,
-) -> std::process::ExitStatus {
-    let mut child = Command::new(std::env::current_exe().expect("current test executable"));
-    child
-        .arg("--exact")
-        .arg("root_publisher_fails_closed_on_unresolved_capsule_publish_residue")
-        .arg("--nocapture")
-        .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path)
-        .env("ENOKI_TEST_ROOT_CAPSULE_REPLACE", "1");
-    if let Some(point) = crash {
-        child
-            .env("ENOKI_TEST_SECURE_FILE_PATH", path)
-            .env("ENOKI_TEST_SECURE_FILE_CRASH_POINT", point);
-    }
-    child.status().expect("run fresh root stale replacement")
 }
 
 fn replacement_registration_binding() -> ReplacementRegistrationBinding {

@@ -1,23 +1,22 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { open } from "node:fs/promises";
 
+import {
+  type ReleaseTransitionContract,
+  verifyReleaseTransitionContract,
+} from "@enoki/probe-release";
+
 import type { VerifiedReleaseTransition } from "./asset-set.js";
 import { readBoundedMetadataSnapshotFromDirectory } from "./assets.js";
 
-const contractDomain = Buffer.from(
-  "enoki/release-transition-contract/v1\0",
-  "utf8",
-);
 const delegationDomain = Buffer.from(
   "enoki/probe-trust-delegation/v1\0",
   "utf8",
 );
-const trustEpochAuthorizationDomain = Buffer.from(
-  "enoki/trust-epoch-migration-authorization/v1\0",
-  "utf8",
-);
 const digestPattern = /^[0-9a-f]{64}$/;
 const semverPattern = /^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/;
+const enokiDistribution = "enoki";
+const trustEpochSourceVersion = "0.1.74";
 const probeTargets = [
   "aarch64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",
@@ -48,6 +47,12 @@ const requiredReleaseTransitionMetadataFileNames = [
   "signing-key.pem",
 ] as const;
 
+type VerifiedAssetSetMetadata = {
+  assets: NonNullable<ReturnType<typeof assetClosure>>;
+  delegationGeneration: number;
+  targetVersion: string;
+};
+
 export async function readVerifiedReleaseTransitionFromDirectory(input: {
   assetDir: string;
   maxMetadataBytes?: number;
@@ -77,9 +82,8 @@ export function verifiedReleaseTransitionFromMetadata(input: {
   if (!rootKey || !signingKey || !rootKey.equals(trustedRoot)) return null;
 
   const delegation = parseCanonicalObject(files.delegation);
-  const contract = parseCanonicalObject(files.contract);
   const manifest = parseObject(files.manifest);
-  if (!delegation || !contract || !manifest) return null;
+  if (!delegation || !manifest) return null;
   if (
     !verifySigned(
       delegationDomain,
@@ -87,163 +91,62 @@ export function verifiedReleaseTransitionFromMetadata(input: {
       files.delegationSignature,
       trustedRoot,
     ) ||
-    !verifySigned(
-      contractDomain,
-      files.contract,
-      files.contractSignature,
-      trustedRoot,
-    ) ||
     !verify("RSA-SHA256", files.manifest, signingKey, files.manifestSignature)
   ) {
     return null;
   }
 
-  const rootKeyId = sha256(trustedRoot);
   const signingKeyId = sha256(signingKey);
-  const assets = assetClosure(manifest.assets);
-  const contractAssets = assetClosure(
-    valueAt(contract, "target", "assetClosure"),
-  );
-  const sourceVersion = stringAt(contract, "source", "version");
-  const sourceAssetSetManifestSha256 = stringAt(
-    contract,
-    "source",
-    "assetSetManifestSha256",
-  );
-  const sourceProbeSha256 = sourceProbeComponentDigests(contract);
-  const targetProbeSha256 = targetProbeComponentDigests(contract);
-  const targetVersion = stringAt(contract, "target", "version");
-  const transition = stringAt(contract, "transition");
-  const targetAssetSetDigest = `sha256:${sha256(files.manifest)}`;
-  const delegationGeneration = numberAt(delegation, "generation");
+  const assetSet = verifiedAssetSetMetadata({
+    delegation,
+    manifest,
+    rootKeyId: sha256(trustedRoot),
+    signingKey,
+    signingKeyId,
+  });
+  if (!assetSet) return null;
 
-  if (
-    !hasVerifiedAssetSetMetadata({
-      assets,
-      delegation,
-      delegationGeneration,
-      manifest,
-      rootKeyId,
-      signingKey,
-      signingKeyId,
-    })
-  ) {
-    return null;
-  }
-
-  const trustEpochTransition = verifiedTrustEpochMigrationTransition({
+  const contract = verifiedReleaseTransitionContract({
+    assetSet,
     authorization: files.authorization,
     authorizationSignature: files.authorizationSignature,
-    contract,
-    manifest,
+    contractBytes: files.contract,
+    contractSignature: files.contractSignature,
+    delegationBytes: files.delegation,
+    delegationSignature: files.delegationSignature,
     manifestBytes: files.manifest,
-    rootKeyId,
     signingKeyId,
-    targetAssetSetDigest,
     trustedRoot,
   });
-  if (trustEpochTransition) return trustEpochTransition;
-  if (files.authorization || files.authorizationSignature) return null;
+  if (!contract) return null;
 
-  if (
-    !hasExactKeys(delegation, [
-      "distribution",
-      "generation",
-      "kind",
-      "purpose",
-      "rootKeyId",
-      "schemaVersion",
-      "signingIdentity",
-    ]) ||
-    !hasExactKeys(valueAt(delegation, "signingIdentity"), [
-      "algorithm",
-      "keyId",
-      "publicKeyPem",
-    ]) ||
-    !hasExactKeys(contract, [
-      "distribution",
-      "kind",
-      "rootKeyId",
-      "schemaVersion",
-      "source",
-      "target",
-      "transition",
-    ]) ||
-    !hasExactKeys(valueAt(contract, "source"), [
-      "assetSetManifestSha256",
-      "probeComponents",
-      "version",
-    ]) ||
-    !hasExactKeys(valueAt(contract, "target"), [
-      "assetClosure",
-      "assetSetManifestSha256",
-      "delegationGeneration",
-      "probeComponents",
-      "signingKeyId",
-      "version",
-    ]) ||
-    !hasExactKeys(manifest, ["assets", "kind", "signature", "version"]) ||
-    !hasExactKeys(valueAt(manifest, "signature"), [
-      "algorithm",
-      "delegationGeneration",
-      "delegationKeyId",
-      "file",
-      "publicKey",
-    ]) ||
-    stringAt(delegation, "kind") !== "enoki-probe-trust-delegation" ||
-    numberAt(delegation, "schemaVersion") !== 1 ||
-    stringAt(delegation, "distribution") !== "enoki" ||
-    stringAt(delegation, "purpose") !== "probe-asset-signing" ||
-    stringAt(delegation, "rootKeyId") !== rootKeyId ||
-    !Number.isSafeInteger(delegationGeneration) ||
-    (delegationGeneration ?? 0) < 1 ||
-    stringAt(delegation, "signingIdentity", "algorithm") !== "rsa-sha256" ||
-    stringAt(delegation, "signingIdentity", "keyId") !== signingKeyId ||
-    canonicalPublicKeyOrNull(
-      stringAt(delegation, "signingIdentity", "publicKeyPem") ?? "",
-    )?.compare(signingKey) !== 0 ||
-    stringAt(contract, "kind") !== "enoki-release-transition-contract" ||
-    numberAt(contract, "schemaVersion") !== 1 ||
-    stringAt(contract, "distribution") !== "enoki" ||
-    stringAt(contract, "rootKeyId") !== rootKeyId ||
-    !semverPattern.test(sourceVersion ?? "") ||
-    !digestPattern.test(sourceAssetSetManifestSha256 ?? "") ||
-    !sourceProbeSha256 ||
-    !targetProbeSha256 ||
-    !semverPattern.test(targetVersion ?? "") ||
-    !["compatible", "replacement-required"].includes(transition ?? "") ||
-    stringAt(manifest, "kind") !== "enoki-probe-assets" ||
-    stringAt(manifest, "version") !== targetVersion ||
-    stringAt(manifest, "signature", "algorithm") !== "rsa-sha256" ||
-    stringAt(manifest, "signature", "file") !== "manifest.json.sig" ||
-    stringAt(manifest, "signature", "publicKey") !== "signing-key.pem" ||
-    numberAt(manifest, "signature", "delegationGeneration") !==
-      delegationGeneration ||
-    stringAt(manifest, "signature", "delegationKeyId") !== signingKeyId ||
-    numberAt(contract, "target", "delegationGeneration") !==
-      delegationGeneration ||
-    stringAt(contract, "target", "signingKeyId") !== signingKeyId ||
-    stringAt(contract, "target", "assetSetManifestSha256") !==
-      sha256(files.manifest) ||
-    !assets ||
-    !contractAssets ||
-    JSON.stringify(contractAssets) !== JSON.stringify(assets)
-  ) {
-    return null;
-  }
-
-  return {
-    classification: transition as VerifiedReleaseTransition["classification"],
-    sourceProbeVersion: sourceVersion!,
-    sourceAssetSetDigest: `sha256:${sourceAssetSetManifestSha256}`,
-    sourceProbeSha256,
-    targetProbeSha256,
-    targetAssetSetDigest,
-    targetBundles: assets.map(({ bundleManifestSha256, target }) => ({
+  const targetAssetSetDigest = `sha256:${sha256(files.manifest)}`;
+  const sourceProbeSha256 = contract.source.probeComponents.map(
+    (component) => component.sha256,
+  );
+  const targetBundles = assetSet.assets.map(
+    ({ bundleManifestSha256, target }) => ({
       bundleManifestSha256: String(bundleManifestSha256),
       target: String(target),
-    })),
-    targetProbeVersion: targetVersion!,
+    }),
+  );
+  if ("migrationAuthorizationSha256" in contract) {
+    return {
+      classification: contract.transition,
+      sourceProbeSha256,
+      sourceProbeVersion: trustEpochSourceVersion,
+      targetAssetSetDigest,
+      targetBundles,
+      targetProbeVersion: contract.target.version,
+    };
+  }
+  return {
+    classification: contract.transition,
+    sourceProbeSha256,
+    sourceProbeVersion: contract.source.version,
+    targetAssetSetDigest,
+    targetBundles,
+    targetProbeVersion: contract.target.version,
   };
 }
 
@@ -295,16 +198,18 @@ function transitionFilesFromMetadata(
   };
 }
 
-function hasVerifiedAssetSetMetadata(input: {
-  assets: ReturnType<typeof assetClosure>;
+function verifiedAssetSetMetadata(input: {
   delegation: Record<string, unknown>;
-  delegationGeneration: number | null;
   manifest: Record<string, unknown>;
   rootKeyId: string;
   signingKey: Buffer;
   signingKeyId: string;
-}) {
-  return !(
+}): VerifiedAssetSetMetadata | null {
+  const assets = assetClosure(input.manifest.assets);
+  const delegationGeneration = numberAt(input.delegation, "generation");
+  const targetVersion = stringAt(input.manifest, "version");
+  if (
+    !assets ||
     !hasExactKeys(input.delegation, [
       "distribution",
       "generation",
@@ -329,11 +234,11 @@ function hasVerifiedAssetSetMetadata(input: {
     ]) ||
     stringAt(input.delegation, "kind") !== "enoki-probe-trust-delegation" ||
     numberAt(input.delegation, "schemaVersion") !== 1 ||
-    stringAt(input.delegation, "distribution") !== "enoki" ||
+    stringAt(input.delegation, "distribution") !== enokiDistribution ||
     stringAt(input.delegation, "purpose") !== "probe-asset-signing" ||
     stringAt(input.delegation, "rootKeyId") !== input.rootKeyId ||
-    !Number.isSafeInteger(input.delegationGeneration) ||
-    (input.delegationGeneration ?? 0) < 1 ||
+    !Number.isSafeInteger(delegationGeneration) ||
+    (delegationGeneration ?? 0) < 1 ||
     stringAt(input.delegation, "signingIdentity", "algorithm") !==
       "rsa-sha256" ||
     stringAt(input.delegation, "signingIdentity", "keyId") !==
@@ -342,245 +247,70 @@ function hasVerifiedAssetSetMetadata(input: {
       stringAt(input.delegation, "signingIdentity", "publicKeyPem") ?? "",
     )?.compare(input.signingKey) !== 0 ||
     stringAt(input.manifest, "kind") !== "enoki-probe-assets" ||
-    !semverPattern.test(stringAt(input.manifest, "version") ?? "") ||
+    !semverPattern.test(targetVersion ?? "") ||
     stringAt(input.manifest, "signature", "algorithm") !== "rsa-sha256" ||
     stringAt(input.manifest, "signature", "file") !== "manifest.json.sig" ||
     stringAt(input.manifest, "signature", "publicKey") !== "signing-key.pem" ||
     numberAt(input.manifest, "signature", "delegationGeneration") !==
-      input.delegationGeneration ||
+      delegationGeneration ||
     stringAt(input.manifest, "signature", "delegationKeyId") !==
-      input.signingKeyId ||
-    !input.assets
-  );
-}
-
-function verifiedTrustEpochMigrationTransition(input: {
-  authorization: Buffer | null;
-  authorizationSignature: Buffer | null;
-  contract: Record<string, unknown>;
-  manifest: Record<string, unknown>;
-  manifestBytes: Buffer;
-  rootKeyId: string;
-  signingKeyId: string;
-  targetAssetSetDigest: string;
-  trustedRoot: Buffer;
-}): VerifiedReleaseTransition | null {
-  const hasAuthorization = Boolean(
-    input.authorization || input.authorizationSignature,
-  );
-  if (!hasAuthorization) return null;
-  if (!input.authorization || !input.authorizationSignature) return null;
-  const authorization = parseCanonicalObject(input.authorization);
-  const sourceProbeSha256 = sourceProbeComponentDigests(input.contract);
-  const sourceAssetSetManifestSha256 = stringAt(
-    input.contract,
-    "source",
-    "assetSetManifestSha256",
-  );
-  const targetProbeSha256 = targetProbeComponentDigests(input.contract);
-  if (
-    !authorization ||
-    !verifySigned(
-      trustEpochAuthorizationDomain,
-      input.authorization,
-      input.authorizationSignature,
-      input.trustedRoot,
-    ) ||
-    !hasExactKeys(input.contract, [
-      "candidateCommit",
-      "distribution",
-      "kind",
-      "migrationAuthorizationSha256",
-      "migrationGeneration",
-      "rootKeyId",
-      "schemaVersion",
-      "source",
-      "target",
-      "transition",
-    ]) ||
-    !hasExactKeys(authorization, [
-      "candidateVersion",
-      "distribution",
-      "kind",
-      "legacyRelease",
-      "migrationGeneration",
-      "purpose",
-      "rootKeyId",
-      "schemaVersion",
-      "targetRootKeyId",
-    ]) ||
-    input.contract.kind !== "enoki-release-transition-contract" ||
-    input.contract.schemaVersion !== 1 ||
-    input.contract.transition !== "replacement-required" ||
-    !/^[0-9a-f]{40}$/.test(String(input.contract.candidateCommit ?? "")) ||
-    input.contract.distribution !== "enoki" ||
-    input.contract.migrationGeneration !== 1 ||
-    input.contract.rootKeyId !== input.rootKeyId ||
-    input.contract.migrationAuthorizationSha256 !==
-      sha256(input.authorization) ||
-    authorization.kind !== "enoki-trust-epoch-migration-authorization" ||
-    authorization.schemaVersion !== 1 ||
-    authorization.distribution !== "enoki" ||
-    authorization.purpose !== "release-baseline-migration" ||
-    authorization.migrationGeneration !== 1 ||
-    authorization.rootKeyId !== input.rootKeyId ||
-    authorization.targetRootKeyId !== input.rootKeyId ||
-    authorization.candidateVersion !==
-      `v${stringAt(input.contract, "target", "version")}` ||
-    !exactTrustEpochLegacyReleaseMatches(authorization, input.contract) ||
-    !sourceProbeSha256 ||
-    !digestPattern.test(sourceAssetSetManifestSha256 ?? "") ||
-    !targetProbeSha256 ||
-    !exactTrustEpochTargetMatches(
-      input.contract,
-      input.manifest,
-      input.manifestBytes,
-      input.signingKeyId,
-    )
+      input.signingKeyId
   ) {
     return null;
   }
-
   return {
-    classification: "replacement-required",
-    sourceProbeVersion: "0.1.74",
-    sourceAssetSetDigest: `sha256:${sourceAssetSetManifestSha256}`,
-    sourceProbeSha256,
-    targetProbeSha256,
-    targetAssetSetDigest: input.targetAssetSetDigest,
-    targetBundles: assetClosure(input.manifest.assets)!.map(
-      ({ bundleManifestSha256, target }) => ({
-        bundleManifestSha256: String(bundleManifestSha256),
-        target: String(target),
-      }),
-    ),
-    targetProbeVersion: stringAt(input.contract, "target", "version")!,
+    assets: assets!,
+    delegationGeneration: delegationGeneration!,
+    targetVersion: targetVersion!,
   };
 }
 
-function sourceProbeComponentDigests(contract: Record<string, unknown>) {
-  return probeComponentDigests(contract, "source");
-}
-
-function targetProbeComponentDigests(contract: Record<string, unknown>) {
-  return probeComponentDigests(contract, "target");
-}
-
-function probeComponentDigests(
-  contract: Record<string, unknown>,
-  side: "source" | "target",
-) {
-  const components = valueAt(contract, side, "probeComponents");
-  if (!Array.isArray(components) || components.length !== probeTargets.length) {
+function verifiedReleaseTransitionContract(input: {
+  assetSet: VerifiedAssetSetMetadata;
+  authorization: Buffer | null;
+  authorizationSignature: Buffer | null;
+  contractBytes: Buffer;
+  contractSignature: Buffer;
+  delegationBytes: Buffer;
+  delegationSignature: Buffer;
+  manifestBytes: Buffer;
+  signingKeyId: string;
+  trustedRoot: Buffer;
+}): ReleaseTransitionContract | null {
+  let contract: ReleaseTransitionContract;
+  try {
+    contract = verifyReleaseTransitionContract({
+      ...(input.authorization
+        ? { authorizationBytes: input.authorization }
+        : {}),
+      ...(input.authorizationSignature
+        ? { authorizationSignature: input.authorizationSignature }
+        : {}),
+      contractBytes: input.contractBytes,
+      contractSignature: input.contractSignature,
+      delegationBytes: input.delegationBytes,
+      delegationSignature: input.delegationSignature,
+      expectedDistribution: enokiDistribution,
+      expected: {
+        delegationGeneration: input.assetSet.delegationGeneration,
+        targetAssetClosure: input.assetSet.assets,
+        targetAssetSetManifestSha256: sha256(input.manifestBytes),
+        targetVersion: input.assetSet.targetVersion,
+      },
+      rootPublicKeyPem: input.trustedRoot,
+    });
+  } catch {
     return null;
   }
-  const digests = components.map((component, index) => {
-    if (
-      !component ||
-      typeof component !== "object" ||
-      Array.isArray(component) ||
-      !hasExactKeys(component as Record<string, unknown>, [
-        "file",
-        "role",
-        "sha256",
-        "target",
-      ]) ||
-      stringAt(component as Record<string, unknown>, "role") !== "probe" ||
-      stringAt(component as Record<string, unknown>, "file") !==
-        "enoki-probe" ||
-      stringAt(component as Record<string, unknown>, "target") !==
-        probeTargets[index] ||
-      !/^[0-9a-f]{64}$/.test(
-        stringAt(component as Record<string, unknown>, "sha256") ?? "",
-      )
-    ) {
-      return null;
-    }
-    return stringAt(component as Record<string, unknown>, "sha256")!;
-  });
-  return digests.every((digest): digest is string => digest !== null)
-    ? digests
-    : null;
-}
-
-function exactTrustEpochLegacyReleaseMatches(
-  authorization: Record<string, unknown>,
-  contract: Record<string, unknown>,
-) {
-  const source = valueAt(contract, "source");
   if (
-    !hasExactKeys(source, [
-      "assetSetManifestSha256",
-      "assets",
-      "commit",
-      "hubDigest",
-      "hubImage",
-      "legacySigningKeySha256",
-      "probeComponents",
-      "releaseId",
-      "repository",
-      "tag",
-      "tagRefSha",
-      "targetCommitish",
-    ]) ||
-    stringAt(contract, "source", "tag") !== "v0.1.74"
+    contract.distribution !== enokiDistribution ||
+    contract.target.signingKeyId !== input.signingKeyId ||
+    "migrationAuthorizationSha256" in contract !==
+      Boolean(input.authorization || input.authorizationSignature)
   ) {
-    return false;
+    return null;
   }
-  return (
-    JSON.stringify(valueAt(authorization, "legacyRelease")) ===
-    JSON.stringify({
-      assets: valueAt(contract, "source", "assets"),
-      githubRelease: {
-        id: valueAt(contract, "source", "releaseId"),
-        peeledCommitSha: valueAt(contract, "source", "commit"),
-        repository: valueAt(contract, "source", "repository"),
-        tag: valueAt(contract, "source", "tag"),
-        tagRefSha: valueAt(contract, "source", "tagRefSha"),
-        targetCommitish: valueAt(contract, "source", "targetCommitish"),
-      },
-      hub: {
-        digest: valueAt(contract, "source", "hubDigest"),
-        image: valueAt(contract, "source", "hubImage"),
-      },
-      legacySigningKeySha256: valueAt(
-        contract,
-        "source",
-        "legacySigningKeySha256",
-      ),
-    })
-  );
-}
-
-function exactTrustEpochTargetMatches(
-  contract: Record<string, unknown>,
-  manifest: Record<string, unknown>,
-  manifestBytes: Buffer,
-  signingKeyId: string,
-) {
-  const assets = assetClosure(manifest.assets);
-  const contractAssets = assetClosure(
-    valueAt(contract, "target", "assetClosure"),
-  );
-  return (
-    hasExactKeys(valueAt(contract, "target"), [
-      "assetClosure",
-      "assetSetManifestSha256",
-      "delegationGeneration",
-      "probeComponents",
-      "signingKeyId",
-      "version",
-    ]) &&
-    Boolean(assets) &&
-    Boolean(contractAssets) &&
-    stringAt(contract, "target", "version") === manifest.version &&
-    stringAt(contract, "target", "signingKeyId") === signingKeyId &&
-    numberAt(contract, "target", "delegationGeneration") ===
-      numberAt(manifest, "signature", "delegationGeneration") &&
-    stringAt(contract, "target", "assetSetManifestSha256") ===
-      sha256(manifestBytes) &&
-    JSON.stringify(contractAssets) === JSON.stringify(assets)
-  );
+  return contract;
 }
 
 function parseCanonicalObject(bytes: Buffer) {

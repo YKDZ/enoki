@@ -58,32 +58,31 @@ jobs:
           echo "sha=$workflow_sha" >> "$GITHUB_OUTPUT"
 
       - name: Checkout exact candidate commit
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: candidate-source
           persist-credentials: false
           ref: ${{ inputs.commit }}
 
-      - name: Bind exact candidate checkout before candidate-controlled setup
-        env:
-          CANDIDATE_COMMIT: ${{ inputs.commit }}
-          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
-        run: |
-          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
-          test "$(git -C candidate-source rev-parse HEAD)" = "$CANDIDATE_COMMIT"
-
-      - name: Set up candidate workspace dependencies
-        uses: ./candidate-source/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: candidate-source
+          node-version-file: candidate-source/package.json
 
-      - name: Validate candidate source inputs after trusted binding
+      - name: Set up the release tool runtime
+        uses: ./candidate-source/.github/actions/setup-release-tool
+        with:
+          directory: candidate-source
+
+      - name: Bind candidate source and release policy to one revision
         env:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
           CANDIDATE_VERSION: ${{ inputs.version }}
+          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
         run: >-
-          node candidate-source/scripts/release-candidate.mjs validate-inputs
+          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
+          && node candidate-source/scripts/release-candidate.mjs validate-inputs
           --commit "$CANDIDATE_COMMIT"
           --version "$CANDIDATE_VERSION"
           --source-dir candidate-source
@@ -94,7 +93,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout immutable release preflight
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -102,22 +101,15 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up immutable release preflight dependencies
-        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-tool
+          node-version-file: trusted-tool/package.json
 
-      - name: Validate public release migration configuration
-        env:
-          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
-          RELEASE_MIGRATION_AUTHORIZATION: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON }}
-          RELEASE_MIGRATION_AUTHORIZATION_SIGNATURE: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_SIGNATURE_BASE64 }}
-          RELEASE_MIGRATION_CONTRACT: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_JSON }}
-          RELEASE_MIGRATION_CONTRACT_SIGNATURE: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_SIGNATURE_BASE64 }}
-        run: >-
-          node trusted-tool/scripts/release-transition-preflight.mjs
-          --candidate-commit "${{ inputs.commit }}"
-          --candidate-version "${{ inputs.version }}"
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
 
       - name: Validate the production Probe signing identity
         env:
@@ -144,24 +136,24 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           gh api \
-            "repos/$REPOSITORY/actions/workflows/ci.yml/runs?branch=main&head_sha=$CANDIDATE_COMMIT&per_page=100" \
+            "repos/$REPOSITORY/actions/workflows/ci.yml/runs?branch=main&per_page=100" \
             > standard-ci-runs.json
-          node trusted-tool/scripts/release-ci.mjs select \
+          selected_run="$(node trusted-tool/scripts/release-ci.ts select \
+            --commit "$CANDIDATE_COMMIT" \
+            --workflow-runs standard-ci-runs.json)"
+          ci_run_id="${selected_run%% *}"
+          ci_run_attempt="${selected_run##* }"
+          gh api \
+            "repos/$REPOSITORY/actions/runs/$ci_run_id/attempts/$ci_run_attempt/jobs?per_page=100" \
+            > standard-ci-jobs.json
+          node trusted-tool/scripts/release-ci.ts verify \
             --commit "$CANDIDATE_COMMIT" \
             --workflow-runs standard-ci-runs.json \
-            --output standard-ci-run.json
-          ci_run_id="$(jq -r '.id' standard-ci-run.json)"
-          ci_run_attempt="$(jq -r '.run_attempt' standard-ci-run.json)"
-          gh api "repos/$REPOSITORY/actions/runs/$ci_run_id/attempts/$ci_run_attempt/jobs?per_page=100" \
-            > standard-ci-jobs.json
-          node trusted-tool/scripts/release-ci.mjs verify \
-            --commit "$CANDIDATE_COMMIT" \
-            --selected-run standard-ci-run.json \
             --jobs standard-ci-jobs.json \
             --output standard-ci-evidence.json
 
       - name: Upload exact standard CI evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-standard-ci-${{ github.run_id }}
           path: standard-ci-evidence.json
@@ -173,11 +165,9 @@ jobs:
     name: Resolve and pin Release Baseline
     needs: [validate-candidate-inputs, validate-release-configuration]
     runs-on: ubuntu-24.04
-    outputs:
-      baseline-kind: ${{ steps.baseline-identity.outputs.kind }}
     steps:
       - name: Checkout immutable baseline resolver
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -185,10 +175,15 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up immutable baseline resolver dependencies
-        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-tool
+          node-version-file: trusted-tool/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
 
       - name: Resolve and fully verify published baseline inputs
         env:
@@ -208,12 +203,8 @@ jobs:
           --trust-epoch-migration-signature-env TRUST_EPOCH_MIGRATION_SIGNATURE
           --output release-baseline
 
-      - name: Expose the verified baseline classification
-        id: baseline-identity
-        run: echo "kind=$(jq -r .kind release-baseline/release-baseline.json)" >> "$GITHUB_OUTPUT"
-
       - name: Upload one pinned baseline resolution
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-release-baseline-${{ github.run_id }}
           path: release-baseline
@@ -256,65 +247,36 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout candidate data without signing credentials
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: candidate-source
           persist-credentials: false
           ref: ${{ inputs.commit }}
 
-      - name: Set up candidate workspace dependencies
-        uses: ./candidate-source/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: candidate-source
+          node-version-file: candidate-source/package.json
 
-      - name: Download x86_64 musl Probe target build
-        uses: actions/download-artifact@v8
+      - name: Set up the release tool runtime
+        uses: ./candidate-source/.github/actions/setup-release-tool
         with:
-          name: enoki-probe-x86_64-unknown-linux-musl-${{ github.run_id }}
+          directory: candidate-source
+
+      - name: Download all Probe target builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: enoki-probe-*-${{ github.run_id }}
           path: probe-builds
+          merge-multiple: true
 
-      - name: Download aarch64 musl Probe target build
-        uses: actions/download-artifact@v8
+      - name: Download all constrained Bootstrap target builds
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: enoki-probe-aarch64-unknown-linux-musl-${{ github.run_id }}
-          path: probe-builds
-
-      - name: Download x86_64 glibc Probe target build
-        uses: actions/download-artifact@v8
-        with:
-          name: enoki-probe-x86_64-unknown-linux-gnu-${{ github.run_id }}
-          path: probe-builds
-
-      - name: Download aarch64 glibc Probe target build
-        uses: actions/download-artifact@v8
-        with:
-          name: enoki-probe-aarch64-unknown-linux-gnu-${{ github.run_id }}
-          path: probe-builds
-
-      - name: Download x86_64 musl Bootstrap target build
-        uses: actions/download-artifact@v8
-        with:
-          name: enoki-probe-bootstrap-x86_64-unknown-linux-musl-${{ github.run_id }}
+          pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
           path: probe-bootstrap-builds
-
-      - name: Download aarch64 musl Bootstrap target build
-        uses: actions/download-artifact@v8
-        with:
-          name: enoki-probe-bootstrap-aarch64-unknown-linux-musl-${{ github.run_id }}
-          path: probe-bootstrap-builds
-
-      - name: Download x86_64 glibc Bootstrap target build
-        uses: actions/download-artifact@v8
-        with:
-          name: enoki-probe-bootstrap-x86_64-unknown-linux-gnu-${{ github.run_id }}
-          path: probe-bootstrap-builds
-
-      - name: Download aarch64 glibc Bootstrap target build
-        uses: actions/download-artifact@v8
-        with:
-          name: enoki-probe-bootstrap-aarch64-unknown-linux-gnu-${{ github.run_id }}
-          path: probe-bootstrap-builds
+          merge-multiple: true
 
       - name: Deep-validate and prepare unsigned Probe Asset Set
         env:
@@ -336,7 +298,7 @@ jobs:
             --trust-delegation-signature trust-delegation.json.sig
 
       - name: Upload exact unsigned signing input
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-unsigned-probe-assets-${{ github.run_id }}
           path: unsigned-probe-assets
@@ -356,7 +318,7 @@ jobs:
     steps:
       # Candidate source is data; no candidate-controlled script runs here.
       - name: Checkout protected trusted signer
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-signer
@@ -370,16 +332,27 @@ jobs:
           TRUSTED_SIGNER_COMMIT: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
         run: test "$(git rev-parse HEAD)" = "$TRUSTED_SIGNER_COMMIT"
 
-      - name: Set up trusted signer dependencies
-        uses: ./trusted-signer/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-signer
+          node-version-file: trusted-signer/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./trusted-signer/.github/actions/setup-release-tool
+        with:
+          directory: trusted-signer
 
       - name: Download exact unsigned signing input
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-unsigned-probe-assets-${{ github.run_id }}
           path: unsigned-probe-assets
+
+      - name: Download this run's verified Release Baseline
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: candidate-release-baseline-${{ github.run_id }}
+          path: release-baseline
 
       - name: Sign only allowlisted, deeply validated content
         env:
@@ -387,42 +360,17 @@ jobs:
           ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           ENOKI_PROBE_TRUST_DELEGATION_JSON: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
           ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
-          RELEASE_BASELINE_KIND: ${{ needs.resolve-release-baseline.outputs.baseline-kind }}
-          RELEASE_TRANSITION_CONTRACT: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_JSON }}
-          RELEASE_TRANSITION_SIGNATURE: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_SIGNATURE_BASE64 }}
-          TRUST_EPOCH_MIGRATION_AUTHORIZATION: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON }}
-          TRUST_EPOCH_MIGRATION_SIGNATURE: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_SIGNATURE_BASE64 }}
         run: |
           printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_JSON" > trust-delegation.json
           printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64" | base64 --decode > trust-delegation.json.sig
           node trusted-signer/scripts/release-candidate.mjs sign-probe-assets \
+            --candidate-commit "${{ inputs.commit }}" \
+            --release-baseline release-baseline \
             --input unsigned-probe-assets --output probe-assets \
             --private-key-env ENOKI_PROBE_ASSET_SIGNING_KEY_PEM \
             --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
             --trust-delegation trust-delegation.json \
             --trust-delegation-signature trust-delegation.json.sig
-          transition_values=0
-          for value in "$RELEASE_TRANSITION_CONTRACT" "$RELEASE_TRANSITION_SIGNATURE"; do
-            if [ -n "$value" ]; then transition_values=$((transition_values + 1)); fi
-          done
-          if [ "$transition_values" -ne 2 ]; then
-            echo "::error::Signed Release Transition Contract is unavailable."
-            exit 1
-          fi
-          printf '%s' "$RELEASE_TRANSITION_CONTRACT" > probe-assets/release-transition-contract.json
-          printf '%s' "$RELEASE_TRANSITION_SIGNATURE" | base64 --decode > probe-assets/release-transition-contract.json.sig
-          if [ "$RELEASE_BASELINE_KIND" = "enoki-trust-epoch-migration-baseline" ]; then
-            authorization_values=0
-            for value in "$TRUST_EPOCH_MIGRATION_AUTHORIZATION" "$TRUST_EPOCH_MIGRATION_SIGNATURE"; do
-              if [ -n "$value" ]; then authorization_values=$((authorization_values + 1)); fi
-            done
-            if [ "$authorization_values" -ne 2 ]; then
-              echo "::error::Trust Epoch Migration public authorization is unavailable."
-              exit 1
-            fi
-            printf '%s' "$TRUST_EPOCH_MIGRATION_AUTHORIZATION" > probe-assets/trust-epoch-migration-authorization.json
-            printf '%s' "$TRUST_EPOCH_MIGRATION_SIGNATURE" | base64 --decode > probe-assets/trust-epoch-migration-authorization.json.sig
-          fi
 
       - name: Validate exact signed output without signing credentials
         env:
@@ -433,7 +381,7 @@ jobs:
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Upload signed Probe Asset Set
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: probe-assets
@@ -472,7 +420,7 @@ jobs:
       artifact-name: ${{ steps.identity.outputs.artifact-name }}
     steps:
       - name: Checkout exact candidate source for provenance binding
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: candidate-source
@@ -480,7 +428,7 @@ jobs:
           ref: ${{ inputs.commit }}
 
       - name: Checkout immutable trusted assembly tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -488,25 +436,30 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up immutable assembly tooling dependencies
-        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-tool
+          node-version-file: trusted-tool/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
 
       - name: Download signed Probe Asset Set
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: candidate-inputs/probe-assets
 
       - name: Download Hub OCI archive
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-hub-oci-${{ github.run_id }}
           path: candidate-inputs/hub
 
       - name: Download pinned Release Baseline
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-release-baseline-${{ github.run_id }}
           path: candidate-inputs/release-baseline
@@ -558,7 +511,7 @@ jobs:
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Attest immutable candidate provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-path: candidate.tar.gz
 
@@ -569,7 +522,7 @@ jobs:
         run: echo "artifact-name=enoki-release-candidate-${CANDIDATE_VERSION}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable Enoki Release Candidate
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ steps.identity.outputs.artifact-name }}
           path: candidate.tar.gz
@@ -585,7 +538,7 @@ jobs:
       matrix: ${{ steps.release-e2e-matrix.outputs.matrix }}
     steps:
       - name: Checkout immutable Release E2E tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -593,13 +546,18 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up immutable Release planning dependencies
-        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-tool
+          node-version-file: trusted-tool/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
 
       - name: Download the immutable candidate before planning Host jobs
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -614,7 +572,7 @@ jobs:
         env:
           ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
-          node trusted-tool/scripts/release-scenario-plan.mjs github-actions
+          node trusted-tool/scripts/release-scenario-plan.ts github-actions
           --candidate-manifest candidate/candidate-manifest.json
           --matrix trusted-tool/scripts/release-e2e-matrix.json
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
@@ -636,7 +594,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout immutable Release E2E tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -644,19 +602,21 @@ jobs:
           repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
-      - name: Set up immutable Release E2E dependencies
-        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-tool
+          node-version-file: trusted-tool/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
 
       - name: Set up the shared Release runtime
         uses: ./trusted-tool/.github/actions/setup-release-runtime
 
-      - name: Normalize the ephemeral Probe install prefix
-        run: sudo install -d -o root -g root -m 0755 /usr/local/bin
-
       - name: Download the immutable candidate
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -680,7 +640,7 @@ jobs:
           ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           RELEASE_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cellId }}
         run: >-
-          node trusted-tool/scripts/release-e2e.mjs run
+          node trusted-tool/scripts/release-e2e.ts run
           --candidate-manifest candidate/candidate-manifest.json
           --matrix trusted-tool/scripts/release-e2e-matrix.json
           --matrix-cell "$MATRIX_CELL"
@@ -699,7 +659,7 @@ jobs:
           HOST_ADAPTER: ${{ matrix.hostAdapter }}
           MATRIX_CELL: ${{ matrix.cellId }}
         run: >-
-          node trusted-tool/scripts/release-e2e.mjs verify-clean
+          node trusted-tool/scripts/release-e2e.ts verify-clean
           --run-manifest "release-e2e-evidence/$MATRIX_CELL/run-manifest.json"
           --host-adapter "$HOST_ADAPTER"
 
@@ -711,7 +671,7 @@ jobs:
           SCENARIO_OUTCOME: ${{ steps.scenario.outcome }}
           VERIFY_CLEAN_OUTCOME: ${{ steps.verify-clean.outcome }}
         run: >-
-          node trusted-tool/scripts/release-verification.mjs record-matrix-gate
+          node trusted-tool/scripts/release-verification.ts record-matrix-gate
           --candidate-manifest candidate/candidate-manifest.json
           --evidence "release-e2e-evidence/$MATRIX_CELL/evidence.json"
           --cell-id "$MATRIX_CELL"
@@ -722,7 +682,7 @@ jobs:
 
       - name: Upload run manifest and lifecycle evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-e2e-${{ matrix.cellId }}-${{ github.run_id }}
           path: |
@@ -754,7 +714,7 @@ jobs:
 
       - name: Checkout immutable UI Contract tooling
         id: checkout-tooling
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -768,7 +728,7 @@ jobs:
 
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: trusted-tool/package.json
           cache: pnpm
@@ -789,7 +749,7 @@ jobs:
 
       - name: Download the immutable candidate
         id: download-candidate
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -806,12 +766,10 @@ jobs:
         env:
           CANDIDATE_MANIFEST: ${{ github.workspace }}/candidate/candidate-manifest.json
           EVIDENCE_DIR: ${{ github.workspace }}/release-ui-contract-evidence
-          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           pnpm run test:e2e:candidate
           --candidate-manifest "$CANDIDATE_MANIFEST"
           --evidence-dir "$EVIDENCE_DIR"
-          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Record every UI Contract setup and runtime outcome
         if: ${{ always() }}
@@ -852,8 +810,8 @@ jobs:
           PLAYWRIGHT_OUTCOME: ${{ steps.candidate-playwright.outcome }}
         run: |
           mkdir -p release-ui-contract-evidence
-          if test -f trusted-tool/scripts/release-verification.mjs && \
-            node trusted-tool/scripts/release-verification.mjs record-ui-gate \
+          if test -f trusted-tool/scripts/release-verification.ts && \
+            node trusted-tool/scripts/release-verification.ts record-ui-gate \
               --candidate-manifest "$CANDIDATE_MANIFEST" \
               --candidate-commit "$CANDIDATE_COMMIT" \
               --candidate-version "$CANDIDATE_VERSION" \
@@ -872,7 +830,7 @@ jobs:
 
       - name: Upload candidate-image UI Contract evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-ui-contract-${{ github.run_id }}
           path: |
@@ -910,7 +868,7 @@ jobs:
       artifact-name: ${{ steps.summary-identity.outputs.artifact-name }}
     steps:
       - name: Checkout immutable verification finalizer
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 1
           path: trusted-tool
@@ -918,15 +876,20 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.workflow_sha }}
 
-      - name: Set up immutable verification finalizer dependencies
-        uses: ./trusted-tool/.github/actions/setup-release-workspace-dependencies
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          working-directory: trusted-tool
+          node-version-file: trusted-tool/package.json
+
+      - name: Set up the release tool runtime
+        uses: ./trusted-tool/.github/actions/setup-release-tool
+        with:
+          directory: trusted-tool
 
       - name: Download the one assembled candidate
         id: download-candidate
         if: ${{ always() && needs.assemble-candidate.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.assemble-candidate.outputs.artifact-name }}
           path: candidate-transfer
@@ -939,42 +902,42 @@ jobs:
 
       - name: Download the available Release Baseline identity
         if: ${{ always() && needs.resolve-release-baseline.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-release-baseline-${{ github.run_id }}
           path: attempt-inputs/release-baseline
 
       - name: Download the exact standard CI evidence
         if: ${{ always() && needs.validate-release-configuration.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-standard-ci-${{ github.run_id }}
           path: attempt-inputs/standard-ci
 
       - name: Download the available signed Probe Asset Set identity
         if: ${{ always() && needs.sign-probe-assets.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: attempt-inputs/probe-assets
 
       - name: Download the available Hub OCI identity
         if: ${{ always() && needs.build-hub-oci.result == 'success' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: candidate-hub-oci-${{ github.run_id }}
           path: attempt-inputs/hub
 
       - name: Download every Host evidence bundle
         if: ${{ always() && needs.candidate-release-e2e.result != 'skipped' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: release-e2e-*-${{ github.run_id }}
           path: release-e2e-gates
 
       - name: Download candidate-image UI Contract evidence
         if: ${{ always() && needs.candidate-ui-contract.result != 'skipped' }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-ui-contract-${{ github.run_id }}
           path: release-ui-contract-gate
@@ -1035,7 +998,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: >-
-          node trusted-tool/scripts/release-verification.mjs summarize
+          node trusted-tool/scripts/release-verification.ts summarize
           --candidate-dir candidate
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           --release-baseline-dir attempt-inputs/release-baseline
@@ -1066,7 +1029,7 @@ jobs:
 
       - name: Upload the authoritative verification evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ steps.summary-identity.outputs.artifact-name }}
           path: |
@@ -1079,5 +1042,5 @@ jobs:
       - name: Require every verification gate to have succeeded
         if: ${{ always() }}
         run: >-
-          node trusted-tool/scripts/release-verification.mjs assert-verified
+          node trusted-tool/scripts/release-verification.ts assert-verified
           --summary release-verification-summary.json

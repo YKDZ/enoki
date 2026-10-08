@@ -1,17 +1,18 @@
-import { createHash, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import {
+  createProbeTrustDelegation,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
 } from "@enoki/probe-release";
 import { describe, expect, it, vi } from "vitest";
 
-import * as planner from "./release-scenario-plan.mjs";
-import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
+import { compileReleaseScenarioPlan } from "./release-scenario-plan-compile.ts";
+import { prepareReleaseScenarioCell } from "./release-scenario-plan.ts";
 
 describe("Release Scenario Planner", () => {
   it("compiles the exact Compatible capabilities without caller-selected scenarios", () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract({ transition: "compatible" }),
       supportedHostMatrix: supportedHostMatrix(),
@@ -57,7 +58,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("compiles Replacement without claiming pre-commit snapshot restoration", () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract({
         transition: "replacement-required",
@@ -107,10 +108,10 @@ describe("Release Scenario Planner", () => {
       const provision = vi.fn();
 
       await expect(
-        planner.prepareReleaseScenarioCell({
+        prepareReleaseScenarioCell({
           cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
           compilePlan: async () =>
-            planner.compileReleaseScenarioPlan({
+            compileReleaseScenarioPlan({
               candidateManifest: candidateManifest(),
               releaseTransition,
               supportedHostMatrix: supportedHostMatrix(),
@@ -123,7 +124,7 @@ describe("Release Scenario Planner", () => {
   );
 
   it("provisions exactly the closed set of planned cells", async () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract(),
       supportedHostMatrix: supportedHostMatrix(),
@@ -131,7 +132,7 @@ describe("Release Scenario Planner", () => {
     const provisioned = [];
 
     for (const cell of plan.cells) {
-      await planner.prepareReleaseScenarioCell({
+      await prepareReleaseScenarioCell({
         cellId: cell.cellId,
         compilePlan: async () => plan,
         provision: async (plannedCell) => provisioned.push(plannedCell),
@@ -145,7 +146,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("releases a provisioned plan cell when initialization fails", async () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract(),
       supportedHostMatrix: supportedHostMatrix(),
@@ -154,7 +155,7 @@ describe("Release Scenario Planner", () => {
     const release = vi.fn(async () => ({ clean: true }));
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => plan,
         initialize: async () => {
@@ -177,7 +178,7 @@ describe("Release Scenario Planner", () => {
   });
 
   it("does not release twice after the scenario runner takes cleanup ownership", async () => {
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition: transitionContract(),
       supportedHostMatrix: supportedHostMatrix(),
@@ -186,7 +187,7 @@ describe("Release Scenario Planner", () => {
     const release = vi.fn(async () => ({ clean: true }));
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => plan,
         initialize: async ({ takeCleanupOwnership }) => {
@@ -208,10 +209,10 @@ describe("Release Scenario Planner", () => {
     matrix.environments[0].capabilityId = "ubuntu-20.04-x86_64";
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-20.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () =>
-          planner.compileReleaseScenarioPlan({
+          compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
             releaseTransition: transitionContract(),
             supportedHostMatrix: matrix,
@@ -223,20 +224,20 @@ describe("Release Scenario Planner", () => {
   });
 
   it("rejects a wrong contract signature across verification and planning before provisioning", async () => {
-    const root = rsa4096TestKeyPair("scenario-root");
-    const contract = signedContractFixture(root.publicKey);
+    const authority = contractAuthority();
+    const contract = signedContractFixture(authority);
     const provision = vi.fn();
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => {
           const releaseTransition = verifyReleaseTransitionContract({
+            ...authority.trust,
             contractBytes: Buffer.from(`${JSON.stringify(contract)}\n`),
             contractSignature: Buffer.alloc(256),
-            rootPublicKeyPem: root.publicKey,
           });
-          return planner.compileReleaseScenarioPlan({
+          return compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
             releaseTransition,
             supportedHostMatrix: supportedHostMatrix(),
@@ -244,29 +245,32 @@ describe("Release Scenario Planner", () => {
         },
         provision,
       }),
-    ).rejects.toThrow(/root signature does not match/i);
+    ).rejects.toThrow(
+      /signature does not match the authorized Probe signing identity/i,
+    );
     expect(provision).not.toHaveBeenCalled();
   });
 
   it("rejects a signed same-version and same-assets contract for a different candidate commit before provisioning", async () => {
-    const root = rsa4096TestKeyPair("scenario-root");
+    const authority = contractAuthority();
     const contract = {
-      ...signedContractFixture(root.publicKey),
+      ...signedContractFixture(authority),
       candidateCommit: "b".repeat(40),
     };
     const contractBytes = Buffer.from(`${JSON.stringify(contract)}\n`);
     const contractSignature = sign(
       "RSA-SHA256",
       releaseTransitionContractSigningInput(contractBytes),
-      root.privateKey,
+      authority.release.privateKey,
     );
     const provision = vi.fn();
 
     await expect(
-      planner.prepareReleaseScenarioCell({
+      prepareReleaseScenarioCell({
         cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
         compilePlan: async () => {
           const releaseTransition = verifyReleaseTransitionContract({
+            ...authority.trust,
             contractBytes,
             contractSignature,
             expected: {
@@ -277,9 +281,8 @@ describe("Release Scenario Planner", () => {
                 contract.target.assetSetManifestSha256,
               targetVersion: "1.2.3",
             },
-            rootPublicKeyPem: root.publicKey,
           });
-          return planner.compileReleaseScenarioPlan({
+          return compileReleaseScenarioPlan({
             candidateManifest: candidateManifest(),
             releaseTransition,
             supportedHostMatrix: supportedHostMatrix(),
@@ -299,7 +302,7 @@ describe("Release Scenario Planner", () => {
       privateKey: "sensitive-private-key",
       rootKeyId: "c".repeat(64),
     };
-    const plan = planner.compileReleaseScenarioPlan({
+    const plan = compileReleaseScenarioPlan({
       candidateManifest: candidateManifest(),
       releaseTransition,
       supportedHostMatrix: supportedHostMatrix(),
@@ -381,7 +384,37 @@ function supportedHostMatrix() {
   };
 }
 
-function signedContractFixture(rootPublicKeyPem) {
+function contractAuthority() {
+  const root = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const release = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const delegation = createProbeTrustDelegation({
+    distribution: "enoki",
+    generation: 1,
+    releasePublicKeyPem: release.publicKey,
+    rootPrivateKeyPem: root.privateKey,
+  });
+  return {
+    delegation,
+    release,
+    root,
+    trust: {
+      delegationBytes: delegation.bytes,
+      delegationSignature: delegation.signature,
+      expectedDistribution: "enoki",
+      rootPublicKeyPem: root.publicKey,
+    },
+  };
+}
+
+function signedContractFixture(authority) {
   const targets = [
     "aarch64-unknown-linux-gnu",
     "aarch64-unknown-linux-musl",
@@ -392,10 +425,9 @@ function signedContractFixture(rootPublicKeyPem) {
     candidateCommit: "a".repeat(40),
     distribution: "enoki",
     kind: "enoki-release-transition-contract",
-    rootKeyId: createHash("sha256").update(rootPublicKeyPem).digest("hex"),
+    rootKeyId: authority.delegation.delegation.rootKeyId,
     schemaVersion: 1,
     source: {
-      assetSetManifestSha256: "a".repeat(64),
       probeComponents: targets.map((target) => ({
         file: "enoki-probe",
         role: "probe",
@@ -414,13 +446,7 @@ function signedContractFixture(rootPublicKeyPem) {
       })),
       assetSetManifestSha256: "b".repeat(64),
       delegationGeneration: 1,
-      probeComponents: targets.map((target) => ({
-        file: "enoki-probe",
-        role: "probe",
-        sha256: "a".repeat(64),
-        target,
-      })),
-      signingKeyId: "f".repeat(64),
+      signingKeyId: authority.delegation.delegation.signingIdentity.keyId,
       version: "1.2.3",
     },
     transition: "compatible",
