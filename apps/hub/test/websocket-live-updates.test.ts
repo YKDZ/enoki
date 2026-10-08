@@ -527,8 +527,8 @@ function collectWebSocketJson(
 
       quietTimer = setTimeout(() => {
         if (!actionCompleted) {
-          // The triggering report request is still in flight, so a later
-          // message may still follow the current quiet window.
+          // 触发本次收集的报告请求仍在途，后续消息可能晚于
+          // 当前静默窗口到达，故此时不结算。
           finishAfterQuiet();
           return;
         }
