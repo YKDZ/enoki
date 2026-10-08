@@ -264,19 +264,55 @@ jobs:
         with:
           directory: candidate-source
 
-      - name: Download all Probe target builds
+      # 制品名匹配的 `*` 会跨 `-`，`enoki-probe-*` 同时命中 Bootstrap 制品，
+      # 所以两组各按本次 run 的四个精确制品名下载，不共用目录也不合并匹配。
+      - name: Download x86_64 musl Probe target build
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: enoki-probe-*-${{ github.run_id }}
+          name: enoki-probe-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: probe-builds
-          merge-multiple: true
 
-      - name: Download all constrained Bootstrap target builds
+      - name: Download aarch64 musl Probe target build
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
+          name: enoki-probe-aarch64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download x86_64 glibc Probe target build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: enoki-probe-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download aarch64 glibc Probe target build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download x86_64 musl constrained Bootstrap build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: probe-bootstrap-builds
-          merge-multiple: true
+
+      - name: Download aarch64 musl constrained Bootstrap build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-bootstrap-builds
+
+      - name: Download x86_64 glibc constrained Bootstrap build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-bootstrap-builds
+
+      - name: Download aarch64 glibc constrained Bootstrap build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-bootstrap-builds
 
       - name: Deep-validate and prepare unsigned Probe Asset Set
         env:

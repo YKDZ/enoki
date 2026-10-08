@@ -92,7 +92,6 @@ describe("verify-only release workflow", () => {
       `name: enoki-probe-${"${{ matrix.target }}"}-${run}`,
     );
     expect(probeWorkflow).toContain("overwrite: true");
-    expect(candidateWorkflow).toContain(`pattern: enoki-probe-*-${run}`);
     for (const name of [
       "candidate-release-baseline",
       "candidate-unsigned-probe-assets",
