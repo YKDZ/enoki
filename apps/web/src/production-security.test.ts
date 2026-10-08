@@ -6,7 +6,8 @@ import { describe, expect, it } from "vitest";
 
 const productionDist = join(
   resolve(dirname(fileURLToPath(import.meta.url)), ".."),
-  "dist",
+  ".scratch",
+  "production-security-dist",
 );
 
 describe("production Web security boundary", () => {
