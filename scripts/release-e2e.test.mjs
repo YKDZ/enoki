@@ -8,6 +8,7 @@ import {
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -1112,6 +1113,128 @@ describe("Probe Host Harness", () => {
       await expect(fingerprint()).resolves.not.toBe(baseline);
       await chmod(binary, 0o644);
       await expect(fingerprint()).resolves.toBe(baseline);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("records systemd DynamicUser StateDirectory custody as one run-owned closure", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-state-custody-"),
+    );
+    const publicState = path.join(root, "var/lib/enoki-probe");
+    const privateState = path.join(root, "var/lib/private/enoki-probe");
+    const identityName = "identity/probe-bootstrap.toml";
+    const resources = [
+      {
+        kind: "directory",
+        path: publicState,
+        privateCustodyPath: privateState,
+      },
+    ];
+    const fingerprint = async () => {
+      try {
+        const { stdout } = await execFileAsync("sh", [
+          "-c",
+          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+        ]);
+        return { code: 0, stdout };
+      } catch (error) {
+        return { code: error?.code ?? 1, stdout: error?.stdout ?? "" };
+      }
+    };
+    const observedType = (output, target) => {
+      const digest = createHash("sha256").update(target).digest("hex");
+      return output
+        .split("\n")
+        .find((entry) => entry.includes(`\t${digest}\t`))
+        ?.split("\t")[2];
+    };
+
+    try {
+      // systemd 迁移形态：声明路径是相对 symlink，真实 identity 数据在固定 private 载体。
+      await mkdir(path.join(privateState, "identity"), { recursive: true });
+      await writeFile(
+        path.join(privateState, identityName),
+        'probe_id = "state-custody"\n',
+        "utf8",
+      );
+      await symlink("private/enoki-probe", publicState);
+      const migrated = await fingerprint();
+      expect(migrated.code).toBe(0);
+      expect(observedType(migrated.stdout, publicState)).toBe("symlink");
+      expect(observedType(migrated.stdout, privateState)).toBe("directory");
+      expect(
+        observedType(migrated.stdout, path.join(privateState, identityName)),
+      ).toBe("file");
+
+      // 只删 public 链接而留下 private 真实数据时，同一闭包仍观察到 private 载体，
+      // 指纹必然偏离已记录值，核验与清理不可能被判为干净。
+      await rm(publicState, { force: true });
+      const residue = await fingerprint();
+      expect(residue.code).toBe(0);
+      expect(observedType(residue.stdout, privateState)).toBe("directory");
+      expect(residue.stdout).not.toBe(migrated.stdout);
+
+      // 普通目录旧形态沿用同一机制。
+      await rm(privateState, { force: true, recursive: true });
+      await mkdir(path.join(publicState, "identity"), { recursive: true });
+      await writeFile(
+        path.join(publicState, identityName),
+        'probe_id = "state-custody"\n',
+        "utf8",
+      );
+      const ordinary = await fingerprint();
+      expect(ordinary.code).toBe(0);
+      expect(observedType(ordinary.stdout, publicState)).toBe("directory");
+      expect(observedType(ordinary.stdout, privateState)).toBeUndefined();
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps rejecting symlink shapes outside the declared StateDirectory custody", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-state-custody-reject-"),
+    );
+    const publicState = path.join(root, "var/lib/enoki-probe");
+    const privateState = path.join(root, "var/lib/private/enoki-probe");
+    const elsewhere = path.join(root, "var/lib/enoki-elsewhere");
+    const fingerprint = async (resources) => {
+      try {
+        const { stdout } = await execFileAsync("sh", [
+          "-c",
+          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+        ]);
+        return { code: 0, stdout };
+      } catch (error) {
+        return { code: error?.code ?? 1, stdout: error?.stdout ?? "" };
+      }
+    };
+
+    try {
+      await mkdir(elsewhere, { recursive: true });
+      await writeFile(path.join(elsewhere, "data.toml"), "foreign\n", "utf8");
+      await symlink(elsewhere, publicState);
+      const foreignTarget = await fingerprint([
+        {
+          kind: "directory",
+          path: publicState,
+          privateCustodyPath: privateState,
+        },
+      ]);
+      expect(foreignTarget.code).not.toBe(0);
+      expect(foreignTarget.stdout).toBe("");
+
+      const metadata = path.join(root, "etc/enoki/probe-install.toml");
+      await mkdir(path.dirname(metadata), { recursive: true });
+      await writeFile(path.join(root, "real-install.toml"), "real\n", "utf8");
+      await symlink(path.join(root, "real-install.toml"), metadata);
+      const declaredFile = await fingerprint([
+        { kind: "file", path: metadata },
+      ]);
+      expect(declaredFile.code).not.toBe(0);
+      expect(declaredFile.stdout).toBe("");
     } finally {
       await rm(root, { force: true, recursive: true });
     }
