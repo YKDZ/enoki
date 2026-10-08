@@ -5,11 +5,12 @@ import { randomUUID } from "node:crypto";
 import {
   parseCandidateUiContractCommandLine,
   runCandidateUiContract,
-} from "./release-ui-contract-lib.mjs";
+} from "./release-ui-contract-lib.ts";
 
 const usage = `Usage:
-  node scripts/release-ui-contract.mjs \\
+  node scripts/release-ui-contract.ts \\
     --candidate-manifest <candidate-dir>/candidate-manifest.json \\
+    --root-public-key-env <environment-variable> \\
     [--hub-port 38220] [--container-engine docker]`;
 
 try {
@@ -27,10 +28,18 @@ try {
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`release-ui-contract: ${message}\n`);
-  if (error?.cleanupError) {
+  const cleanupError = readCleanupError(error);
+  if (cleanupError) {
     process.stderr.write(
-      `release-ui-contract cleanup: ${error.cleanupError.message}\n`,
+      `release-ui-contract cleanup: ${cleanupError.message}\n`,
     );
   }
   process.exitCode = 1;
+}
+
+function readCleanupError(error: unknown): Error | undefined {
+  if (!(error instanceof Error) || !("cleanupError" in error)) {
+    return undefined;
+  }
+  return error.cleanupError instanceof Error ? error.cleanupError : undefined;
 }

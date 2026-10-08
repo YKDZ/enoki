@@ -273,6 +273,48 @@ describe("Release E2E business assertions", () => {
         scenario: "replacement-migration-uninstall",
       }),
     ).rejects.toThrow(/manifest fields must be exactly/i);
+
+    // 两种 kind 各自只接受自己的 GitHub Release 字段集：迁移形状多出的 tag 不会
+    // 被普通基线接受，迁移基线也不能交回缺失 tag 的旧形状。
+    for (const [runId, releaseBaseline] of [
+      [
+        "run-ordinary-baseline-with-tag",
+        {
+          ...ordinaryReleaseBaseline(),
+          githubRelease: {
+            ...ordinaryReleaseBaseline().githubRelease,
+            tag: "v1.2.2",
+          },
+        },
+      ],
+      [
+        "run-migration-baseline-without-tag",
+        {
+          ...manifest.releaseBaseline,
+          githubRelease: {
+            id: 74,
+            peeledCommitSha: "d".repeat(40),
+            repository: "YKDZ/enoki",
+            tagRefSha: "e".repeat(40),
+            targetCommitish: "main",
+          },
+        },
+      ],
+    ]) {
+      await expect(
+        runReleaseE2EScenario({
+          candidateManifest: { ...manifest, releaseBaseline },
+          environment: {
+            cleanup: async () => ({ clean: true }),
+            start: async () => ({ host: {}, hub: {} }),
+          },
+          evidenceSink: { write: async () => {} },
+          ownerPassword: "owner-password",
+          runId,
+          scenario: "replacement-migration-uninstall",
+        }),
+      ).rejects.toThrow(/manifest fields must be exactly/i);
+    }
   });
 
   it("dispatches Replacement participants from the planned scenario instead of the baseline name", async () => {
@@ -8118,6 +8160,7 @@ function migrationReleaseBaseline() {
       id: 74,
       peeledCommitSha: "d".repeat(40),
       repository: "YKDZ/enoki",
+      tag: "v0.1.74",
       tagRefSha: "e".repeat(40),
       targetCommitish: "main",
     },

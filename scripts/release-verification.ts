@@ -340,9 +340,10 @@ async function readAttemptIdentities(
   let inspectedProbeAssetSet: ProbeAssetSetInspection | null = null;
   let probeAssetSet: unknown = null;
   let releaseBaseline: unknown = null;
+  // 三处身份验证必须共用同一个外部信任根，否则缺参会被报成制品自身不可用。
+  let trustedRootPublicKeyPem: string | undefined;
   try {
-    const trustedRootPublicKeyPem =
-      process.env[options["--root-public-key-env"]];
+    trustedRootPublicKeyPem = process.env[options["--root-public-key-env"]];
     if (!trustedRootPublicKeyPem) {
       throw new Error(
         `Probe Distribution Trust Root environment variable ${options["--root-public-key-env"]} is empty`,
@@ -358,6 +359,10 @@ async function readAttemptIdentities(
   try {
     releaseBaseline = await validateResolvedReleaseBaseline(
       options["--release-baseline-dir"],
+      {
+        candidateVersion: options["--requested-version"],
+        trustedRootPublicKeyPem,
+      },
     );
   } catch (error) {
     errors.push(
@@ -365,7 +370,10 @@ async function readAttemptIdentities(
     );
   }
   try {
-    const inspected = await inspectProbeAssetSet(options["--probe-assets-dir"]);
+    const inspected = await inspectProbeAssetSet(
+      options["--probe-assets-dir"],
+      { trustedRootPublicKeyPem },
+    );
     inspectedProbeAssetSet = inspected;
     probeAssetSet = {
       directory: "probe-assets",

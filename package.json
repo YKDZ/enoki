@@ -24,7 +24,7 @@
     "test": "vitest run scripts/*.test.mjs --reporter=agent --silent=passed-only",
     "test:hub-container-logging": "node apps/hub/scripts/hub-container-logging-evidence.mjs",
     "test:e2e": "playwright test",
-    "test:e2e:candidate": "node scripts/release-ui-contract.mjs",
+    "test:e2e:candidate": "node scripts/release-ui-contract.ts",
     "e2e": "pnpm run test:e2e",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },

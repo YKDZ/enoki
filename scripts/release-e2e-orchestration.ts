@@ -136,7 +136,7 @@ type MigrationReleaseBaselineDescriptor = {
     signatureSha256: string;
   };
   catalogSnapshot: ReleaseCatalogSnapshot;
-  githubRelease: BaselineGithubReleaseDescriptor;
+  githubRelease: BaselineGithubReleaseDescriptor & { tag: string };
   hub: BaselineHubDescriptor;
   kind: "enoki-trust-epoch-migration-baseline";
   legacyProbeAssets: { directory: string; files: LegacyCandidateFileEntry[] };
@@ -4015,13 +4015,21 @@ function assertReleaseBaselineDescriptor(
     "sourceManifestSize",
   ]);
   assertExactObjectKeys(baseline.hub.platform, ["architecture", "os"]);
-  assertExactObjectKeys(baseline.githubRelease, [
-    "id",
-    "peeledCommitSha",
-    "repository",
-    "tagRefSha",
-    "targetCommitish",
-  ]);
+  // 迁移基线的生产形状多带一个 tag：它与已签授权里被 legacyReleaseSha256 钉住的
+  // githubRelease 同源，前面的候选验证已按根信任复核过该授权与描述符的字节一致性。
+  assertExactObjectKeys(
+    baseline.githubRelease,
+    ordinary
+      ? ["id", "peeledCommitSha", "repository", "tagRefSha", "targetCommitish"]
+      : [
+          "id",
+          "peeledCommitSha",
+          "repository",
+          "tag",
+          "tagRefSha",
+          "targetCommitish",
+        ],
+  );
   assertExactObjectKeys(baseline.catalogSnapshot, ["entries", "sha256"]);
   validateReleaseCatalogSnapshot(baseline.catalogSnapshot);
   const snapshotRelease = baseline.catalogSnapshot.entries.find(
