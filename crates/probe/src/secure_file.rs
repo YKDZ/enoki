@@ -278,7 +278,11 @@ fn read_systemd_registration_credential(path: &Path, maximum_bytes: usize) -> io
     let filesystem = statfs_fd(parent.raw())?;
     let mount = statvfs_fd(parent.raw())?;
     let required_flags = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
-    if filesystem.f_type != TMPFS_MAGIC || mount.f_flag & required_flags != required_flags {
+    // f_type 在不同 libc 上符号性不同（GNU 为带符号、musl 为无符号），
+    // 两边加宽到可无损容纳二者的 i128 后比较，未知取值仍按原判据拒绝。
+    if i128::from(filesystem.f_type) != i128::from(TMPFS_MAGIC)
+        || mount.f_flag & required_flags != required_flags
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "systemd registration credential mount attributes do not match",

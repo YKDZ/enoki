@@ -601,11 +601,12 @@ fn verify_owned_directory(
     minimum_links: u64,
 ) -> io::Result<()> {
     let stat = stat_fd(fd)?;
+    // st_nlink 在 ARM 上是 u32、在 x86_64 上是 u64，两边加宽到可无损容纳二者的 u128 再比较。
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR
         || stat.st_mode & 0o777 != mode
         || stat.st_uid != owner.0
         || stat.st_gid != owner.1
-        || stat.st_nlink < minimum_links
+        || u128::from(stat.st_nlink) < u128::from(minimum_links)
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
