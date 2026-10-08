@@ -70,7 +70,7 @@ const testDistributionRoot = generateKeyPairSync("rsa", {
   publicKeyEncoding: { format: "pem", type: "spki" },
 });
 
-describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
+describe("Enoki Release Candidate", { timeout: 60_000 }, () => {
   it("generates the bootstrap recipe from the canonical seven-role bundle closure", async () => {
     const publication = await createProbeBootstrapPublication({
       bundleVersion: "1.2.3",
@@ -142,6 +142,82 @@ with open(os.devnull, "rb") as input_stream:
       }),
     ).resolves.toMatchObject({ stderr: "", stdout: "" });
     await rm(directory, { force: true, recursive: true });
+  });
+
+  it("authenticates the formally signed Probe Asset Set manifest bytes", async () => {
+    const root = generateKeyPairSync("rsa", {
+      modulusLength: 4096,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-recipe-manifest-signature-"),
+    );
+    const target = "x86_64-unknown-linux-gnu";
+
+    try {
+      const { outputDir } = await createProbeAssetSetFixture(workDir, {
+        root,
+        signingModulusLength: 4096,
+      });
+      const publication = await createProbeBootstrapPublication({
+        bundleVersion: "1.2.3",
+        sourceDir: process.cwd(),
+        trustedRootPublicKeyPem: root.publicKey,
+      });
+      const recipePath = path.join(workDir, "recipe.py");
+      await writeFile(recipePath, publication.recipeBytes);
+      const stageDir = path.join(workDir, "stage");
+      await mkdir(stageDir);
+      for (const file of [
+        "root-key.pem",
+        "trust-delegation.json",
+        "trust-delegation.json.sig",
+        "signing-key.pem",
+        "manifest.json",
+        "manifest.json.sig",
+      ]) {
+        await cp(path.join(outputDir, file), path.join(stageDir, file));
+      }
+      const manifest = JSON.parse(
+        await readFile(path.join(outputDir, "manifest.json"), "utf8"),
+      );
+      const asset = manifest.assets.find((entry) => entry.target === target);
+
+      await expect(
+        authenticateProbeRecipeMetadata(recipePath, stageDir, target),
+      ).resolves.toEqual(asset);
+
+      const manifestBytes = await readFile(
+        path.join(outputDir, "manifest.json"),
+      );
+      await writeFile(
+        path.join(stageDir, "manifest.json"),
+        Buffer.concat([manifestBytes, Buffer.from(" ")]),
+      );
+      await expect(
+        authenticateProbeRecipeMetadata(recipePath, stageDir, target),
+      ).rejects.toThrow(
+        "enoki-probe-bootstrap: Probe Asset Set manifest signature is invalid",
+      );
+
+      await cp(
+        path.join(outputDir, "manifest.json"),
+        path.join(stageDir, "manifest.json"),
+      );
+      const signature = await readFile(
+        path.join(outputDir, "manifest.json.sig"),
+      );
+      signature[signature.byteLength - 1] ^= 1;
+      await writeFile(path.join(stageDir, "manifest.json.sig"), signature);
+      await expect(
+        authenticateProbeRecipeMetadata(recipePath, stageDir, target),
+      ).rejects.toThrow(
+        "enoki-probe-bootstrap: Probe Asset Set manifest signature is invalid",
+      );
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
   });
 
   it("requires exactly one root private-key representation for trust delegations", () => {
@@ -2483,6 +2559,7 @@ async function createProbeAssetSetFixture(
     bundleManifestSymlink,
     mutateArchives,
     root: suppliedRoot,
+    signingModulusLength = 2048,
     targets = probeTargets,
     version = "v1.2.3",
   } = {},
@@ -2490,7 +2567,7 @@ async function createProbeAssetSetFixture(
   const archivesDir = path.join(workDir, `${name}archives`);
   const outputDir = path.join(workDir, `${name}probe-assets`);
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
+    modulusLength: signingModulusLength,
     privateKeyEncoding: { format: "pem", type: "pkcs8" },
     publicKeyEncoding: { format: "pem", type: "spki" },
   });
@@ -3256,6 +3333,33 @@ async function createReleaseBaselineFixture(
     `${JSON.stringify(descriptor, null, 2)}\n`,
   );
   return releaseBaselineDir;
+}
+
+async function authenticateProbeRecipeMetadata(recipePath, stageDir, target) {
+  const program = String.raw`
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("enoki_recipe", sys.argv[1])
+recipe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recipe)
+try:
+    asset = recipe.authenticate_metadata(pathlib.Path(sys.argv[2]), sys.argv[3])
+except RuntimeError as error:
+    sys.stderr.write(f"enoki-probe-bootstrap: {error}\n")
+    raise SystemExit(1)
+sys.stdout.write(json.dumps(asset))
+`;
+  try {
+    const { stdout } = await execFileAsync(
+      "python3",
+      ["-c", program, recipePath, stageDir, target],
+      { env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } },
+    );
+    return JSON.parse(stdout);
+  } catch (error) {
+    throw new Error(
+      String(error.stderr ?? "").trim() || String(error.message ?? error),
+    );
+  }
 }
 
 async function expectCandidateMutationRejected(mutate, expectedMessage) {
