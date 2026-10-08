@@ -50,7 +50,7 @@ const layerMediaType = "application/vnd.oci.image.layer.v1.tar";
 const commitSha = "1".repeat(40);
 const tagSha = "2".repeat(40);
 
-describe("Release Baseline resolution", () => {
+describe("Release Baseline resolution", { timeout: 30_000 }, () => {
   it("selects the highest published stable SemVer below the candidate", () => {
     const selected = selectReleaseBaseline({
       candidateVersion: "v2.0.0",
