@@ -142,6 +142,8 @@ export async function runCandidateUiContract(
   }
 
   const baseUrl = `http://127.0.0.1:${options.hubPort}/`;
+  // Hub 只接受 scheme://host[:port] 形式的 Origin，浏览器则需要根页面 URL，两种形状各有用途。
+  const hubOrigin = new URL(baseUrl).origin;
   const controller = createHubController({
     containerEngine: options.containerEngine,
   });
@@ -170,8 +172,8 @@ export async function runCandidateUiContract(
     resources = await controller.start({
       candidateDir: loaded.candidateDir,
       candidateManifest: manifest,
-      hubOwnerUrl: baseUrl,
-      hubPublicUrl: baseUrl,
+      hubOwnerUrl: hubOrigin,
+      hubPublicUrl: hubOrigin,
       ownerPassword,
       runId,
     });

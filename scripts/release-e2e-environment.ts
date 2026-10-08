@@ -872,7 +872,9 @@ function verifyCandidateBootstrapRecipeScript({
   recipe: CandidateBootstrapRecipe;
   stageDir: string;
 }) {
-  return `# enoki-release-e2e:candidate-bootstrap-recipe-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\nrecipe="$stage_dir/${recipe.file}"\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n[ -f "$recipe" ] && [ ! -L "$recipe" ]\n[ "$(wc -c < "$recipe" | tr -d ' ')" = ${shellSingleQuote(String(recipe.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(recipe.sha256)} "$recipe" | sha256sum -c -\nchmod 0500 "$recipe"\nprintf 'verified\\n'\n`;
+  // sha256sum -c 把逐文件状态行写到 stdout，会污染调用方严格要求等于 verified 的哨兵通道；
+  // 状态行丢弃即可，摘要不符仍由 sha256sum 的非 0 退出与 stderr 警告拒绝。
+  return `# enoki-release-e2e:candidate-bootstrap-recipe-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\nrecipe="$stage_dir/${recipe.file}"\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n[ -f "$recipe" ] && [ ! -L "$recipe" ]\n[ "$(wc -c < "$recipe" | tr -d ' ')" = ${shellSingleQuote(String(recipe.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(recipe.sha256)} "$recipe" | sha256sum -c - >/dev/null\nchmod 0500 "$recipe"\nprintf 'verified\\n'\n`;
 }
 
 function removeCandidateBootstrapRecipeScript(stageDir: string | null) {
