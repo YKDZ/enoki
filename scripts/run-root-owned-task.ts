@@ -7,25 +7,9 @@ const command =
     : task === "format:write"
       ? ["exec", "oxfmt", "--write", "--config", "oxfmt.config.ts", "."]
       : task === "lint"
-        ? [
-            "exec",
-            "oxlint",
-            "--quiet",
-            "--format=unix",
-            "--config",
-            "oxlint.config.ts",
-            ".",
-          ]
+        ? ["exec", "oxlint", "--quiet", "--config", "oxlint.config.ts", "."]
         : task === "lint:fix"
-          ? [
-              "exec",
-              "oxlint",
-              "--format=unix",
-              "--config",
-              "oxlint.config.ts",
-              ".",
-              "--fix",
-            ]
+          ? ["exec", "oxlint", "--config", "oxlint.config.ts", ".", "--fix"]
           : undefined;
 
 if (command === undefined) {
