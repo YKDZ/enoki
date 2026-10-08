@@ -26,7 +26,7 @@ import {
   probeTargets,
 } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import {
@@ -177,13 +177,20 @@ describe("Release Baseline resolution", () => {
     }
   });
 
-  it("keeps the first rooted release publication closure as an ordinary v0.1.76 baseline", async () => {
-    const fixture = await createResolverFixture({
-      candidateVersion: "v0.1.76",
-      historicalTransition: true,
-      version: "v0.1.75",
+  describe("v0.1.76 rooted publication baseline fixture", () => {
+    let fixture;
+    beforeEach(async () => {
+      fixture = await createResolverFixture({
+        candidateVersion: "v0.1.76",
+        historicalTransition: true,
+        version: "v0.1.75",
+      });
     });
-    try {
+    afterEach(async () => {
+      await fixture?.cleanup();
+    });
+
+    it("keeps the first rooted release publication closure as an ordinary v0.1.76 baseline", async () => {
       const descriptor = await resolveReleaseBaseline(fixture.arguments_);
       expect(descriptor).toMatchObject({
         kind: "enoki-release-baseline",
@@ -198,9 +205,7 @@ describe("Release Baseline resolution", () => {
           "trust-epoch-migration-authorization.json.sig",
         ]),
       );
-    } finally {
-      await fixture.cleanup();
-    }
+    });
   });
 
   it("keeps the ordinary rooted failure when migration material is unavailable", async () => {
@@ -239,198 +244,218 @@ describe("Release Baseline resolution", () => {
     }
   });
 
-  it("signs one migration Release Transition Contract from this run's baseline", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
-      await resolveReleaseBaseline(fixture.arguments_);
-      const candidateCommit = "3".repeat(40);
-      const targetWorkDir = await mkdtemp(
+  describe("migration Release Transition Contract signing fixture", () => {
+    let fixture;
+    let targetWorkDir;
+    let signingTarget;
+    beforeEach(async () => {
+      fixture = await createLegacyTrustEpochFixture();
+      targetWorkDir = await mkdtemp(
         path.join(tmpdir(), "enoki-baseline-sign-target-"),
       );
-      try {
-        const target = await createProbeAssetSetFixture(
-          targetWorkDir,
-          "v0.1.75",
+      const target = await createProbeAssetSetFixture(
+        targetWorkDir,
+        "v0.1.75",
+        {
+          signingIdentity: {
+            privateKey: fixture.probe.privateKey,
+            publicKey: fixture.probe.publicKey,
+          },
+          trustRoot: fixture.probe.root,
+        },
+      );
+      const unsignedDir = path.join(targetWorkDir, "unsigned-probe-assets");
+      await prepareUnsignedProbeAssetSet({
+        archivesDir: target.archivesDir,
+        bootstrapArchivesDir: target.bootstrapArchivesDir,
+        delegationBytes: await readFile(target.delegationPath),
+        delegationSignature: await readFile(target.delegationSignaturePath),
+        distribution: "enoki",
+        outputDir: unsignedDir,
+        publicKeyPem: target.publicKey,
+        rootPublicKeyPem: target.root.publicKey,
+        version: "v0.1.75",
+      });
+      signingTarget = {
+        outputDir: path.join(targetWorkDir, "signed-probe-assets"),
+        target,
+        unsignedDir,
+      };
+    });
+    afterEach(async () => {
+      if (targetWorkDir !== undefined) {
+        await rm(targetWorkDir, { force: true, recursive: true });
+      }
+      await fixture?.cleanup();
+    });
+
+    it("signs one migration Release Transition Contract from this run's baseline", async () => {
+      await resolveReleaseBaseline(fixture.arguments_);
+      const candidateCommit = "3".repeat(40);
+      const { outputDir, target, unsignedDir } = signingTarget;
+      const signWithDelegation = (
+        delegationPath,
+        delegationSignaturePath,
+        signedDir,
+      ) =>
+        execFileAsync(
+          "node",
+          [
+            "scripts/release-candidate.mjs",
+            "sign-probe-assets",
+            "--candidate-commit",
+            candidateCommit,
+            "--input",
+            unsignedDir,
+            "--output",
+            signedDir,
+            "--private-key-env",
+            "TEST_PROBE_PRIVATE_KEY",
+            "--release-baseline",
+            fixture.outputDir,
+            "--root-public-key-env",
+            "TEST_PROBE_ROOT_PUBLIC_KEY",
+            "--trust-delegation",
+            delegationPath,
+            "--trust-delegation-signature",
+            delegationSignaturePath,
+          ],
           {
-            signingIdentity: {
-              privateKey: fixture.probe.privateKey,
-              publicKey: fixture.probe.publicKey,
+            env: {
+              ...process.env,
+              TEST_PROBE_PRIVATE_KEY: fixture.probe.privateKey,
+              TEST_PROBE_ROOT_PUBLIC_KEY: fixture.probe.root.publicKey,
             },
-            trustRoot: fixture.probe.root,
           },
         );
-        const unsignedDir = path.join(targetWorkDir, "unsigned-probe-assets");
-        await prepareUnsignedProbeAssetSet({
-          archivesDir: target.archivesDir,
-          bootstrapArchivesDir: target.bootstrapArchivesDir,
-          delegationBytes: await readFile(target.delegationPath),
-          delegationSignature: await readFile(target.delegationSignaturePath),
-          distribution: "enoki",
-          outputDir: unsignedDir,
-          publicKeyPem: target.publicKey,
-          rootPublicKeyPem: target.root.publicKey,
-          version: "v0.1.75",
-        });
-        const outputDir = path.join(targetWorkDir, "signed-probe-assets");
-        const signWithDelegation = (
-          delegationPath,
-          delegationSignaturePath,
-          signedDir,
-        ) =>
-          execFileAsync(
-            "node",
-            [
-              "scripts/release-candidate.mjs",
-              "sign-probe-assets",
-              "--candidate-commit",
-              candidateCommit,
-              "--input",
-              unsignedDir,
-              "--output",
-              signedDir,
-              "--private-key-env",
-              "TEST_PROBE_PRIVATE_KEY",
-              "--release-baseline",
-              fixture.outputDir,
-              "--root-public-key-env",
-              "TEST_PROBE_ROOT_PUBLIC_KEY",
-              "--trust-delegation",
-              delegationPath,
-              "--trust-delegation-signature",
-              delegationSignaturePath,
-            ],
-            {
-              env: {
-                ...process.env,
-                TEST_PROBE_PRIVATE_KEY: fixture.probe.privateKey,
-                TEST_PROBE_ROOT_PUBLIC_KEY: fixture.probe.root.publicKey,
-              },
-            },
-          );
-        const { stdout } = await signWithDelegation(
-          target.delegationPath,
-          target.delegationSignaturePath,
-          outputDir,
-        );
-        expect(stdout).toBe(`signed Probe Asset Set v0.1.75 at ${outputDir}\n`);
-        const contract = JSON.parse(
-          await readFile(
-            path.join(outputDir, "release-transition-contract.json"),
-            "utf8",
-          ),
-        );
-        expect(contract).toMatchObject({
-          candidateCommit,
-          migrationAuthorizationSha256: sha256(
-            await readFile(
-              path.join(
-                fixture.outputDir,
-                "trust-epoch-migration-authorization.json",
-              ),
-            ),
-          ),
-          migrationGeneration: 1,
-          source: {
-            commit: fixture.releaseIdentity.peeledCommitSha,
-            hubDigest: fixture.hub.sourceManifest.descriptor.digest,
-            hubImage: "ghcr.io/ykdz/enoki-hub",
-            legacySigningKeySha256: sha256(
-              Buffer.from(fixture.legacySigningPublicKey),
-            ),
-            releaseId: fixture.releaseIdentity.id,
-            repository: "YKDZ/enoki",
-            tag: "v0.1.74",
-            tagRefSha: fixture.releaseIdentity.tagRefSha,
-          },
-          target: { version: "0.1.75" },
-          transition: "replacement-required",
-        });
-        // 一次性根授权原样带入，签名入口不重新签发。
-        await expect(
-          readFile(
-            path.join(outputDir, "trust-epoch-migration-authorization.json"),
-          ),
-        ).resolves.toEqual(
+      const { stdout } = await signWithDelegation(
+        target.delegationPath,
+        target.delegationSignaturePath,
+        outputDir,
+      );
+      expect(stdout).toBe(`signed Probe Asset Set v0.1.75 at ${outputDir}\n`);
+      const contract = JSON.parse(
+        await readFile(
+          path.join(outputDir, "release-transition-contract.json"),
+          "utf8",
+        ),
+      );
+      expect(contract).toMatchObject({
+        candidateCommit,
+        migrationAuthorizationSha256: sha256(
           await readFile(
             path.join(
               fixture.outputDir,
               "trust-epoch-migration-authorization.json",
             ),
           ),
-        );
-        await expect(
-          inspectProbeAssetSet(outputDir, {
-            trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-          }),
-        ).resolves.toMatchObject({
-          releaseTransition: {
-            candidateCommit,
-            transition: "replacement-required",
-          },
-          version: "0.1.75",
-        });
+        ),
+        migrationGeneration: 1,
+        source: {
+          commit: fixture.releaseIdentity.peeledCommitSha,
+          hubDigest: fixture.hub.sourceManifest.descriptor.digest,
+          hubImage: "ghcr.io/ykdz/enoki-hub",
+          legacySigningKeySha256: sha256(
+            Buffer.from(fixture.legacySigningPublicKey),
+          ),
+          releaseId: fixture.releaseIdentity.id,
+          repository: "YKDZ/enoki",
+          tag: "v0.1.74",
+          tagRefSha: fixture.releaseIdentity.tagRefSha,
+        },
+        target: { version: "0.1.75" },
+        transition: "replacement-required",
+      });
+      // 一次性根授权原样带入，签名入口不重新签发。
+      await expect(
+        readFile(
+          path.join(outputDir, "trust-epoch-migration-authorization.json"),
+        ),
+      ).resolves.toEqual(
+        await readFile(
+          path.join(
+            fixture.outputDir,
+            "trust-epoch-migration-authorization.json",
+          ),
+        ),
+      );
+      await expect(
+        inspectProbeAssetSet(outputDir, {
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).resolves.toMatchObject({
+        releaseTransition: {
+          candidateCommit,
+          transition: "replacement-required",
+        },
+        version: "0.1.75",
+      });
 
-        // 正式入口在委托与 unsigned 闭包不一致时拒绝签署，也不留下半个输出目录。
-        const rogueIdentity = generateKeyPairSync("rsa", {
-          modulusLength: 2048,
-          privateKeyEncoding: { format: "pem", type: "pkcs8" },
-          publicKeyEncoding: { format: "pem", type: "spki" },
-        });
-        const rogueDelegation = createProbeTrustDelegation({
-          distribution: "enoki",
-          generation: 1,
-          releasePublicKeyPem: rogueIdentity.publicKey,
-          rootPrivateKeyPem: fixture.probe.root.privateKey,
-        });
-        const rogueDelegationPath = path.join(
-          targetWorkDir,
-          "rogue-trust-delegation.json",
-        );
-        const rogueDelegationSignaturePath = path.join(
-          targetWorkDir,
-          "rogue-trust-delegation.json.sig",
-        );
-        await writeFile(rogueDelegationPath, rogueDelegation.bytes);
-        await writeFile(
-          rogueDelegationSignaturePath,
-          rogueDelegation.signature,
-        );
-        const rejectedDir = path.join(targetWorkDir, "rejected-probe-assets");
-        const rejection = await signWithDelegation(
-          rogueDelegationPath,
-          rogueDelegationSignaturePath,
-          rejectedDir,
-        ).catch((caught) => caught);
-        expect(rejection).toBeInstanceOf(Error);
-        expect(rejection.message).toMatch(
-          /delegation does not match the trusted delegation/,
-        );
-        await expect(readdir(rejectedDir)).rejects.toThrow();
-      } finally {
-        await rm(targetWorkDir, { force: true, recursive: true });
-      }
-    } finally {
-      await fixture.cleanup();
-    }
+      // 正式入口在委托与 unsigned 闭包不一致时拒绝签署，也不留下半个输出目录。
+      const rogueIdentity = generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const rogueDelegation = createProbeTrustDelegation({
+        distribution: "enoki",
+        generation: 1,
+        releasePublicKeyPem: rogueIdentity.publicKey,
+        rootPrivateKeyPem: fixture.probe.root.privateKey,
+      });
+      const rogueDelegationPath = path.join(
+        targetWorkDir,
+        "rogue-trust-delegation.json",
+      );
+      const rogueDelegationSignaturePath = path.join(
+        targetWorkDir,
+        "rogue-trust-delegation.json.sig",
+      );
+      await writeFile(rogueDelegationPath, rogueDelegation.bytes);
+      await writeFile(rogueDelegationSignaturePath, rogueDelegation.signature);
+      const rejectedDir = path.join(targetWorkDir, "rejected-probe-assets");
+      const rejection = await signWithDelegation(
+        rogueDelegationPath,
+        rogueDelegationSignaturePath,
+        rejectedDir,
+      ).catch((caught) => caught);
+      expect(rejection).toBeInstanceOf(Error);
+      expect(rejection.message).toMatch(
+        /delegation does not match the trusted delegation/,
+      );
+      await expect(readdir(rejectedDir)).rejects.toThrow();
+    });
   });
 
-  it("does not classify another legacy tag as the trust epoch migration", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
+  describe("legacy trust epoch other-tag fixture", () => {
+    let fixture;
+    beforeEach(async () => {
+      fixture = await createLegacyTrustEpochFixture();
+    });
+    afterEach(async () => {
+      await fixture?.cleanup();
+    });
+
+    it("does not classify another legacy tag as the trust epoch migration", async () => {
       fixture.release.tagName = "v0.1.73";
       fixture.releaseIdentity.tagName = "v0.1.73";
       fixture.arguments_.candidateVersion = "v0.1.75";
       await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
         "must contain exactly",
       );
-    } finally {
-      await fixture.cleanup();
-    }
+    });
   });
 
-  it("materializes and offline-validates one complete linux/amd64 OCI archive", async () => {
-    const fixture = await createResolverFixture();
-    try {
+  describe("complete linux/amd64 OCI baseline fixture", () => {
+    let fixture;
+    beforeEach(async () => {
+      fixture = await createResolverFixture();
+    });
+    afterEach(async () => {
+      await fixture?.cleanup();
+    });
+
+    it("materializes and offline-validates one complete linux/amd64 OCI archive", async () => {
       const descriptor = await resolveReleaseBaseline(fixture.arguments_);
       expect(descriptor).toMatchObject({
         githubRelease: {
@@ -467,9 +492,7 @@ describe("Release Baseline resolution", () => {
           trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
       ).resolves.toEqual(descriptor);
-    } finally {
-      await fixture.cleanup();
-    }
+    });
   });
 
   it("accepts the historical Hub asset layout only when it differs by checksum sidecars", async () => {
