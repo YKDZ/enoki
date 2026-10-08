@@ -1,18 +1,15 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  chmod,
   copyFile,
   cp,
   mkdir,
-  mkdtemp,
   readFile,
   rename,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -20,7 +17,6 @@ import {
   canonicalPublicKeyPem,
   createProbeTrustDelegation,
   inspectLegacyProbeAssetSet,
-  inspectProbeElf,
   probeBundleComponentProfiles,
   probeBundledBootstrapAssets,
   probeTargets,
@@ -30,16 +26,13 @@ import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.t
 import { inspectHubOciArchive } from "./release-candidate-oci.ts";
 import {
   prepareUnsignedProbeAssetSet,
-  renderProbeBundleComponentsFromDetails,
   signProbeAssetSet,
 } from "./release-candidate-signing.ts";
 import {
   bootstrapRecipeFile,
   bootstrapRecipeRecordFile,
   fileSha256,
-  inspectProbeArchive,
   inspectProbeAssetSet,
-  readProbeBundleComponentDetails,
   releaseTransitionForValidatedCandidate,
   sha256,
   untrustedToolEnvironment,
@@ -47,6 +40,7 @@ import {
   validateReleaseCandidate,
 } from "./release-candidate-verification.ts";
 
+export { packageProbeArchive } from "./package-probe-archive.ts";
 export {
   inspectProbeAssetSet,
   releaseTransitionForValidatedCandidate,
@@ -166,95 +160,6 @@ export async function writeProbeBootstrapPublication({
     ),
   ]);
   return publication.record;
-}
-
-export async function packageProbeArchive({
-  binaryPath,
-  outputDir,
-  sourceDateEpoch,
-  target,
-  version,
-}) {
-  const { version: stableVersion } = validateCandidateIdentity({
-    commit: "0".repeat(40),
-    version,
-  });
-  if (!probeTargets.includes(target)) {
-    throw new Error(`unsupported Probe target: ${target}`);
-  }
-  if (!/^(?:0|[1-9]\d*)$/.test(sourceDateEpoch ?? "")) {
-    throw new Error("source date epoch must be a non-negative integer");
-  }
-  const binary = await readFile(binaryPath);
-  inspectProbeElf(binary, { target, version: stableVersion });
-
-  const stagingDir = await mkdtemp(path.join(tmpdir(), "enoki-probe-package-"));
-  const file = `enoki-probe-${target}.tar.gz`;
-  const archivePath = path.join(outputDir, file);
-  try {
-    await mkdir(outputDir, { recursive: true });
-    for (const profile of Object.values(probeBundleComponentProfiles)) {
-      const source =
-        profile.path === "enoki-probe"
-          ? binaryPath
-          : path.join(path.dirname(binaryPath), profile.path);
-      const component = await readFile(source);
-      inspectProbeElf(component, { target, version: stableVersion });
-      const staged = path.join(stagingDir, profile.path);
-      await copyFile(source, staged);
-      await chmod(staged, 0o755);
-    }
-    const componentDetails = await readProbeBundleComponentDetails(
-      stagingDir,
-      probeBundleComponentProfiles,
-    );
-    await writeFile(
-      path.join(stagingDir, "bundle-manifest.json"),
-      `${JSON.stringify(
-        {
-          components: renderProbeBundleComponentsFromDetails({
-            componentDetails,
-            version: stableVersion.slice(1),
-          }),
-          kind: "enoki-probe-bundle",
-          target,
-          version: stableVersion.slice(1),
-        },
-        null,
-        2,
-      )}\n`,
-    );
-    await execFileAsync(
-      "tar",
-      [
-        "--create",
-        "--gzip",
-        "--sort=name",
-        "--owner=0",
-        "--group=0",
-        "--numeric-owner",
-        "--blocking-factor=1",
-        `--mtime=@${sourceDateEpoch}`,
-        "--format=gnu",
-        "--file",
-        archivePath,
-        "--directory",
-        stagingDir,
-        "bundle-manifest.json",
-        ...Object.values(probeBundleComponentProfiles).map(({ path }) => path),
-      ],
-      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
-    );
-    await inspectProbeArchive(archivePath, {
-      target,
-      version: stableVersion,
-    });
-    const archiveSha256 = await fileSha256(archivePath);
-    await writeFile(`${archivePath}.sha256`, `${archiveSha256}  ${file}\n`);
-    return { archivePath, archiveSha256, file };
-  } finally {
-    await rm(stagingDir, { force: true, recursive: true });
-  }
 }
 
 export async function packageReleaseCandidate({

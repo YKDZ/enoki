@@ -635,34 +635,15 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const binary = createProbeElf({
+      const binaries = createProbeBundleBinaries({
         target: "x86_64-unknown-linux-gnu",
         version: "v1.2.3",
       });
+      await writeProbeBundleBinaries(workDir, binaries);
       const firstBinary = path.join(workDir, "first-probe");
       const secondBinary = path.join(workDir, "second-probe");
-      await writeFile(firstBinary, binary, { mode: 0o700 });
-      await writeFile(secondBinary, binary, { mode: 0o755 });
-      await writeFile(path.join(workDir, "enoki-observation-runtime"), binary, {
-        mode: 0o755,
-      });
-      await writeFile(
-        path.join(workDir, "enoki-cpu-resource-provider"),
-        binary,
-        {
-          mode: 0o755,
-        },
-      );
-      await writeFile(
-        path.join(workDir, "enoki-disk-health-resource-provider"),
-        binary,
-        { mode: 0o755 },
-      );
-      await writeFile(
-        path.join(workDir, "enoki-probe-lifecycle-companion"),
-        binary,
-        { mode: 0o755 },
-      );
+      await writeFile(firstBinary, binaries["enoki-probe"], { mode: 0o700 });
+      await writeFile(secondBinary, binaries["enoki-probe"], { mode: 0o755 });
       const firstOutput = path.join(workDir, "first");
       const secondOutput = path.join(workDir, "second");
       const commonArguments = [
@@ -702,6 +683,164 @@ with open(os.devnull, "rb") as input_stream:
       await rm(workDir, { force: true, recursive: true });
     }
   });
+
+  it("packages a Probe bundle whose Resource Providers omit the legacy Probe marker", async () => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-provider-identity-"),
+    );
+
+    try {
+      await writeProbeBundleBinaries(
+        workDir,
+        createProbeBundleBinaries({
+          target: "x86_64-unknown-linux-gnu",
+          version: "v1.2.3",
+        }),
+      );
+
+      const result = await runPackageProbe(workDir, {
+        target: "x86_64-unknown-linux-gnu",
+        version: "v1.2.3",
+      });
+      expect(result.stderr).toBe("");
+
+      const file = "enoki-probe-x86_64-unknown-linux-gnu.tar.gz";
+      const archivePath = path.join(workDir, "dist", file);
+      const archive = await readFile(archivePath);
+      expect(result.stdout).toContain(file);
+      expect(await readFile(`${archivePath}.sha256`, "utf8")).toEqual(
+        `${sha256(archive)}  ${file}\n`,
+      );
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    "enoki-probe",
+    "enoki-observation-runtime",
+    "enoki-probe-lifecycle-companion",
+  ])("still requires the legacy Probe marker on %s", async (component) => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-missing-marker-"),
+    );
+    const target = "x86_64-unknown-linux-gnu";
+
+    try {
+      await writeProbeBundleBinaries(
+        workDir,
+        createProbeBundleBinaries({
+          overrides: {
+            [component]: createProbeElf({
+              embedProbeIdentity: false,
+              target,
+              version: "v1.2.3",
+            }),
+          },
+          target,
+          version: "v1.2.3",
+        }),
+      );
+
+      await expect(
+        runPackageProbe(workDir, { target, version: "v1.2.3" }),
+      ).rejects.toThrow(
+        `enoki-probe-${target}.tar.gz embedded target does not match ${target}`,
+      );
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    ["enoki-cpu-resource-provider", "architecture"],
+    ["enoki-cpu-resource-provider", "abi"],
+    ["enoki-disk-health-resource-provider", "architecture"],
+    ["enoki-disk-health-resource-provider", "abi"],
+  ])(
+    "rejects a %s Resource Provider with the wrong %s",
+    async (component, mismatch) => {
+      const workDir = await mkdtemp(
+        path.join(tmpdir(), "enoki-candidate-provider-elf-"),
+      );
+      const target = "x86_64-unknown-linux-gnu";
+      const provider =
+        mismatch === "architecture"
+          ? createProbeElf({
+              embedProbeIdentity: false,
+              target: "aarch64-unknown-linux-gnu",
+              version: "v1.2.3",
+            })
+          : createProbeElf({
+              embedProbeIdentity: false,
+              interpreter: "/lib/ld-musl-x86_64.so.1\0",
+              target,
+              version: "v1.2.3",
+            });
+
+      try {
+        await writeProbeBundleBinaries(
+          workDir,
+          createProbeBundleBinaries({
+            overrides: { [component]: provider },
+            target,
+            version: "v1.2.3",
+          }),
+        );
+
+        await expect(
+          runPackageProbe(workDir, { target, version: "v1.2.3" }),
+        ).rejects.toThrow(
+          `enoki-probe-${target}.tar.gz ELF ${mismatch === "architecture" ? "architecture" : "ABI"} does not match ${target}`,
+        );
+      } finally {
+        await rm(workDir, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.each([
+    {
+      embeddedTarget: "x86_64-unknown-linux-musl",
+      embeddedVersion: "v1.2.3",
+      rejection: "embedded target does not match x86_64-unknown-linux-gnu",
+    },
+    {
+      embeddedTarget: "x86_64-unknown-linux-gnu",
+      embeddedVersion: "v9.9.9",
+      rejection: "embedded Probe version does not match v1.2.3",
+    },
+  ])(
+    "rejects a Probe bundle with the wrong $rejection",
+    async ({ embeddedTarget, embeddedVersion, rejection }) => {
+      const workDir = await mkdtemp(
+        path.join(tmpdir(), "enoki-candidate-probe-identity-"),
+      );
+      const target = "x86_64-unknown-linux-gnu";
+
+      try {
+        await writeProbeBundleBinaries(
+          workDir,
+          createProbeBundleBinaries({
+            overrides: {
+              "enoki-probe": createProbeElf({
+                target: embeddedTarget,
+                version: embeddedVersion,
+              }),
+            },
+            target,
+            version: "v1.2.3",
+          }),
+        );
+
+        await expect(
+          runPackageProbe(workDir, { target, version: "v1.2.3" }),
+        ).rejects.toThrow(`enoki-probe-${target}.tar.gz ${rejection}`);
+      } finally {
+        await rm(workDir, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("pins release toolchain and base inputs while normalizing build metadata", async () => {
     const [
@@ -1676,48 +1815,14 @@ with open(os.devnull, "rb") as input_stream:
       const workDir = await mkdtemp(
         path.join(tmpdir(), `enoki-candidate-musl-${linkage}-`),
       );
-      const binaryPath = path.join(workDir, "enoki-probe");
 
       try {
-        await writeFile(
-          binaryPath,
-          createProbeElf({ interpreter, target, version: "v1.2.3" }),
-          { mode: 0o755 },
-        );
-        await writeFile(
-          path.join(workDir, "enoki-observation-runtime"),
-          createProbeElf({ interpreter, target, version: "v1.2.3" }),
-          { mode: 0o755 },
-        );
-        await writeFile(
-          path.join(workDir, "enoki-cpu-resource-provider"),
-          createProbeElf({ interpreter, target, version: "v1.2.3" }),
-          { mode: 0o755 },
-        );
-        await writeFile(
-          path.join(workDir, "enoki-disk-health-resource-provider"),
-          createProbeElf({ interpreter, target, version: "v1.2.3" }),
-          { mode: 0o755 },
-        );
-        await writeFile(
-          path.join(workDir, "enoki-probe-lifecycle-companion"),
-          createProbeElf({ interpreter, target, version: "v1.2.3" }),
-          { mode: 0o755 },
+        await writeProbeBundleBinaries(
+          workDir,
+          createProbeBundleBinaries({ interpreter, target, version: "v1.2.3" }),
         );
         await expect(
-          runCandidateCli([
-            "package-probe",
-            "--binary",
-            binaryPath,
-            "--output-dir",
-            path.join(workDir, "dist"),
-            "--source-date-epoch",
-            "0",
-            "--target",
-            target,
-            "--version",
-            "v1.2.3",
-          ]),
+          runPackageProbe(workDir, { target, version: "v1.2.3" }),
         ).resolves.toMatchObject({ stderr: "" });
       } finally {
         await rm(workDir, { force: true, recursive: true });
@@ -2637,7 +2742,12 @@ async function writeProbeArchive(
   await rm(binaryDir, { force: true, recursive: true });
 }
 
-function createProbeElf({ interpreter: interpreterOverride, target, version }) {
+function createProbeElf({
+  embedProbeIdentity = true,
+  interpreter: interpreterOverride,
+  target,
+  version,
+}) {
   const architecture = target.startsWith("x86_64-") ? 62 : 183;
   const interpreter =
     interpreterOverride ??
@@ -2648,9 +2758,11 @@ function createProbeElf({ interpreter: interpreterOverride, target, version }) {
       : "");
   const headerSize = 64;
   const programHeaderSize = interpreter ? 56 : 0;
-  const marker = Buffer.from(
-    `ENOKI_PROBE_TARGET=${target}\0ENOKI_PROBE_VERSION=${version}\0`,
-  );
+  const marker = embedProbeIdentity
+    ? Buffer.from(
+        `ENOKI_PROBE_TARGET=${target}\0ENOKI_PROBE_VERSION=${version}\0`,
+      )
+    : Buffer.alloc(0);
   const interpreterBytes = Buffer.from(interpreter);
   const result = Buffer.alloc(
     headerSize + programHeaderSize + interpreterBytes.length + marker.length,
@@ -2676,6 +2788,56 @@ function createProbeElf({ interpreter: interpreterOverride, target, version }) {
   }
   result.set(marker, headerSize + programHeaderSize + interpreterBytes.length);
   return result;
+}
+
+// 本打包合同的 fixture：两个 Resource Provider 不携带旧普通 Probe 标记，
+// Probe、Observation Runtime 与 Lifecycle Companion 沿用既有标记要求。
+function createProbeBundleBinaries({
+  interpreter,
+  overrides = {},
+  target,
+  version,
+}) {
+  const embedded = createProbeElf({ interpreter, target, version });
+  const provider = createProbeElf({
+    embedProbeIdentity: false,
+    interpreter,
+    target,
+    version,
+  });
+  const binaries = {
+    "enoki-probe": embedded,
+    "enoki-observation-runtime": embedded,
+    "enoki-cpu-resource-provider": provider,
+    "enoki-disk-health-resource-provider": provider,
+    "enoki-probe-lifecycle-companion": embedded,
+  };
+  for (const [component, bytes] of Object.entries(overrides)) {
+    binaries[component] = bytes;
+  }
+  return binaries;
+}
+
+async function writeProbeBundleBinaries(workDir, binaries) {
+  for (const [component, bytes] of Object.entries(binaries)) {
+    await writeFile(path.join(workDir, component), bytes, { mode: 0o755 });
+  }
+}
+
+async function runPackageProbe(workDir, { target, version }) {
+  return runCandidateCli([
+    "package-probe",
+    "--binary",
+    path.join(workDir, "enoki-probe"),
+    "--output-dir",
+    path.join(workDir, "dist"),
+    "--source-date-epoch",
+    "0",
+    "--target",
+    target,
+    "--version",
+    version,
+  ]);
 }
 
 function createBootstrapElf({ identity, target }) {
