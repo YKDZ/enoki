@@ -1798,6 +1798,25 @@ function systemdDiagnosticsScript(): string {
   return String.raw`# enoki-release-e2e:systemd-diagnostics
 set -eu
 systemctl show enoki-probe.service --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts
+# 57临时取证：general lifecycle companion 失败事实。第十轮现场的 companion 激活／执行／退出子分支未知，
+# 这里只读取已有 manager 字段与有限 journal；取得充分因果后、实际 companion 修复交付前整段删除。
+printf '\n### enoki-probe-lifecycle-companion.socket\n'
+systemctl show enoki-probe-lifecycle-companion.socket --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result || printf 'companionSocketState=unavailable\n'
+journalctl --unit=enoki-probe-lifecycle-companion.socket --no-pager --lines=50 --output=short-iso || printf 'companionSocketJournal=unavailable\n'
+printf '\n### enoki-probe-lifecycle-companion instances\n'
+companion_list_failed=0
+companion_list=$(systemctl list-units --all --full --plain --no-legend --no-pager 'enoki-probe-lifecycle-companion@*' 2>/dev/null) || companion_list_failed=1
+if [ "$companion_list_failed" -ne 0 ]; then
+  printf 'companionInstanceList=unavailable\n'
+elif [ -z "$companion_list" ]; then
+  printf 'companionInstances=none\n'
+else
+  for companion_unit in $(printf '%s\n' "$companion_list" | awk 'NF { print $1 }' | head -n 8); do
+    printf '\n### %s\n' "$companion_unit"
+    systemctl show "$companion_unit" --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts || printf 'companionInstanceState=unavailable\n'
+    journalctl --unit="$companion_unit" --no-pager --lines=100 --output=short-iso || printf 'companionInstanceJournal=unavailable\n'
+  done
+fi
 `;
 }
 
