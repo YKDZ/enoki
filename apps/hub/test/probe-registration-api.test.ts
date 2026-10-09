@@ -1033,6 +1033,90 @@ describe("Probe registration API", () => {
       .get() as { id: number; probeId: string };
     expect(host.probeId).toBe(firstIdentity.probeId);
 
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const sourceBootBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "source-boot",
+        enrollmentId: firstIdentity.enrollmentId,
+        probeAssetBundleVersion: "0.1.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: firstIdentity.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [],
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(
+            firstIdentity,
+            "/api/probe/report",
+            sourceBootBody,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const sourceHostProfile = sampleHostProfile({
+      hostname: "v-prefix-host",
+      probeAssetBundleVersion: "0.1.0",
+      probeVersion: "v0.1.0",
+    });
+    const sourceObservationBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "source-boot",
+        enrollmentId: firstIdentity.enrollmentId,
+        metrics: [
+          {
+            collectedAtMs: Date.now(),
+            collectorOutcomes: [
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeAssetBundleVersion: "0.1.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: firstIdentity.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sourceHostProfile,
+            snapshotHash: hashStableHostProfile(sourceHostProfile),
+          },
+        ],
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(
+            firstIdentity,
+            "/api/probe/report",
+            sourceObservationBody,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    expect(
+      database.sqlite
+        .prepare("select status from enrollment_tokens where enrollment_id = ?")
+        .get(firstIdentity.enrollmentId),
+    ).toEqual({ status: "ready" });
+    expect(
+      database.sqlite
+        .prepare(
+          "select probe_id as probeId, probe_version as probeVersion from managed_hosts where id = ?",
+        )
+        .get(host.id),
+    ).toEqual({ probeId: firstIdentity.probeId, probeVersion: "v0.1.0" });
+
     const enrollmentResponse = await app.request(
       `/api/web/enrollments/manual-reinstall/${host.id}`,
       { headers: { cookie: ownerSession }, method: "POST" },
