@@ -2892,7 +2892,7 @@ describe("Probe Host Harness", () => {
   // 的有限状态与 journal 经既有 collectDiagnostics 文本载体回传，且 companion 读取失败既不
   // 丢弃原 Probe 事实也不掩盖原主失败。取得充分因果后、实际 companion 修复交付前连同
   // harness 内的专用取证段一起删除。
-  it("captures lifecycle companion state and journal in terminal diagnostics without masking the primary failure", async () => {
+  it("在终端失败诊断中保留 lifecycle companion 状态与 journal 且不掩盖原主失败", async () => {
     const bin = await mkdtemp(
       path.join(os.tmpdir(), "enoki-release-companion-diagnostics-shim-"),
     );
