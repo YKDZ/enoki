@@ -1227,7 +1227,7 @@ fn run_authorized_probe_repair_for_invoking_admin(
     if installed_failure_is_current {
         return run_authorized_installed_bundle_repair(invoking_uid, invoking_gid);
     }
-    if Path::new("/var/lib/enoki-probe/runtime-failure/latch").exists() {
+    if Path::new("/var/lib/enoki-probe-bootstrap/runtime-failure/latch").exists() {
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
     }
     let consumed = if let Some(consumed) = resumable_upgrade {

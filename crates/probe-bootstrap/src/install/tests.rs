@@ -5,7 +5,9 @@ mod tests {
         create_probe_ipc_group_with_commands, create_transaction_identity_with_commands,
         owned_ipc_group_record_matches, remove_owned_ipc_group_with_commands,
     };
-    use super::upgrade::{upgrade_destinations, write_operation_status};
+    use super::upgrade::{
+        invalidate_runtime_failure_epoch, upgrade_destinations, write_operation_status,
+    };
     use super::*;
     use crate::handoff::Enrollment;
     use crate::lifecycle::UpgradeCompletion;
@@ -2930,8 +2932,8 @@ mod tests {
             assert!(runtime.contains(property), "Runtime 缺少 {property}");
         }
         assert!(
-            runtime.contains("ConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch"),
-            "latch 存在时 Runtime 不得再生成进程"
+            runtime.contains("ConditionPathExists=!/var/lib/enoki-probe-bootstrap/runtime-failure/latch"),
+            "root 保管的 latch 存在时 Runtime 不得再生成进程"
         );
         assert!(
             runtime.contains(
@@ -2966,6 +2968,16 @@ mod tests {
             service.contains("ReadWritePaths=/etc/enoki"),
             "入口必须能写它自己的固定 gate 路径"
         );
+        assert!(
+            service.contains("RuntimeDirectory=enoki-probe"),
+            "Evidence／Repair Companion 必须固定提供 alias 的 target parent"
+        );
+        assert!(
+            service.contains(
+                "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+            ),
+            "Evidence／Repair Companion 是当前 boot reader 的消费者，须把宿主 boot_id 固定绑定成同一 alias，否则 ProcSubset=pid 会隐藏 source"
+        );
     }
 
     #[test]
@@ -2980,16 +2992,34 @@ mod tests {
             "Group=root",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
-            "CapabilityBoundingSet=",
+            "CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
             "AmbientCapabilities=",
             "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any",
             "SocketBindDeny=any",
             "ProtectSystem=strict",
-            "ReadWritePaths=/var/lib/enoki-probe/runtime-failure",
+            "ReadWritePaths=/var/lib/enoki-probe-bootstrap/runtime-failure",
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
+        assert!(
+            recorder.contains("CapabilityBoundingSet=CAP_DAC_READ_SEARCH\n"),
+            "recorder 只恢复单一 CAP_DAC_READ_SEARCH 以读取固定 private 根"
+        );
+        assert!(
+            !recorder.contains("CAP_DAC_OVERRIDE"),
+            "recorder 不得获得 CAP_DAC_OVERRIDE 等第二项写绕过能力"
+        );
+        assert!(
+            recorder.contains(
+                "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+            ),
+            "recorder 必须把宿主 boot_id 固定绑定成专用 alias 供当前 boot reader 读取"
+        );
+        assert!(
+            !recorder.contains("enoki-observation-runtime-failure.service /proc/sys/kernel/random/boot_id"),
+            "boot 输入改经固定 alias，不再直接列在会被 ProcSubset 隐藏的 ReadOnlyPaths"
+        );
         assert!(recorder.contains("RefuseManualStart=yes"));
         assert!(
             recorder.contains("/etc/systemd/system/enoki-observation-runtime-failure.service"),
@@ -3037,13 +3067,96 @@ mod tests {
 
         let state = fs::symlink_metadata(paths.state()).unwrap();
         let identity = fs::symlink_metadata(paths.identity()).unwrap();
+        let bootstrap = fs::symlink_metadata(paths.bootstrap_state()).unwrap();
         assert_eq!(state.mode() & 0o7777, 0o750);
         assert_eq!((state.uid(), state.gid()), (identity.uid(), identity.gid()));
+        assert_eq!(bootstrap.mode() & 0o7777, 0o700);
+        assert_eq!(
+            (bootstrap.uid(), bootstrap.gid()),
+            (paths.expected_root_uid(), paths.expected_root_gid())
+        );
+        assert!(
+            !paths.state().join("runtime-failure").exists(),
+            "Probe 状态根不得再持有故障保管 child"
+        );
         let recorder = fs::read_to_string(paths.observation_runtime_failure_recorder_unit())
             .unwrap();
-        assert!(recorder.contains("StateDirectory=enoki-probe/runtime-failure"));
+        assert!(recorder.contains("StateDirectory=enoki-probe-bootstrap/runtime-failure"));
         assert!(recorder.contains("StateDirectoryMode=0700"));
         assert!(recorder.contains("User=root\nGroup=root"));
+    }
+
+    /// R51-2：producer／consumer／unit 配置与显式 Upgrade 撤销必须指向同一个 root 保管
+    /// failure 位置，identity／operation status 仍留在 Probe 自己的投影上。
+    #[test]
+    fn upgrade_revocation_and_every_configuration_share_one_root_failure_location() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.runtime_failure_dir()).unwrap();
+        fs::create_dir_all(paths.identity_dir()).unwrap();
+        fs::write(paths.runtime_failure_latch(), b"generation").unwrap();
+        fs::write(paths.runtime_failure_epoch(), b"epoch").unwrap();
+        fs::write(
+            paths.runtime_failure_dir().join("repair-intent.json"),
+            b"{\"intent\":true}",
+        )
+        .unwrap();
+        fs::write(paths.identity(), b"identity").unwrap();
+        let status = paths.state().join("probe-operation-status.toml");
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(&status, b"status = \"running\"\n").unwrap();
+
+        // 配置侧：Runtime 负启动条件、recorder 的保管目录与写范围都必须是同一固定位置。
+        let relative = |absolute: &str| PathBuf::from(absolute.trim_start_matches('/'));
+        let latch = paths.runtime_failure_latch();
+        assert_eq!(
+            latch.strip_prefix(temporary.path()).unwrap(),
+            relative(RUNTIME_FAILURE_LATCH)
+        );
+        assert_eq!(
+            paths
+                .runtime_failure_epoch()
+                .strip_prefix(temporary.path())
+                .unwrap(),
+            relative(RUNTIME_FAILURE_EPOCH)
+        );
+        assert_eq!(
+            paths
+                .runtime_failure_dir()
+                .strip_prefix(temporary.path())
+                .unwrap(),
+            relative(RUNTIME_FAILURE_DIR)
+        );
+        assert_eq!(paths.runtime_failure_dir(), latch.parent().unwrap());
+        let runtime = observation_runtime_unit();
+        assert!(
+            runtime.contains(&format!("ConditionPathExists=!{RUNTIME_FAILURE_LATCH}")),
+            "Runtime 负条件必须直接引用被撤销的同一 latch"
+        );
+        let recorder = observation_runtime_failure_recorder_unit();
+        assert!(recorder.contains(&format!("ReadWritePaths={RUNTIME_FAILURE_DIR}")));
+
+        // 撤销侧：只失效固定位置上的 latch／epoch，不搬动 identity／status，也不吞掉 intent。
+        invalidate_runtime_failure_epoch(&paths).unwrap();
+        assert!(!paths.runtime_failure_latch().exists());
+        assert!(!paths.runtime_failure_epoch().exists());
+        assert!(
+            paths
+                .runtime_failure_dir()
+                .join("repair-intent.json")
+                .exists(),
+            "Upgrade 撤销不拥有 Repair intent 的生命周期"
+        );
+        assert!(paths.runtime_failure_dir().exists(), "保管 child 本身由 root 持有");
+        assert_eq!(fs::read(paths.identity()).unwrap(), b"identity");
+        assert_eq!(fs::read(&status).unwrap(), b"status = \"running\"\n");
+        assert!(
+            !paths.state().join("runtime-failure").exists(),
+            "撤销链不得在 Probe 状态根内另建或改写故障数据"
+        );
+
+        // 幂等：数据已失效后再次撤销仍是成功（复用原撤销业务）。
+        invalidate_runtime_failure_epoch(&paths).unwrap();
     }
 
     #[test]

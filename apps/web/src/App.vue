@@ -667,7 +667,9 @@ async function createManualReinstallEnrollment(hostId: number) {
     const response = await fetch(
       `/api/web/enrollments/manual-reinstall/${hostId}`,
       {
+        body: "{}",
         credentials: "same-origin",
+        headers: { "content-type": "application/json" },
         method: "POST",
       },
     );

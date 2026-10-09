@@ -5,18 +5,22 @@ use super::{
     TrustedProbeInstallMetadata,
 };
 use crate::upgrader::{
-    ensure_absolute_path, fixed_installed_probe_sha256, is_lifecycle_companion_path,
-    is_lifecycle_companion_service, observation_services, preflight_rooted_path,
-    read_trusted_probe_install_metadata_read_only, read_trusted_probe_install_preflight,
-    rebase_trusted_install_metadata_paths, remove_empty_parent_dir, remove_path_if_exists,
-    uninstall_cleanup_failure, verify_path_absent,
+    PRODUCTION_REPLACEMENT_COMMIT_PATH, ensure_absolute_path, fixed_installed_probe_sha256,
+    is_lifecycle_companion_path, is_lifecycle_companion_service, observation_services,
+    preflight_rooted_path, read_trusted_probe_install_metadata_read_only,
+    read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
+    remove_empty_parent_dir, remove_path_if_exists, uninstall_cleanup_failure, verify_path_absent,
 };
 use enoki_probe_bootstrap::install::{ProbeStateRoot, ProbeStateRootError};
 use enoki_probe_bootstrap::replacement::{
-    ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
-    commit_and_cleanup_replacement,
+    FileReplacementCommitStore, ReplacementCommitError, ReplacementCommitFact,
+    ReplacementCommitStore, ReplacementIntent, commit_and_cleanup_replacement,
 };
-use std::{fs, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
 #[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
@@ -105,8 +109,16 @@ pub(super) fn cleanup_committed_replacement_install(
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: install_metadata.identity_path.clone(),
     };
-    let plan =
-        plan_committed_replacement_cleanup(&input, &install_metadata, &install_metadata_path)?;
+    let commit_custody = authorized_replacement_commit_fact(
+        intent,
+        &preflight_rooted_path(test_root, Path::new(PRODUCTION_REPLACEMENT_COMMIT_PATH)),
+    );
+    let plan = plan_committed_replacement_cleanup_with_commit_custody(
+        &input,
+        &install_metadata,
+        &install_metadata_path,
+        commit_custody,
+    )?;
     execute_committed_replacement_cleanup(&plan, systemd)
 }
 
@@ -147,11 +159,30 @@ fn validate_committed_replacement_install_receipt(
     Ok(())
 }
 
+/// committed Replacement 源阶段的提交事实保管：固定生产路径加上本次替换自己的
+/// canonical intent 摘要。校验时只接受这一份绑定，普通卸载与恢复永远不授予它。
+#[derive(Debug)]
+struct AuthorizedReplacementCommitFact {
+    path: PathBuf,
+    canonical_intent_sha256: String,
+}
+
+fn authorized_replacement_commit_fact(
+    intent: &ReplacementIntent,
+    commit_path: &Path,
+) -> Option<AuthorizedReplacementCommitFact> {
+    Some(AuthorizedReplacementCommitFact {
+        path: commit_path.to_path_buf(),
+        canonical_intent_sha256: intent.canonical_sha256()?,
+    })
+}
+
 #[derive(Debug)]
 pub(super) struct ProbeUninstallCleanupPlan<'a> {
     pub(super) input: &'a ProbeUninstallerRunInput,
     pub(super) install_metadata: &'a TrustedProbeInstallMetadata,
     pub(super) install_metadata_path: &'a Path,
+    authorized_commit_fact: Option<AuthorizedReplacementCommitFact>,
 }
 
 /// Establishes every local deletion target before systemd or filesystem
@@ -177,12 +208,31 @@ pub(super) fn plan_probe_uninstall_recovery<'a>(
     Ok(plan)
 }
 
+/// 测试侧的三参数投影：生产源阶段总是经 `..._with_commit_custody` 传入按 intent 授予的保管，
+/// 普通卸载与恢复从不涉及替换提交事实，因此那里没有对应输入可以构造。
+#[cfg(test)]
 pub(super) fn plan_committed_replacement_cleanup<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    plan_committed_replacement_cleanup_with_commit_custody(
+        input,
+        install_metadata,
+        install_metadata_path,
+        None,
+    )
+}
+
+/// committed Replacement 的源阶段规划。`commit_custody` 只由真实替换入口按当前 intent 授予，
+/// 使源清理之前已 durable 落盘的提交事实不被整根白名单当作未知对象。
+fn plan_committed_replacement_cleanup_with_commit_custody<'a>(
+    input: &'a ProbeUninstallerRunInput,
+    install_metadata: &'a TrustedProbeInstallMetadata,
+    install_metadata_path: &'a Path,
+    commit_custody: Option<AuthorizedReplacementCommitFact>,
+) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
+    let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
     if matches!(install_metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role_for_recovery(
             install_metadata.bootstrap_acquirer_path.as_deref(),
@@ -190,8 +240,12 @@ pub(super) fn plan_committed_replacement_cleanup<'a>(
         validate_owned_bootstrap_role_for_recovery(
             install_metadata.bootstrap_activator_path.as_deref(),
         )?;
-        validate_owned_bootstrap_state(install_metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state_with_commit_custody(
+            install_metadata.bootstrap_state_dir.as_deref(),
+            commit_custody.as_ref(),
+        )?;
     }
+    plan.authorized_commit_fact = commit_custody;
     Ok(plan)
 }
 
@@ -243,6 +297,7 @@ pub(super) fn plan_probe_uninstall_paths<'a>(
         input,
         install_metadata,
         install_metadata_path,
+        authorized_commit_fact: None,
     })
 }
 
@@ -428,6 +483,29 @@ pub(super) fn remove_probe_bootstrap_state(
         remove_owned_bootstrap_state(path)?;
     }
     Ok(())
+}
+
+/// committed Replacement 只在源授权清理阶段退休 D9 固定故障保管 child：该 child 属于被替换
+/// 的源安装，而 `trust`／`inbox` 与提交意图属于候选，必须原样留下。删除前重新复核整个
+/// bootstrap state，使 plan 之后新出现的未知对象、link 或额外硬链接仍被拒绝。child 已不存在
+/// 时按幂等成功返回，因此 cleanup_complete 之前的重入不会第二次删除源保管。
+pub(super) fn retire_bootstrap_runtime_failure_custody(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let Some(state_dir) = plan.install_metadata.bootstrap_state_dir.as_deref() else {
+        return Ok(());
+    };
+    let custody = state_dir.join("runtime-failure");
+    if fs::symlink_metadata(&custody)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    validate_owned_bootstrap_state_with_commit_custody(
+        Some(state_dir),
+        plan.authorized_commit_fact.as_ref(),
+    )?;
+    fs::remove_dir_all(custody).map_err(ProbeUpgraderRunError::Io)
 }
 
 pub(super) fn remove_probe_install_identities(
@@ -698,6 +776,7 @@ pub(super) fn execute_committed_replacement_cleanup(
 ) -> Result<(), ProbeUpgraderRunError> {
     prepare_probe_uninstall_cleanup(plan, systemd)?;
     remove_probe_bootstrap_roles(plan)?;
+    retire_bootstrap_runtime_failure_custody(plan)?;
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_lifecycle_companion_binary(plan)?;
@@ -765,6 +844,15 @@ pub(super) fn verify_replacement_residue_absent(
         ),
     ] {
         verify_path_absent(path, code, action)?;
+    }
+    // 源保管 child 属于被替换的源安装：committed Replacement 核验时它必须已实际退休，
+    // 候选的 bootstrap state 父目录本身不在退休清单内。
+    if let Some(state_dir) = plan.install_metadata.bootstrap_state_dir.as_deref() {
+        verify_path_absent(
+            &state_dir.join("runtime-failure"),
+            "probe_uninstall_bootstrap_state_residue",
+            "verifying the source runtime-failure custody is retired",
+        )?;
     }
     verify_state_root_retired(&plan.install_metadata.state_dir)?;
     verify_lifecycle_companion_binary_absent(plan)
@@ -964,6 +1052,13 @@ pub(super) fn validate_owned_bootstrap_role_for_recovery(
 pub(super) fn validate_owned_bootstrap_state(
     path: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
+    validate_owned_bootstrap_state_with_commit_custody(path, None)
+}
+
+fn validate_owned_bootstrap_state_with_commit_custody(
+    path: Option<&Path>,
+    commit: Option<&AuthorizedReplacementCommitFact>,
+) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
         "schema v2 metadata is missing Probe Bootstrap ownership",
     ))?;
@@ -995,6 +1090,46 @@ pub(super) fn validate_owned_bootstrap_state(
                 {
                     return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                         "Probe Bootstrap inbox is not empty",
+                    ));
+                }
+            }
+            // D9 的固定故障保管 child：root 管理的 parent 使普通 Probe 无法改名或替换它，
+            // 因此卸载必须逐个复核其白名单对象后随整个 bootstrap state 一起退休，
+            // 而不是把该 child 当作未知对象拒绝，也不是整目录盲删。
+            Some("runtime-failure") => {
+                validate_owned_bootstrap_directory(&entry.path(), 0o700)?;
+                for failure in fs::read_dir(entry.path()).map_err(ProbeUpgraderRunError::Io)? {
+                    let failure = failure.map_err(ProbeUpgraderRunError::Io)?;
+                    if !matches!(
+                        failure.file_name().to_str(),
+                        Some("epoch.toml" | "latch" | "repair-intent.json")
+                    ) {
+                        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                            "Probe Bootstrap state contains an unexpected entry",
+                        ));
+                    }
+                    validate_owned_bootstrap_regular(&failure.path(), 0o600)?;
+                }
+            }
+            // committed Replacement 在源清理之前 durable 写入的提交事实。只有当前源阶段
+            // 授权的那一份绑定才是本次替换的恢复凭据；同名但未绑定、位于别处或没有授权
+            // （普通卸载与恢复）时，仍按未知对象失败关闭。绑定校验直接复用生产文件存储的
+            // load()，包括它对 schema、摘要自洽与文件属性的判据，不在此复制算法。
+            Some("replacement-migration.json") => {
+                let Some(commit) = commit.filter(|commit| commit.path == entry.path()) else {
+                    return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "Probe Bootstrap state contains an unexpected entry",
+                    ));
+                };
+                validate_owned_bootstrap_regular(&entry.path(), 0o600)?;
+                let fact = FileReplacementCommitStore::at(entry.path(), 0)
+                    .load()
+                    .map_err(ProbeUpgraderRunError::Io)?;
+                if fact.as_ref().is_none_or(|fact| {
+                    fact.canonical_intent_sha256 != commit.canonical_intent_sha256
+                }) {
+                    return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "replacement commit fact is not bound to the committed intent",
                     ));
                 }
             }
@@ -1063,17 +1198,32 @@ pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgra
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata,
+        AuthorizedReplacementCommitFact, ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata,
+        commit_replacement_and_cleanup_install_with_systemd,
         commit_replacement_cleanup_with_metadata_retirement,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
         finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
         plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
-        remove_lifecycle_companion_binary, remove_uninstall_local_state_with,
-        validate_owned_bootstrap_state,
+        remove_lifecycle_companion_binary, remove_owned_bootstrap_state,
+        remove_uninstall_local_state_with, validate_owned_bootstrap_state,
+        validate_owned_bootstrap_state_with_commit_custody,
     };
-    use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
+    use crate::upgrader::{
+        CPU_PROVIDER_BINARY_PATH, CPU_PROVIDER_SERVICE_UNIT_PATH, CPU_PROVIDER_SOCKET_UNIT_PATH,
+        LIFECYCLE_COMPANION_BINARY_PATH, LIFECYCLE_COMPANION_SERVICE_UNIT_PATH,
+        LIFECYCLE_COMPANION_SOCKET_UNIT_PATH, OBSERVATION_IPC_GROUP,
+        OBSERVATION_RUNTIME_BINARY_PATH, OBSERVATION_RUNTIME_SERVICE_UNIT_PATH,
+        OBSERVATION_RUNTIME_SOCKET_UNIT_PATH, PROBE_IPC_GROUP, PRODUCTION_BOOTSTRAP_ACQUIRER_PATH,
+        PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH, PRODUCTION_BOOTSTRAP_STATE_DIR,
+        PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH, PRODUCTION_INSTALL_METADATA_PATH,
+        PRODUCTION_INSTALL_STATE_DIR, PRODUCTION_PROBE_BINARY_PATH,
+        PRODUCTION_REPLACEMENT_COMMIT_PATH, ProbeUninstallerRunInput, ProbeUpgraderRunError,
+        fixed_installed_probe_sha256, preflight_rooted_path,
+        read_trusted_probe_install_metadata_read_only,
+    };
     use enoki_probe_bootstrap::replacement::{
-        ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
+        FileReplacementCommitStore, ReplacementCommitError, ReplacementCommitFact,
+        ReplacementCommitStore, ReplacementIntent,
     };
     use std::{
         fs,
@@ -1859,5 +2009,393 @@ mod tests {
             ))
         ));
         assert!(extra_state.join("unrecognised").exists());
+
+        // 真实生产文件存储写下的提交事实：普通卸载与恢复从不授予保管，未授予时它仍是未知
+        // 对象，整根退休不得靠删掉这份恢复凭据来通过白名单。
+        let commit_temp = tempfile::tempdir().expect("commit fact temp");
+        let commit_state = owned_state(commit_temp.path());
+        let commit_path = commit_state.join("replacement-migration.json");
+        let intent = replacement_intent();
+        let mut store = FileReplacementCommitStore::at(&commit_path, 0);
+        store
+            .persist(&ReplacementCommitFact {
+                schema_version: 1,
+                canonical_intent_sha256: intent.canonical_sha256().expect("canonical intent"),
+                intent,
+                cleanup_complete: false,
+                candidate_layout_complete: false,
+            })
+            .expect("persist commit fact");
+        assert!(matches!(
+            validate_owned_bootstrap_state(Some(&commit_state)),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
+        ));
+        assert!(matches!(
+            remove_owned_bootstrap_state(&commit_state),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
+        ));
+        assert!(
+            commit_path.exists(),
+            "普通卸载不得把真实提交事实当作可删除的多余对象"
+        );
+
+        let authorized = AuthorizedReplacementCommitFact {
+            path: commit_path.clone(),
+            canonical_intent_sha256: store
+                .load()
+                .expect("可读的提交事实")
+                .expect("事实已落盘")
+                .canonical_intent_sha256,
+        };
+        validate_owned_bootstrap_state_with_commit_custody(Some(&commit_state), Some(&authorized))
+            .expect("绑定到当前 intent 的提交事实是源阶段的恢复凭据");
+        let mismatched = AuthorizedReplacementCommitFact {
+            canonical_intent_sha256: "e".repeat(64),
+            ..authorized
+        };
+        assert!(matches!(
+            validate_owned_bootstrap_state_with_commit_custody(
+                Some(&commit_state),
+                Some(&mismatched)
+            ),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "replacement commit fact is not bound to the committed intent"
+            ))
+        ));
+        assert!(commit_path.exists());
+    }
+
+    #[test]
+    fn bootstrap_state_validation_retires_the_fixed_failure_child_contents() {
+        let temporary = tempfile::tempdir().expect("failure child temp");
+        let state = owned_state(temporary.path());
+        let failure = state.join("runtime-failure");
+        private_directory(&failure);
+        for name in ["epoch.toml", "latch", "repair-intent.json"] {
+            let path = failure.join(name);
+            fs::write(&path, b"custody").expect("failure datum");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("failure mode");
+        }
+
+        validate_owned_bootstrap_state(Some(&state))
+            .expect("固定故障 child 与其白名单数据是受支持的保管对象");
+        remove_owned_bootstrap_state(&state).expect("卸载退休固定 child 的实际数据");
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn bootstrap_state_validation_rejects_unknown_objects_inside_the_fixed_failure_child() {
+        let temporary = tempfile::tempdir().expect("unknown failure object temp");
+        let state = owned_state(temporary.path());
+        let failure = state.join("runtime-failure");
+        private_directory(&failure);
+        let epoch = failure.join("epoch.toml");
+        fs::write(&epoch, b"custody").expect("epoch");
+        fs::set_permissions(&epoch, fs::Permissions::from_mode(0o600)).expect("epoch mode");
+        let foreign = failure.join("attached");
+        fs::write(&foreign, b"foreign").expect("foreign entry");
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o600)).expect("foreign mode");
+
+        assert!(matches!(
+            validate_owned_bootstrap_state(Some(&state)),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
+        ));
+        assert!(matches!(
+            remove_owned_bootstrap_state(&state),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
+        ));
+        assert!(foreign.exists());
+        assert!(state.exists());
+    }
+
+    /// 生产形态的源安装：可信 metadata 与每个受管对象都在盘上，固定 bootstrap state 目录里
+    /// 同时有 D9 故障保管 child 的实际数据、候选 `trust` 与空 `inbox`。
+    struct SourceInstallation {
+        install_metadata_path: PathBuf,
+        identity_path: PathBuf,
+        state_dir: PathBuf,
+        bootstrap_state: PathBuf,
+        custody: PathBuf,
+        trust_generation: PathBuf,
+        commit_fact_path: PathBuf,
+    }
+
+    fn schema_four_metadata_contents() -> String {
+        [
+            "schema_version = 4".to_owned(),
+            "hub_url = \"https://hub.example\"".to_owned(),
+            format!(
+                "identity_path = \"{PRODUCTION_INSTALL_STATE_DIR}/identity/probe-bootstrap.toml\""
+            ),
+            format!("install_path = \"{PRODUCTION_PROBE_BINARY_PATH}\""),
+            format!("observation_runtime_path = \"{OBSERVATION_RUNTIME_BINARY_PATH}\""),
+            format!("cpu_provider_path = \"{CPU_PROVIDER_BINARY_PATH}\""),
+            format!("lifecycle_companion_path = \"{LIFECYCLE_COMPANION_BINARY_PATH}\""),
+            format!("probe_ipc_group = \"{PROBE_IPC_GROUP}\""),
+            format!(
+                "probe_ipc_group_ownership = \"!enoki-bootstrap-{}\"",
+                "d".repeat(32)
+            ),
+            format!("observation_ipc_group = \"{OBSERVATION_IPC_GROUP}\""),
+            format!(
+                "operation_status_path = \"{PRODUCTION_INSTALL_STATE_DIR}/probe-operation-status.toml\""
+            ),
+            format!("state_dir = \"{PRODUCTION_INSTALL_STATE_DIR}\""),
+            format!("probe_distribution_root_sha256 = \"{}\"", "a".repeat(64)),
+            format!("install_state_sha256 = \"{}\"", "b".repeat(64)),
+            format!("target_manifest_sha256 = \"{}\"", "c".repeat(64)),
+            "bundle_version = \"1.2.3\"".to_owned(),
+            format!("bootstrap_acquirer_path = \"{PRODUCTION_BOOTSTRAP_ACQUIRER_PATH}\""),
+            format!("bootstrap_activator_path = \"{PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH}\""),
+            format!("bootstrap_state_dir = \"{PRODUCTION_BOOTSTRAP_STATE_DIR}\""),
+            "service_name = \"enoki-probe\"".to_owned(),
+            "service_user = \"enoki-probe\"".to_owned(),
+            "service_group = \"enoki-probe\"".to_owned(),
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"".to_owned(),
+            format!("observation_runtime_service_unit_path = \"{OBSERVATION_RUNTIME_SERVICE_UNIT_PATH}\""),
+            format!("observation_runtime_socket_unit_path = \"{OBSERVATION_RUNTIME_SOCKET_UNIT_PATH}\""),
+            format!("cpu_provider_service_unit_path = \"{CPU_PROVIDER_SERVICE_UNIT_PATH}\""),
+            format!("cpu_provider_socket_unit_path = \"{CPU_PROVIDER_SOCKET_UNIT_PATH}\""),
+            format!("lifecycle_companion_service_unit_path = \"{LIFECYCLE_COMPANION_SERVICE_UNIT_PATH}\""),
+            format!("lifecycle_companion_socket_unit_path = \"{LIFECYCLE_COMPANION_SOCKET_UNIT_PATH}\""),
+            format!("collector_helper_sudoers_path = \"{PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH}\""),
+        ]
+        .join("\n")
+    }
+
+    fn installed_source(root: &Path) -> SourceInstallation {
+        let rooted = |path: &Path| preflight_rooted_path(Some(root), path);
+        let install_metadata_path = rooted(Path::new(PRODUCTION_INSTALL_METADATA_PATH));
+        fs::create_dir_all(install_metadata_path.parent().expect("metadata parent"))
+            .expect("metadata parent");
+        fs::write(&install_metadata_path, schema_four_metadata_contents())
+            .expect("install metadata");
+        fs::set_permissions(&install_metadata_path, fs::Permissions::from_mode(0o600))
+            .expect("install metadata mode");
+        let parsed = read_trusted_probe_install_metadata_read_only(&install_metadata_path, None)
+            .expect("生产路径形态的可信安装收据");
+        let mut managed = vec![
+            (parsed.install_path.clone(), 0o755),
+            (parsed.service_unit_path.clone(), 0o644),
+        ];
+        for path in &parsed.observation_unit_paths {
+            managed.push((path.clone(), 0o644));
+        }
+        for path in [
+            parsed.observation_runtime_path.as_deref(),
+            parsed.cpu_provider_path.as_deref(),
+            parsed.lifecycle_companion_path.as_deref(),
+            parsed.bootstrap_acquirer_path.as_deref(),
+            parsed.bootstrap_activator_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            managed.push((path.to_path_buf(), 0o755));
+        }
+        for (path, mode) in managed {
+            create_file(&rooted(&path), mode);
+        }
+        if let Some(path) = parsed.collector_helper_sudoers_path.as_deref() {
+            create_file(&rooted(path), 0o440);
+        }
+        let identity_path = rooted(&parsed.identity_path);
+        fs::create_dir_all(identity_path.parent().expect("identity parent"))
+            .expect("identity parent");
+        fs::write(
+            &identity_path,
+            "hub_url = \"https://hub.example\"\nprobe_id = \"probe_01\"\nprobe_private_key_pem = \"test-private-key\"\n",
+        )
+        .expect("source identity");
+        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
+            .expect("source identity mode");
+        let bootstrap_state = rooted(
+            parsed
+                .bootstrap_state_dir
+                .as_deref()
+                .expect("fixed bootstrap state dir"),
+        );
+        fs::create_dir_all(bootstrap_state.join("trust")).expect("trust dir");
+        fs::create_dir(bootstrap_state.join("inbox")).expect("inbox dir");
+        for path in [
+            &bootstrap_state,
+            &bootstrap_state.join("trust"),
+            &bootstrap_state.join("inbox"),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .expect("bootstrap state mode");
+        }
+        let trust_generation = bootstrap_state.join("trust/delegation-generation");
+        fs::write(&trust_generation, b"candidate trust").expect("candidate trust");
+        fs::set_permissions(&trust_generation, fs::Permissions::from_mode(0o600))
+            .expect("candidate trust mode");
+        let custody = bootstrap_state.join("runtime-failure");
+        private_directory(&custody);
+        for name in ["epoch.toml", "latch", "repair-intent.json"] {
+            let datum = custody.join(name);
+            fs::write(&datum, b"source custody").expect("failure datum");
+            fs::set_permissions(&datum, fs::Permissions::from_mode(0o600)).expect("failure mode");
+        }
+        SourceInstallation {
+            install_metadata_path,
+            identity_path,
+            state_dir: rooted(&parsed.state_dir),
+            bootstrap_state,
+            custody,
+            trust_generation,
+            commit_fact_path: rooted(Path::new(PRODUCTION_REPLACEMENT_COMMIT_PATH)),
+        }
+    }
+
+    /// 绑定到上述真实收据的替换意图：源 Probe 摘要取自盘上的固定生产路径。
+    fn source_replacement_intent(root: &Path) -> ReplacementIntent {
+        ReplacementIntent {
+            enrollment_id: "enr_0123456789abcdef".to_owned(),
+            enrollment_token_sha256: "a".repeat(64),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_01".to_owned(),
+            source_probe_version: "1.2.3".to_owned(),
+            source_probe_sha256: fixed_installed_probe_sha256(
+                Path::new(PRODUCTION_PROBE_BINARY_PATH),
+                Some(root),
+            )
+            .expect("installed Probe digest"),
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+            target_probe_version: "1.2.4".to_owned(),
+            target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+        }
+    }
+
+    /// R51-4：committed Replacement 的源阶段必须与真实 `FileReplacementCommitStore` 事先写入
+    /// 同一 bootstrap state 目录的提交事实共存，并只退休源安装的 D9 固定故障保管 child。
+    /// 三段依次证明：事实已落盘而 state 中另有未知对象时整个源阶段失败关闭，保管与
+    /// `cleanup_complete = false` 的事实都原样保留；绑定到同一 intent 的事实被认作本次替换的
+    /// 恢复凭据后源保管退休，候选 `trust`／`inbox`／父目录与事实全部保留且 `cleanup_complete`
+    /// 真实落盘；`cleanup_complete` 之后重入不再触及源保管，也不删除候选新建的故障 state。
+    #[test]
+    fn committed_replacement_retires_the_source_custody_child_only_in_the_source_phase() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path();
+        let source = installed_source(root);
+        let intent = source_replacement_intent(root);
+        let mut store = FileReplacementCommitStore::at(&source.commit_fact_path, 0);
+
+        let stray = source.bootstrap_state.join("stray");
+        fs::write(&stray, b"foreign").expect("stray entry");
+        let interrupted = commit_replacement_and_cleanup_install_with_systemd(
+            intent.clone(),
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            Some(root),
+            &mut TestSystemd::default(),
+        );
+        assert!(
+            matches!(
+                interrupted,
+                Err(ReplacementCommitError::Effect(
+                    ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "Probe Bootstrap state contains an unexpected entry"
+                    )
+                ))
+            ),
+            "未知对象仍必须失败关闭：{interrupted:?}"
+        );
+        assert!(
+            source.custody.join("epoch.toml").exists(),
+            "源阶段失败时故障保管 child 不得被退休"
+        );
+        let interrupted_fact = store
+            .load()
+            .expect("可读的提交事实")
+            .expect("清理之前提交事实已持久化");
+        assert!(
+            !interrupted_fact.cleanup_complete,
+            "失败关闭的边界必须是盘上真实的 cleanup_complete = false"
+        );
+
+        fs::remove_file(&stray).expect("remove stray entry");
+        let mut source_systemd = TestSystemd::default();
+        let completed = commit_replacement_and_cleanup_install_with_systemd(
+            intent.clone(),
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            Some(root),
+            &mut source_systemd,
+        )
+        .expect("绑定到同一 intent 的真实提交事实必须与候选 trust 共存并完成源阶段");
+        assert!(completed.cleanup_complete);
+        assert!(!completed.candidate_layout_complete);
+        assert!(!source_systemd.calls.is_empty());
+        assert!(
+            !source.custody.exists(),
+            "源固定 child 与其保管数据随源退休"
+        );
+        assert!(
+            source.bootstrap_state.exists(),
+            "候选 bootstrap state 父目录不属于源退休清单"
+        );
+        assert_eq!(
+            fs::read(&source.trust_generation).expect("候选 trust 保留"),
+            b"candidate trust"
+        );
+        assert!(source.bootstrap_state.join("inbox").is_dir());
+        assert!(
+            source.commit_fact_path.exists(),
+            "提交事实由 finalizer 的 exact 动作退休，不属于源清理清单"
+        );
+        let fact = store
+            .load()
+            .expect("可读的提交事实")
+            .expect("cleanup_complete 已落盘");
+        assert!(fact.cleanup_complete);
+        assert_eq!(
+            fact.canonical_intent_sha256,
+            intent.canonical_sha256().expect("canonical intent")
+        );
+        assert!(
+            !source.install_metadata_path.exists(),
+            "可信 metadata 在全部可失败清理之后退休"
+        );
+        assert!(!source.identity_path.exists());
+        assert!(!source.state_dir.exists());
+
+        let candidate_custody = source.bootstrap_state.join("runtime-failure");
+        private_directory(&candidate_custody);
+        let sentinel = candidate_custody.join("epoch.toml");
+        fs::write(&sentinel, b"late custody").expect("late custody");
+        fs::set_permissions(&sentinel, fs::Permissions::from_mode(0o600)).expect("late mode");
+
+        let mut reentry_systemd = TestSystemd::default();
+        let reentry = commit_replacement_and_cleanup_install_with_systemd(
+            intent,
+            &mut store,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            Some(root),
+            &mut reentry_systemd,
+        )
+        .expect("exact 重入不再重复源删除");
+        assert!(reentry.cleanup_complete);
+        assert!(
+            reentry_systemd.calls.is_empty(),
+            "cleanup_complete 之后重入不得再次执行源清理"
+        );
+        assert!(
+            candidate_custody.exists(),
+            "候选新建的故障 state 属于候选保管"
+        );
+        assert_eq!(
+            fs::read(&sentinel).expect("late custody remains"),
+            b"late custody"
+        );
     }
 }
