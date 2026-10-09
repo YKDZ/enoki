@@ -57,6 +57,23 @@ jobs:
           echo "::error::A packaged Hub artifact requires signed Probe assets and reproducibility verification."
           exit 1
 
+      # 在任何镜像构建或 Buildx bootstrap 之前，复用新鲜 runner 上已有的 Docker
+      # daemon：用原生 jq 仅合并 registry-mirrors 键并保留 daemon.json 其他既有键，
+      # 随后正常重启。嵌入式 BuildKit 与 Buildx bootstrap 取镜像都会优先经
+      # Google 公共 Hub 缓存，未命中仍按 Docker 既有行为回退 Docker Hub。
+      - name: Route the runner Docker daemon through the public Hub cache
+        run: |
+          if [ -e /etc/docker/daemon.json ]; then
+            base="$(sudo cat /etc/docker/daemon.json)"
+          else
+            base='{}'
+          fi
+          sudo mkdir -p /etc/docker
+          printf '%s' "$base" |
+            jq '.["registry-mirrors"] = ["https://mirror.gcr.io"]' |
+            sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+
       - name: Set up Node.js for release verification
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -135,6 +152,10 @@ jobs:
       - name: Set up Docker Buildx
         if: inputs.package-artifact
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Build the Hub OCI archive twice from clean state
         if: inputs.package-artifact
