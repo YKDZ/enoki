@@ -80,9 +80,8 @@ fn http_attempt_error(error: ureq::Error) -> HttpAttemptError {
     }
 }
 
-/// Hub error bodies are `{ "error": <code> }`; keeping that code is the whole
-/// point of this narrow read, so anything unreadable or non-string keeps the
-/// plain status text and the original classification.
+/// Hub 错误体形如 `{ "error": <code> }`；保留该业务码就是这次窄读取的全部目的，
+/// 因此读取失败、不是 JSON 或该字段不是字符串时，一律维持原来的状态文字与原分类。
 fn hub_error_code(response: ureq::Response) -> Option<String> {
     const MAX_ERROR_BODY_BYTES: u64 = 4096;
     let mut body = Vec::new();
@@ -113,7 +112,7 @@ mod tests {
 
     const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(2);
 
-    /// Serves one raw HTTP response to a single request on a private loopback port.
+    /// 在独占的回环端口上，向单个请求返回一份原始 HTTP 响应。
     fn serve(status_line: &str, content_type: &str, body: &[u8]) -> (u16, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let port = listener.local_addr().expect("loopback address").port();
