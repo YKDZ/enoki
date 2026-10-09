@@ -516,8 +516,8 @@ claim=/var/lib/enoki-release-e2e/claim
 runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
 unit_file=/etc/systemd/system/enoki-observation-runtime.service
-epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
-latch=/var/lib/enoki-probe/runtime-failure/latch
+epoch=/var/lib/enoki-probe-bootstrap/runtime-failure/epoch.toml
+latch=/var/lib/enoki-probe-bootstrap/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
 fail() { printf '%s\n' "$1" >&2; exit 79; }
 [ -d "$claim" ] || fail 'release E2E ownership claim is missing'
@@ -601,8 +601,8 @@ set -eu
 claim=/var/lib/enoki-release-e2e/claim
 runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
-epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
-latch=/var/lib/enoki-probe/runtime-failure/latch
+epoch=/var/lib/enoki-probe-bootstrap/runtime-failure/epoch.toml
+latch=/var/lib/enoki-probe-bootstrap/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
@@ -632,8 +632,8 @@ set -eu
 claim=/var/lib/enoki-release-e2e/claim
 runtime=/usr/local/bin/enoki-observation-runtime
 backup="$claim/observation-runtime-original"
-epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml
-latch=/var/lib/enoki-probe/runtime-failure/latch
+epoch=/var/lib/enoki-probe-bootstrap/runtime-failure/epoch.toml
+latch=/var/lib/enoki-probe-bootstrap/runtime-failure/latch
 unit=${shellSingleQuote(observationRuntimeUnit)}
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]

@@ -2,6 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
+import { normalizeSemVer } from "../probe/asset-set.js";
 import { createAuditRepository } from "./audit.js";
 import type { HostProfilePersistenceValues } from "./host-profiles.js";
 import {
@@ -226,7 +227,10 @@ export function createEnrollmentRepository(
         if (
           !host ||
           host.probeId !== pending.expectedProbeId ||
-          host.probeVersion !== pending.expectedProbeVersion
+          !hostVersionMatchesExpectedSourceVersion(
+            host.probeVersion,
+            pending.expectedProbeVersion,
+          )
         ) {
           return null;
         }
@@ -566,7 +570,10 @@ export function createEnrollmentRepository(
           if (
             !target ||
             target.probeId !== input.target.expectedProbeId ||
-            target.probeVersion !== input.target.expectedProbeVersion
+            !hostVersionMatchesExpectedSourceVersion(
+              target.probeVersion,
+              input.target.expectedProbeVersion,
+            )
           ) {
             return { kind: "existing_host_unavailable" };
           }
@@ -767,7 +774,10 @@ export function createEnrollmentRepository(
               !pending.targetAssetSetDigest ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
-              existingHost.probeVersion !== pending.expectedProbeVersion)
+              !hostVersionMatchesExpectedSourceVersion(
+                existingHost.probeVersion,
+                pending.expectedProbeVersion,
+              ))
           ) {
             return null;
           }
@@ -968,6 +978,22 @@ function validSourceProbeSha256(value: unknown): value is string[] {
     value.every(
       (digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
     )
+  );
+}
+
+// ADR 0058 允许 Host 上报带可选 v 前缀的版本，因此这些比较只在双方按既有 SemVer
+// 语义规范化后相等时放行；无效值之间不得互相匹配。
+function hostVersionMatchesExpectedSourceVersion(
+  hostProbeVersion: string | null | undefined,
+  expectedProbeVersion: string,
+): boolean {
+  const hostVersion = normalizeSemVer(hostProbeVersion);
+  const expectedVersion = normalizeSemVer(expectedProbeVersion);
+
+  return (
+    hostVersion !== null &&
+    expectedVersion !== null &&
+    hostVersion === expectedVersion
   );
 }
 

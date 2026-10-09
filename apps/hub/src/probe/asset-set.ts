@@ -259,7 +259,7 @@ function probeAssetSetVersionResult(
   };
 }
 
-function normalizeSemVer(value: string | null | undefined) {
+export function normalizeSemVer(value: string | null | undefined) {
   if (typeof value !== "string") {
     return null;
   }

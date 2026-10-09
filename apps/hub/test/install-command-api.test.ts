@@ -321,6 +321,167 @@ describe("Owner add-host install command", () => {
     database.close();
   });
 
+  it("v前缀上报的Host可创建手动重装pending且签名来源版本原样保留", async () => {
+    const database = await createTemporaryDatabase();
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-reinstall-vprefix-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.2.2",
+      targetVersion: "1.2.3",
+      transition: "replacement-required",
+    });
+    database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "203.0.113.10",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "v前缀上报的主机",
+      displayNameEdited: false,
+      id: 9,
+      lastClockSkewMs: null,
+      lastReportAtMs: 1_725_000_000_000,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-v-prefixed-identity",
+      probeSecretHash: "secret-hash-v-prefixed-identity",
+      probeVersion: "v1.2.2",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      installation: {
+        bootstrapRecipe,
+        probeApiOrigin: "https://hub.example",
+      },
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+    });
+    const ownerSession = await loginOwner(app);
+
+    const response = await app.request(
+      "/api/web/enrollments/manual-reinstall/9",
+      { headers: { cookie: ownerSession }, method: "POST" },
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+    };
+    expect(
+      database.enrollments.inspectPending({
+        nowMs: Date.now(),
+        tokenHash: hashSecret(body.enrollmentToken),
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        sourceProbeVersion: "1.2.2",
+        targetKind: "manual_reinstall",
+      }),
+    );
+    expect(
+      database.sqlite
+        .prepare(
+          `select expected_probe_version as expectedProbeVersion
+             from enrollment_tokens where enrollment_id = ?`,
+        )
+        .get(body.enrollmentId),
+    ).toEqual({ expectedProbeVersion: "1.2.2" });
+
+    database.close();
+  });
+
+  it("Host版本与预期来源版本不同或无效时拒绝创建手动重装", async () => {
+    const database = await createTemporaryDatabase();
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-reinstall-seam-refuse-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.2.2",
+      targetVersion: "1.2.3",
+      transition: "replacement-required",
+    });
+    database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "203.0.113.11",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "不同版本的主机",
+      displayNameEdited: false,
+      id: 10,
+      lastClockSkewMs: null,
+      lastReportAtMs: 1_725_000_000_000,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-different-version",
+      probeSecretHash: "secret-hash-different-version",
+      probeVersion: "v1.2.1",
+    });
+    database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "203.0.113.12",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "无效版本的主机",
+      displayNameEdited: false,
+      id: 11,
+      lastClockSkewMs: null,
+      lastReportAtMs: 1_725_000_000_000,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-invalid-version",
+      probeSecretHash: "secret-hash-invalid-version",
+      probeVersion: "develop",
+    });
+
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_000_000,
+        enrollmentId: "enr_seamddifferent_000001",
+        expiresAtMs: 1_725_000_060_000,
+        target: {
+          expectedHubOrigin: "https://hub.example",
+          expectedProbeId: "probe-different-version",
+          expectedProbeVersion: "1.2.2",
+          hostId: 10,
+          kind: "manual_reinstall" as const,
+          sourceProbeSha256: release.sourceProbeSha256,
+          targetAssetSetDigest: release.targetAssetSetDigest,
+          targetProbeVersion: "1.2.3",
+        },
+        tokenHash: "token-hash-seam-different",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: 1_725_000_000_000,
+        enrollmentId: "enr_seaminvalidboth_00001",
+        expiresAtMs: 1_725_000_060_000,
+        target: {
+          expectedHubOrigin: "https://hub.example",
+          expectedProbeId: "probe-invalid-version",
+          expectedProbeVersion: "develop",
+          hostId: 11,
+          kind: "manual_reinstall" as const,
+          sourceProbeSha256: release.sourceProbeSha256,
+          targetAssetSetDigest: release.targetAssetSetDigest,
+          targetProbeVersion: "1.2.3",
+        },
+        tokenHash: "token-hash-seam-invalid",
+      }),
+    ).toEqual({ kind: "existing_host_unavailable" });
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from enrollment_tokens")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
   it("issues the same bounded command for an offline closed recovery disposition", async () => {
     const database = await createTemporaryDatabase();
     const assetDir = await mkdtemp(
