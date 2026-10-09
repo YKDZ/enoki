@@ -303,7 +303,7 @@ describe("Release E2E business assertions", () => {
     return client.createEnrollment();
   }
 
-  it("accepts the produced manual-reinstall enrollment input verbatim through the consumer", async () => {
+  it("接受正式生成的手动重装注册输入并原样交给消费者", async () => {
     const produced = producedReplacementEnrollment();
     // 正式生产者的手动重装注册输入是携带迁移绑定的规范 JSON，而非裸 token
     expect(produced.installCommand).toContain("replacementMigration");
@@ -314,7 +314,7 @@ describe("Release E2E business assertions", () => {
     expect(created.installCommand).toBe(produced.installCommand);
   });
 
-  it("keeps manual-reinstall enrollment binding and rejects malformed structured inputs", async () => {
+  it("保持手动重装绑定并拒绝无效的结构化注册输入", async () => {
     const produced = producedReplacementEnrollment();
     // 迁移 JSON 的 token 与 Enrollment 来源不一致时仍触发绑定错误
     await expect(
@@ -348,7 +348,7 @@ describe("Release E2E business assertions", () => {
     }
   });
 
-  it("keeps the bare-token new host and legacy install commands accepted by the consumer", async () => {
+  it("保持裸 token 新主机与 legacy 安装命令继续被消费者接受", async () => {
     // 正对照：既有裸 token 新主机命令与 .74 legacy 命令保持可接受
     await expect(
       consumeCreatedEnrollment(officialEnrollment()),
