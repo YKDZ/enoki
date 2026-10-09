@@ -17,11 +17,16 @@ use crate::{
         TrustedProbeInstallPreflight,
     },
 };
+use enoki_probe_bootstrap::handoff::Enrollment;
 use enoki_probe_bootstrap::lifecycle::{LifecycleRequest, LifecycleResponse};
+use enoki_probe_bootstrap::replacement::{
+    FileReplacementCommitStore, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
+};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -1919,5 +1924,679 @@ fn an_untrusted_state_root_form_does_not_take_on_removal_authority() {
     assert!(
         fixture.metadata_path.exists(),
         "更早的可信读端拒绝时尚未退休任何必要资源"
+    );
+}
+
+/// 命令替身只替换环境供应：产品 Adapter 仍按 PATH 解析并执行同名程序，清理算法不被复制。
+/// 每条调用按出现顺序留痕；删除命令额外记录当时的 state 根本体 owner，用来证明归属交接
+/// 耐久先于账户删除，以及拒绝路径下账户删除从未开始。
+const LEGACY_STATE_ROOT_COMMAND_SHIM: &str = r#"#!/bin/sh
+name=${0##*/}
+printf '%s <%s>\n' "$name" "$*" >> "$ENOKI_TEST_LEGACY_STATE_COMMANDS"
+case "$name" in
+  systemctl)
+    if [ "$1" = show ]; then printf 'not-found\n'; fi
+    exit 0
+    ;;
+  getent)
+    record=$(/usr/bin/sed -n "s#^$1|$2|##p" "$ENOKI_TEST_LEGACY_STATE_ACCOUNTS")
+    if [ -z "$record" ]; then exit 2; fi
+    printf '%s\n' "$record"
+    exit 0
+    ;;
+  userdel|groupdel)
+    if [ -e "$ENOKI_TEST_LEGACY_STATE_DIR" ]; then
+      printf 'state-owner %s\n' "$(/usr/bin/stat -c '%u:%g' "$ENOKI_TEST_LEGACY_STATE_DIR")" >> "$ENOKI_TEST_LEGACY_STATE_COMMANDS"
+    else
+      printf 'state-owner absent\n' >> "$ENOKI_TEST_LEGACY_STATE_COMMANDS"
+    fi
+    if [ "$name" = userdel ]; then database=passwd; else database=group; fi
+    /usr/bin/sed -i "/^$database|$1|/d" "$ENOKI_TEST_LEGACY_STATE_ACCOUNTS"
+    exit 0
+    ;;
+  *)
+    printf '替身不接受的命令\n' >&2
+    exit 99
+    ;;
+esac
+"#;
+
+/// 真实主机上可查询的旧服务账户记录。正向反馈只接受当场可读、且数值与 state 根本体
+/// owner 对应的实际账户，不接受构造常量。
+struct LegacyHostAccount {
+    user: String,
+    group: String,
+    uid: u32,
+    gid: u32,
+    passwd_record: String,
+    group_record: String,
+}
+
+fn host_legacy_service_account() -> Option<LegacyHostAccount> {
+    let record = |database: &str, name: &str| -> Option<(String, u32)> {
+        let output = Command::new("getent")
+            .args([database, name])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let record = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+        if record.split(':').next() != Some(name) {
+            return None;
+        }
+        let identifier = record.split(':').nth(2)?.parse().ok()?;
+        Some((record, identifier))
+    };
+    let (passwd_record, uid) = record("passwd", "sys")?;
+    let (group_record, gid) = record("group", "tty")?;
+    Some(LegacyHostAccount {
+        user: "sys".to_owned(),
+        group: "tty".to_owned(),
+        uid,
+        gid,
+        passwd_record,
+        group_record,
+    })
+}
+
+/// 旧产品（schema 1）的正式替换清理输入：可信 root-owned metadata 与其清单内的真实资产、
+/// state 根本体的实际数值 owner 和实际数据、durable 的 cleanup_complete=false 提交事实。
+struct LegacyStateRootScenario<'a> {
+    root: &'a Path,
+    service_user: &'a str,
+    service_group: &'a str,
+    accounts: &'a str,
+    owner: (u32, u32),
+}
+
+struct LegacyStateRootFixture {
+    metadata_path: PathBuf,
+    identity_path: PathBuf,
+    state_dir: PathBuf,
+    candidate_bootstrap_state: PathBuf,
+    commit_path: PathBuf,
+    accounts_path: PathBuf,
+    commands_log: PathBuf,
+    shim_dir: PathBuf,
+}
+
+fn legacy_schema_one_metadata_contents(service_user: &str, service_group: &str) -> String {
+    [
+        "schema_version = 1".to_owned(),
+        "hub_url = \"https://hub.example\"".to_owned(),
+        "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"".to_owned(),
+        "install_path = \"/usr/local/bin/enoki-probe\"".to_owned(),
+        "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"".to_owned(),
+        "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\"".to_owned(),
+        "collector_helper_sudoers_path = \"/etc/sudoers.d/enoki-probe-collector-helpers\""
+            .to_owned(),
+        format!("probe_asset_public_key_sha256 = \"{}\"", "a".repeat(64)),
+        "service_name = \"enoki-probe\"".to_owned(),
+        format!("service_user = \"{service_user}\""),
+        format!("service_group = \"{service_group}\""),
+        "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"".to_owned(),
+        "state_dir = \"/var/lib/enoki-probe\"".to_owned(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+/// durable intent 与 canonical request 在父子进程各自按同一固定输入重建，恢复证明因此携带
+/// 同一 intent，而不是新造一次授权。
+fn legacy_replacement_intent() -> ReplacementIntent {
+    ReplacementIntent {
+        enrollment_id: "enr_0123456789abcdef".to_owned(),
+        enrollment_token_sha256: format!("{:x}", Sha256::digest(b"enk_enroll_test")),
+        host_id: "7".to_owned(),
+        hub_origin: "https://hub.example".to_owned(),
+        old_probe_id: "probe_old_01".to_owned(),
+        source_probe_version: "1.2.3".to_owned(),
+        source_probe_sha256: format!("{:x}", Sha256::digest(b"owned")),
+        target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+        target_probe_version: "1.2.3".to_owned(),
+        target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+        target_manifest_sha256: "d".repeat(64),
+    }
+}
+
+fn legacy_replacement_request() -> LifecycleRequest {
+    let intent = legacy_replacement_intent();
+    let input = format!(
+        "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"{}\",\"expectedProbeId\":\"{}\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.3\",\"targetAssetSetDigest\":\"{}\",\"targetHostId\":\"{}\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+        intent.enrollment_id,
+        intent.old_probe_id,
+        intent.source_probe_sha256,
+        intent.target_asset_set_digest,
+        intent.host_id,
+    );
+    let enrollment = Enrollment::from_install_input("https://hub.example", input.as_bytes())
+        .expect("exact replacement enrollment");
+    LifecycleRequest::replacement_migration(
+        &enrollment,
+        &intent.target_asset_set_digest,
+        &intent.target_bundle_target,
+        &intent.target_manifest_sha256,
+        &intent.target_probe_version,
+    )
+    .expect("exact replacement request")
+}
+
+fn build_legacy_state_root_fixture(
+    scenario: &LegacyStateRootScenario<'_>,
+) -> LegacyStateRootFixture {
+    let rooted = |absolute: &str| scenario.root.join(absolute.trim_start_matches('/'));
+    for path in [
+        "/usr/local/bin/enoki-probe",
+        "/etc/systemd/system/enoki-probe.service",
+        "/etc/sudoers.d/enoki-probe-operations",
+        "/etc/sudoers.d/enoki-probe-collector-helpers",
+    ] {
+        let path = rooted(path);
+        fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture parent");
+        fs::write(&path, "owned").expect("fixture asset");
+    }
+    fs::set_permissions(
+        rooted("/usr/local/bin/enoki-probe"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("installed Probe mode");
+
+    let state_dir = rooted("/var/lib/enoki-probe");
+    let identity_path = state_dir.join("identity/probe-bootstrap.toml");
+    fs::create_dir_all(identity_path.parent().expect("identity parent")).expect("identity parent");
+    fs::write(
+        &identity_path,
+        "hub_url = \"https://hub.example\"\nprobe_id = \"probe_old_01\"\nprobe_private_key_pem = \"test-private-key\"\n",
+    )
+    .expect("source Probe identity");
+    fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600)).expect("identity mode");
+    fs::write(state_dir.join("installed-state"), "本安装实际数据夹具").expect("state data");
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o750)).expect("state mode");
+
+    let candidate_bootstrap_state = rooted("/var/lib/enoki-probe-bootstrap");
+    fs::create_dir_all(&candidate_bootstrap_state).expect("candidate Bootstrap state");
+    fs::set_permissions(
+        &candidate_bootstrap_state,
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("candidate Bootstrap state mode");
+
+    let metadata_path = rooted("/etc/enoki/probe-install.toml");
+    fs::create_dir_all(metadata_path.parent().expect("metadata parent")).expect("metadata parent");
+    fs::write(
+        &metadata_path,
+        legacy_schema_one_metadata_contents(scenario.service_user, scenario.service_group),
+    )
+    .expect("metadata");
+    fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o600)).expect("metadata mode");
+
+    let intent = legacy_replacement_intent();
+    let commit_path = rooted("/var/lib/enoki-probe-bootstrap/replacement-migration.json");
+    FileReplacementCommitStore::at(&commit_path, 0)
+        .persist(&ReplacementCommitFact {
+            schema_version: 1,
+            canonical_intent_sha256: intent.canonical_sha256().expect("canonical intent"),
+            intent,
+            cleanup_complete: false,
+            candidate_layout_complete: false,
+        })
+        .expect("durable pre-cleanup commit");
+
+    let shim_dir = scenario.root.join("command-shim");
+    fs::create_dir_all(&shim_dir).expect("shim directory");
+    let shim = shim_dir.join("command-shim.sh");
+    fs::write(&shim, LEGACY_STATE_ROOT_COMMAND_SHIM).expect("command shim");
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).expect("command shim mode");
+    for program in ["systemctl", "getent", "userdel", "groupdel"] {
+        symlink(&shim, shim_dir.join(program)).expect("command shim link");
+    }
+    let accounts_path = scenario.root.join("accounts");
+    fs::write(&accounts_path, scenario.accounts).expect("account substitute");
+    let commands_log = scenario.root.join("commands.log");
+    fs::write(&commands_log, "").expect("command log");
+    std::os::unix::fs::chown(&state_dir, Some(scenario.owner.0), Some(scenario.owner.1))
+        .expect("state root owner");
+
+    LegacyStateRootFixture {
+        metadata_path,
+        identity_path,
+        state_dir,
+        candidate_bootstrap_state,
+        commit_path,
+        accounts_path,
+        commands_log,
+        shim_dir,
+    }
+}
+
+fn legacy_state_root_owner(path: &Path) -> Option<(u32, u32)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    Some((metadata.uid(), metadata.gid()))
+}
+
+fn legacy_command_trace(fixture: &LegacyStateRootFixture) -> Vec<String> {
+    fs::read_to_string(&fixture.commands_log)
+        .expect("command trace")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// 全新进程真正结束首个执行后，父进程重新读取 durable commit 事实本身。
+fn legacy_persisted_cleanup_completed(fixture: &LegacyStateRootFixture) -> bool {
+    FileReplacementCommitStore::at(&fixture.commit_path, 0)
+        .load()
+        .expect("durable commit fact is readable")
+        .expect("commit fact survives")
+        .cleanup_complete
+}
+
+fn run_legacy_state_root_child(
+    fixture: &LegacyStateRootFixture,
+    root: &Path,
+    expected: &str,
+    retirement_fault: bool,
+    sync_failure: bool,
+) {
+    let mut command = Command::new(std::env::current_exe().expect("current test process"));
+    command
+        .args([
+            "--exact",
+            "upgrader::uninstall::tests::legacy_state_root_formal_recovery_child_process",
+            "--nocapture",
+        ])
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin:/usr/sbin:/sbin",
+                fixture.shim_dir.display()
+            ),
+        )
+        .env("ENOKI_TEST_REPLACEMENT_PRODUCTION_ROOT", root)
+        .env("ENOKI_TEST_LEGACY_STATE_EXPECTED", expected)
+        .env("ENOKI_TEST_LEGACY_STATE_ACCOUNTS", &fixture.accounts_path)
+        .env("ENOKI_TEST_LEGACY_STATE_COMMANDS", &fixture.commands_log)
+        .env("ENOKI_TEST_LEGACY_STATE_DIR", &fixture.state_dir);
+    if retirement_fault {
+        command.env("ENOKI_TEST_LEGACY_STATE_RETIREMENT_FAULT", "1");
+    } else {
+        command.env_remove("ENOKI_TEST_LEGACY_STATE_RETIREMENT_FAULT");
+    }
+    if sync_failure {
+        command.env(
+            "ENOKI_TEST_STATE_ROOT_SYNC_FAILURE_PATH",
+            &fixture.state_dir,
+        );
+    } else {
+        command.env_remove("ENOKI_TEST_STATE_ROOT_SYNC_FAILURE_PATH");
+    }
+    let status = command
+        .status()
+        .expect("start a fresh production recovery process");
+    assert!(
+        status.success(),
+        "fresh recovery process for expected {expected} did not converge"
+    );
+}
+
+/// 正式 `run_lifecycle_companion` 的 exact-request 恢复入口：真实 committed cleanup、真实
+/// 目录 owner 与真实 metadata/commit 编解码，账户与 systemd 只由 PATH 替身供应环境。
+#[test]
+fn legacy_service_owned_state_root_is_handed_over_before_the_formal_account_deletion() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let Some(account) = host_legacy_service_account() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let fixture = build_legacy_state_root_fixture(&LegacyStateRootScenario {
+        root,
+        service_user: &account.user,
+        service_group: &account.group,
+        accounts: &format!(
+            "passwd|{}|{}\ngroup|{}|{}\n",
+            account.user, account.passwd_record, account.group, account.group_record
+        ),
+        owner: (account.uid, account.gid),
+    });
+    assert_eq!(
+        legacy_state_root_owner(&fixture.state_dir),
+        Some((account.uid, account.gid)),
+        "旧产品把 state 根本体留给服务账户"
+    );
+
+    run_legacy_state_root_child(&fixture, root, "succeeded", false, false);
+
+    let trace = legacy_command_trace(&fixture);
+    let userdel = trace
+        .iter()
+        .position(|line| line.starts_with("userdel <"))
+        .expect("旧服务账户由命令 Adapter 删除");
+    assert_eq!(
+        trace.get(userdel + 1).map(String::as_str),
+        Some("state-owner 0:0"),
+        "归属交接必须耐久先于账户删除"
+    );
+    let groupdel = trace
+        .iter()
+        .position(|line| line.starts_with("groupdel <"))
+        .expect("旧服务组由命令 Adapter 删除");
+    assert_eq!(
+        trace.get(groupdel + 1).map(String::as_str),
+        Some("state-owner 0:0"),
+        "服务组删除时根仍归 root"
+    );
+    let accounts = fs::read_to_string(&fixture.accounts_path).expect("account substitute");
+    assert!(
+        !accounts.contains("passwd|") && !accounts.contains("group|"),
+        "账户删除替身确实退休了本次记录：{accounts}"
+    );
+    assert!(
+        !fixture.state_dir.exists(),
+        "交接后的旧 ordinary 根本体随本安装 state 一起退休"
+    );
+    assert!(!fixture.identity_path.exists());
+    assert!(
+        !fixture.metadata_path.exists(),
+        "metadata 由 exact commit custody 在最后退休"
+    );
+    assert!(
+        fixture.candidate_bootstrap_state.exists(),
+        "committed Replacement 保留候选 Bootstrap custody"
+    );
+    assert!(
+        legacy_persisted_cleanup_completed(&fixture),
+        "成功清理的 receipt 必须为真"
+    );
+}
+
+/// 归属交接已耐久完成、账户也已删除后被打断：磁盘保留 false commit、留存 metadata 与
+/// root:root 的实际数据。第二个全新进程的账户查询明确 absent，准备动作不再依赖 owner。
+#[test]
+fn legacy_service_owned_state_root_recovers_in_a_new_process_after_the_accounts_are_deleted() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let Some(account) = host_legacy_service_account() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let fixture = build_legacy_state_root_fixture(&LegacyStateRootScenario {
+        root,
+        service_user: &account.user,
+        service_group: &account.group,
+        accounts: &format!(
+            "passwd|{}|{}\ngroup|{}|{}\n",
+            account.user, account.passwd_record, account.group, account.group_record
+        ),
+        owner: (account.uid, account.gid),
+    });
+
+    run_legacy_state_root_child(
+        &fixture,
+        root,
+        "lifecycle.replacement_cleanup_failed",
+        true,
+        false,
+    );
+
+    assert!(
+        !legacy_persisted_cleanup_completed(&fixture),
+        "本机未退休不能记为清理完成"
+    );
+    assert_eq!(
+        legacy_state_root_owner(&fixture.state_dir),
+        Some((0, 0)),
+        "中断后磁盘保留已交接的 root:root 根本体"
+    );
+    assert!(
+        fixture.state_dir.join("installed-state").exists(),
+        "内容保留故障下实际安装数据仍在"
+    );
+    assert!(
+        fixture.metadata_path.exists(),
+        "可信 metadata 活过可失败清理，仍由 exact commit custody 最后退休"
+    );
+    let accounts = fs::read_to_string(&fixture.accounts_path).expect("account substitute");
+    assert!(
+        !accounts.contains("passwd|") && !accounts.contains("group|"),
+        "首个进程已删除账户，重入不得再次依赖账户查询：{accounts}"
+    );
+
+    run_legacy_state_root_child(&fixture, root, "succeeded", false, false);
+
+    assert!(legacy_persisted_cleanup_completed(&fixture));
+    assert!(!fixture.state_dir.exists());
+    assert!(!fixture.metadata_path.exists());
+    assert!(fixture.candidate_bootstrap_state.exists());
+}
+
+/// chown 已完成而同步未完成的中断：任何 userdel/groupdel 都还没被调用，receipt 仍假，
+/// 磁盘保留 root:root 的实际数据；全新进程重新完成同步后继续。
+#[test]
+fn legacy_service_owned_state_root_rewaits_an_interrupted_handover_sync_in_a_new_process() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let Some(account) = host_legacy_service_account() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let fixture = build_legacy_state_root_fixture(&LegacyStateRootScenario {
+        root,
+        service_user: &account.user,
+        service_group: &account.group,
+        accounts: &format!(
+            "passwd|{}|{}\ngroup|{}|{}\n",
+            account.user, account.passwd_record, account.group, account.group_record
+        ),
+        owner: (account.uid, account.gid),
+    });
+
+    run_legacy_state_root_child(
+        &fixture,
+        root,
+        "lifecycle.replacement_cleanup_failed",
+        false,
+        true,
+    );
+
+    let trace = legacy_command_trace(&fixture);
+    assert!(
+        trace
+            .iter()
+            .all(|line| !line.starts_with("userdel") && !line.starts_with("groupdel")),
+        "交接耐久完成前绝不开始账户删除：{trace:?}"
+    );
+    assert!(
+        !legacy_persisted_cleanup_completed(&fixture),
+        "同步未完成不能把清理记为完成"
+    );
+    assert_eq!(
+        legacy_state_root_owner(&fixture.state_dir),
+        Some((0, 0)),
+        "中断只可能落在 chown 之后，重入必须重新完成同步"
+    );
+    assert!(fixture.state_dir.join("installed-state").exists());
+    assert!(fixture.metadata_path.exists());
+    let accounts = fs::read_to_string(&fixture.accounts_path).expect("account substitute");
+    assert!(
+        accounts.contains("passwd|") && accounts.contains("group|"),
+        "账户删除尚未开始：{accounts}"
+    );
+
+    run_legacy_state_root_child(&fixture, root, "succeeded", false, false);
+
+    let trace = legacy_command_trace(&fixture);
+    assert!(
+        trace.iter().any(|line| line.starts_with("userdel <")),
+        "重新同步后账户删除才继续：{trace:?}"
+    );
+    assert!(legacy_persisted_cleanup_completed(&fixture));
+    assert!(!fixture.state_dir.exists());
+    assert!(!fixture.metadata_path.exists());
+}
+
+/// 同一正式入口下的必要负项：owner 与本安装 metadata 名称的精确记录不符（含已接受调查的
+/// getent 全 absent 孤根输入）时不取得任何删除权，账户删除不开始，实际数据与壳逐字节保留。
+#[test]
+fn an_unqueryable_legacy_state_root_owner_never_starts_the_formal_account_deletion() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let host_account = host_legacy_service_account();
+    let mut cases = vec![(
+        "原 getent 全 absent 的孤根输入".to_owned(),
+        "enoki-probe".to_owned(),
+        "enoki-probe".to_owned(),
+        String::new(),
+        (8_888_u32, 8_888_u32),
+    )];
+    if let Some(account) = host_account.as_ref() {
+        cases.push((
+            "账户可查但目录 gid 与 group 记录不符".to_owned(),
+            account.user.clone(),
+            account.group.clone(),
+            format!(
+                "passwd|{}|{}\ngroup|{}|{}\n",
+                account.user, account.passwd_record, account.group, account.group_record
+            ),
+            (account.uid, account.gid + 1),
+        ));
+    }
+
+    for (label, service_user, service_group, accounts, owner) in cases {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let root = temporary.path();
+        let fixture = build_legacy_state_root_fixture(&LegacyStateRootScenario {
+            root,
+            service_user: &service_user,
+            service_group: &service_group,
+            accounts: &accounts,
+            owner,
+        });
+        fs::write(fixture.state_dir.join("unknown-payload"), "unknown data")
+            .expect("unknown payload");
+
+        run_legacy_state_root_child(
+            &fixture,
+            root,
+            "lifecycle.replacement_cleanup_failed",
+            false,
+            false,
+        );
+
+        let trace = legacy_command_trace(&fixture);
+        assert!(
+            trace
+                .iter()
+                .all(|line| !line.starts_with("userdel") && !line.starts_with("groupdel")),
+            "{label}：归属未确认时账户删除不开始"
+        );
+        assert_eq!(
+            legacy_state_root_owner(&fixture.state_dir),
+            Some(owner),
+            "{label}：未确认归属的根本体 owner 不被改动"
+        );
+        assert_eq!(
+            fs::read(fixture.state_dir.join("unknown-payload")).expect("unknown payload"),
+            b"unknown data",
+            "{label}：归属未确认时不删除未知对象"
+        );
+        assert!(
+            !legacy_persisted_cleanup_completed(&fixture),
+            "{label}：本机未退休不能记为清理完成"
+        );
+        assert!(
+            fixture.metadata_path.exists(),
+            "{label}：可信 metadata 仍由 exact commit custody 保管"
+        );
+        assert!(
+            fixture.identity_path.exists(),
+            "{label}：身份退休尚未开始，必要资源不被提前吞掉"
+        );
+        assert!(fixture.candidate_bootstrap_state.exists());
+    }
+}
+
+/// canonical 投影不经过 ordinary 账户交接：准备动作既不改动固定 private 根的 owner，
+/// 也不把实际数据交给交接路径；退休中断只可能落在原样保留的固定投影上。
+#[test]
+fn canonical_state_root_never_takes_the_ordinary_account_handover() {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    let Some(account) = host_legacy_service_account() else {
+        return;
+    };
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let root = temporary.path();
+    let fixture = build_legacy_state_root_fixture(&LegacyStateRootScenario {
+        root,
+        service_user: &account.user,
+        service_group: &account.group,
+        accounts: &format!(
+            "passwd|{}|{}\ngroup|{}|{}\n",
+            account.user, account.passwd_record, account.group, account.group_record
+        ),
+        owner: (999, 999),
+    });
+    let private = root.join("var/lib/private/enoki-probe");
+    fs::create_dir_all(private.parent().expect("private parent")).expect("private parent");
+    fs::rename(&fixture.state_dir, &private).expect("canonical private root");
+    symlink("private/enoki-probe", &fixture.state_dir).expect("canonical public link");
+
+    run_legacy_state_root_child(
+        &fixture,
+        root,
+        "lifecycle.replacement_cleanup_failed",
+        true,
+        false,
+    );
+
+    assert_eq!(
+        legacy_state_root_owner(&private),
+        Some((999, 999)),
+        "准备动作不改 canonical owner"
+    );
+    assert!(
+        private.join("installed-state").exists(),
+        "canonical 实际数据不被交接路径改动"
+    );
+    assert!(fixture.state_dir.is_symlink(), "exact public 链保持原形态");
+    assert!(
+        !legacy_persisted_cleanup_completed(&fixture),
+        "未退休不能记为清理完成"
+    );
+    assert!(fixture.metadata_path.exists());
+}
+
+#[test]
+fn legacy_state_root_formal_recovery_child_process() {
+    let Ok(expected) = std::env::var("ENOKI_TEST_LEGACY_STATE_EXPECTED") else {
+        return;
+    };
+    if std::env::var("ENOKI_TEST_LEGACY_STATE_RETIREMENT_FAULT").is_ok_and(|fault| fault == "1") {
+        inject_state_root_removal_fault(Some(StateRootRemovalFault::ContentsRetained));
+    }
+    let request = legacy_replacement_request();
+    let mut transport = RecordingValidationTransport::default();
+
+    let response = crate::upgrader::run_lifecycle_companion(&request, &mut transport);
+
+    let expected = if expected == "succeeded" {
+        LifecycleResponse::succeeded()
+    } else {
+        LifecycleResponse::failed(&expected)
+    };
+    assert_eq!(response, expected, "正式 exact-request 恢复入口的反馈");
+    assert!(
+        transport.downloads.is_empty(),
+        "恢复路径不访问 Hub，反馈只来自本机清理"
     );
 }

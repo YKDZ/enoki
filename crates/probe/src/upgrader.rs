@@ -2416,7 +2416,7 @@ fn fixed_installed_probe_sha256(
     Ok(digest)
 }
 
-#[cfg(feature = "deterministic-test-seams")]
+#[cfg(any(test, feature = "deterministic-test-seams"))]
 fn replacement_production_root() -> Result<Option<PathBuf>, ()> {
     let Some(value) = std::env::var_os("ENOKI_TEST_REPLACEMENT_PRODUCTION_ROOT") else {
         return Ok(None);
@@ -2428,7 +2428,7 @@ fn replacement_production_root() -> Result<Option<PathBuf>, ()> {
     Ok(Some(root))
 }
 
-#[cfg(not(feature = "deterministic-test-seams"))]
+#[cfg(not(any(test, feature = "deterministic-test-seams")))]
 fn replacement_production_root() -> Result<Option<PathBuf>, ()> {
     Ok(None)
 }

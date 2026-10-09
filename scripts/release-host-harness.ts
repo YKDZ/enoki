@@ -21,7 +21,11 @@ import type {
   InstalledBundleFailureRepair,
   ProbeIdentityEvidence,
 } from "./release-installed-bundle-failure-repair.ts";
-import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.ts";
+import {
+  createInstalledBundleFailureRepairHostDriver,
+  generalCompanionFailureObservationScript,
+  generalCompanionFailureObservationSnippet,
+} from "./release-installed-bundle-failure-repair.ts";
 import {
   isPositiveSafeInteger,
   isSafeInteger,
@@ -480,6 +484,29 @@ export function createProbeHostHarness({
         ...(output ? { output } : {}),
       };
     }
+  }
+
+  // 票61 临时观察：读取失败只追加不可用事实，调用方保留原错误继续聚合与清理。
+  async function observeCompanionFailureUnits(
+    section: string,
+  ): Promise<string> {
+    let observed;
+    try {
+      observed = await execute(
+        generalCompanionFailureObservationScript(section),
+        { root: true },
+      );
+    } catch (error) {
+      return `observation unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    const facts = `${observed.stdout}${observed.stderr}`.trim();
+    if (observed.code !== 0) {
+      return `observation unavailable: the manager/journal script exited ${observed.code}${facts ? `: ${facts}` : ""}`;
+    }
+    return (
+      facts ||
+      "observation unavailable: the manager/journal script returned no facts"
+    );
   }
 
   async function prepareEnrollmentInstall(
@@ -1306,7 +1333,25 @@ export function createProbeHostHarness({
           });
         }
 
-        await attempt(() => installedBundleFailureRepair.cleanup(runId));
+        await attempt(async () => {
+          try {
+            return await installedBundleFailureRepair.cleanup(runId);
+          } catch (error) {
+            // cleanup 自身的失败原因只有在 emergency cleanup 破坏现场之前读取才可能被解释。
+            const observation = await observeCompanionFailureUnits(
+              "after the run-owned Observation Runtime failure cleanup failed",
+            );
+            const message =
+              error instanceof Error ? error.message : String(error);
+            const code = objectView(error).code;
+            throw Object.assign(
+              new Error(
+                `${message}; general Companion and Observation Runtime at this moment: ${observation}`,
+              ),
+              typeof code === "string" ? { code } : {},
+            );
+          }
+        });
 
         let inspected = await attempt(() => inventory());
         let residue = inspected ? inventoryResidue(inspected) : null;
@@ -1334,9 +1379,18 @@ export function createProbeHostHarness({
           inspected = await attempt(() => inventory());
           residue = inspected ? inventoryResidue(inspected) : null;
           if ((residue?.length ?? 0) > 0) {
+            const residueMessage = `Run-owned Probe cleanup left residue: ${residue?.join(", ")}`;
+            // 残留核对之后才取残留实例状态：loaded 与活跃能力不等价，这里只保留事实。
+            const companionResidue = (residue ?? []).filter((item) =>
+              /^enoki-probe-lifecycle-companion@[^/]+\.service$/.test(item),
+            );
             errors.push(
               new Error(
-                `Run-owned Probe cleanup left residue: ${residue?.join(", ")}`,
+                companionResidue.length === 0
+                  ? residueMessage
+                  : `${residueMessage}; residual general Companion instances at the final residue check: ${await observeCompanionFailureUnits(
+                      "at the final general Companion instance residue check",
+                    )}`,
               ),
             );
           }
@@ -1795,9 +1849,15 @@ journalctl --unit=enoki-probe.service --no-pager --lines=200 --output=short-iso
 }
 
 function systemdDiagnosticsScript(): string {
-  return String.raw`# enoki-release-e2e:systemd-diagnostics
+  // 普通 Probe 诊断的 stdout 只表示 Probe 自身，terminal validator 依赖这一点；general
+  // Companion 与 Observation Runtime 的有限 manager/journal 事实一律进入同一命令的 stderr，
+  // 并保留原 Probe 命令的退出码。
+  return `# enoki-release-e2e:systemd-diagnostics
 set -eu
-systemctl show enoki-probe.service --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts
+probe_status=0
+systemctl show enoki-probe.service --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts || probe_status=$?
+${generalCompanionFailureObservationSnippet("during the terminal Probe systemd diagnostics")}
+exit "$probe_status"
 `;
 }
 

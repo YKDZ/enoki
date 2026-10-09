@@ -513,6 +513,15 @@ pub(super) fn remove_probe_install_identities(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
     let install_metadata = plan.install_metadata;
+    // 旧产品可能把 state 根本体留给本安装 metadata 记下的服务账户；`userdel` 之后该账户不再
+    // 可查，所以归属交接必须耐久先于任何账户删除。无法精确解释的形态不取得删除权，
+    // 后续的根退休仍按原有严格判定拒绝。
+    ProbeStateRoot::prepare_installed_retirement(
+        &install_metadata.state_dir,
+        &install_metadata.service_user,
+        &install_metadata.service_group,
+    )
+    .map_err(|error| state_root_removal_error(&install_metadata.state_dir, error))?;
     // 在所有易失败的账户清理完成前，保留 Companion 激活资产和可信元数据。
     // 中断后管理员仍可从同一固定入口提交绑定到该安装收据的显式卸载请求。
     systemd
