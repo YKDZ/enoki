@@ -1798,6 +1798,25 @@ function systemdDiagnosticsScript(): string {
   return String.raw`# enoki-release-e2e:systemd-diagnostics
 set -eu
 systemctl show enoki-probe.service --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts
+# 57临时取证：general lifecycle companion 失败事实。第十轮现场的 companion 激活／执行／退出子分支未知，
+# 这里只读取已有 manager 字段与有限 journal；取得充分因果后、实际 companion 修复交付前整段删除。
+printf '\n### enoki-probe-lifecycle-companion.socket\n'
+systemctl show enoki-probe-lifecycle-companion.socket --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result || printf 'companionSocketState=unavailable\n'
+journalctl --unit=enoki-probe-lifecycle-companion.socket --no-pager --lines=50 --output=short-iso || printf 'companionSocketJournal=unavailable\n'
+printf '\n### enoki-probe-lifecycle-companion instances\n'
+companion_list_failed=0
+companion_list=$(systemctl list-units --all --full --plain --no-legend --no-pager 'enoki-probe-lifecycle-companion@*' 2>/dev/null) || companion_list_failed=1
+if [ "$companion_list_failed" -ne 0 ]; then
+  printf 'companionInstanceList=unavailable\n'
+elif [ -z "$companion_list" ]; then
+  printf 'companionInstances=none\n'
+else
+  for companion_unit in $(printf '%s\n' "$companion_list" | awk 'NF { print $1 }' | head -n 8); do
+    printf '\n### %s\n' "$companion_unit"
+    systemctl show "$companion_unit" --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts || printf 'companionInstanceState=unavailable\n'
+    journalctl --unit="$companion_unit" --no-pager --lines=100 --output=short-iso || printf 'companionInstanceJournal=unavailable\n'
+  done
+fi
 `;
 }
 
@@ -2230,13 +2249,22 @@ export function assertInstallCommand(command: unknown): InstallContract {
   ) {
     throw new Error("Hub returned an invalid Probe install command");
   }
+  // 注册输入可为新主机的裸 token，或手动重装携带迁移绑定的规范 JSON；两者语法在此消费，
+  // 命令本身保持原样交给 Host 执行，绝不改写成裸 token 丢失迁移语义。
   const recipe = command.match(
-    /^printf '%s\\n' '(enk_enroll_[A-Za-z0-9_-]+)' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin '(https?:\/\/[^'\s]+)'$/,
+    /^printf '%s\\n' '([^']*)' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin '(https?:\/\/[^'\s]+)'$/,
   );
   if (recipe) {
     const hubUrl = stringValue(recipe[2]);
     assertInstallHubOrigin(hubUrl);
-    return { hubUrl, kind: "bootstrap-recipe", token: stringValue(recipe[1]) };
+    return {
+      hubUrl,
+      kind: "bootstrap-recipe",
+      token: parseBootstrapRecipeEnrollmentInput(
+        stringValue(recipe[1]),
+        hubUrl,
+      ),
+    };
   }
   const legacy = command.match(
     /^curl -fsSL '(https?:\/\/[^'\s]+\/api\/probe\/install\.sh)' \| sudo env ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='(enk_enroll_[A-Za-z0-9_-]+)' bash$/,
@@ -2254,6 +2282,36 @@ export function assertInstallCommand(command: unknown): InstallContract {
     };
   }
   throw new Error("Hub returned an invalid Probe install command");
+}
+
+// 只做消费此注册输入所需的语法识别：裸 token 或 schemaVersion 1 的规范 JSON。
+// 迁移载荷字段由 Rust 本机消费者逐项校验，这里不复制其授权或全字段验证器。
+function parseBootstrapRecipeEnrollmentInput(
+  input: string,
+  hubUrl: string,
+): string {
+  if (/^enk_enroll_[A-Za-z0-9_-]+$/.test(input)) {
+    return input;
+  }
+  if (!input.startsWith("{")) {
+    throw new Error("Hub returned an invalid Probe install command");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    throw new Error("Hub returned an invalid Probe install command");
+  }
+  const enrollment = objectView(parsed);
+  const token = stringValue(enrollment.enrollmentToken);
+  if (
+    enrollment.schemaVersion !== 1 ||
+    enrollment.hubOrigin !== hubUrl ||
+    !/^enk_enroll_[A-Za-z0-9_-]+$/.test(token)
+  ) {
+    throw new Error("Hub returned an invalid Probe install command");
+  }
+  return token;
 }
 
 function assertInstallHubOrigin(value: string): void {

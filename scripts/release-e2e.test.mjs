@@ -239,6 +239,136 @@ describe("Release E2E business assertions", () => {
     }
   });
 
+  const replacementMigrationFacts = {
+    enrollmentId: "enr_manual_reinstall_0001",
+    expectedProbeId: "probe-run10-replacement",
+    sourceProbeSha256: ["a".repeat(64)],
+    sourceProbeVersion: "v0.1.74",
+    targetAssetSetDigest: "b".repeat(64),
+    targetHostId: "7",
+    targetProbeVersion: "v0.1.75",
+  };
+
+  function producedReplacementEnrollment() {
+    const enrollment = officialEnrollment();
+    const rendered = renderInstallCommand(
+      {
+        bootstrapRecipe: enrollment.bootstrapRecipe,
+        probeApiOrigin: enrollment.hubUrl,
+      },
+      {
+        enrollmentToken: enrollment.enrollmentToken,
+        replacementMigration: replacementMigrationFacts,
+      },
+    );
+    return {
+      ...enrollment,
+      enrollmentId: replacementMigrationFacts.enrollmentId,
+      installCommand: rendered.installCommand,
+      target: { hostId: 7, kind: "manual_reinstall" },
+    };
+  }
+
+  async function consumeManualReinstall(enrollment) {
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const { pathname } = new URL(url);
+        if (pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (pathname === "/api/web/enrollments/manual-reinstall/7") {
+          return jsonResponse(enrollment, 201);
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+    await client.authenticate("owner-password");
+    return client.createManualReinstallEnrollment(7);
+  }
+
+  async function consumeCreatedEnrollment(enrollment) {
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url) => {
+        const { pathname } = new URL(url);
+        if (pathname === "/api/web/enrollments") {
+          return jsonResponse(enrollment, 201);
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+    return client.createEnrollment();
+  }
+
+  it("接受正式生成的手动重装注册输入并原样交给消费者", async () => {
+    const produced = producedReplacementEnrollment();
+    // 正式生产者的手动重装注册输入是携带迁移绑定的规范 JSON，而非裸 token
+    expect(produced.installCommand).toContain("replacementMigration");
+    expect(produced.installCommand).not.toBe(officialInstallCommand);
+
+    const created = await consumeManualReinstall(produced);
+    // W56-3：消费接缝原样保留命令，安装入口继续执行逐字的生产输出
+    expect(created.installCommand).toBe(produced.installCommand);
+  });
+
+  it("保持手动重装绑定并拒绝无效的结构化注册输入", async () => {
+    const produced = producedReplacementEnrollment();
+    // 迁移 JSON 的 token 与 Enrollment 来源不一致时仍触发绑定错误
+    await expect(
+      consumeManualReinstall({
+        ...produced,
+        installCommand: produced.installCommand.replace(
+          produced.enrollmentToken,
+          `enk_enroll_${"0".repeat(22)}`,
+        ),
+      }),
+    ).rejects.toThrow(/not bound to its token and origin/);
+
+    for (const installCommand of [
+      // schemaVersion 非 1 的未知注册输入
+      produced.installCommand.replace('"schemaVersion":1', '"schemaVersion":2'),
+      // hubOrigin 与命令来源不一致
+      produced.installCommand.replace(
+        '"hubOrigin":"https://hub.example"',
+        '"hubOrigin":"https://attacker.example"',
+      ),
+      // 缺少合法 enrollmentToken
+      produced.installCommand.replace(
+        `"enrollmentToken":"${produced.enrollmentToken}"`,
+        '"enrollmentToken":"not-a-token"',
+      ),
+    ]) {
+      expect(installCommand).not.toBe(produced.installCommand);
+      await expect(
+        consumeManualReinstall({ ...produced, installCommand }),
+      ).rejects.toThrow(/invalid Probe install command/);
+    }
+  });
+
+  it("保持裸 token 新主机与 legacy 安装命令继续被消费者接受", async () => {
+    // 正对照：既有裸 token 新主机命令与 .74 legacy 命令保持可接受
+    await expect(
+      consumeCreatedEnrollment(officialEnrollment()),
+    ).resolves.toEqual(
+      expect.objectContaining({ installCommand: officialInstallCommand }),
+    );
+
+    const legacyCommand =
+      "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash";
+    await expect(
+      consumeCreatedEnrollment({
+        enrollmentToken: "enk_enroll_legacy",
+        hubUrl: "https://hub.example",
+        installCommand: legacyCommand,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ installCommand: legacyCommand }),
+    );
+  });
+
   it("accepts only the verified Trust Epoch migration baseline union member", async () => {
     const manifest = candidateManifestWithMigrationBaseline();
     await expect(
@@ -2756,6 +2886,156 @@ describe("Probe Host Harness", () => {
         output: { code: 0, stderr: "", stdout: "not-json" },
       },
     });
+  });
+
+  // 57临时取证：在真实 sh 接缝执行正式生成的失败诊断脚本，证明 general lifecycle companion
+  // 的有限状态与 journal 经既有 collectDiagnostics 文本载体回传，且 companion 读取失败既不
+  // 丢弃原 Probe 事实也不掩盖原主失败。取得充分因果后、实际 companion 修复交付前连同
+  // harness 内的专用取证段一起删除。
+  it("在终端失败诊断中保留 lifecycle companion 状态与 journal 且不掩盖原主失败", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-release-companion-diagnostics-shim-"),
+    );
+    const commands = [];
+    const probeFailure =
+      "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainStatus=78\nNRestarts=3\n";
+    const companionInstance =
+      "enoki-probe-lifecycle-companion@1-2.service loaded failed Enoki Probe lifecycle companion\n";
+    const companionJournal =
+      "2026-10-09T12:10:27.784000 host systemd[1]: enoki-probe-lifecycle-companion@1-2.service: Main process exited, code=exited, status=203/EXEC\n";
+    try {
+      const collect = async () => {
+        const harness = createProbeHostHarness({
+          async execute(command) {
+            commands.push(command);
+            if (command.includes("# enoki-release-e2e:systemd-diagnostics")) {
+              // 正式生成的取证脚本原样交给 sh 执行，事实来自被调用命令本身而非测试拼装。
+              const result = spawnSync("/bin/sh", ["-s"], {
+                encoding: "utf8",
+                env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+                input: command,
+              });
+              return {
+                code: result.status ?? 1,
+                stderr: result.stderr ?? "",
+                stdout: result.stdout ?? "",
+              };
+            }
+            if (command.includes("# enoki-release-e2e:inventory")) {
+              return successfulCommand({
+                accounts: { group: false, user: false },
+                files: [],
+                units: [],
+              });
+            }
+            if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
+              return {
+                code: 1,
+                stderr:
+                  "Probe repair failed: code=lifecycle.companion_unavailable.",
+                stdout: "",
+              };
+            }
+            if (command.includes("# enoki-release-e2e:journald")) {
+              return successfulCommandText("retained Probe journal line\n");
+            }
+            if (command.includes("# enoki-release-e2e:installed-sudoers")) {
+              return successfulCommandText("");
+            }
+            throw new Error("unexpected diagnostics command");
+          },
+        });
+        return await harness.collectDiagnostics("run-companion-diagnostics");
+      };
+
+      await writeFile(
+        path.join(bin, "systemctl"),
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "show" ]; then',
+          '  case "$2" in',
+          `    enoki-probe.service) printf '${probeFailure}' ;;`,
+          "    enoki-probe-lifecycle-companion.socket) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nResult=success\\n' ;;",
+          "    *) printf 'LoadState=loaded\\nActiveState=failed\\nSubState=failed\\nResult=exec-condition\\nExecMainStatus=203\\nNRestarts=0\\n' ;;",
+          "  esac",
+          "  exit 0",
+          "fi",
+          'if [ "$1" = "list-units" ]; then',
+          `  printf '${companionInstance}'`,
+          "  exit 0",
+          "fi",
+          "exit 0",
+          "",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      await writeFile(
+        path.join(bin, "journalctl"),
+        `#!/bin/sh\nprintf '${companionJournal}'\n`,
+        { mode: 0o700 },
+      );
+
+      const captured = await collect();
+      expect(captured.systemd).toMatchObject({ available: true });
+      const facts = captured.systemd.value;
+      // 原 Probe 事实保持在同一文本载体首位。
+      expect(facts.startsWith(probeFailure)).toBe(true);
+      expect(facts).toContain("enoki-probe-lifecycle-companion.socket");
+      expect(facts).toContain("ActiveState=active");
+      expect(facts).toContain("enoki-probe-lifecycle-companion@1-2.service");
+      expect(facts).toContain("ExecMainStatus=203");
+      expect(facts).toContain("status=203/EXEC");
+      // 其他组件仍各自独立回传，主失败事实未被替换。
+      expect(captured.installation).toMatchObject({
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      });
+      expect(captured.journald).toMatchObject({
+        available: true,
+        value: "retained Probe journal line\n",
+      });
+
+      // companion 与 upgrade/provider 无关，且共享 journald 载体未被改成 companion 日志。
+      const journaldCommand = commands.find((command) =>
+        command.includes("# enoki-release-e2e:journald"),
+      );
+      expect(journaldCommand).toContain("enoki-probe.service");
+      expect(journaldCommand).not.toContain("companion");
+
+      // companion 读取失败：socket 查询、实例清点与 journal 全部非零退出。
+      await writeFile(
+        path.join(bin, "systemctl"),
+        [
+          "#!/bin/sh",
+          'if [ "$1" = "show" ] && [ "$2" = "enoki-probe.service" ]; then',
+          `  printf '${probeFailure}'`,
+          "  exit 0",
+          "fi",
+          "exit 70",
+          "",
+        ].join("\n"),
+        { mode: 0o700 },
+      );
+      await writeFile(path.join(bin, "journalctl"), "#!/bin/sh\nexit 70\n", {
+        mode: 0o700,
+      });
+
+      const degraded = await collect();
+      // 原主失败与原 Probe 事实保留：读取失败只是少一段事实，不替换、不掩盖。
+      expect(degraded.systemd).toMatchObject({ available: true });
+      expect(degraded.systemd.value.startsWith(probeFailure)).toBe(true);
+      expect(degraded.systemd.value).toContain("unavailable");
+      expect(degraded.installation).toMatchObject({
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      });
+      expect(degraded.journald).toMatchObject({
+        available: true,
+        value: "retained Probe journal line\n",
+      });
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
   });
 
   it("releases the run claim and independently verifies a normally clean Release Test Host", async () => {
