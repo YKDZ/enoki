@@ -321,7 +321,7 @@ describe("Owner add-host install command", () => {
     database.close();
   });
 
-  it("creates a pending manual reinstall for a v-prefixed host report while keeping the signed source version verbatim", async () => {
+  it("v前缀上报的Host可创建手动重装pending且签名来源版本原样保留", async () => {
     const database = await createTemporaryDatabase();
     const assetDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-reinstall-vprefix-assets-"),
@@ -397,7 +397,7 @@ describe("Owner add-host install command", () => {
     database.close();
   });
 
-  it("refuses manual reinstall creation when the host version differs from or is invalid against the expected source version", async () => {
+  it("Host版本与预期来源版本不同或无效时拒绝创建手动重装", async () => {
     const database = await createTemporaryDatabase();
     const assetDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-reinstall-seam-refuse-assets-"),

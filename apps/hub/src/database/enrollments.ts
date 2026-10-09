@@ -981,8 +981,8 @@ function validSourceProbeSha256(value: unknown): value is string[] {
   );
 }
 
-// ADR 0058 allows Hosts to report an optional "v" prefix, so these comparisons are
-// equal only after shared SemVer normalization; invalid values never match each other.
+// ADR 0058 允许 Host 上报带可选 v 前缀的版本，因此这些比较只在双方按既有 SemVer
+// 语义规范化后相等时放行；无效值之间不得互相匹配。
 function hostVersionMatchesExpectedSourceVersion(
   hostProbeVersion: string | null | undefined,
   expectedProbeVersion: string,

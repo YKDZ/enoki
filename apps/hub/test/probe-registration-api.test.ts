@@ -992,7 +992,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("closes create, inspection and registration for a v-prefixed host version against the signed source version", async () => {
+  it("v前缀Host版本对签名来源版本闭合创建、检查与注册三段比较", async () => {
     const database = await createTemporaryDatabase();
     const assetDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-reinstall-vprefix-vertical-"),
