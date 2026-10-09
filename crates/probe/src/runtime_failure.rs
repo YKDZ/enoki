@@ -4,7 +4,10 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -23,11 +26,22 @@ use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
 const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
 const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
+/// public 身份文件固定路径；生产 identity 由 concrete 状态根派生（见 IDENTITY_SUFFIX），
+/// 此常量仅供测试夹具写入普通布局的身份文件。
+#[cfg(test)]
 const IDENTITY_PATH: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const RECORDER_UNIT_PATH: &str = "/etc/systemd/system/enoki-observation-runtime-failure.service";
-const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
-const FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
+/// recorder 命名空间内由固定 unit bind 出来的当前 boot alias 来源（宿主 proc 隐藏时的入口）。
+const BOOT_ID_PATH: &str = "/run/enoki-probe/runtime-failure-boot-id";
+/// manager／Local Retry 上下文可见的宿主 boot 来源。
+const HOST_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+/// 专用 bounded reader 单次读取上限：boot ID 远小于此，超过即拒绝。
+const BOOT_ID_READ_LIMIT: usize = 64;
+const STATE_ROOT_PUBLIC: &str = "/var/lib/enoki-probe";
+/// DynamicUser 安装：public 是指向固定 private 根的单链接 symlink。
+const CANONICAL_PRIVATE_STATE_ROOT: &str = "/var/lib/private/enoki-probe";
+const CANONICAL_PUBLIC_SYMLINK_TARGET: &[u8] = b"private/enoki-probe";
 const EPOCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
 const LATCH_PATH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
 
@@ -611,30 +625,22 @@ fn retry_runtime_at(
     expected_uid: u32,
     systemd: &mut impl RuntimeRetrySystemd,
 ) -> std::io::Result<()> {
-    let epoch_path = rooted(root, EPOCH_PATH);
-    let latch_path = rooted(root, LATCH_PATH);
-    let epoch_bytes = trusted_file(&epoch_path, expected_uid, 0o600)?;
+    let paths = runtime_failure_paths(root)?;
+    let epoch_bytes = trusted_file(&paths.epoch, expected_uid, 0o600)?;
     let epoch: RuntimeFailureEpoch = toml::from_str(
         std::str::from_utf8(&epoch_bytes)
             .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
     )
     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    let latch = trusted_file(&latch_path, expected_uid, 0o600)?;
+    let latch = trusted_file(&paths.latch, expected_uid, 0o600)?;
     if latch != epoch.generation.as_bytes()
-        || epoch.boot_id
-            != String::from_utf8(trusted_file(
-                &rooted(root, BOOT_ID_PATH),
-                expected_uid,
-                0o444,
-            )?)
-            .map_err(|_| std::io::Error::other("boot binding invalid"))?
-            .trim()
+        || epoch.boot_id != trusted_fixed_boot_id(root, expected_uid, FixedBootIdSource::HostProc)?
     {
         return Err(std::io::Error::other("failure epoch binding invalid"));
     }
-    fs::remove_file(&latch_path)?;
-    fs::remove_file(&epoch_path)?;
-    File::open(rooted(root, FAILURE_DIR))?.sync_all()?;
+    fs::remove_file(&paths.latch)?;
+    fs::remove_file(&paths.epoch)?;
+    File::open(&paths.failure_dir)?.sync_all()?;
     systemd.retry_fixed_runtime()
 }
 
@@ -733,26 +739,18 @@ fn current_epoch_at(
     root: &Path,
     expected_uid: u32,
 ) -> std::io::Result<(RuntimeFailureEpoch, toml::Value)> {
-    trusted_state_directory(
-        &rooted(root, "/var/lib/enoki-probe"),
-        &rooted(root, IDENTITY_PATH),
-    )?;
-    let epoch_bytes = trusted_file(&rooted(root, EPOCH_PATH), expected_uid, 0o600)?;
+    let paths = runtime_failure_paths(root)?;
+    let epoch_bytes = trusted_file(&paths.epoch, expected_uid, 0o600)?;
     let epoch: RuntimeFailureEpoch = toml::from_str(
         std::str::from_utf8(&epoch_bytes)
             .map_err(|_| std::io::Error::other("failure epoch invalid"))?,
     )
     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
-    let latch = trusted_file(&rooted(root, LATCH_PATH), expected_uid, 0o600)?;
+    let latch = trusted_file(&paths.latch, expected_uid, 0o600)?;
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
+    let identity = trusted_identity_file(&paths.identity)?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
-    let boot_id = String::from_utf8(trusted_file(
-        &rooted(root, BOOT_ID_PATH),
-        expected_uid,
-        0o444,
-    )?)
-    .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    let boot_id = trusted_fixed_boot_id(root, expected_uid, FixedBootIdSource::NamespaceAlias)?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata_bytes)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -793,13 +791,10 @@ fn record_runtime_failure_at(
     recorder_invocation_id: &str,
     recorder_pid: u32,
 ) -> std::io::Result<RuntimeFailureRecordOutcome> {
-    let failure_dir = rooted(root, FAILURE_DIR);
-    let epoch_path = rooted(root, EPOCH_PATH);
-    let latch_path = rooted(root, LATCH_PATH);
-    trusted_state_directory(
-        &rooted(root, "/var/lib/enoki-probe"),
-        &rooted(root, IDENTITY_PATH),
-    )?;
+    let paths = runtime_failure_paths(root)?;
+    let failure_dir = paths.failure_dir.clone();
+    let epoch_path = paths.epoch.clone();
+    let latch_path = paths.latch.clone();
     if epoch_path.exists() || latch_path.exists() {
         current_epoch_at(root, expected_uid)?;
         return Ok(RuntimeFailureRecordOutcome::AlreadyLatched);
@@ -822,7 +817,7 @@ fn record_runtime_failure_at(
         trusted_directory(&failure_dir, expected_uid, 0o700)?;
     }
     let metadata = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let identity = trusted_identity_file(&rooted(root, IDENTITY_PATH))?;
+    let identity = trusted_identity_file(&paths.identity)?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
     let expected_unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
         .into_iter()
@@ -831,12 +826,7 @@ fn record_runtime_failure_at(
     if unit != expected_unit {
         return Err(std::io::Error::other("runtime unit binding mismatch"));
     }
-    let boot_id = String::from_utf8(trusted_file(
-        &rooted(root, BOOT_ID_PATH),
-        expected_uid,
-        0o444,
-    )?)
-    .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    let boot_id = trusted_fixed_boot_id(root, expected_uid, FixedBootIdSource::NamespaceAlias)?;
     let metadata: toml::Value = toml::from_str(
         std::str::from_utf8(&metadata)
             .map_err(|_| std::io::Error::other("install receipt invalid"))?,
@@ -895,6 +885,130 @@ fn record_runtime_failure_at(
 
 fn rooted(root: &Path, absolute: &str) -> PathBuf {
     root.join(absolute.trim_start_matches('/'))
+}
+
+/// concrete 状态根下的相对后缀（去掉 public 前缀），供两种布局共用。
+const IDENTITY_SUFFIX: &str = "identity/probe-bootstrap.toml";
+const FAILURE_DIR_SUFFIX: &str = "runtime-failure";
+
+/// 固定的当前 boot 来源；命名空间 alias 与宿主 proc 共用同一专用 bounded reader。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FixedBootIdSource {
+    /// recorder 单元 bind 出的固定 alias（宿主 proc 在受限命名空间不可见时的入口）。
+    NamespaceAlias,
+    /// manager／Local Retry 上下文直接可见的宿主 proc。
+    HostProc,
+}
+
+impl FixedBootIdSource {
+    fn path(self) -> &'static str {
+        match self {
+            Self::NamespaceAlias => BOOT_ID_PATH,
+            Self::HostProc => HOST_BOOT_ID_PATH,
+        }
+    }
+}
+
+/// 当前 boot 绑定的专用 bounded reader：读取固定来源至多 `BOOT_ID_READ_LIMIT` 字节，
+/// 不比较 st_size（proc 伪文件恒报 0），拒绝缺失／symlink／非 root 文件／超长／空白／控制字符。
+/// 通用 `trusted_file` 的磁盘文件语义不受影响；来源固定，不新增公开 caller path／source 参数。
+fn trusted_fixed_boot_id(
+    root: &Path,
+    expected_uid: u32,
+    source: FixedBootIdSource,
+) -> std::io::Result<String> {
+    let path = rooted(root, source.path());
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o7777 != 0o444
+    {
+        return Err(std::io::Error::other("boot binding invalid"));
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    let mut buffer = [0_u8; 65];
+    let read = file
+        .take(65)
+        .read(&mut buffer)
+        .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    if read == 0 || read > BOOT_ID_READ_LIMIT {
+        return Err(std::io::Error::other("boot binding invalid"));
+    }
+    let value = std::str::from_utf8(&buffer[..read])
+        .map_err(|_| std::io::Error::other("boot binding invalid"))?;
+    let boot_id = value.trim_end_matches(['\n', '\r']);
+    if boot_id.is_empty() || boot_id.chars().any(char::is_control) {
+        return Err(std::io::Error::other("boot binding invalid"));
+    }
+    Ok(boot_id.to_owned())
+}
+
+/// RuntimeFailurePair 在 concrete 状态根下的固定路径投影（epoch／latch／failure 子目录／identity）。
+struct RuntimeFailurePaths {
+    failure_dir: PathBuf,
+    epoch: PathBuf,
+    latch: PathBuf,
+    identity: PathBuf,
+}
+
+/// 把 public 绝对状态路径投影到 concrete 状态根；用于 Repair intent／operation status 与
+/// 消费者复用同一 concrete 根，无需放宽全局 no-follow。非状态根路径（／etc、／run、／proc）原样返回。
+fn state_child(root: &Path, public_absolute: &str) -> std::io::Result<PathBuf> {
+    match public_absolute.strip_prefix(STATE_ROOT_PUBLIC) {
+        Some(relative) => Ok(concrete_state_root(root)?.join(relative.trim_start_matches('/'))),
+        None => Ok(rooted(root, public_absolute)),
+    }
+}
+
+/// 解析当前安装的 concrete 状态根，供 producer／consumer／Repair 复用；
+/// unknown target、错误 symlink 目标、不可达 child 均在查询／写入前拒绝。
+/// ordinary：public 是真实目录（owner／mode 由现有 `trusted_state_directory` 复核）。
+/// canonical：public 必须是 root 拥有的单链接 symlink → 固定 private 根；recorder 不补建／chown 该父目录。
+fn concrete_state_root(root: &Path) -> std::io::Result<PathBuf> {
+    let public = rooted(root, STATE_ROOT_PUBLIC);
+    let metadata = fs::symlink_metadata(&public)
+        .map_err(|_| std::io::Error::other("state root unavailable"))?;
+    if metadata.file_type().is_symlink() {
+        if metadata.uid() != 0 {
+            return Err(std::io::Error::other("state root symlink invalid"));
+        }
+        let link = fs::read_link(&public)
+            .map_err(|_| std::io::Error::other("state root symlink invalid"))?;
+        if link.as_os_str().as_bytes() != CANONICAL_PUBLIC_SYMLINK_TARGET {
+            return Err(std::io::Error::other("state root symlink target unknown"));
+        }
+        let private = rooted(root, CANONICAL_PRIVATE_STATE_ROOT);
+        let child = fs::symlink_metadata(&private)
+            .map_err(|_| std::io::Error::other("state child unreachable"))?;
+        if !child.is_dir() || child.file_type().is_symlink() {
+            return Err(std::io::Error::other("state child unreachable"));
+        }
+        return Ok(private);
+    }
+    if metadata.is_dir() {
+        return Ok(public);
+    }
+    Err(std::io::Error::other("state root target unknown"))
+}
+
+/// 计算 concrete 状态根并在查询／写入前复核布局边界（真实 0750 根 + 合法 identity 文件）。
+fn runtime_failure_paths(root: &Path) -> std::io::Result<RuntimeFailurePaths> {
+    let state_root = concrete_state_root(root)?;
+    let identity = state_root.join(IDENTITY_SUFFIX);
+    trusted_state_directory(&state_root, &identity)?;
+    let failure_dir = state_root.join(FAILURE_DIR_SUFFIX);
+    Ok(RuntimeFailurePaths {
+        epoch: failure_dir.join("epoch.toml"),
+        latch: failure_dir.join("latch"),
+        failure_dir,
+        identity,
+    })
 }
 
 fn trusted_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Vec<u8>> {
@@ -1375,6 +1489,7 @@ pub(super) mod tests {
             "etc/enoki",
             "var/lib/enoki-probe/identity",
             "etc/systemd/system",
+            "run/enoki-probe",
             "proc/sys/kernel/random",
         ] {
             fs::create_dir_all(root.path().join(directory)).unwrap();
@@ -1407,6 +1522,7 @@ pub(super) mod tests {
             0o644,
         );
         write_fixture(root.path(), BOOT_ID_PATH, b"boot-01\n", 0o444);
+        write_fixture(root.path(), HOST_BOOT_ID_PATH, b"boot-01\n", 0o444);
         root
     }
 
@@ -2804,5 +2920,92 @@ pub(super) mod tests {
             .chain_update(outer_pad)
             .chain_update(inner)
             .finalize())
+    }
+
+    /// 正式 DynamicUser 安装布局：public 是 root 单链接 symlink，状态与 child 都在固定 private 根。
+    fn canonical_dynamic_user_fixture() -> tempfile::TempDir {
+        let root = fixture();
+        let public = rooted(root.path(), "/var/lib/enoki-probe");
+        let private = rooted(root.path(), "/var/lib/private/enoki-probe");
+        fs::create_dir_all(private.join("identity")).unwrap();
+        fs::rename(public.join("identity"), private.join("identity")).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::create_dir(private.join("runtime-failure")).unwrap();
+        fs::set_permissions(
+            private.join("runtime-failure"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::remove_dir(&public).unwrap();
+        std::os::unix::fs::symlink("private/enoki-probe", &public).unwrap();
+        root
+    }
+
+    #[test]
+    fn canonical_dynamic_user_layout_publishes_and_consumes_the_private_exact_pair() {
+        let root = canonical_dynamic_user_fixture();
+        assert_eq!(
+            concrete_state_root(root.path()).unwrap(),
+            rooted(root.path(), "/var/lib/private/enoki-probe"),
+            "canonical 单链接 symlink 必须解析到固定 private 根"
+        );
+        record_latched(root.path(), 3);
+        assert!(
+            rooted(
+                root.path(),
+                "/var/lib/private/enoki-probe/runtime-failure/epoch.toml"
+            )
+            .is_file(),
+            "canonical 布局的 recorder 必须把 exact pair 发布在固定 private 根 child"
+        );
+        assert!(
+            rooted(
+                root.path(),
+                "/var/lib/private/enoki-probe/runtime-failure/latch"
+            )
+            .is_file()
+        );
+        let mut retry = RetrySystemd::default();
+        retry_runtime_at(root.path(), unsafe { libc::geteuid() }, &mut retry).unwrap();
+        assert_eq!(retry.0, 1);
+    }
+
+    #[test]
+    fn canonical_dynamic_user_rejects_an_unknown_symlink_target_before_any_query_or_write() {
+        let root = canonical_dynamic_user_fixture();
+        let public = rooted(root.path(), "/var/lib/enoki-probe");
+        fs::remove_file(&public).unwrap();
+        std::os::unix::fs::symlink("private/enoki-probe-evil", &public).unwrap();
+        record_runtime_failure_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut Snapshots::terminal(2),
+            &mut Generation(4),
+            RECORDER_INVOCATION,
+            std::process::id(),
+        )
+        .expect_err("unknown canonical symlink target 必须在查询／写入前拒绝");
+    }
+
+    #[test]
+    fn current_boot_reader_keeps_size_zero_pseudo_file_readable_although_trusted_file_stays_disk() {
+        let host = Path::new(HOST_BOOT_ID_PATH);
+        let metadata = fs::symlink_metadata(host).unwrap();
+        assert!(
+            metadata.is_file() && metadata.len() == 0,
+            "宿主 boot 输入必须仍是报告 size=0 的伪文件"
+        );
+        // 通用 trusted_file 保持原磁盘文件语义：以 st_size 相等为准，size-0 伪文件被拒绝。
+        assert!(
+            trusted_file(host, 0, 0o444).is_err(),
+            "trusted_file 不得被放宽以迁就伪文件"
+        );
+        // 专用 bounded reader 不比较 st_size：同一固定 host 来源必须可读且非空。
+        let boot_id =
+            trusted_fixed_boot_id(Path::new("/"), 0, FixedBootIdSource::HostProc).unwrap();
+        assert!(
+            !boot_id.is_empty(),
+            "固定的当前 boot 输入必须可读出合法 boot id"
+        );
     }
 }

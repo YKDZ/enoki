@@ -2966,6 +2966,16 @@ mod tests {
             service.contains("ReadWritePaths=/etc/enoki"),
             "入口必须能写它自己的固定 gate 路径"
         );
+        assert!(
+            service.contains("RuntimeDirectory=enoki-probe"),
+            "Evidence／Repair Companion 必须固定提供 alias 的 target parent"
+        );
+        assert!(
+            service.contains(
+                "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+            ),
+            "Evidence／Repair Companion 是当前 boot reader 的消费者，须把宿主 boot_id 固定绑定成同一 alias，否则 ProcSubset=pid 会隐藏 source"
+        );
     }
 
     #[test]
@@ -2980,7 +2990,7 @@ mod tests {
             "Group=root",
             "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
             "PrivateNetwork=true",
-            "CapabilityBoundingSet=",
+            "CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
             "AmbientCapabilities=",
             "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any",
@@ -2990,6 +3000,24 @@ mod tests {
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
+        assert!(
+            recorder.contains("CapabilityBoundingSet=CAP_DAC_READ_SEARCH\n"),
+            "recorder 只恢复单一 CAP_DAC_READ_SEARCH 以读取固定 private 根"
+        );
+        assert!(
+            !recorder.contains("CAP_DAC_OVERRIDE"),
+            "recorder 不得获得 CAP_DAC_OVERRIDE 等第二项写绕过能力"
+        );
+        assert!(
+            recorder.contains(
+                "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
+            ),
+            "recorder 必须把宿主 boot_id 固定绑定成专用 alias 供当前 boot reader 读取"
+        );
+        assert!(
+            !recorder.contains("enoki-observation-runtime-failure.service /proc/sys/kernel/random/boot_id"),
+            "boot 输入改经固定 alias，不再直接列在会被 ProcSubset 隐藏的 ReadOnlyPaths"
+        );
         assert!(recorder.contains("RefuseManualStart=yes"));
         assert!(
             recorder.contains("/etc/systemd/system/enoki-observation-runtime-failure.service"),
