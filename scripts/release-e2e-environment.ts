@@ -292,6 +292,7 @@ type HubRuntimeEnvironment = {
   operationSigningSecret: string;
   ownerPassword: string;
   ownerPort: string;
+  probeApiOrigin: string;
   probeOperationRunningTimeoutSeconds: number | null;
   useHubStateSnapshot: boolean;
 };
@@ -1706,6 +1707,10 @@ export function createDockerHubController({
         operationSigningSecret,
         ownerPassword,
         ownerPort,
+        // forward 场景的容器只发布 ownerPort，基线 v0.1.74 按请求 URL 派生并签名其
+        // 报告 Origin，而规范 transport 会剥离 host；因此报告 Origin 必须声明该直连
+        // 地址。fresh 场景仍声明规范观察地址，首窗捕获不变。
+        probeApiOrigin: hubMode === "baseline" ? hubOwnerUrl : hubPublicUrl,
         probeOperationRunningTimeoutSeconds,
         useHubStateSnapshot,
       };
@@ -2519,7 +2524,7 @@ export function createDockerHubController({
       [
         `OWNER_PASSWORD=${currentRuntimeEnvironment.ownerPassword}`,
         `ENOKI_MANAGEMENT_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
-        `ENOKI_PROBE_API_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
+        `ENOKI_PROBE_API_ORIGIN=${currentRuntimeEnvironment.probeApiOrigin}`,
         `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET=${currentRuntimeEnvironment.operationSigningSecret}`,
         ...(currentRuntimeEnvironment.probeOperationRunningTimeoutSeconds ===
         null

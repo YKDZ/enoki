@@ -69,6 +69,68 @@ fn attempt_all_fixed_units(
 fn rollback_unit_is_absent(state: &str) -> bool {
     matches!(state.trim(), "inactive" | "unknown")
 }
+
+/// 缺失 unit 探测对固定 systemctl CLI 输出的判定结果。
+enum AbsenceProbeDecision {
+    /// 双支持平台 (systemd 249/255) 一致的真缺失形态，可继续安装。
+    Absent,
+    /// v249 的 disabled/masked 与缺失共享空 stdout + 码 1 形态；不是结论，
+    /// 必须由权威 `show LoadState` 确认后才能放行。
+    ExistingCandidate,
+    /// 已加载/禁用/屏蔽等既有 unit 或不受支持的组合，必须拒绝。
+    Existing,
+    /// manager 故障或不可解析输出；不得当作缺失。
+    ManagerFault,
+}
+
+/// `systemctl is-enabled` 对 enoki-probe.service 的 stdout/退出码形态判定：
+/// v255 缺失打印 `not-found`（退出码 1/4）；v249 缺失与已加载 disabled/masked
+/// 都打印空 stdout 且退出码 1，故空 stdout 只是待 `show` 权威确认的候选，
+/// 本身从不构成缺失结论。其它码（如 v255 manager 未运行的空 stdout+4）为故障。
+fn classify_is_enabled_absence_probe(stdout: &[u8], code: Option<i32>) -> AbsenceProbeDecision {
+    match systemd_probe_value(stdout) {
+        Some("not-found") => match code {
+            Some(1) | Some(4) => AbsenceProbeDecision::Absent,
+            _ => AbsenceProbeDecision::Existing,
+        },
+        Some("") => match code {
+            Some(1) => AbsenceProbeDecision::ExistingCandidate,
+            _ => AbsenceProbeDecision::ManagerFault,
+        },
+        Some(_) => AbsenceProbeDecision::Existing,
+        None => AbsenceProbeDecision::ManagerFault,
+    }
+}
+
+/// `systemctl show --property=LoadState --value` 是两版本一致的权威确认：
+/// 缺失必须精确为 `not-found` 且退出码 0；沿用 `single_systemd_value` 的既有
+/// 输出资格规则（空/多行/非 UTF-8 一律视为 manager 故障，不得放行安装）。
+fn classify_load_state_absence_probe(stdout: &[u8], success: bool) -> AbsenceProbeDecision {
+    let value = match single_systemd_value(stdout) {
+        Ok(value) => value,
+        Err(_) => return AbsenceProbeDecision::ManagerFault,
+    };
+    if !success {
+        return AbsenceProbeDecision::Existing;
+    }
+    if value == "not-found" {
+        AbsenceProbeDecision::Absent
+    } else {
+        AbsenceProbeDecision::Existing
+    }
+}
+
+/// `is-enabled` 输出的单行资格判定：与 `single_systemd_value` 相同的换行规则，
+/// 但空 stdout 是 v249 的合法可判定形态而非错误。
+fn systemd_probe_value(bytes: &[u8]) -> Option<&str> {
+    let value = std::str::from_utf8(bytes).ok()?;
+    let value = value.strip_suffix('\n').unwrap_or(value);
+    if value.contains(['\n', '\r']) {
+        return None;
+    }
+    Some(value)
+}
+
 /// 生产 systemd adapter 不接收动态数据，所有 unit 名称和路径均为编译期常量。
 #[derive(Default)]
 pub struct SystemSystemd {
@@ -134,9 +196,10 @@ impl SystemdPort for SystemSystemd {
             deadline,
             COMMAND_STEP_BUDGET,
         )?;
-        let enabled_value = single_systemd_value(&enabled.stdout)?;
-        if enabled_value != "not-found" || !matches!(enabled.status.code(), Some(1) | Some(4)) {
-            return Err(InstallError::ExistingResidue);
+        match classify_is_enabled_absence_probe(&enabled.stdout, enabled.status.code()) {
+            AbsenceProbeDecision::Existing => return Err(InstallError::ExistingResidue),
+            AbsenceProbeDecision::ManagerFault => return Err(InstallError::Systemd),
+            AbsenceProbeDecision::Absent | AbsenceProbeDecision::ExistingCandidate => {}
         }
         let loaded = run_bounded(
             "/usr/bin/systemctl",
@@ -150,10 +213,13 @@ impl SystemdPort for SystemSystemd {
             deadline,
             COMMAND_STEP_BUDGET,
         )?;
-        if !loaded.status.success() || single_systemd_value(&loaded.stdout)? != "not-found" {
-            return Err(InstallError::ExistingResidue);
+        match classify_load_state_absence_probe(&loaded.stdout, loaded.status.success()) {
+            AbsenceProbeDecision::Absent => Ok(()),
+            AbsenceProbeDecision::Existing => Err(InstallError::ExistingResidue),
+            AbsenceProbeDecision::ManagerFault | AbsenceProbeDecision::ExistingCandidate => {
+                Err(InstallError::Systemd)
+            }
         }
-        Ok(())
     }
     fn daemon_reload(&mut self) -> Result<(), InstallError> {
         require_success(
@@ -303,11 +369,86 @@ impl SystemdPort for SystemSystemd {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        attempt_all_fixed_units, canonical_restart_deadline, is_live_general_companion_unit,
-        is_live_upgrade_companion_unit, rollback_unit_is_absent,
+        AbsenceProbeDecision, InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS,
+        ROLLBACK_VERIFY_UNITS, attempt_all_fixed_units, canonical_restart_deadline,
+        classify_is_enabled_absence_probe, classify_load_state_absence_probe,
+        is_live_general_companion_unit, is_live_upgrade_companion_unit, rollback_unit_is_absent,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn absence_probe_accepts_both_supported_systemd_absent_shapes() {
+        // systemd 249 (Ubuntu 22.04)：缺失 unit 的 is-enabled 为空 stdout + 退出码 1，
+        // 经 show LoadState=not-found 权威确认后才可继续安装。
+        assert!(matches!(
+            classify_is_enabled_absence_probe(b"", Some(1)),
+            AbsenceProbeDecision::ExistingCandidate
+        ));
+        assert!(matches!(
+            classify_load_state_absence_probe(b"not-found\n", true),
+            AbsenceProbeDecision::Absent
+        ));
+        // systemd 255 (Ubuntu 24.04)：is-enabled 直接打印 not-found（退出码 1 或 4）。
+        for code in [Some(1), Some(4)] {
+            assert!(matches!(
+                classify_is_enabled_absence_probe(b"not-found\n", code),
+                AbsenceProbeDecision::Absent
+            ));
+        }
+    }
+
+    #[test]
+    fn absence_probe_rejects_existing_units_including_v249_empty_shapes() {
+        for (stdout, code) in [
+            ("enabled\n", Some(0)),
+            ("static\n", Some(1)),
+            ("disabled\n", Some(1)),
+            ("masked\n", Some(1)),
+            // 异常退出码下的 not-found 不构成缺失。
+            ("not-found\n", Some(0)),
+        ] {
+            assert!(
+                matches!(
+                    classify_is_enabled_absence_probe(stdout.as_bytes(), code),
+                    AbsenceProbeDecision::Existing
+                ),
+                "已加载或不受支持形态必须拒绝: {stdout:?} {code:?}"
+            );
+        }
+        // v249 缺失候选进入 show 后，loaded（含 masked/disabled）一律 ExistingResidue。
+        for stdout in [b"loaded\n".as_slice(), b"loaded".as_slice()] {
+            assert!(matches!(
+                classify_load_state_absence_probe(stdout, true),
+                AbsenceProbeDecision::Existing
+            ));
+        }
+        assert!(matches!(
+            classify_load_state_absence_probe(b"not-found\n", false),
+            AbsenceProbeDecision::Existing
+        ));
+    }
+
+    #[test]
+    fn absence_probe_maps_manager_faults_to_systemd_not_absence() {
+        // v255 manager 未运行：is-enabled 空 stdout + 退出码 4，不得视为缺失候选。
+        assert!(matches!(
+            classify_is_enabled_absence_probe(b"", Some(4)),
+            AbsenceProbeDecision::ManagerFault
+        ));
+        assert!(matches!(
+            classify_is_enabled_absence_probe(b"not-found\nnot-found\n", Some(1)),
+            AbsenceProbeDecision::ManagerFault
+        ));
+        assert!(matches!(
+            classify_is_enabled_absence_probe(&[0xff], Some(1)),
+            AbsenceProbeDecision::ManagerFault
+        ));
+        // 权威确认命令自身无输出时不得放行安装。
+        assert!(matches!(
+            classify_load_state_absence_probe(b"", true),
+            AbsenceProbeDecision::ManagerFault
+        ));
+    }
 
     #[test]
     fn canonical_restart_gets_a_new_bounded_deadline_after_install_deadline() {

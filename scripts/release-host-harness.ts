@@ -36,7 +36,13 @@ import { probeRepairLocalCompletionOutput } from "./release-repair-closure-evide
 // emergency-removal plan; the product installer and uninstaller are never
 // invoked by this test-only path.
 type ManagedFileResource = { kind: "file"; path: string };
-type ManagedDirectoryResource = { kind: "directory"; path: string };
+// systemd 在 DynamicUser 下把声明的 StateDirectory 迁到固定 private 载体，声明路径留 symlink；
+// privateCustodyPath 补齐同一资源的真实数据载体，使记录、清理与独立 inventory 消费同一闭包。
+type ManagedDirectoryResource = {
+  kind: "directory";
+  path: string;
+  privateCustodyPath?: string;
+};
 type ProbeUserResource = { kind: "user"; name: string };
 type ProbeGroupResource = { kind: "group"; name: string };
 type ProbeServiceResource = { kind: "service"; name: string };
@@ -63,7 +69,11 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
       kind: "file",
       path: "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
     },
-    { kind: "directory", path: "/var/lib/enoki-probe" },
+    {
+      kind: "directory",
+      path: "/var/lib/enoki-probe",
+      privateCustodyPath: "/var/lib/private/enoki-probe",
+    },
     { kind: "file", path: "/etc/sudoers.d/enoki-probe-operations" },
     {
       kind: "file",
@@ -75,10 +85,20 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
     { kind: "service", name: "enoki-probe.service" },
   ]);
 
+// 声明路径与其 private 真实载体是同一个 run-owned 闭包；preflight、指纹、清理与
+// 独立 inventory 都通过这一条映射消费同一份声明。
+function managedPathResourcePaths(
+  resource: ManagedPathResource,
+): readonly string[] {
+  return resource.kind === "directory" && resource.privateCustodyPath
+    ? [resource.path, resource.privateCustodyPath]
+    : [resource.path];
+}
+
 const managedHostPaths: readonly string[] = Object.freeze(
   releaseE2EInfrastructureResources
     .filter((resource): resource is ManagedPathResource => "path" in resource)
-    .map((resource) => resource.path),
+    .flatMap(managedPathResourcePaths),
 );
 
 const releaseE2EUsers: readonly string[] = Object.freeze(
@@ -2026,9 +2046,25 @@ export function renderReleaseE2EResourceFingerprint(
   const directories = resources
     .filter(
       (resource): resource is ManagedDirectoryResource =>
-        resource.kind === "directory",
+        resource.kind === "directory" &&
+        resource.privateCustodyPath === undefined,
     )
     .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const custodyPairs = resources
+    .filter(
+      (
+        resource,
+      ): resource is ManagedDirectoryResource & {
+        privateCustodyPath: string;
+      } =>
+        resource.kind === "directory" &&
+        resource.privateCustodyPath !== undefined,
+    )
+    .flatMap((resource) => [
+      shellSingleQuote(resource.path),
+      shellSingleQuote(resource.privateCustodyPath),
+    ])
     .join(" ");
   const users = resources
     .filter(
@@ -2069,6 +2105,28 @@ fingerprint_directory() {
     fingerprint_path "$member" || exit 1
   done
 }
+fingerprint_state_directory() {
+  declared=$1
+  private_carrier=$2
+  if [ -L "$declared" ]; then
+    [ "$(readlink -f -- "$declared")" = "$private_carrier" ] || return 1
+    fingerprint_path "$declared" || return 1
+  elif [ -e "$declared" ]; then
+    [ -d "$declared" ] || return 1
+    fingerprint_directory "$declared" || return 1
+  fi
+  if [ -e "$private_carrier" ] || [ -L "$private_carrier" ]; then
+    [ -d "$private_carrier" ] && [ ! -L "$private_carrier" ] || return 1
+    fingerprint_directory "$private_carrier" || return 1
+  fi
+}
+fingerprint_state_custody() {
+  set -- ${custodyPairs}
+  while [ "$#" -gt 0 ]; do
+    fingerprint_state_directory "$1" "$2" || return 1
+    shift 2
+  done
+}
 fingerprint() {
   for candidate in ${files}; do
     if [ -e "$candidate" ] || [ -L "$candidate" ]; then
@@ -2082,6 +2140,7 @@ fingerprint() {
       fingerprint_directory "$candidate" || return 1
     fi
   done
+  fingerprint_state_custody || return 1
   for account in ${users}; do
     if entry=$(getent passwd "$account"); then
       uid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
@@ -2135,7 +2194,8 @@ function releaseEmergencyCleanupScript(runId: string, token: string): string {
       .filter(
         (resource): resource is ManagedPathResource => resource.kind === kind,
       )
-      .map((resource) => shellSingleQuote(resource.path))
+      .flatMap(managedPathResourcePaths)
+      .map((resource) => shellSingleQuote(resource))
       .join(" ");
   const namesFor = (kind: "user" | "group" | "service"): string =>
     releaseE2EInfrastructureResources

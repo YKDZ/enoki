@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -7,6 +8,7 @@ import {
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -1111,6 +1113,128 @@ describe("Probe Host Harness", () => {
       await expect(fingerprint()).resolves.not.toBe(baseline);
       await chmod(binary, 0o644);
       await expect(fingerprint()).resolves.toBe(baseline);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("records systemd DynamicUser StateDirectory custody as one run-owned closure", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-state-custody-"),
+    );
+    const publicState = path.join(root, "var/lib/enoki-probe");
+    const privateState = path.join(root, "var/lib/private/enoki-probe");
+    const identityName = "identity/probe-bootstrap.toml";
+    const resources = [
+      {
+        kind: "directory",
+        path: publicState,
+        privateCustodyPath: privateState,
+      },
+    ];
+    const fingerprint = async () => {
+      try {
+        const { stdout } = await execFileAsync("sh", [
+          "-c",
+          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+        ]);
+        return { code: 0, stdout };
+      } catch (error) {
+        return { code: error?.code ?? 1, stdout: error?.stdout ?? "" };
+      }
+    };
+    const observedType = (output, target) => {
+      const digest = createHash("sha256").update(target).digest("hex");
+      return output
+        .split("\n")
+        .find((entry) => entry.includes(`\t${digest}\t`))
+        ?.split("\t")[2];
+    };
+
+    try {
+      // systemd 迁移形态：声明路径是相对 symlink，真实 identity 数据在固定 private 载体。
+      await mkdir(path.join(privateState, "identity"), { recursive: true });
+      await writeFile(
+        path.join(privateState, identityName),
+        'probe_id = "state-custody"\n',
+        "utf8",
+      );
+      await symlink("private/enoki-probe", publicState);
+      const migrated = await fingerprint();
+      expect(migrated.code).toBe(0);
+      expect(observedType(migrated.stdout, publicState)).toBe("symlink");
+      expect(observedType(migrated.stdout, privateState)).toBe("directory");
+      expect(
+        observedType(migrated.stdout, path.join(privateState, identityName)),
+      ).toBe("file");
+
+      // 只删 public 链接而留下 private 真实数据时，同一闭包仍观察到 private 载体，
+      // 指纹必然偏离已记录值，核验与清理不可能被判为干净。
+      await rm(publicState, { force: true });
+      const residue = await fingerprint();
+      expect(residue.code).toBe(0);
+      expect(observedType(residue.stdout, privateState)).toBe("directory");
+      expect(residue.stdout).not.toBe(migrated.stdout);
+
+      // 普通目录旧形态沿用同一机制。
+      await rm(privateState, { force: true, recursive: true });
+      await mkdir(path.join(publicState, "identity"), { recursive: true });
+      await writeFile(
+        path.join(publicState, identityName),
+        'probe_id = "state-custody"\n',
+        "utf8",
+      );
+      const ordinary = await fingerprint();
+      expect(ordinary.code).toBe(0);
+      expect(observedType(ordinary.stdout, publicState)).toBe("directory");
+      expect(observedType(ordinary.stdout, privateState)).toBeUndefined();
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("keeps rejecting symlink shapes outside the declared StateDirectory custody", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-state-custody-reject-"),
+    );
+    const publicState = path.join(root, "var/lib/enoki-probe");
+    const privateState = path.join(root, "var/lib/private/enoki-probe");
+    const elsewhere = path.join(root, "var/lib/enoki-elsewhere");
+    const fingerprint = async (resources) => {
+      try {
+        const { stdout } = await execFileAsync("sh", [
+          "-c",
+          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+        ]);
+        return { code: 0, stdout };
+      } catch (error) {
+        return { code: error?.code ?? 1, stdout: error?.stdout ?? "" };
+      }
+    };
+
+    try {
+      await mkdir(elsewhere, { recursive: true });
+      await writeFile(path.join(elsewhere, "data.toml"), "foreign\n", "utf8");
+      await symlink(elsewhere, publicState);
+      const foreignTarget = await fingerprint([
+        {
+          kind: "directory",
+          path: publicState,
+          privateCustodyPath: privateState,
+        },
+      ]);
+      expect(foreignTarget.code).not.toBe(0);
+      expect(foreignTarget.stdout).toBe("");
+
+      const metadata = path.join(root, "etc/enoki/probe-install.toml");
+      await mkdir(path.dirname(metadata), { recursive: true });
+      await writeFile(path.join(root, "real-install.toml"), "real\n", "utf8");
+      await symlink(path.join(root, "real-install.toml"), metadata);
+      const declaredFile = await fingerprint([
+        { kind: "file", path: metadata },
+      ]);
+      expect(declaredFile.code).not.toBe(0);
+      expect(declaredFile.stdout).toBe("");
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -7297,6 +7421,7 @@ describe("Release E2E command", () => {
     const manifestDigest = `sha256:${"d".repeat(64)}`;
     const configDigest = `sha256:${"e".repeat(64)}`;
     const commands = [];
+    const hubEnvs = [];
     const state = { container: false, image: false, volume: false };
     const exec = async (command, arguments_) => {
       commands.push([command, ...arguments_].join(" "));
@@ -7319,6 +7444,9 @@ describe("Release E2E command", () => {
       }
       if (arguments_[0] === "run") {
         state.container = true;
+        hubEnvs.push(
+          parseHubEnvFile(arguments_[arguments_.indexOf("--env-file") + 1]),
+        );
         return successfulCommandText("container-id\n");
       }
       if (arguments_[0] === "logs") {
@@ -7419,6 +7547,11 @@ describe("Release E2E command", () => {
       ownerPassword: "owner-secret",
       runId: "run-runtime",
     });
+    // W48-2：fresh 场景的候选 Hub 报告配置仍声明其规范观察地址（canonical
+    // transport 的 listenUrl，由现有测试锁定为 hubPublicUrl），必要捕获不关闭。
+    expect(hubEnvs).toHaveLength(1);
+    expect(hubEnvs[0].ENOKI_PROBE_API_ORIGIN).toBe("http://192.0.2.20:33000");
+    expect(hubEnvs[0].ENOKI_PUBLIC_HUB_URL).toBeUndefined();
 
     expect(commands).toEqual(
       expect.arrayContaining([
@@ -7457,6 +7590,7 @@ describe("Release E2E command", () => {
     const candidateConfigDigest = `sha256:${"e".repeat(64)}`;
     const commands = [];
     const runMounts = [];
+    const hubEnvs = [];
     const images = new Map();
     let stagedImage = null;
     let stagedTag = null;
@@ -7509,6 +7643,9 @@ describe("Release E2E command", () => {
         container = true;
         activeImage = images.get(arguments_.at(-1));
         runMounts.push(arguments_[arguments_.indexOf("--mount") + 1]);
+        hubEnvs.push(
+          parseHubEnvFile(arguments_[arguments_.indexOf("--env-file") + 1]),
+        );
         return successfulCommandText("container-id\n");
       }
       if (arguments_[0] === "rm") {
@@ -7598,6 +7735,19 @@ describe("Release E2E command", () => {
     expect(resources.activeHub).toBe("baseline");
     await controller.switchToCandidate({ resources, runId: "run-switch" });
     expect(resources.activeHub).toBe("candidate");
+    // W48-1：forward 场景下基线 v0.1.74 探针的实际请求 Origin 是容器唯一发布的
+    // owner 直连地址；环境声明的 Probe 报告 Origin 必须与之及候选消费者一致。
+    expect(hubEnvs.map((env) => env.ENOKI_PROBE_API_ORIGIN)).toEqual([
+      "http://127.0.0.1:33000",
+      "http://127.0.0.1:33000",
+    ]);
+    expect(hubEnvs.map((env) => env.ENOKI_MANAGEMENT_ORIGIN)).toEqual([
+      "http://192.0.2.20:33000",
+      "http://192.0.2.20:33000",
+    ]);
+    expect(hubEnvs.every((env) => env.ENOKI_PUBLIC_HUB_URL === undefined)).toBe(
+      true,
+    );
     expect(runMounts).toEqual([
       "type=volume,source=enoki-e2e-data-run-switch,target=/data",
       "type=volume,source=enoki-e2e-data-run-switch,target=/data",
@@ -8187,6 +8337,18 @@ describe("Release E2E command", () => {
     });
   });
 });
+
+// 生产 runHubRuntime 在 `docker run --env-file` 时刻真实写入磁盘的 Hub 运行配置。
+function parseHubEnvFile(filePath) {
+  const values = {};
+  for (const line of readFileSync(filePath, "utf8").split("\n")) {
+    const separator = line.indexOf("=");
+    if (separator > 0) {
+      values[line.slice(0, separator)] = line.slice(separator + 1);
+    }
+  }
+  return values;
+}
 
 function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
