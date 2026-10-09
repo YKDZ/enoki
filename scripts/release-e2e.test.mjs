@@ -239,6 +239,136 @@ describe("Release E2E business assertions", () => {
     }
   });
 
+  const replacementMigrationFacts = {
+    enrollmentId: "enr_manual_reinstall_0001",
+    expectedProbeId: "probe-run10-replacement",
+    sourceProbeSha256: ["a".repeat(64)],
+    sourceProbeVersion: "v0.1.74",
+    targetAssetSetDigest: "b".repeat(64),
+    targetHostId: "7",
+    targetProbeVersion: "v0.1.75",
+  };
+
+  function producedReplacementEnrollment() {
+    const enrollment = officialEnrollment();
+    const rendered = renderInstallCommand(
+      {
+        bootstrapRecipe: enrollment.bootstrapRecipe,
+        probeApiOrigin: enrollment.hubUrl,
+      },
+      {
+        enrollmentToken: enrollment.enrollmentToken,
+        replacementMigration: replacementMigrationFacts,
+      },
+    );
+    return {
+      ...enrollment,
+      enrollmentId: replacementMigrationFacts.enrollmentId,
+      installCommand: rendered.installCommand,
+      target: { hostId: 7, kind: "manual_reinstall" },
+    };
+  }
+
+  async function consumeManualReinstall(enrollment) {
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const { pathname } = new URL(url);
+        if (pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (pathname === "/api/web/enrollments/manual-reinstall/7") {
+          return jsonResponse(enrollment, 201);
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+    await client.authenticate("owner-password");
+    return client.createManualReinstallEnrollment(7);
+  }
+
+  async function consumeCreatedEnrollment(enrollment) {
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url) => {
+        const { pathname } = new URL(url);
+        if (pathname === "/api/web/enrollments") {
+          return jsonResponse(enrollment, 201);
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+    return client.createEnrollment();
+  }
+
+  it("accepts the produced manual-reinstall enrollment input verbatim through the consumer", async () => {
+    const produced = producedReplacementEnrollment();
+    // 正式生产者的手动重装注册输入是携带迁移绑定的规范 JSON，而非裸 token
+    expect(produced.installCommand).toContain("replacementMigration");
+    expect(produced.installCommand).not.toBe(officialInstallCommand);
+
+    const created = await consumeManualReinstall(produced);
+    // W56-3：消费接缝原样保留命令，安装入口继续执行逐字的生产输出
+    expect(created.installCommand).toBe(produced.installCommand);
+  });
+
+  it("keeps manual-reinstall enrollment binding and rejects malformed structured inputs", async () => {
+    const produced = producedReplacementEnrollment();
+    // 迁移 JSON 的 token 与 Enrollment 来源不一致时仍触发绑定错误
+    await expect(
+      consumeManualReinstall({
+        ...produced,
+        installCommand: produced.installCommand.replace(
+          produced.enrollmentToken,
+          `enk_enroll_${"0".repeat(22)}`,
+        ),
+      }),
+    ).rejects.toThrow(/not bound to its token and origin/);
+
+    for (const installCommand of [
+      // schemaVersion 非 1 的未知注册输入
+      produced.installCommand.replace('"schemaVersion":1', '"schemaVersion":2'),
+      // hubOrigin 与命令来源不一致
+      produced.installCommand.replace(
+        '"hubOrigin":"https://hub.example"',
+        '"hubOrigin":"https://attacker.example"',
+      ),
+      // 缺少合法 enrollmentToken
+      produced.installCommand.replace(
+        `"enrollmentToken":"${produced.enrollmentToken}"`,
+        '"enrollmentToken":"not-a-token"',
+      ),
+    ]) {
+      expect(installCommand).not.toBe(produced.installCommand);
+      await expect(
+        consumeManualReinstall({ ...produced, installCommand }),
+      ).rejects.toThrow(/invalid Probe install command/);
+    }
+  });
+
+  it("keeps the bare-token new host and legacy install commands accepted by the consumer", async () => {
+    // 正对照：既有裸 token 新主机命令与 .74 legacy 命令保持可接受
+    await expect(
+      consumeCreatedEnrollment(officialEnrollment()),
+    ).resolves.toEqual(
+      expect.objectContaining({ installCommand: officialInstallCommand }),
+    );
+
+    const legacyCommand =
+      "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash";
+    await expect(
+      consumeCreatedEnrollment({
+        enrollmentToken: "enk_enroll_legacy",
+        hubUrl: "https://hub.example",
+        installCommand: legacyCommand,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ installCommand: legacyCommand }),
+    );
+  });
+
   it("accepts only the verified Trust Epoch migration baseline union member", async () => {
     const manifest = candidateManifestWithMigrationBaseline();
     await expect(
