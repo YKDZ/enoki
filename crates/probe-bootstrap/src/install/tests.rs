@@ -2974,9 +2974,47 @@ mod tests {
         );
         assert!(
             service.contains(
+                "RuntimeDirectory=enoki-probe systemd/system/enoki-observation-runtime.service.d\n"
+            ),
+            "固定 repair drop-in 必须由 manager 在 mount namespace 建立前创建，否则 fresh 路径缺失会以 226/NAMESPACE 阻止进程进入"
+        );
+        assert!(
+            service.contains("ReadOnlyPaths=/run/systemd/system\n"),
+            "drop-in 的父目录必须只读，进程不得在 /run/systemd/system 里另建同级路径"
+        );
+        assert!(
+            service.contains(
+                "BindPaths=/run/systemd/system/enoki-observation-runtime.service.d:/run/systemd/system/enoki-observation-runtime.service.d\n"
+            ),
+            "只有固定 drop-in 目录本身被交给 companion 写"
+        );
+        assert!(
+            service.contains("RuntimeDirectoryPreserve=yes\n"),
+            "namespace 前的目录创建不得让 manager 在停止时删除共享 /run/enoki-probe 锁与故障事实"
+        );
+        assert!(
+            service.contains(
                 "BindReadOnlyPaths=/proc/sys/kernel/random/boot_id:/run/enoki-probe/runtime-failure-boot-id"
             ),
             "Evidence／Repair Companion 是当前 boot reader 的消费者，须把宿主 boot_id 固定绑定成同一 alias，否则 ProcSubset=pid 会隐藏 source"
+        );
+        // 负项：逐个解析全部 ReadWritePaths token 并去掉 optional '-'，缺失路径不得再以强制写面出现，
+        // 也不能靠把父目录／任意子路径列进写面来绕过创建。
+        let write_paths = service
+            .lines()
+            .filter_map(|line| line.strip_prefix("ReadWritePaths="))
+            .flat_map(str::split_ascii_whitespace)
+            .map(|path| path.strip_prefix('-').unwrap_or(path))
+            .collect::<Vec<_>>();
+        assert!(
+            write_paths.iter().all(|path| {
+                *path != "/run/systemd/system" && !path.starts_with("/run/systemd/system/")
+            }),
+            "ordinary companion 不得强制依赖 /run/systemd/system 下的 runtime leaf"
+        );
+        assert!(
+            !write_paths.contains(&"/var/lib/enoki-probe-registration"),
+            "ordinary companion 不拥有已退休的 registration custody"
         );
     }
 
