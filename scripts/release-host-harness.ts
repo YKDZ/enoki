@@ -48,11 +48,13 @@ type ManagedDirectoryResource = {
 type ProbeUserResource = { kind: "user"; name: string };
 type ProbeGroupResource = { kind: "group"; name: string };
 type ProbeServiceResource = { kind: "service"; name: string };
+type ProbeSocketResource = { kind: "socket"; name: string };
 type ManagedPathResource = ManagedFileResource | ManagedDirectoryResource;
 type ManagedNameResource =
   | ProbeUserResource
   | ProbeGroupResource
-  | ProbeServiceResource;
+  | ProbeServiceResource
+  | ProbeSocketResource;
 type InfrastructureResource = ManagedPathResource | ManagedNameResource;
 
 const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
@@ -60,6 +62,14 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
     { kind: "file", path: "/usr/local/bin/enoki-probe" },
     { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-acquire" },
     { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-activate" },
+    // 当前正式安装随 Probe 一并落盘的四个集成 binary（install.rs:56—60）。
+    { kind: "file", path: "/usr/local/bin/enoki-observation-runtime" },
+    { kind: "file", path: "/usr/local/bin/enoki-cpu-resource-provider" },
+    {
+      kind: "file",
+      path: "/usr/local/bin/enoki-disk-health-resource-provider",
+    },
+    { kind: "file", path: "/usr/local/bin/enoki-probe-lifecycle-companion" },
     {
       kind: "file",
       path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
@@ -67,6 +77,56 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
     { kind: "directory", path: "/var/lib/enoki-probe-bootstrap" },
     { kind: "file", path: "/etc/enoki/probe-install.toml" },
     { kind: "file", path: "/etc/systemd/system/enoki-probe.service" },
+    // 九项 observation integration 与两项 lifecycle-upgrade unit 文件（install.rs:68—93）。
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-observation-runtime.service",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-observation-runtime.socket",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-observation-runtime-failure.service",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-cpu-resource-provider@.service",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-cpu-resource-provider.socket",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-disk-health-resource-provider@.service",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-disk-health-resource-provider.socket",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-probe-lifecycle-companion@.service",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-probe-lifecycle-companion.socket",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-probe-lifecycle-upgrade@.service",
+    },
+    {
+      kind: "file",
+      path: "/etc/systemd/system/enoki-probe-lifecycle-upgrade.socket",
+    },
+    // systemctl enable 建立的激活能力；unit 文件删除后该 symlink 仍会让 Probe 开机复活。
+    {
+      kind: "file",
+      path: "/etc/systemd/system/multi-user.target.wants/enoki-probe.service",
+    },
     {
       kind: "file",
       path: "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
@@ -76,6 +136,22 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
       path: "/var/lib/enoki-probe",
       privateCustodyPath: "/var/lib/private/enoki-probe",
     },
+    // Replacement registration 与 installed-bundle repair 的 run-owned 载体
+    // （replacement_registration.rs:18—21、live.rs:539—543）。
+    { kind: "file", path: "/var/lib/enoki-probe-registration/attempt.json" },
+    {
+      kind: "file",
+      path: "/run/credentials/enoki-probe.service/registration-attempt",
+    },
+    {
+      kind: "file",
+      path: "/run/systemd/system/enoki-probe.service.d/10-enoki-replacement-registration.conf",
+    },
+    {
+      kind: "file",
+      path: "/run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf",
+    },
+    { kind: "directory", path: "/run/enoki-probe" },
     { kind: "file", path: "/etc/sudoers.d/enoki-probe-operations" },
     {
       kind: "file",
@@ -83,8 +159,22 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
     },
     { kind: "file", path: "/etc/sudoers.d/enoki-probe-upgrader" },
     { kind: "user", name: "enoki-probe" },
+    // 当前安装创建的两个持久 IPC group（account.rs:12—31）；共享组拒绝准入、仅本 run 可退休。
     { kind: "group", name: "enoki-probe" },
+    { kind: "group", name: "enoki-probe-ipc" },
+    { kind: "group", name: "enoki-observation-ipc" },
     { kind: "service", name: "enoki-probe.service" },
+    { kind: "service", name: "enoki-observation-runtime.service" },
+    { kind: "service", name: "enoki-observation-runtime-failure.service" },
+    { kind: "service", name: "enoki-cpu-resource-provider@.service" },
+    { kind: "service", name: "enoki-disk-health-resource-provider@.service" },
+    { kind: "service", name: "enoki-probe-lifecycle-companion@.service" },
+    { kind: "service", name: "enoki-probe-lifecycle-upgrade@.service" },
+    { kind: "socket", name: "enoki-observation-runtime.socket" },
+    { kind: "socket", name: "enoki-cpu-resource-provider.socket" },
+    { kind: "socket", name: "enoki-disk-health-resource-provider.socket" },
+    { kind: "socket", name: "enoki-probe-lifecycle-companion.socket" },
+    { kind: "socket", name: "enoki-probe-lifecycle-upgrade.socket" },
   ]);
 
 // 声明路径与其 private 真实载体是同一个 run-owned 闭包；preflight、清理与
@@ -117,6 +207,31 @@ const releaseE2EGroups: readonly string[] = Object.freeze(
       (resource): resource is ProbeGroupResource => resource.kind === "group",
     )
     .map((resource) => resource.name),
+);
+
+// 模板 unit 的运行时库存只以实例出现，因此查询与退休沿产品自己固定的 name@*.service
+// 形状（install/systemd.rs:3—45），不扩到任意 unit 名。
+const releaseE2EUnitPatterns: readonly string[] = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter(
+      (resource): resource is ProbeServiceResource | ProbeSocketResource =>
+        resource.kind === "service" || resource.kind === "socket",
+    )
+    .map((resource) =>
+      resource.name.includes("@.")
+        ? resource.name.replace("@.", "@*.")
+        : resource.name,
+    ),
+);
+
+// baseline 保留的既有观察：/run/systemd/system 下的 enoki-probe 运行时 unit。
+// 同一 glob 既进入 list-units 模式，也进入该目录的路径存在性检查。
+const releaseE2ERuntimeUnitGlobs: readonly string[] = Object.freeze([
+  "enoki-probe*.service",
+]);
+
+const releaseE2ERuntimeUnitPaths: readonly string[] = Object.freeze(
+  releaseE2ERuntimeUnitGlobs.map((glob) => `/run/systemd/system/${glob}`),
 );
 
 export type ProbeOperationState =
@@ -1374,17 +1489,44 @@ json_bool test -f /sys/fs/cgroup/cgroup.controllers
 printf ',"virtualization":"%s"}\n' "$virtualization"`;
 }
 
+// getent 约定 0=存在、2=不存在、其它=查询失败。失败必须以非零退出把库存记为 unknown，
+// 不能像条件上下文那样把读取错误折叠成 absent。
+function probeAccountQueryScript(): string {
+  return String.raw`probe_account() {
+  database=$1
+  name=$2
+  status=0
+  getent "$database" "$name" >/dev/null 2>&1 || status=$?
+  if [ "$status" = 0 ]; then return 0; fi
+  if [ "$status" != 2 ]; then
+    printf 'Probe account inventory query failed: getent %s %s (exit %s)\n' "$database" "$name" "$status" >&2
+    exit 76
+  fi
+  return 1
+}`;
+}
+
 function hostInventoryScript(): string {
-  const group = shellSingleQuote(stringValue(releaseE2EGroups[0]));
-  const user = shellSingleQuote(stringValue(releaseE2EUsers[0]));
-  return String.raw`# enoki-release-e2e:inventory
+  const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
+  const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
+  const unitPatterns = [
+    ...releaseE2EUnitPatterns,
+    ...releaseE2ERuntimeUnitGlobs,
+  ]
+    .map(shellSingleQuote)
+    .join(" ");
+  return `# enoki-release-e2e:inventory
 set -eu
-json_bool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
-printf '{"accounts":{"group":'
-json_bool getent group ${group}
-printf ',"user":'
-json_bool getent passwd ${user}
-printf '},"files":['
+${probeAccountQueryScript()}
+group_present=false
+for account in ${groups}; do
+  if probe_account group "$account"; then group_present=true; fi
+done
+user_present=false
+for account in ${users}; do
+  if probe_account passwd "$account"; then user_present=true; fi
+done
+printf '{"accounts":{"group":%s,"user":%s},"files":[' "$group_present" "$user_present"
 separator=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
@@ -1392,21 +1534,23 @@ for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
     separator=,
   fi
 done
-for candidate in /run/systemd/system/enoki-probe*.service; do
+for candidate in ${releaseE2ERuntimeUnitPaths.join(" ")}; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     printf '%s"%s"' "$separator" "$candidate"
     separator=,
   fi
 done
 printf '],"units":['
+units=$(systemctl list-units --all --full --plain ${unitPatterns} --no-legend --no-pager)
 separator=
-systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null |
-  while IFS=' ' read -r unit _; do
-    [ -n "$unit" ] || continue
-    printf '%s"%s"' "$separator" "$unit"
-    separator=,
-  done
-printf ']}\n'
+while IFS=' ' read -r unit _; do
+  [ -n "$unit" ] || continue
+  printf '%s"%s"' "$separator" "$unit"
+  separator=,
+done <<EOUNITINVENTORY
+$units
+EOUNITINVENTORY
+printf ']}\\n'
 `;
 }
 
@@ -1706,37 +1850,49 @@ done
 function claimRunScript(runId: string, token: string): string {
   const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
   const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
+  const unitPatterns = [
+    ...releaseE2EUnitPatterns,
+    ...releaseE2ERuntimeUnitGlobs,
+  ]
+    .map(shellSingleQuote)
+    .join(" ");
   return `# enoki-release-e2e:claim
 set -eu
+${probeAccountQueryScript()}
 claim_root=/var/lib/enoki-release-e2e
 claim_dir="$claim_root/claim"
 install -d -m 0700 "$claim_root"
 if ! mkdir -m 0700 "$claim_dir" 2>/dev/null; then
-  printf 'Host already claimed by another Release E2E run\n' >&2
+  printf 'Host already claimed by another Release E2E run\\n' >&2
   exit 73
 fi
 cleanup_rejected_claim() { rm -f -- "$claim_dir/run-id" "$claim_dir/token"; rmdir "$claim_dir" 2>/dev/null || true; rmdir "$claim_root" 2>/dev/null || true; }
 trap cleanup_rejected_claim EXIT HUP INT TERM
-( umask 077; printf '%s\n' ${shellSingleQuote(runId)} > "$claim_dir/run-id"; printf '%s\n' ${shellSingleQuote(token)} > "$claim_dir/token" )
+( umask 077; printf '%s\\n' ${shellSingleQuote(runId)} > "$claim_dir/run-id"; printf '%s\\n' ${shellSingleQuote(token)} > "$claim_dir/token" )
 # enoki-release-e2e:claim-empty-recheck
 residue=
-for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do
+for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} ${releaseE2ERuntimeUnitPaths.join(" ")}; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then residue="$residue $candidate"; fi
 done
 for account in ${users}; do
-  if getent passwd "$account" >/dev/null 2>&1; then residue="$residue user:$account"; fi
+  if probe_account passwd "$account"; then residue="$residue user:$account"; fi
 done
 for account in ${groups}; do
-  if getent group "$account" >/dev/null 2>&1; then residue="$residue group:$account"; fi
+  if probe_account group "$account"; then residue="$residue group:$account"; fi
 done
-units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
-if [ -n "$units" ]; then residue="$residue enoki-probe-unit"; fi
+units=$(systemctl list-units --all --full --plain ${unitPatterns} --no-legend --no-pager)
+while IFS=' ' read -r unit _; do
+  [ -n "$unit" ] || continue
+  residue="$residue unit:$unit"
+done <<EOUNITINVENTORY
+$units
+EOUNITINVENTORY
 if [ -n "$residue" ]; then
-  printf 'Release Test Host became non-empty before claim:%s\n' "$residue" >&2
+  printf 'Release Test Host became non-empty before claim:%s\\n' "$residue" >&2
   exit 74
 fi
 trap - EXIT HUP INT TERM
-printf 'owned\n'
+printf 'owned\\n'
 `;
 }
 
@@ -1950,18 +2106,29 @@ function releaseEmergencyCleanupScript(runId: string, token: string): string {
       .flatMap(managedPathResourcePaths)
       .map((resource) => shellSingleQuote(resource))
       .join(" ");
-  const namesFor = (kind: "user" | "group" | "service"): string =>
+  const namesFor = (kind: "user" | "group"): string =>
     releaseE2EInfrastructureResources
       .filter(
         (resource): resource is ManagedNameResource => resource.kind === kind,
       )
       .map((resource) => shellSingleQuote(resource.name))
       .join(" ");
+  const patternsFor = (
+    suffix: ".service" | ".socket",
+    extra: readonly string[] = [],
+  ): string =>
+    [
+      ...releaseE2EUnitPatterns.filter((name) => name.endsWith(suffix)),
+      ...extra,
+    ]
+      .map(shellSingleQuote)
+      .join(" ");
   const files = pathsFor("file");
   const directories = pathsFor("directory");
   const users = namesFor("user");
   const groups = namesFor("group");
-  const services = namesFor("service");
+  const sockets = patternsFor(".socket");
+  const services = patternsFor(".service", releaseE2ERuntimeUnitGlobs);
   // 同一固定声明给出 public 链的封闭形态：ordinary 真实目录，或精确指向其 private
   // 载体。未知 target 不跟随也不删除，整个清理 effect 前拒绝并保留 claim。
   const stateCustodyGuards = releaseE2EInfrastructureResources
@@ -1989,6 +2156,9 @@ claim=/var/lib/enoki-release-e2e/claim
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 ${stateCustodyGuards}
+# 退休顺序沿用产品自己的固定 stop 列表：先收 socket 激活源，再停 service 与实例，
+# 否则正常停止 Probe 后 socket 会重新拉起 Runtime／Provider。
+systemctl disable --now ${sockets} >/dev/null 2>&1 || true
 systemctl disable --now ${services} >/dev/null 2>&1 || true
 rm -f -- ${files}
 rm -rf -- ${directories}

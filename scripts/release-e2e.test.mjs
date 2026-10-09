@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
@@ -1234,6 +1234,150 @@ describe("Probe Host Harness", () => {
     ).toHaveLength(1);
     expect(executions[0].command).toContain("probe-install.toml");
     expect(executions[0].options).toEqual({ root: true });
+  });
+
+  it("refuses admission and verification for the current formal install integration closure", async () => {
+    // 当前正式安装除 Probe 本体外还创建集成 Runtime／Provider、两个持久 IPC group 与
+    // socket 激活源。只报告首个 group，或只观察 enoki-probe*.service，都会把这层残留洗成空 Host。
+    const integrationResidue = {
+      accounts: { group: true, user: false },
+      files: [
+        "/etc/systemd/system/enoki-observation-runtime.service",
+        "/run/enoki-probe",
+        "/usr/local/bin/enoki-observation-runtime",
+      ],
+      units: [
+        "enoki-cpu-resource-provider@1.service",
+        "enoki-observation-runtime.service",
+        "enoki-observation-runtime.socket",
+      ],
+    };
+    const harness = createProbeHostHarness({
+      execute: async () => successfulCommand(integrationResidue),
+    });
+
+    const admission = await harness
+      .assertDisposable("run-integration-closure")
+      .catch((error) => error);
+    expect(admission.message).toMatch(/pre-existing Enoki installation/);
+    for (const residue of [
+      "group:enoki-probe-ipc",
+      "group:enoki-observation-ipc",
+      "/usr/local/bin/enoki-observation-runtime",
+      "/etc/systemd/system/enoki-observation-runtime.service",
+      "/run/enoki-probe",
+      "enoki-observation-runtime.socket",
+      "enoki-cpu-resource-provider@1.service",
+    ]) {
+      expect(admission.message).toContain(residue);
+    }
+
+    const verification = await harness
+      .verifyClean("run-integration-closure")
+      .catch((error) => error);
+    expect(verification.message).toMatch(/is not clean/);
+    expect(verification.message).toContain("enoki-observation-runtime.socket");
+    expect(verification.message).toContain("group:enoki-observation-ipc");
+  });
+
+  it("consumes one declared closure in admission, claim recheck, and emergency retirement", async () => {
+    const commands = [];
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 2
+              ? {
+                  accounts: { group: true, user: true },
+                  files: ["/usr/local/bin/enoki-observation-runtime"],
+                  units: ["enoki-observation-runtime.service"],
+                }
+              : {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText("absent\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("enk_enroll_secret")) {
+          return { code: 1, stderr: "interrupted", stdout: "" };
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-shared-closure");
+    await expect(
+      harness.install(officialEnrollment(), "run-shared-closure"),
+    ).rejects.toMatchObject({ code: "probe_installation_failed" });
+    await expect(harness.cleanup("run-shared-closure")).resolves.toEqual({
+      clean: true,
+      removedPartialInstallation: true,
+    });
+
+    const scriptFor = (marker) =>
+      commands.find((command) => command.includes(marker));
+    const inventory = scriptFor("# enoki-release-e2e:inventory");
+    const claim = scriptFor("# enoki-release-e2e:claim");
+    const emergency = scriptFor("# enoki-release-e2e:emergency-cleanup");
+    // 准入、claim 空库存重查与紧急退休必须由同一份声明生成，缺一层就留下无人退休的组件。
+    for (const resource of [
+      "enoki-probe-ipc",
+      "enoki-observation-ipc",
+      "/usr/local/bin/enoki-observation-runtime",
+      "/usr/local/bin/enoki-cpu-resource-provider",
+      "/etc/systemd/system/enoki-observation-runtime.service",
+      "/etc/systemd/system/enoki-probe-lifecycle-upgrade.socket",
+      "/var/lib/enoki-probe-registration/attempt.json",
+      "/run/enoki-probe",
+      "enoki-observation-runtime.socket",
+    ]) {
+      expect(inventory).toContain(resource);
+      expect(claim).toContain(resource);
+      expect(emergency).toContain(resource);
+    }
+    for (const script of [inventory, claim]) {
+      expect(script).toContain("/run/systemd/system/enoki-probe*.service");
+      const unitQuery = script
+        .split("\n")
+        .find((line) => line.startsWith("units=$(systemctl list-units"));
+      expect(unitQuery).toBeDefined();
+      expect(unitQuery).not.toContain("|| true");
+    }
+    expect(emergency).toContain("'enoki-probe*.service'");
+
+    const stops = emergency
+      .split("\n")
+      .filter((line) => line.startsWith("systemctl disable --now"));
+    expect(stops).toHaveLength(2);
+    expect(stops[0]).toContain("enoki-observation-runtime.socket");
+    expect(stops[1]).toContain("'enoki-probe.service'");
+
+    // 生产接缝是 sh -s：任何 bash 专有构造都必须在这里被拒绝，而不是只在真实 Host 上失败。
+    for (const script of [inventory, claim, emergency]) {
+      await expect(
+        execFileAsync("/bin/sh", ["-n", "-c", script]),
+      ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    }
   });
 
   it("installs the Hub command once and proves the non-root local privilege boundary", async () => {
@@ -2795,6 +2939,143 @@ describe("Probe Host Harness", () => {
     ]) {
       expect(commands.some((command) => command.includes(marker))).toBe(true);
     }
+  });
+
+  it("refuses admission instead of laundering a failed account query into an empty Host", async () => {
+    // getent 约定 0 存在、2 不存在、其它是查询失败：失败必须让库存变成 unknown。这里让
+    // Harness 在真实 sh -s 接缝执行生成脚本，证明拒绝来自脚本退出码而非测试拼装。
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-release-inventory-shim-"),
+    );
+    const commands = [];
+    try {
+      await writeFile(path.join(bin, "getent"), "#!/bin/sh\nexit 70\n", {
+        mode: 0o700,
+      });
+      const harness = createProbeHostHarness({
+        async execute(command) {
+          commands.push(command);
+          const result = spawnSync("/bin/sh", ["-s"], {
+            encoding: "utf8",
+            env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+            input: command,
+          });
+          return {
+            code: result.status ?? 1,
+            stderr: result.stderr ?? "",
+            stdout: result.stdout ?? "",
+          };
+        },
+      });
+
+      await expect(
+        harness.assertDisposable("run-account-query-failure"),
+      ).rejects.toThrow(/Release Test Host inspection failed \(76\)/);
+
+      // 同一份脚本在权威查询成功返回不存在时仍给出可解析的空库存，失败不是恒拒绝。
+      const inventory = commands.find((command) =>
+        command.includes("# enoki-release-e2e:inventory"),
+      );
+      for (const [name, body] of [
+        ["getent", "#!/bin/sh\nexit 2\n"],
+        ["systemctl", "#!/bin/sh\nexit 0\n"],
+      ]) {
+        await writeFile(path.join(bin, name), body, { mode: 0o700 });
+      }
+      const empty = spawnSync("/bin/sh", ["-s"], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+        input: inventory,
+      });
+      expect(empty.status).toBe(0);
+      expect(JSON.parse(empty.stdout)).toMatchObject({
+        accounts: { group: false, user: false },
+      });
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
+  });
+
+  it("retains the run claim and reports cleanup incomplete when the residue query fails", async () => {
+    const commands = [];
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          if (inventoryCount === 1) {
+            return successfulCommand({
+              accounts: { group: false, user: false },
+              files: [],
+              units: [],
+            });
+          }
+          if (inventoryCount === 2) {
+            return successfulCommand({
+              accounts: { group: true, user: true },
+              files: ["/usr/local/bin/enoki-probe"],
+              units: ["enoki-probe.service"],
+            });
+          }
+          return {
+            code: 76,
+            stderr:
+              "Probe account inventory query failed: getent group enoki-probe-ipc (exit 70)",
+            stdout: "",
+          };
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("enk_enroll_secret")) {
+          return { code: 1, stderr: "interrupted", stdout: "" };
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-residue-query-failure");
+    await expect(
+      harness.install(officialEnrollment(), "run-residue-query-failure"),
+    ).rejects.toMatchObject({ code: "probe_installation_failed" });
+
+    const failure = await harness
+      .cleanup("run-residue-query-failure")
+      .catch((error) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.errors.map((error) => error.message)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Release Test Host inspection failed (76)"),
+        "Run claim remains after Host cleanup",
+      ]),
+    );
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:emergency-cleanup"),
+      ),
+    ).toBe(true);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:remove-claim"),
+      ),
+    ).toBe(false);
+    await expect(
+      harness.verifyClean("run-residue-query-failure"),
+    ).rejects.toThrow(/Release Test Host inspection failed \(76\)/);
   });
 });
 
