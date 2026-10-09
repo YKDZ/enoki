@@ -2307,6 +2307,138 @@ describe("Probe Host Harness", () => {
     ).resolves.toMatchObject({ stderr: "", stdout: "" });
   });
 
+  it.runIf(fixedProbeStatusNamespaceAvailable())(
+    "把 Repair 失败绑定到 CLI 后新出现的操作状态并区分两种持久 code",
+    async () => {
+      const fixtureDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-probe-operation-status-"),
+      );
+      const codes = [
+        "probe_repair_bundle_restore_failed",
+        "probe_repair_runtime_validation_failed",
+      ];
+      try {
+        const explained = [];
+        for (const errorCode of codes) {
+          const { failure, repairCliCalls, statusReads } =
+            await captureRepairFailureFromRealStatusRead({
+              after: {
+                document: probeOperationStatusDocument({
+                  errorCode,
+                  operationId: "42",
+                  status: "failed",
+                  targetProbeVersion: "1.2.3",
+                }),
+                state: "present",
+              },
+              before: { state: "absent" },
+              fixtureDir,
+            });
+          expect(failure).toBeInstanceOf(Error);
+          // 正式 Repair CLI 仍只执行一次，其原退出码与 stderr 不被替换；前后各读一次白名单。
+          expect(repairCliCalls).toBe(1);
+          expect(statusReads).toBe(2);
+          expect(failure.message).toContain(
+            "Installed Bundle Failure Repair failed (1): probe repair stopped after the durable epoch was admitted",
+          );
+          expect(failure.message).toContain(
+            "[probe operation status before CLI: absent]",
+          );
+          expect(failure.message).toContain(
+            `code=${errorCode} operation_id=42 association=fresh-operation`,
+          );
+          expect(failure.message).toContain(
+            "local read only, not an independent Hub authority proof",
+          );
+          // 白名单投影：message 与 repair eligibility 行属于同一文件但不进入证据。
+          expect(failure.message).not.toContain("unprojected fold detail");
+          expect(failure.message).not.toContain("eligibility");
+          explained.push(errorCode);
+        }
+        expect(explained).toEqual(codes);
+      } finally {
+        await rm(fixtureDir, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.runIf(fixedProbeStatusNamespaceAvailable())(
+    "旧 operation、错 version 与拒读保留事实但保持 unknown",
+    async () => {
+      const fixtureDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-probe-operation-status-"),
+      );
+      const staleDocument = probeOperationStatusDocument({
+        errorCode: "probe_repair_bundle_restore_failed",
+        operationId: "41",
+        status: "failed",
+        targetProbeVersion: "1.2.3",
+      });
+      const currentDocument = probeOperationStatusDocument({
+        errorCode: "probe_repair_runtime_validation_failed",
+        operationId: "42",
+        status: "failed",
+        targetProbeVersion: "1.2.3",
+      });
+      const cases = [
+        {
+          before: { document: staleDocument, state: "present" },
+          after: { document: staleDocument, state: "present" },
+          retainedFact: "operation_id=41",
+          unknown: "repair failure code=unknown reason=operation-id-unchanged",
+        },
+        {
+          before: { state: "absent" },
+          after: {
+            document: probeOperationStatusDocument({
+              errorCode: "probe_repair_runtime_validation_failed",
+              operationId: "42",
+              status: "failed",
+              targetProbeVersion: "9.9.9",
+            }),
+            state: "present",
+          },
+          retainedFact: "target_probe_version=9.9.9",
+          unknown:
+            "repair failure code=unknown reason=target-probe-version-mismatch",
+        },
+        {
+          before: { state: "absent" },
+          after: { document: currentDocument, state: "refused" },
+          retainedFact:
+            "[probe operation status after the failed CLI: unreadable;",
+          unknown:
+            "repair failure code=unknown reason=operation-status-unreadable",
+        },
+      ];
+      try {
+        for (const scenario of cases) {
+          const { failure, repairCliCalls, statusReads } =
+            await captureRepairFailureFromRealStatusRead({
+              ...scenario,
+              fixtureDir,
+            });
+          expect(failure).toBeInstanceOf(Error);
+          expect(repairCliCalls).toBe(1);
+          expect(statusReads).toBe(2);
+          expect(failure.message).toContain(
+            "Installed Bundle Failure Repair failed (1): probe repair stopped after the durable epoch was admitted",
+          );
+          expect(failure.message).toContain(scenario.unknown);
+          expect(failure.message).toContain(scenario.retainedFact);
+          expect(failure.message).not.toContain(
+            "code=probe_repair_bundle_restore_failed operation_id",
+          );
+          expect(failure.message).not.toContain(
+            "code=probe_repair_runtime_validation_failed operation_id",
+          );
+        }
+      } finally {
+        await rm(fixtureDir, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("proves exact uninstall residue while retaining journald and shared dependencies", async () => {
     const dependencies = JSON.stringify({
       curl: "/usr/bin/curl",
@@ -2789,6 +2921,154 @@ describe("Probe Host Harness", () => {
     expect(commands).toHaveLength(5);
   });
 
+  it("把 general Companion 与 Observation Runtime 的有限 manager/journal 事实送进原 systemd 命令的 stderr", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-companion-observation-shim-"),
+    );
+    const commands = [];
+    try {
+      await writeSystemdShims(bin, { companionInstances: 6 });
+      const harness = createProbeHostHarness({
+        async execute(command, options) {
+          commands.push({ command, options });
+          if (command.includes("# enoki-release-e2e:systemd-diagnostics")) {
+            return runGeneratedHostCommand({ bin, command });
+          }
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            return successfulCommand({
+              accounts: { group: false, user: false },
+              files: [],
+              units: [],
+            });
+          }
+          if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
+            return { code: 1, stderr: "Probe is not installed", stdout: "" };
+          }
+          if (command.includes("# enoki-release-e2e:journald")) {
+            return successfulCommandText("retained Probe journal\n");
+          }
+          if (command.includes("# enoki-release-e2e:installed-sudoers")) {
+            return successfulCommandText(
+              "enoki-probe ALL=(root) NOPASSWD: x\n",
+            );
+          }
+          throw new Error("unexpected diagnostics command");
+        },
+      });
+
+      const diagnostics = await harness.collectDiagnostics(
+        "run-companion-diagnostics",
+      );
+      expect(diagnostics.systemd.available).toBe(true);
+      expect(diagnostics.systemd.output.code).toBe(0);
+      // 普通 Probe 诊断的 stdout 仍只表示 Probe 自身：terminal validator 匹配的同名键不会
+      // 被 Companion／Runtime 的同名属性污染。
+      expect(diagnostics.systemd.output.stdout).toBe(
+        "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\nNRestarts=0\n",
+      );
+      const stderr = diagnostics.systemd.output.stderr;
+      expect(stderr).toContain(
+        "=== general Companion and Observation Runtime manager and journal: during the terminal Probe systemd diagnostics",
+      );
+      expect(stderr).toContain(
+        "### manager enoki-probe-lifecycle-companion.socket",
+      );
+      expect(stderr).toContain("ActiveState=failed");
+      expect(stderr).toContain("ExecMainStatus=203");
+      expect(stderr).toContain("### journal enoki-observation-runtime.service");
+      // Runtime 才追加 NRestarts；固定 unit 与实例各自最多一份 manager/journal。
+      expect(stderr).toContain("NRestarts=3");
+      expect(diagnostics.systemd.output.stdout).not.toContain("NRestarts=3");
+      expect(stderr.match(/^### manager /gmu)).toHaveLength(7);
+      expect(stderr.match(/^### journal /gmu)).toHaveLength(7);
+      // 实例读取受固定上限约束，超出上限的事实被如实保留而不是被宣称穷尽。
+      expect(stderr).toContain(
+        "instances total=6 shown=4 truncated=more instances than the fixed limit",
+      );
+      expect(
+        stderr.match(/^### manager enoki-probe-lifecycle-companion@/gmu),
+      ).toHaveLength(4);
+      expect(diagnostics.journald.available).toBe(true);
+      expect(diagnostics.installation.available).toBe(false);
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
+  });
+
+  it("journal 拒读与实例缺失只追加不可用事实，并保持原 Probe 命令的退出码", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-companion-observation-shim-"),
+    );
+    let generatedCommand = "";
+    try {
+      await writeSystemdShims(bin, {
+        companionInstances: 0,
+        journalRefused: true,
+        probeExitCode: 3,
+      });
+      const harness = createProbeHostHarness({
+        async execute(command) {
+          if (command.includes("# enoki-release-e2e:systemd-diagnostics")) {
+            generatedCommand = command;
+            return runGeneratedHostCommand({ bin, command });
+          }
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            return successfulCommand({
+              accounts: { group: false, user: false },
+              files: [],
+              units: [],
+            });
+          }
+          if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
+            return { code: 1, stderr: "Probe is not installed", stdout: "" };
+          }
+          if (command.includes("# enoki-release-e2e:journald")) {
+            return successfulCommandText("retained Probe journal\n");
+          }
+          return successfulCommandText("");
+        },
+      });
+
+      const diagnostics = await harness.collectDiagnostics(
+        "run-companion-refused",
+      );
+      // 原 Probe 读取失败仍是该命令的失败原因，补充读取的事实不被丢弃也不改写它。
+      expect(diagnostics.systemd.available).toBe(false);
+      expect(diagnostics.systemd.error).toMatchObject({
+        code: "diagnostic_command_failed",
+      });
+      expect(diagnostics.systemd.output.code).toBe(3);
+      const probeStdout =
+        "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\nNRestarts=0\n";
+      expect(diagnostics.systemd.output.stdout).toBe(probeStdout);
+      const stderr = diagnostics.systemd.output.stderr;
+      expect(stderr).toContain(
+        "journal unavailable: journalctl exited 1\njournal access refused",
+      );
+      expect(stderr).toContain("instances total=0 shown=0 truncated=none");
+      expect(stderr).toContain("### manager enoki-observation-runtime.service");
+      expect(stderr).toContain("NRestarts=3");
+      expect(diagnostics.journald).toMatchObject({
+        available: true,
+        value: "retained Probe journal\n",
+      });
+
+      // 观察自身依赖缺失（此处 PATH 只含 shim）也不得改写原 Probe 命令的 stdout 与退出码。
+      const degraded = runGeneratedHostCommand({
+        bin,
+        command: generatedCommand,
+        searchSystemPaths: false,
+      });
+      expect(degraded.code).toBe(3);
+      expect(degraded.stdout).toBe(probeStdout);
+      expect(degraded.stderr).toContain(
+        "### manager enoki-observation-runtime.service",
+      );
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
+  });
+
   it("uses only run-owned emergency infrastructure cleanup for a partial installation", async () => {
     const commands = [];
     let inventoryCount = 0;
@@ -3075,6 +3355,225 @@ describe("Probe Host Harness", () => {
       "# enoki-release-e2e:inspect-claim",
     ]) {
       expect(commands.some((command) => command.includes(marker))).toBe(true);
+    }
+  });
+
+  it("在 emergency cleanup 之前解释 cleanup 失败并在残留核对之后保留残留实例事实", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-companion-cleanup-shim-"),
+    );
+    const commands = [];
+    let inventoryCount = 0;
+    try {
+      await writeSystemdShims(bin, { companionInstances: 1 });
+      const harness = createProbeHostHarness({
+        async execute(command) {
+          commands.push(command);
+          if (
+            command.includes(
+              "# enoki-release-e2e:general-companion-failure-observation",
+            )
+          ) {
+            return runGeneratedHostCommand({ bin, command });
+          }
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            inventoryCount += 1;
+            return successfulCommand(
+              inventoryCount === 1
+                ? {
+                    accounts: { group: false, user: false },
+                    files: [],
+                    units: [],
+                  }
+                : {
+                    accounts: { group: true, user: true },
+                    files: ["/usr/local/bin/enoki-probe"],
+                    units: [
+                      "enoki-probe.service",
+                      "enoki-probe-lifecycle-companion@instance1.service",
+                    ],
+                  },
+            );
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          if (command.includes("# enoki-release-e2e:verify-claim")) {
+            return successfulCommandText("owned\n");
+          }
+          if (
+            command.includes(
+              "# enoki-release-e2e:cleanup-observation-runtime-failure",
+            )
+          ) {
+            return {
+              code: 1,
+              stderr:
+                "systemctl start enoki-observation-runtime.socket failed: Resource limit reached",
+              stdout: "",
+            };
+          }
+          if (command.includes("# enoki-release-e2e:inspect-claim")) {
+            return successfulCommandText("owned\n");
+          }
+          return successfulCommandText("");
+        },
+      });
+
+      await harness.assertDisposable("run-cleanup-observation");
+      await harness.install(officialEnrollment(), "run-cleanup-observation");
+      const failure = await harness
+        .cleanup("run-cleanup-observation")
+        .catch((error) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      const messages = failure.errors.map((error) => error.message);
+      // cleanup 自身的原因先被保留，其后的即时观察只追加当时的 manager/journal 事实。
+      expect(messages[0]).toContain(
+        "Observation Runtime failure cleanup failed: systemctl start enoki-observation-runtime.socket failed: Resource limit reached",
+      );
+      expect(messages[0]).toContain(
+        "general Companion and Observation Runtime at this moment: === general Companion and Observation Runtime manager and journal: after the run-owned Observation Runtime failure cleanup failed",
+      );
+      expect(messages[0]).toContain("ActiveState=failed");
+      expect(messages[0]).toContain("ExecMainStatus=203");
+      // 残留实例的事实属于第二次核对之后，不与 cleanup 失败混成同一时刻。
+      expect(messages[1]).toContain("Run-owned Probe cleanup left residue:");
+      expect(messages[1]).toContain(
+        "enoki-probe-lifecycle-companion@instance1.service",
+      );
+      expect(messages[1]).toContain(
+        "residual general Companion instances at the final residue check: === general Companion and Observation Runtime manager and journal: at the final general Companion instance residue check",
+      );
+      expect(messages).toContain("Run claim remains after Host cleanup");
+
+      const observationIndexes = commands
+        .map((command, index) => ({ command, index }))
+        .filter(({ command }) =>
+          command.includes(
+            "# enoki-release-e2e:general-companion-failure-observation",
+          ),
+        )
+        .map(({ index }) => index);
+      const indexOf = (marker) =>
+        commands.findIndex((command) => command.includes(marker));
+      const lastInventory = commands.reduce(
+        (last, command, index) =>
+          command.includes("# enoki-release-e2e:inventory") ? index : last,
+        -1,
+      );
+      expect(observationIndexes).toHaveLength(2);
+      expect(observationIndexes[0]).toBeGreaterThan(
+        indexOf("# enoki-release-e2e:cleanup-observation-runtime-failure"),
+      );
+      expect(observationIndexes[0]).toBeLessThan(
+        indexOf("# enoki-release-e2e:emergency-cleanup"),
+      );
+      expect(observationIndexes[1]).toBeGreaterThan(lastInventory);
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
+  });
+
+  it("观察脚本自身失败时只追加不可用事实，cleanup 失败与既有清理照常交付", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-companion-cleanup-shim-"),
+    );
+    const commands = [];
+    let inventoryCount = 0;
+    try {
+      // 只暴露 systemctl/journalctl 替身而不提供系统路径：读取脚本在固定实例选择处自身失败，
+      // 这正是观察不得覆盖主失败的场景。
+      await writeSystemdShims(bin, { companionInstances: 1 });
+      const harness = createProbeHostHarness({
+        async execute(command) {
+          commands.push(command);
+          if (
+            command.includes(
+              "# enoki-release-e2e:general-companion-failure-observation",
+            )
+          ) {
+            return runGeneratedHostCommand({
+              bin,
+              command,
+              searchSystemPaths: false,
+            });
+          }
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            inventoryCount += 1;
+            return successfulCommand(
+              inventoryCount === 1
+                ? {
+                    accounts: { group: false, user: false },
+                    files: [],
+                    units: [],
+                  }
+                : {
+                    accounts: { group: true, user: true },
+                    files: [],
+                    units: [
+                      "enoki-probe-lifecycle-companion@instance1.service",
+                    ],
+                  },
+            );
+          }
+          if (command.includes("# enoki-release-e2e:verify-claim")) {
+            return successfulCommandText("owned\n");
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          if (
+            command.includes(
+              "# enoki-release-e2e:cleanup-observation-runtime-failure",
+            )
+          ) {
+            return {
+              code: 1,
+              stderr: "systemctl start enoki-observation-runtime.socket failed",
+              stdout: "",
+            };
+          }
+          if (command.includes("# enoki-release-e2e:inspect-claim")) {
+            return successfulCommandText("owned\n");
+          }
+          return successfulCommandText("");
+        },
+      });
+
+      await harness.assertDisposable("run-observation-failure");
+      await harness.install(officialEnrollment(), "run-observation-failure");
+      const failure = await harness
+        .cleanup("run-observation-failure")
+        .catch((error) => error);
+
+      expect(failure).toBeInstanceOf(AggregateError);
+      const messages = failure.errors.map((error) => error.message);
+      expect(messages[0]).toContain(
+        "Observation Runtime failure cleanup failed: systemctl start enoki-observation-runtime.socket failed",
+      );
+      expect(messages[0]).toContain(
+        "observation unavailable: the manager/journal script exited",
+      );
+      expect(messages[1]).toContain(
+        "Run-owned Probe cleanup left residue: enoki-probe-lifecycle-companion@instance1.service",
+      );
+      expect(messages[1]).toContain(
+        "residual general Companion instances at the final residue check: observation unavailable: the manager/journal script exited",
+      );
+      // 观察失败不减少原有清理：emergency cleanup、daemon reload 与 claim 核对都仍执行。
+      expect(
+        commands.some((command) =>
+          command.includes("# enoki-release-e2e:emergency-cleanup"),
+        ),
+      ).toBe(true);
+      expect(
+        commands.some((command) =>
+          command.includes("# enoki-release-e2e:inspect-claim"),
+        ),
+      ).toBe(true);
+    } finally {
+      await rm(bin, { force: true, recursive: true });
     }
   });
 
@@ -6883,6 +7382,235 @@ describe("Release E2E Orchestrator", () => {
     expect(serialized).not.toContain("owner-session-secret");
   });
 
+  it.runIf(fixedProbeStatusNamespaceAvailable())(
+    "把 driver 的操作状态解释经 orchestration 保留在 result.error.message",
+    async () => {
+      const fixtureDir = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-probe-operation-status-"),
+      );
+      const calls = [];
+      const counters = { repairCliCalls: 0, statusReads: 0 };
+      const identity = {
+        identitySha256: "b".repeat(64),
+        probeId: "probe_release_01",
+      };
+      let lifecycle = "empty";
+      try {
+        await writeFile(path.join(fixtureDir, "before.toml"), "");
+        await writeFile(
+          path.join(fixtureDir, "after.toml"),
+          probeOperationStatusDocument({
+            errorCode: "probe_repair_runtime_validation_failed",
+            operationId: "42",
+            status: "failed",
+            targetProbeVersion: "1.2.3",
+          }),
+        );
+        const driver = createRealStatusReadRepairDriver({
+          after: { state: "present" },
+          before: { state: "absent" },
+          counters,
+          fixtureDir,
+        });
+        const host = {
+          async assertDisposable() {
+            calls.push("host.assertDisposable");
+          },
+          async assertInstalled(_runId, version) {
+            calls.push("host.assertInstalled");
+            return installedHostBoundary(version);
+          },
+          async awaitPermanentReportRejection() {
+            throw new Error(
+              "Repair failure must precede the deletion boundary",
+            );
+          },
+          async captureInstallationState() {
+            throw new Error("Repair failure must precede the repeated Add");
+          },
+          async cleanup() {
+            calls.push("host.cleanup");
+            return { clean: true };
+          },
+          async collectDiagnostics() {
+            calls.push("host.collectDiagnostics");
+            return {
+              installation: { available: false },
+              inventory: { available: true },
+              journald: { available: false },
+              sudoers: { available: false },
+              systemd: { available: false },
+            };
+          },
+          async collectEvidence() {
+            calls.push("host.collectEvidence");
+            return { inventory: { files: [] } };
+          },
+          async install() {
+            calls.push("host.install");
+            lifecycle = "installed";
+            return {
+              output: {
+                code: 0,
+                stderr: "",
+                stdout: productInstallerOutput(),
+              },
+            };
+          },
+          async localUninstall() {
+            throw new Error(
+              "Repair failure must precede Local Probe Uninstall",
+            );
+          },
+          async readProbeIdentity() {
+            calls.push("host.readProbeIdentity");
+            return identity;
+          },
+          async rejectRepeatedInstall() {
+            throw new Error("Repair failure must precede the repeated Add");
+          },
+          repairInstalledBundleFailure: (runId, expectedBundleVersion) => {
+            calls.push("host.repairInstalledBundleFailure");
+            return driver.repair(runId, expectedBundleVersion);
+          },
+          async verifyUninstallCompletion() {
+            throw new Error("Repair failure must precede Uninstall Completion");
+          },
+        };
+        const hub = {
+          async authenticate() {
+            calls.push("hub.authenticate");
+          },
+          async collectEvidence() {
+            return { apiTimeline: [] };
+          },
+          async createEnrollment(target) {
+            calls.push(`hub.createEnrollment:${target.kind}`);
+            return {
+              enrollmentId: "enr_release_operation_status",
+              enrollmentToken: "enk_enroll_release_e2e_test_token",
+              installCommand: officialInstallCommand,
+              status: "pending",
+              target,
+            };
+          },
+          async deleteHostHubOnly() {
+            throw new Error(
+              "Repair failure must precede the Hub-only deletion",
+            );
+          },
+          async getAuditLog() {
+            return [];
+          },
+          async getEnrollment() {
+            throw new Error("Repair failure must precede the repeated Add");
+          },
+          async getHost() {
+            return readyHost({ reportedProbeConfigurationVersion: "host-2-1" });
+          },
+          async getHostMetrics() {
+            calls.push("hub.getHostMetrics");
+            return [
+              portableMetric({
+                collectedAtMs: 10,
+                sequence: 1,
+                uptimeSeconds: 100,
+              }),
+              portableMetric({
+                collectedAtMs: 20,
+                sequence: 2,
+                uptimeSeconds: 110,
+              }),
+            ];
+          },
+          async getHostProbeConfiguration() {
+            calls.push("hub.getHostProbeConfiguration");
+            return {
+              configuration: {
+                enabledCollectorIds: ["official.cpu", "official.memory"],
+                metricsCollectionIntervalSeconds: 5,
+                version: "host-2-1",
+              },
+              mode: "override",
+            };
+          },
+          async isHostSoftDeleted() {
+            return false;
+          },
+          async listHosts() {
+            return lifecycle === "empty" ? [] : [{ id: 7 }];
+          },
+          async updateHostProbeConfiguration(_hostId, input) {
+            calls.push("hub.updateHostProbeConfiguration");
+            return {
+              configuration: { ...input.configuration, version: "host-2-1" },
+              mode: "override",
+            };
+          },
+        };
+        const written = [];
+
+        const failure = await runReleaseE2EScenario({
+          candidateManifest: candidateManifest(),
+          environment: {
+            async cleanup() {
+              calls.push("environment.cleanup");
+              return { clean: true };
+            },
+            async start() {
+              return {
+                canonicalReports: {
+                  armRepairClosure() {
+                    calls.push("canonicalReports.armRepairClosure");
+                  },
+                  diagnostics: () => ({ completed: false }),
+                  async waitForRepairClosureEvidence() {
+                    throw new Error(
+                      "Repair closure evidence must follow a completed Repair",
+                    );
+                  },
+                },
+                host,
+                hub,
+              };
+            },
+          },
+          evidenceSink: {
+            async write(value) {
+              written.push(value);
+            },
+          },
+          ownerPassword: "owner-password",
+          runId: "run-operation-status-evidence",
+          scenario: "fresh-install-uninstall",
+          timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+        }).catch((error) => error);
+
+        expect(failure).toBeInstanceOf(Error);
+        expect(failure.message).toContain(
+          "Installed Bundle Failure Repair failed (1): probe repair stopped after the durable epoch was admitted",
+        );
+        expect(written.at(-1).result).toMatchObject({
+          error: {
+            message: expect.stringContaining(
+              "repair failure code=probe_repair_runtime_validation_failed operation_id=42 association=fresh-operation",
+            ),
+          },
+          status: "failed",
+        });
+        expect(written.at(-1).result.error.message).toContain(
+          "local read only, not an independent Hub authority proof",
+        );
+        expect(counters.repairCliCalls).toBe(1);
+        expect(counters.statusReads).toBe(2);
+        expect(calls).toContain("canonicalReports.armRepairClosure");
+        expect(calls).toContain("host.collectDiagnostics");
+      } finally {
+        await rm(fixtureDir, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("retains redacted failed installer evidence without retaining its command", async () => {
     const failure = Object.assign(new Error("Probe installation failed"), {
       code: "probe_installation_failed",
@@ -8890,6 +9618,229 @@ function durableRuntimeFailureEvidenceOutput(runtimeSha256 = "a".repeat(64)) {
 
 function productInstallerOutput() {
   return "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n";
+}
+
+// 票61 临时观察的专用验证夹具。正式 Probe 生命周期把操作状态写成逐行 key = "value"，其中
+// message 与 repair_eligibility_* 行不属于白名单，所以整文件读取必须被证明没有发生。
+function probeOperationStatusDocument({
+  errorCode,
+  operationId,
+  status,
+  targetProbeVersion,
+}) {
+  const lines = [
+    `operation_id = ${JSON.stringify(operationId)}`,
+    `target_probe_version = ${JSON.stringify(targetProbeVersion)}`,
+    `status = ${JSON.stringify(status)}`,
+  ];
+  if (status === "failed") {
+    lines.push(
+      `error_code = ${JSON.stringify(errorCode)}`,
+      'message = "unprojected fold detail"',
+    );
+  }
+  lines.push(
+    'repair_eligibility_evidence = "eligibility canonical document"',
+    'repair_eligibility_signature = "eligibility signature"',
+  );
+  return `${lines.join("\n")}\n`;
+}
+
+// 固定状态路径只允许在私有 mount namespace 内被写入：先在 namespace 内把 tmpfs 挂到既有
+// /var/lib，再在该私有挂载里放置夹具；任何挂载失败立即以固定码退出，绝不回退宿主路径。
+// 实例进程退出后私有挂载自然退休，宿主的 /var/lib/enoki-probe 始终不存在。
+function probeStatusNamespaceBootstrap() {
+  return String.raw`
+set -eu
+mount -t tmpfs tmpfs /var/lib || exit 75
+mkdir -p /var/lib/enoki-probe || exit 75
+status=/var/lib/enoki-probe/probe-operation-status.toml
+case "$1" in
+  absent) ;;
+  present)
+    cp -- "$2" "$status"
+    chmod 600 "$status"
+    ;;
+  refused)
+    cp -- "$2" /var/lib/enoki-probe/status-source.toml
+    ln -s /var/lib/enoki-probe/status-source.toml "$status"
+    ;;
+  *) exit 74 ;;
+esac
+exec /bin/sh -s
+`;
+}
+
+function runGeneratedProbeStatusRead({
+  fixtureSource = "",
+  generatedScript,
+  state,
+}) {
+  const result = spawnSync(
+    "/usr/bin/unshare",
+    [
+      "-m",
+      "--propagation",
+      "private",
+      "/bin/sh",
+      "-c",
+      probeStatusNamespaceBootstrap(),
+      "enoki-release-host",
+      state,
+      fixtureSource,
+    ],
+    { encoding: "utf8", input: generatedScript },
+  );
+  return {
+    code: result.status ?? 1,
+    stderr: result.stderr ?? "",
+    stdout: result.stdout ?? "",
+  };
+}
+
+function fixedProbeStatusNamespaceAvailable() {
+  return (
+    typeof process.getuid === "function" &&
+    process.getuid() === 0 &&
+    runGeneratedProbeStatusRead({
+      generatedScript: "exit 0\n",
+      state: "absent",
+    }).code === 0
+  );
+}
+
+// driver 的 execute 接缝真实运行生成的状态读取脚本；正式 Repair CLI 只执行一次，其在失败
+// 前后各触发一次白名单读取。
+function createRealStatusReadRepairDriver({
+  after,
+  before,
+  counters,
+  fixtureDir,
+}) {
+  let phase = "before";
+  const driver = createInstalledBundleFailureRepairHostDriver({
+    assertOwnedRun() {},
+    async execute(command) {
+      if (
+        command.includes("# enoki-release-e2e:probe-operation-status-snapshot")
+      ) {
+        counters.statusReads += 1;
+        const reading = phase === "before" ? before : after;
+        return runGeneratedProbeStatusRead({
+          fixtureSource: path.join(fixtureDir, `${phase}.toml`),
+          generatedScript: command,
+          state: reading.state,
+        });
+      }
+      if (
+        command.includes(
+          "# enoki-release-e2e:exhaust-observation-runtime-budget",
+        )
+      ) {
+        return successfulCommandText(durableRuntimeFailureEvidenceOutput());
+      }
+      if (
+        command.includes(
+          "# enoki-release-e2e:repair-observation-runtime-failure",
+        )
+      ) {
+        counters.repairCliCalls += 1;
+        phase = "after";
+        return {
+          code: 1,
+          stderr: "probe repair stopped after the durable epoch was admitted",
+          stdout: "",
+        };
+      }
+      throw new Error("unexpected production Host command");
+    },
+    ownershipToken: "00000000-0000-4000-8000-000000000002",
+  });
+  return driver;
+}
+
+async function captureRepairFailureFromRealStatusRead({
+  after,
+  before,
+  fixtureDir,
+}) {
+  await writeFile(path.join(fixtureDir, "before.toml"), before.document ?? "");
+  await writeFile(path.join(fixtureDir, "after.toml"), after.document ?? "");
+  const counters = { repairCliCalls: 0, statusReads: 0 };
+  const driver = createRealStatusReadRepairDriver({
+    after,
+    before,
+    counters,
+    fixtureDir,
+  });
+  const failure = await driver
+    .repair("run-operation-status", "1.2.3")
+    .then(() => null)
+    .catch((error) => error);
+  return { ...counters, failure };
+}
+
+// general Companion／Observation Runtime 的 manager／journal 替身：只提供固定 unit 的原生
+// 返回形状，不建立真实 unit 或日志平台。
+async function writeSystemdShims(
+  bin,
+  { companionInstances = 1, journalRefused = false, probeExitCode = 0 } = {},
+) {
+  await writeFile(
+    path.join(bin, "systemctl"),
+    `#!/bin/sh
+set -eu
+case "$1" in
+  show) ;;
+  list-units)
+    index=0
+    while [ "$index" -lt ${companionInstances} ]; do
+      index=$((index + 1))
+      printf 'enoki-probe-lifecycle-companion@instance%s.service loaded active running Enoki Probe lifecycle companion\\n' "$index"
+    done
+    exit 0
+    ;;
+  *) exit 2 ;;
+esac
+if [ "$2" = enoki-probe.service ]; then
+  printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nResult=success\\nExecMainStatus=0\\nNRestarts=0\\n'
+  exit ${probeExitCode}
+fi
+printf 'Id=%s\\nLoadState=loaded\\nActiveState=failed\\nSubState=failed\\nResult=exec\\nExecMainCode=1\\nExecMainStatus=203\\nMainPID=0\\nControlPID=0\\nJob=0\\n' "$2"
+case "$*" in
+  *--property=NRestarts*) printf 'NRestarts=3\\n' ;;
+esac
+`,
+    { mode: 0o700 },
+  );
+  await writeFile(
+    path.join(bin, "journalctl"),
+    `#!/bin/sh
+set -eu
+if [ "${journalRefused ? "yes" : "no"}" = yes ]; then
+  printf 'journal access refused\\n' 1>&2
+  exit 1
+fi
+printf '2026-10-09T19:00:00Z release-host %s[120]: companion request failed\\n' "\${1#--unit=}"
+`,
+    { mode: 0o700 },
+  );
+}
+
+function runGeneratedHostCommand({ bin, command, searchSystemPaths = true }) {
+  const result = spawnSync("/bin/sh", ["-s"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: searchSystemPaths ? `${bin}:/usr/bin:/bin` : bin,
+    },
+    input: command,
+  });
+  return {
+    code: result.status ?? 1,
+    stderr: result.stderr ?? "",
+    stdout: result.stdout ?? "",
+  };
 }
 
 const candidateDelegationGenerationPath =
