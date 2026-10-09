@@ -326,7 +326,7 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
         -> Result<CommittedReplacementLocalCustody, ActivationError>,
     mut invoke: impl FnMut(&LifecycleRequest) -> Result<(), ActivationError>,
 ) -> Result<ReplacementActivation, ActivationError> {
-    if let Some(commit) = matching_replacement_commit_in(store, enrollment, bundle)? {
+    if let Some(commit) = matching_replacement_commit_in(store, enrollment, bundle, false)? {
         match commit {
             MatchingReplacementCommit::CleanupRequired(fact) => {
                 if classify_local_custody(&fact)?
@@ -371,7 +371,7 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
         invoke(&request)?;
     }
     let Some(MatchingReplacementCommit::Ready(fact)) =
-        matching_replacement_commit_in(store, enrollment, bundle)?
+        matching_replacement_commit_in(store, enrollment, bundle, true)?
     else {
         observe_replacement_failure("position=prepare:post-invoke-ready-receipt-missing");
         return Err(ActivationError::Replacement);
@@ -387,9 +387,13 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
     store: &mut S,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
+    after_invoke: bool,
 ) -> Result<Option<MatchingReplacementCommit>, ActivationError> {
+    // R59-1：调用后的同形失败必须靠位置本身与调用前区分，否则无法判定 Companion 是否已被调用。
+    // 退休触发见票 59。
+    let phase = if after_invoke { "post-invoke-" } else { "" };
     let loaded = observe_failure(
-        "position=prepare:commit-load-failed",
+        &format!("position=prepare:{phase}commit-load-failed"),
         store.load().map_err(|_| ActivationError::Replacement),
     )?;
     let Some(fact) = loaded else {
@@ -427,11 +431,15 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
         }));
     }
     if !fact.candidate_layout_complete {
-        observe_replacement_failure("position=prepare:commit-binding-rejected-layout-incomplete");
+        observe_replacement_failure(&format!(
+            "position=prepare:{phase}commit-binding-rejected-layout-incomplete"
+        ));
         return Err(ActivationError::Replacement);
     }
     if !fact.cleanup_complete || fact.intent.hub_origin != enrollment.hub_origin() {
-        observe_replacement_failure("position=prepare:commit-binding-rejected-completed-mismatch");
+        observe_replacement_failure(&format!(
+            "position=prepare:{phase}commit-binding-rejected-completed-mismatch"
+        ));
         return Err(ActivationError::Replacement);
     }
     Ok(None)
@@ -1382,6 +1390,7 @@ mod tests {
             &mut Store(Some(fact.clone())),
             &exact_enrollment,
             &received.bundle,
+            false,
         )
         .unwrap()
         .unwrap();
@@ -1397,6 +1406,7 @@ mod tests {
                 &mut Store(Some(fact.clone())),
                 &other_enrollment,
                 &received.bundle,
+                false,
             )
             .unwrap()
             .is_none(),
@@ -1409,6 +1419,7 @@ mod tests {
                 &mut Store(Some(incomplete)),
                 &other_enrollment,
                 &received.bundle,
+                false,
             ),
             Err(ActivationError::Replacement)
         ));
@@ -1785,13 +1796,47 @@ mod tests {
         );
     }
 
-    /// 父协调真实 postcondition：invoke 返回后 commit 仍未 Ready 时保持原失败并留下固定
-    /// 调用后位置；同一意图 cleanup 完成继续 Resume 且没有任何新增取证输出。
+    /// 父协调真实 postcondition：调用前读取失败绝不进入 Companion；invoke 返回成功之后的读取
+    /// 失败必须自带可与调用前区分的位置；invoke 返回后 commit 仍未 Ready 时保持原失败并留下
+    /// 固定调用后位置；同一意图 cleanup 完成继续 Resume 且没有任何新增取证输出。
     #[test]
     fn replacement_postcondition_keeps_its_failure_position_and_stays_silent_on_success() {
-        use std::{cell::RefCell, rc::Rc};
+        use std::{
+            cell::{Cell, RefCell},
+            rc::Rc,
+        };
 
-        struct Store(Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>);
+        struct Store {
+            fact: Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>,
+            /// R59-1 反例夹具：让第 N 次（1 基）读取失败，用于区分调用前首次加载与调用后核验
+            /// 的读取失败。退休触发见票 59。
+            fail_load_on_call: Option<usize>,
+            load_calls: Cell<usize>,
+        }
+
+        impl Store {
+            fn with_read_failure(
+                fact: &Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>,
+                call: usize,
+            ) -> Self {
+                Self {
+                    fact: Rc::clone(fact),
+                    fail_load_on_call: Some(call),
+                    load_calls: Cell::new(0),
+                }
+            }
+
+            fn reading(
+                fact: &Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>,
+            ) -> Self {
+                Self {
+                    fact: Rc::clone(fact),
+                    fail_load_on_call: None,
+                    load_calls: Cell::new(0),
+                }
+            }
+        }
+
         impl crate::replacement::ReplacementCommitStore for Store {
             type Error = ();
 
@@ -1799,14 +1844,18 @@ mod tests {
                 &mut self,
             ) -> Result<Option<crate::replacement::ReplacementCommitFact>, Self::Error>
             {
-                Ok(self.0.borrow().clone())
+                self.load_calls.set(self.load_calls.get() + 1);
+                if self.fail_load_on_call == Some(self.load_calls.get()) {
+                    return Err(());
+                }
+                Ok(self.fact.borrow().clone())
             }
 
             fn persist(
                 &mut self,
                 fact: &crate::replacement::ReplacementCommitFact,
             ) -> Result<(), Self::Error> {
-                *self.0.borrow_mut() = Some(fact.clone());
+                *self.fact.borrow_mut() = Some(fact.clone());
                 Ok(())
             }
         }
@@ -1843,13 +1892,78 @@ mod tests {
             crate::replacement::ReplacementCommitFact::for_test(intent, false, false),
         )));
 
+        // R59-1 反例甲：调用前首次读取失败只在调用前位置留证据，且绝不进入 Companion 调用。
+        let pre_load_invoked = Rc::new(RefCell::new(0));
+        let observed_pre_load_invocations = Rc::clone(&pre_load_invoked);
+        assert_eq!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &received.bundle,
+                &mut Store::with_read_failure(&shared, 1),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
+                move |_| {
+                    *observed_pre_load_invocations.borrow_mut() += 1;
+                    Ok(())
+                },
+            )
+            .err(),
+            Some(ActivationError::Replacement),
+            "调用前读取失败保持原错误"
+        );
+        assert_eq!(
+            *pre_load_invoked.borrow(),
+            0,
+            "调用前读取失败不得进入既有 Companion 调用"
+        );
+        let facts = take_observed_replacement_failure_facts();
+        assert_eq!(facts.len(), 1, "只记录实际到达的调用前读取失败");
+        assert_eq!(
+            facts[0], "position=prepare:commit-load-failed",
+            "{}",
+            facts[0]
+        );
+
+        // R59-1 反例乙：invoke 一次成功之后的读取失败必须自带调用后位置，否则与反例甲留下
+        // 相同标签，维护者无法判定 Companion 是否已被调用。
+        let post_load_invoked = Rc::new(RefCell::new(0));
+        let observed_post_load_invocations = Rc::clone(&post_load_invoked);
+        assert_eq!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &received.bundle,
+                &mut Store::with_read_failure(&shared, 2),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
+                move |_| {
+                    *observed_post_load_invocations.borrow_mut() += 1;
+                    Ok(())
+                },
+            )
+            .err(),
+            Some(ActivationError::Replacement),
+            "调用后读取失败仍是原失败"
+        );
+        assert_eq!(
+            *post_load_invoked.borrow(),
+            1,
+            "读取失败发生在既有 Companion 调用成功之后"
+        );
+        let facts = take_observed_replacement_failure_facts();
+        assert_eq!(facts.len(), 1, "调用后核验失败只留下一条事实");
+        assert_eq!(
+            facts[0], "position=prepare:post-invoke-commit-load-failed",
+            "{}",
+            facts[0]
+        );
+
         let invoked = Rc::new(RefCell::new(0));
         let observed_invocations = Rc::clone(&invoked);
         assert_eq!(
             prepare_replacement_migration_in(
                 &enrollment,
                 &received.bundle,
-                &mut Store(Rc::clone(&shared)),
+                &mut Store::reading(&shared),
                 false,
                 |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
                 move |_| {
@@ -1877,11 +1991,10 @@ mod tests {
 
         let success_invocations = Rc::new(RefCell::new(0));
         let observed_success_invocations = Rc::clone(&success_invocations);
-        let completing_store = Rc::clone(&shared);
         let activation = prepare_replacement_migration_in(
             &enrollment,
             &received.bundle,
-            &mut Store(completing_store),
+            &mut Store::reading(&shared),
             false,
             |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
             move |_| {
