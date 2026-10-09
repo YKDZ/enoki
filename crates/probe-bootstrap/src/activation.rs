@@ -8,7 +8,7 @@ use crate::{
         SystemSystemd, VerifiedCompleteFreshComponents,
         activate_complete_replacement_current_probe_with_registration, coordinate_fresh_install,
     },
-    lifecycle::{LifecycleRequest, LifecycleResponse},
+    lifecycle::{LifecycleRejection, LifecycleRequest, LifecycleResponse},
     replacement::{
         FileReplacementCommitStore, ReplacementCommitStore, record_replacement_candidate_layout,
     },
@@ -24,7 +24,7 @@ use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::fd::{AsRawFd, FromRawFd, RawFd},
-    os::unix::process::CommandExt,
+    os::unix::process::{CommandExt, ExitStatusExt},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -37,6 +37,13 @@ const REPLACEMENT_COMMIT: &str = "/var/lib/enoki-probe-bootstrap/replacement-mig
 const REPLACEMENT_COMPANION_BUDGET: Duration = Duration::from_secs(90);
 const REPLACEMENT_COMPANION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 static COMPONENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    /// 59 专用取证捕获：仅测试构建存在，保存失败分支实际写出的事实，退休触发见票 59。
+    static OBSERVED_REPLACEMENT_FAILURE_FACTS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ActivationError {
@@ -156,9 +163,12 @@ impl ReceivedRootHandoff {
         let paths = FixedInstallPaths::production();
         let result = if let ReplacementActivation::Resume(commit) = &replacement_activation {
             let resume_binding = commit.resume_binding();
-            let registration_binding = commit
-                .registration_binding()
-                .ok_or(ActivationError::Replacement)?;
+            let registration_binding = observe_failure(
+                "position=activate:registration-binding-missing",
+                commit
+                    .registration_binding()
+                    .ok_or(ActivationError::Replacement),
+            )?;
             activate_complete_replacement_current_probe_with_registration(
                 components,
                 &self.enrollment,
@@ -177,12 +187,19 @@ impl ReceivedRootHandoff {
         if let ReplacementActivation::Resume(commit) = replacement_activation {
             let resume_binding = commit.resume_binding();
             let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
-            record_replacement_candidate_layout(&mut store, resume_binding.as_str())
-                .map_err(|_| ActivationError::Replacement)?;
-            let completed = store
-                .load()
-                .map_err(|_| ActivationError::Replacement)?
-                .ok_or(ActivationError::Replacement)?;
+            observe_failure(
+                "position=activate:candidate-layout-record-failed",
+                record_replacement_candidate_layout(&mut store, resume_binding.as_str())
+                    .map_err(|_| ActivationError::Replacement),
+            )?;
+            let reloaded = observe_failure(
+                "position=activate:candidate-layout-reload-failed",
+                store.load().map_err(|_| ActivationError::Replacement),
+            )?;
+            let completed = observe_failure(
+                "position=activate:candidate-layout-absent",
+                reloaded.ok_or(ActivationError::Replacement),
+            )?;
             crate::install::finalize_and_retire_complete_replacement_current_probe(
                 &paths,
                 &resume_binding,
@@ -208,6 +225,57 @@ impl ReceivedRootHandoff {
     }
 }
 
+/// 59 有界取证前缀：activator 自身的 stderr 已由既有 acquirer 继承进 installerEvidence。
+const REPLACEMENT_FAILURE_FACT_PREFIX: &str = "enoki-probe-bootstrap: replacement failure fact ";
+
+/// 59 有界取证：只在既有失败分支被折叠前尽力写出固定位置与原类型化结果。写入失败不覆盖
+/// 原失败，也不作为任何完成门禁；成功路径不调用。退休触发见票 59：充分因果形成后、对应
+/// 真实重装修复交付前，删除本函数、辅助函数与全部调用点及专用测试。
+fn observe_replacement_failure(fact: &str) {
+    #[cfg(test)]
+    OBSERVED_REPLACEMENT_FAILURE_FACTS.with(|facts| facts.borrow_mut().push(fact.to_owned()));
+    let _ = io::stderr().write_all(REPLACEMENT_FAILURE_FACT_PREFIX.as_bytes());
+    let _ = io::stderr().write_all(fact.as_bytes());
+    let _ = io::stderr().write_all(b"\n");
+}
+
+/// 59 有界取证：结果失败时先记录固定位置，再原样返回同一个错误。
+fn observe_failure<T>(
+    position: &str,
+    result: Result<T, ActivationError>,
+) -> Result<T, ActivationError> {
+    if result.is_err() {
+        observe_replacement_failure(position);
+    }
+    result
+}
+
+/// 自然退出结果：只描述已经取得的 status；未取得时明确写未知，绝不填入主动回收的结果。
+fn replacement_child_exit_fact(status: Option<std::process::ExitStatus>) -> String {
+    match status {
+        None => "exit=unknown".to_owned(),
+        Some(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => format!("exit=code({code})"),
+            (None, Some(signal)) => format!("exit=signal({signal})"),
+            (None, None) => "exit=unknown".to_owned(),
+        },
+    }
+}
+
+/// 既有 decode 结果：只有解码成功才输出现有 status()／code()，失败只输出现有拒绝类别。
+fn replacement_child_response_fact(
+    decoded: &Result<LifecycleResponse, LifecycleRejection>,
+) -> String {
+    match decoded {
+        Ok(response) => format!(
+            "response=decoded(status={:?},code={})",
+            response.status(),
+            response.code()
+        ),
+        Err(rejection) => format!("response=decode-rejected({})", rejection.code()),
+    }
+}
+
 fn prepare_replacement_migration(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -223,11 +291,14 @@ fn prepare_replacement_migration(
         &mut store,
         has_installed_metadata,
         |fact| {
-            crate::install::classify_committed_replacement_local_custody(
-                &FixedInstallPaths::production(),
-                &fact.resume_binding(),
+            observe_failure(
+                "position=prepare:custody-classification-failed",
+                crate::install::classify_committed_replacement_local_custody(
+                    &FixedInstallPaths::production(),
+                    &fact.resume_binding(),
+                )
+                .map_err(ActivationError::Install),
             )
-            .map_err(ActivationError::Install)
         },
         |request| invoke_replacement_companion(request, companion, bundle),
     )
@@ -261,10 +332,14 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
                 if classify_local_custody(&fact)?
                     != CommittedReplacementLocalCustody::SourceMetadata
                 {
+                    observe_replacement_failure("position=prepare:custody-not-source-metadata");
                     return Err(ActivationError::Replacement);
                 }
-                let request = replacement_request_for_installed_state(true, enrollment, bundle)?
-                    .ok_or(ActivationError::Replacement)?;
+                let request = observe_failure(
+                    "position=prepare:replacement-request-absent",
+                    replacement_request_for_installed_state(true, enrollment, bundle)?
+                        .ok_or(ActivationError::Replacement),
+                )?;
                 invoke(&request)?;
             }
             MatchingReplacementCommit::Ready(fact) => {
@@ -272,9 +347,11 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
                     && classify_local_custody(&fact)?
                         == CommittedReplacementLocalCustody::SourceMetadata
                 {
-                    let request =
+                    let request = observe_failure(
+                        "position=prepare:replacement-request-absent",
                         replacement_request_for_installed_state(true, enrollment, bundle)?
-                            .ok_or(ActivationError::Replacement)?;
+                            .ok_or(ActivationError::Replacement),
+                    )?;
                     invoke(&request)?;
                     return Ok(ReplacementActivation::Resume(*fact));
                 }
@@ -296,6 +373,7 @@ fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStor
     let Some(MatchingReplacementCommit::Ready(fact)) =
         matching_replacement_commit_in(store, enrollment, bundle)?
     else {
+        observe_replacement_failure("position=prepare:post-invoke-ready-receipt-missing");
         return Err(ActivationError::Replacement);
     };
     Ok(if fact.candidate_layout_complete {
@@ -310,7 +388,11 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
 ) -> Result<Option<MatchingReplacementCommit>, ActivationError> {
-    let Some(fact) = store.load().map_err(|_| ActivationError::Replacement)? else {
+    let loaded = observe_failure(
+        "position=prepare:commit-load-failed",
+        store.load().map_err(|_| ActivationError::Replacement),
+    )?;
+    let Some(fact) = loaded else {
         return Ok(None);
     };
     let token_sha256 = format!(
@@ -345,9 +427,11 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
         }));
     }
     if !fact.candidate_layout_complete {
+        observe_replacement_failure("position=prepare:commit-binding-rejected-layout-incomplete");
         return Err(ActivationError::Replacement);
     }
     if !fact.cleanup_complete || fact.intent.hub_origin != enrollment.hub_origin() {
+        observe_replacement_failure("position=prepare:commit-binding-rejected-completed-mismatch");
         return Err(ActivationError::Replacement);
     }
     Ok(None)
@@ -360,20 +444,24 @@ fn replacement_request_for_installed_state(
 ) -> Result<Option<LifecycleRequest>, ActivationError> {
     if !has_installed_metadata {
         return if enrollment.replacement_migration().is_some() {
+            observe_replacement_failure("position=prepare:authority-without-installed-metadata");
             Err(ActivationError::Replacement)
         } else {
             Ok(None)
         };
     }
-    LifecycleRequest::replacement_migration(
-        enrollment,
-        &format!("sha256:{}", bundle.asset_set_manifest_sha256),
-        &bundle.target,
-        &bundle.manifest_sha256,
-        &bundle.version,
+    observe_failure(
+        "position=prepare:request-construction-rejected",
+        LifecycleRequest::replacement_migration(
+            enrollment,
+            &format!("sha256:{}", bundle.asset_set_manifest_sha256),
+            &bundle.target,
+            &bundle.manifest_sha256,
+            &bundle.version,
+        )
+        .map(Some)
+        .map_err(|_| ActivationError::Replacement),
     )
-    .map(Some)
-    .map_err(|_| ActivationError::Replacement)
 }
 
 fn invoke_replacement_companion(
@@ -403,23 +491,32 @@ fn invoke_replacement_companion(
             }
         });
     }
-    let mut child = command.spawn().map_err(|_| ActivationError::Replacement)?;
+    let mut child = observe_failure(
+        "position=child:spawn-failed",
+        command.spawn().map_err(|_| ActivationError::Replacement),
+    )?;
     let Some(mut stdin) = child.stdin.take() else {
         terminate_and_reap(&mut child);
+        observe_replacement_failure("position=child:stdin-missing");
         return Err(ActivationError::Replacement);
     };
-    let encoded = request.encode().map_err(|_| ActivationError::Replacement)?;
+    let encoded = observe_failure(
+        "position=child:request-encode-failed",
+        request.encode().map_err(|_| ActivationError::Replacement),
+    )?;
     if stdin
         .write_all(&encoded)
         .and_then(|()| stdin.flush())
         .is_err()
     {
         terminate_and_reap(&mut child);
+        observe_replacement_failure("position=child:request-write-failed");
         return Err(ActivationError::Replacement);
     }
     drop(stdin);
     let Some(mut stdout) = child.stdout.take() else {
         terminate_and_reap(&mut child);
+        observe_replacement_failure("position=child:stdout-missing");
         return Err(ActivationError::Replacement);
     };
     let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
@@ -427,6 +524,7 @@ fn invoke_replacement_companion(
         || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
     {
         terminate_and_reap(&mut child);
+        observe_replacement_failure("position=child:stdout-nonblock-failed");
         return Err(ActivationError::Replacement);
     }
     let deadline = Instant::now() + REPLACEMENT_COMPANION_BUDGET;
@@ -437,10 +535,17 @@ fn invoke_replacement_companion(
         loop {
             match stdout.read(&mut chunk) {
                 Ok(0) if status.is_some() => {
+                    let decoded = LifecycleResponse::decode(&response);
                     let succeeded = status
                         .is_some_and(|status: std::process::ExitStatus| status.success())
-                        && LifecycleResponse::decode(&response)
-                            == Ok(LifecycleResponse::succeeded());
+                        && decoded == Ok(LifecycleResponse::succeeded());
+                    if !succeeded {
+                        observe_replacement_failure(&format!(
+                            "position=child:eof {} {}",
+                            replacement_child_exit_fact(status),
+                            replacement_child_response_fact(&decoded),
+                        ));
+                    }
                     return succeeded.then_some(()).ok_or(ActivationError::Replacement);
                 }
                 Ok(0) => break,
@@ -448,18 +553,25 @@ fn invoke_replacement_companion(
                     response.extend_from_slice(&chunk[..read]);
                     if response.len() > crate::lifecycle::MAX_LIFECYCLE_REQUEST_BYTES {
                         terminate_and_reap(&mut child);
+                        observe_replacement_failure("position=child:response-oversize");
                         return Err(ActivationError::Replacement);
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(_) => {
                     terminate_and_reap(&mut child);
+                    observe_replacement_failure("position=child:response-read-failed");
                     return Err(ActivationError::Replacement);
                 }
             }
         }
         if Instant::now() >= deadline {
             terminate_and_reap(&mut child);
+            // 主动回收的退出结果不是原失败原因，因此这里只报告此前已经取得的自然 status。
+            observe_replacement_failure(&format!(
+                "position=child:deadline-exhausted {}",
+                replacement_child_exit_fact(status),
+            ));
             return Err(ActivationError::Replacement);
         }
         if status.is_none() {
@@ -467,6 +579,7 @@ fn invoke_replacement_companion(
                 Ok(next) => status = next,
                 Err(_) => {
                     terminate_and_reap(&mut child);
+                    observe_replacement_failure("position=child:try-wait-failed");
                     return Err(ActivationError::Replacement);
                 }
             }
@@ -482,6 +595,7 @@ fn reserve_closed_standard_descriptors() -> Result<Vec<File>, ActivationError> {
             continue;
         }
         if io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+            observe_replacement_failure("position=child:descriptor-probe-failed");
             return Err(ActivationError::Replacement);
         }
         let opened = unsafe {
@@ -494,6 +608,7 @@ fn reserve_closed_standard_descriptors() -> Result<Vec<File>, ActivationError> {
             if opened >= 0 {
                 unsafe { libc::close(opened) };
             }
+            observe_replacement_failure("position=child:descriptor-null-open-failed");
             return Err(ActivationError::Replacement);
         }
         reserved.push(unsafe { File::from_raw_fd(opened) });
@@ -505,33 +620,51 @@ fn sealed_lifecycle_companion(
     source: &mut File,
     bundle: &VerifiedBundle,
 ) -> Result<File, ActivationError> {
-    source.rewind().map_err(|_| ActivationError::Io)?;
-    let name = CString::new("enoki-probe-lifecycle-companion")
-        .map_err(|_| ActivationError::Replacement)?;
+    observe_failure(
+        "position=child:seal-rewind-failed",
+        source.rewind().map_err(|_| ActivationError::Io),
+    )?;
+    let name = observe_failure(
+        "position=child:seal-name-failed",
+        CString::new("enoki-probe-lifecycle-companion").map_err(|_| ActivationError::Replacement),
+    )?;
     let descriptor =
         unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
     if descriptor < 0 {
+        observe_replacement_failure("position=child:seal-memfd-failed");
         return Err(ActivationError::Replacement);
     }
     let mut sealed = unsafe { File::from_raw_fd(descriptor) };
-    let copied = io::copy(source, &mut sealed).map_err(|_| ActivationError::Replacement)?;
-    let (_, expected_size) = bundle
-        .component_receipt("lifecycle-companion")
-        .ok_or(ActivationError::Verification)?;
+    let copied = observe_failure(
+        "position=child:seal-copy-failed",
+        io::copy(source, &mut sealed).map_err(|_| ActivationError::Replacement),
+    )?;
+    let (_, expected_size) = observe_failure(
+        "position=child:seal-receipt-missing",
+        bundle
+            .component_receipt("lifecycle-companion")
+            .ok_or(ActivationError::Verification),
+    )?;
     if copied != expected_size {
+        observe_replacement_failure("position=child:seal-size-mismatch");
         return Err(ActivationError::Verification);
     }
-    sealed
-        .sync_all()
-        .map_err(|_| ActivationError::Replacement)?;
+    observe_failure(
+        "position=child:seal-sync-failed",
+        sealed.sync_all().map_err(|_| ActivationError::Replacement),
+    )?;
     let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
     if unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, seals) } != 0
         || unsafe { libc::fcntl(descriptor, libc::F_GET_SEALS) } != seals
     {
+        observe_replacement_failure("position=child:seal-seals-failed");
         return Err(ActivationError::Replacement);
     }
-    verify_role_component(&mut sealed, bundle, "lifecycle-companion")
-        .map_err(|_| ActivationError::Verification)?;
+    observe_failure(
+        "position=child:seal-verify-failed",
+        verify_role_component(&mut sealed, bundle, "lifecycle-companion")
+            .map_err(|_| ActivationError::Verification),
+    )?;
     Ok(sealed)
 }
 
@@ -1564,6 +1697,213 @@ mod tests {
         );
     }
 
+    /// 59 专用取证夹具：最小静态 x86-64 ELF，先从 stdin 读走请求再自然退出 3 且不写响应字节。
+    /// 退休触发见票 59：充分因果形成后、对应真实重装修复交付前删除。
+    const FAILED_REPLACEMENT_COMPANION_EXECUTABLE: &[u8] =
+        b"\x7f\x45\x4c\x46\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00\x01\x00\x00\x00\x78\x00\x40\x00\x00\x00\x00\x00\x40\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40\x00\x38\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x05\x00\x00\x00\x78\x00\x00\x00\x00\x00\x00\x00\x78\x00\x40\x00\x00\x00\x00\x00\x78\x00\x40\x00\x00\x00\x00\x00\x20\x00\x00\x00\x00\x00\x00\x00\x20\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\xb8\x00\x00\x00\x00\xbf\x00\x00\x00\x00\x48\x89\xe6\xba\x00\x10\x00\x00\x0f\x05\xb8\xe7\x00\x00\x00\xbf\x03\x00\x00\x00\x0f\x05";
+
+    /// 59 专用取证夹具：同形状 ELF，读走请求后写出既有 canonical succeeded 响应再自然退出 0。
+    const SUCCEEDED_REPLACEMENT_COMPANION_EXECUTABLE: &[u8] =
+        b"\x7f\x45\x4c\x46\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00\x01\x00\x00\x00\x78\x00\x40\x00\x00\x00\x00\x00\x40\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x40\x00\x38\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x05\x00\x00\x00\x78\x00\x00\x00\x00\x00\x00\x00\x78\x00\x40\x00\x00\x00\x00\x00\x78\x00\x40\x00\x00\x00\x00\x00\x7a\x00\x00\x00\x00\x00\x00\x00\x7a\x00\x00\x00\x00\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\xb8\x00\x00\x00\x00\xbf\x00\x00\x00\x00\x48\x89\xe6\xba\x00\x10\x00\x00\x0f\x05\xb8\x01\x00\x00\x00\xbf\x01\x00\x00\x00\x48\x8d\x35\x10\x00\x00\x00\xba\x45\x00\x00\x00\x0f\x05\xb8\xe7\x00\x00\x00\x31\xff\x0f\x05\x7b\x22\x73\x63\x68\x65\x6d\x61\x56\x65\x72\x73\x69\x6f\x6e\x22\x3a\x31\x2c\x22\x73\x74\x61\x74\x75\x73\x22\x3a\x22\x73\x75\x63\x63\x65\x65\x64\x65\x64\x22\x2c\x22\x63\x6f\x64\x65\x22\x3a\x22\x6c\x69\x66\x65\x63\x79\x63\x6c\x65\x2e\x73\x75\x63\x63\x65\x65\x64\x65\x64\x22\x7d";
+
+    /// 复用既有 Replacement enrollment 安排，只提供测试所需的有界 Enrollment。
+    fn replacement_enrollment_for(bundle: &VerifiedBundle) -> Enrollment {
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            "c".repeat(64),
+            bundle.asset_set_manifest_sha256,
+        );
+        Enrollment::from_install_input("https://hub.example", enrollment_input.as_bytes()).unwrap()
+    }
+
+    fn take_observed_replacement_failure_facts() -> Vec<String> {
+        OBSERVED_REPLACEMENT_FAILURE_FACTS.with(|facts| std::mem::take(&mut *facts.borrow_mut()))
+    }
+
+    /// 真实 sealed child 在 EOF 自然退出非零：原判定仍失败，但折叠前保留固定调用位置、
+    /// 自然退出结果与原有 decode 拒绝；成功退出且回执恰为 succeeded 时保持原静默。
+    #[test]
+    fn sealed_child_eof_observes_natural_exit_and_decode_only_on_failure() {
+        let temporary = tempdir().unwrap();
+        let failure_fixture =
+            fixture_with_lifecycle_companion(4, FAILED_REPLACEMENT_COMPANION_EXECUTABLE);
+        let mut received = receive_for_test(
+            &mut Cursor::new(failure_fixture.stream.as_slice()),
+            &temporary.path().join("failure-state"),
+            &failure_fixture.policy(),
+        )
+        .unwrap();
+        let enrollment = replacement_enrollment_for(&received.bundle);
+        let request = replacement_request_for_installed_state(true, &enrollment, &received.bundle)
+            .unwrap()
+            .unwrap();
+        assert!(
+            take_observed_replacement_failure_facts().is_empty(),
+            "调用前不产生取证事实"
+        );
+
+        assert_eq!(
+            invoke_replacement_companion(
+                &request,
+                &mut received.lifecycle_companion,
+                &received.bundle,
+            )
+            .err(),
+            Some(ActivationError::Replacement),
+            "child 非零自然退出必须仍是原失败"
+        );
+        let facts = take_observed_replacement_failure_facts();
+        assert_eq!(facts.len(), 1, "只有实际到达的失败分支写出事实");
+        assert!(facts[0].contains("position=child:eof"), "{}", facts[0]);
+        assert!(facts[0].contains("exit=code(3)"), "{}", facts[0]);
+        assert!(
+            facts[0].contains("response=decode-rejected(lifecycle.invalid_authority)"),
+            "{}",
+            facts[0]
+        );
+
+        let success_fixture =
+            fixture_with_lifecycle_companion(4, SUCCEEDED_REPLACEMENT_COMPANION_EXECUTABLE);
+        let mut received = receive_for_test(
+            &mut Cursor::new(success_fixture.stream.as_slice()),
+            &temporary.path().join("success-state"),
+            &success_fixture.policy(),
+        )
+        .unwrap();
+        assert_eq!(
+            invoke_replacement_companion(
+                &request,
+                &mut received.lifecycle_companion,
+                &received.bundle,
+            ),
+            Ok(()),
+            "自然退出 0 且回执恰为 succeeded 仍是原成功"
+        );
+        assert!(
+            take_observed_replacement_failure_facts().is_empty(),
+            "成功路径不得新增取证输出"
+        );
+    }
+
+    /// 父协调真实 postcondition：invoke 返回后 commit 仍未 Ready 时保持原失败并留下固定
+    /// 调用后位置；同一意图 cleanup 完成继续 Resume 且没有任何新增取证输出。
+    #[test]
+    fn replacement_postcondition_keeps_its_failure_position_and_stays_silent_on_success() {
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Store(Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>);
+        impl crate::replacement::ReplacementCommitStore for Store {
+            type Error = ();
+
+            fn load(
+                &mut self,
+            ) -> Result<Option<crate::replacement::ReplacementCommitFact>, Self::Error>
+            {
+                Ok(self.0.borrow().clone())
+            }
+
+            fn persist(
+                &mut self,
+                fact: &crate::replacement::ReplacementCommitFact,
+            ) -> Result<(), Self::Error> {
+                *self.0.borrow_mut() = Some(fact.clone());
+                Ok(())
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+        let enrollment = replacement_enrollment_for(&received.bundle);
+        let intent = crate::replacement::ReplacementIntent {
+            enrollment_id: "enr_0123456789abcdef".to_owned(),
+            enrollment_token_sha256: format!(
+                "{:x}",
+                Sha256::digest(enrollment.enrollment_token().as_bytes())
+            ),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_old_01".to_owned(),
+            source_probe_version: "1.2.2".to_owned(),
+            source_probe_sha256: "c".repeat(64),
+            target_bundle_target: received.bundle.target.clone(),
+            target_probe_version: received.bundle.version.clone(),
+            target_asset_set_digest: format!(
+                "sha256:{}",
+                received.bundle.asset_set_manifest_sha256
+            ),
+            target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+        };
+        let shared = Rc::new(RefCell::new(Some(
+            crate::replacement::ReplacementCommitFact::for_test(intent, false, false),
+        )));
+
+        let invoked = Rc::new(RefCell::new(0));
+        let observed_invocations = Rc::clone(&invoked);
+        assert_eq!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &received.bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
+                move |_| {
+                    *observed_invocations.borrow_mut() += 1;
+                    // 既有 Companion 调用成功返回，但 cleanup 回执没有出现。
+                    Ok(())
+                },
+            )
+            .err(),
+            Some(ActivationError::Replacement),
+            "调用后仍没有 Ready 回执必须保持原失败"
+        );
+        assert_eq!(
+            *invoked.borrow(),
+            1,
+            "同一意图只重入一次既有 Companion 调用"
+        );
+        let facts = take_observed_replacement_failure_facts();
+        assert_eq!(facts.len(), 1, "只记录实际到达的调用后核验失败");
+        assert!(
+            facts[0].contains("position=prepare:post-invoke-ready-receipt-missing"),
+            "{}",
+            facts[0]
+        );
+
+        let success_invocations = Rc::new(RefCell::new(0));
+        let observed_success_invocations = Rc::clone(&success_invocations);
+        let completing_store = Rc::clone(&shared);
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(completing_store),
+            false,
+            |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
+            move |_| {
+                *observed_success_invocations.borrow_mut() += 1;
+                let mut completed = shared.borrow().clone().expect("durable commit");
+                completed.cleanup_complete = true;
+                *shared.borrow_mut() = Some(completed);
+                Ok(())
+            },
+        )
+        .expect("cleanup 完成后同一意图继续 committed candidate activation");
+        assert!(
+            matches!(activation, ReplacementActivation::Resume(_)),
+            "成功安排的业务结果保持不变"
+        );
+        assert_eq!(*success_invocations.borrow(), 1);
+        assert!(
+            take_observed_replacement_failure_facts().is_empty(),
+            "父协调成功路径不得新增取证输出"
+        );
+    }
+
     #[test]
     fn received_handoff_holds_the_generation_lock_until_drop() {
         let temporary = tempdir().unwrap();
@@ -1648,6 +1988,12 @@ mod tests {
     }
 
     fn fixture(generation: u64) -> Fixture {
+        fixture_with_lifecycle_companion(generation, b"lifecycle-companion")
+    }
+
+    /// 59 专用取证夹具扩展：只把 lifecycle-companion 角色内容换成给定字节，其余角色与
+    /// 签名安排与 `fixture` 完全一致，用于让 sealed child 走真实 spawn/EOF 分支。
+    fn fixture_with_lifecycle_companion(generation: u64, companion: &[u8]) -> Fixture {
         let mut rng = OsRng;
         let root = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let daily = RsaPrivateKey::new(&mut rng, 2048).unwrap();
@@ -1665,14 +2011,15 @@ mod tests {
         let daily_id = sha256(&daily_pem);
         let component = b"probe";
         let bundle = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":21,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v3\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":19,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":21,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v3\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
             sha256(b"a"),
             sha256(b"b"),
             sha256(component),
             sha256(b"runtime"),
             sha256(b"system-state-provider"),
             sha256(b"disk-health-provider"),
-            sha256(b"lifecycle-companion"),
+            sha256(companion),
+            companion.len() as u64,
         )
         .into_bytes();
         let delegation = format!(
@@ -1714,8 +2061,8 @@ mod tests {
                 21,
                 &mut Cursor::new(b"disk-health-provider"),
                 20,
-                &mut Cursor::new(b"lifecycle-companion"),
-                19,
+                &mut Cursor::new(companion),
+                companion.len() as u64,
                 &mut Cursor::new(b"a"),
                 1,
                 &mut stream,
