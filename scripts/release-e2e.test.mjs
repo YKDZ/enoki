@@ -1367,10 +1367,17 @@ describe("Probe Host Harness", () => {
 
     const stops = emergency
       .split("\n")
-      .filter((line) => line.startsWith("systemctl disable --now"));
+      .filter((line) => line.startsWith("systemctl stop "));
     expect(stops).toHaveLength(2);
     expect(stops[0]).toContain("enoki-observation-runtime.socket");
     expect(stops[1]).toContain("'enoki-probe.service'");
+    // unit-file 的 disable 不接收 glob：官方 mangle_names 会把它转义成字面名，
+    // verb_enable 因此在所需 --now 停止之前整批失败。
+    const [disable] = emergency
+      .split("\n")
+      .filter((line) => line.startsWith("systemctl disable "));
+    expect(disable).toContain("'enoki-probe.service'");
+    expect(disable).not.toContain("*");
 
     // 生产接缝是 sh -s：任何 bash 专有构造都必须在这里被拒绝，而不是只在真实 Host 上失败。
     for (const script of [inventory, claim, emergency]) {
@@ -3076,6 +3083,149 @@ describe("Probe Host Harness", () => {
     await expect(
       harness.verifyClean("run-residue-query-failure"),
     ).rejects.toThrow(/Release Test Host inspection failed \(76\)/);
+  });
+
+  it("submits real stop requests for the fixed sockets, services and template instances", async () => {
+    // 官方 systemctl 语义（v249／v255）：stop 走 expand_unit_names
+    // (src/systemctl/systemctl-util.c:263—291)，glob 由 manager 展开成已加载单元，未加载的
+    // 具体名报错但其余名继续；disable 走 mangle_names (同文件 924—955) 不展开 glob，`*` 被
+    // 转义成字面名，verb_enable 在 unit-file 阶段就整批失败，早于 systemctl-enable.c:315 的
+    // --now 停止；reset-failed 只清失败计数，daemon-reload 不停单元。这里按这些语义解释生产
+    // 生成脚本里真实出现的 systemctl 命令行，不重建完整 manager 替身。
+    const retireUnits = [
+      "enoki-probe.service",
+      "enoki-observation-runtime.service",
+      "enoki-observation-runtime.socket",
+      "enoki-cpu-resource-provider.socket",
+      "enoki-disk-health-resource-provider.socket",
+      "enoki-probe-lifecycle-companion.socket",
+      "enoki-probe-lifecycle-upgrade.socket",
+      "enoki-cpu-resource-provider@1.service",
+      "enoki-disk-health-resource-provider@1.service",
+      "enoki-probe-lifecycle-companion@1.service",
+      "enoki-probe-lifecycle-upgrade@1.service",
+    ];
+    // 本 run 的安装才把固定闭包落成已加载单元：准入时 Host 必须真的干净。
+    let loaded = [];
+    let claimReleased = false;
+    const retireCalls = [];
+
+    const toRegExp = (pattern) =>
+      new RegExp(
+        `^${pattern.replace(/[.*+?^${}()|[\]\\]/g, (char) =>
+          char === "*" ? ".*" : `\\${char}`,
+        )}$`,
+      );
+
+    const stopNames = (names) => {
+      let code = 0;
+      for (const name of names) {
+        const hits = name.includes("*")
+          ? loaded.filter((unit) => toRegExp(name).test(unit))
+          : loaded.filter((unit) => unit === name);
+        if (!name.includes("*") && hits.length === 0) code = 1;
+        loaded = loaded.filter((unit) => !hits.includes(unit));
+      }
+      return code;
+    };
+
+    const runSystemctlLine = (line) => {
+      const tokens = line
+        .replace(/\s*(?:>>?|\d?>).*$/, "")
+        .trim()
+        .split(/\s+/)
+        .slice(1)
+        .map((token) => token.replaceAll("'", ""));
+      const verb = tokens.find((token) => !token.startsWith("-"));
+      const names = tokens.filter(
+        (token) => !token.startsWith("-") && token !== verb,
+      );
+      retireCalls.push({ names, verb });
+      switch (verb) {
+        case "stop":
+        case "restart":
+          return stopNames(names);
+        case "disable":
+        case "enable":
+        case "mask":
+        case "unmask": {
+          if (names.some((name) => name.includes("*"))) return 1;
+          return tokens.includes("--now") && verb !== "enable"
+            ? stopNames(names)
+            : 0;
+        }
+        default:
+          return 0;
+      }
+    };
+
+    const runId = "run-unit-retirement-semantics";
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [...loaded],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:emergency-cleanup")) {
+          for (const line of command.split("\n")) {
+            if (line.startsWith("systemctl ")) runSystemctlLine(line);
+          }
+          // 生成脚本对退休调用按 || true 容错（幂等重放），文件与账户删除由既有
+          // 退休测试与一次性沙箱证明，因此脚本本身以 cleaned 成功返回。
+          return { code: 0, stderr: "", stdout: "cleaned\n" };
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          // Runtime 故障夹具的退休由既有 Repair 测试证明；这里只确认它成功，
+          // 使本测试的残留判据完全来自固定闭包退休调用本身。
+          return { code: 0, stderr: "", stdout: "cleaned\n" };
+        }
+        if (command.includes("# enoki-release-e2e:remove-claim")) {
+          claimReleased = true;
+          return successfulCommandText("");
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText(claimReleased ? "absent\n" : "owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("enk_enroll_secret")) {
+          loaded = [...retireUnits];
+          return { code: 1, stderr: "interrupted", stdout: "" };
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable(runId);
+    await expect(
+      harness.install(officialEnrollment(), runId),
+    ).rejects.toMatchObject({ code: "probe_installation_failed" });
+
+    await expect(harness.cleanup(runId)).resolves.toMatchObject({
+      clean: true,
+      removedPartialInstallation: true,
+    });
+    // 所需 socket、固定 service 与模板 instance 全部收到停止；激活源先收，
+    // unit-file 的 disable 不承担停止，也不靠 reset-failed 假称已停。
+    expect(loaded).toEqual([]);
+    expect(
+      retireCalls
+        .filter(({ verb }) => verb === "stop")[0]
+        ?.names.every((name) => name.endsWith(".socket")),
+    ).toBe(true);
+    expect(claimReleased).toBe(true);
+    await expect(harness.verifyClean(runId)).resolves.toBeDefined();
   });
 });
 

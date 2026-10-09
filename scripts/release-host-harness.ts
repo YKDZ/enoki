@@ -2129,6 +2129,13 @@ function releaseEmergencyCleanupScript(runId: string, token: string): string {
   const groups = namesFor("group");
   const sockets = patternsFor(".socket");
   const services = patternsFor(".service", releaseE2ERuntimeUnitGlobs);
+  const unitFiles = releaseE2EInfrastructureResources
+    .filter(
+      (resource): resource is ProbeServiceResource | ProbeSocketResource =>
+        resource.kind === "service" || resource.kind === "socket",
+    )
+    .map((resource) => shellSingleQuote(resource.name))
+    .join(" ");
   // 同一固定声明给出 public 链的封闭形态：ordinary 真实目录，或精确指向其 private
   // 载体。未知 target 不跟随也不删除，整个清理 effect 前拒绝并保留 claim。
   const stateCustodyGuards = releaseE2EInfrastructureResources
@@ -2157,9 +2164,13 @@ claim=/var/lib/enoki-release-e2e/claim
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 ${stateCustodyGuards}
 # 退休顺序沿用产品自己的固定 stop 列表：先收 socket 激活源，再停 service 与实例，
-# 否则正常停止 Probe 后 socket 会重新拉起 Runtime／Provider。
-systemctl disable --now ${sockets} >/dev/null 2>&1 || true
-systemctl disable --now ${services} >/dev/null 2>&1 || true
+# 否则正常停止 Probe 后 socket 会重新拉起 Runtime／Provider。stop 走官方
+# expand_unit_names（systemctl-util.c:263—291），glob 由 manager 展开成已加载实例；
+# unit-file 的 disable 走 mangle_names（同文件 924—955）不展开 glob，所以只接收声明的
+# 具体单元名——否则 verb_enable 在 systemctl-enable.c:315 的 --now 停止之前就整批失败。
+systemctl stop ${sockets} >/dev/null 2>&1 || true
+systemctl stop ${services} >/dev/null 2>&1 || true
+systemctl disable ${unitFiles} >/dev/null 2>&1 || true
 rm -f -- ${files}
 rm -rf -- ${directories}
 for account in ${users}; do userdel -- "$account" >/dev/null 2>&1 || true; done
