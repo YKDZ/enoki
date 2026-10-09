@@ -11,7 +11,6 @@ use std::{
 
 const SYSTEMD_PROBE_CREDENTIAL_DIRECTORY: &str = "/run/credentials/enoki-probe.service";
 const SYSTEMD_REGISTRATION_CREDENTIAL_NAME: &str = "registration-attempt";
-const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
 
 #[cfg(test)]
 use std::{
@@ -261,33 +260,11 @@ pub fn read_registration_attempt_credential_bytes(
     read_systemd_registration_credential(path, maximum_bytes)
 }
 
+/// 读取 systemd 一次性交付的注册凭据。交付目录与文件的 mode、uid、gid、nlink
+/// 以及文件系统类型和挂载 flags 都由平台决定，不再作为读取判据；这里只保留
+/// 固定交付路径下的常规非符号链接文件判定与大小上限。
 fn read_systemd_registration_credential(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
     let (parent, target) = open_parent(path, false)?;
-    let directory = stat_fd(parent.raw())?;
-    if file_type(directory.st_mode) != libc::S_IFDIR
-        || directory.st_mode & 0o777 != 0o550
-        || directory.st_uid != 0
-        || directory.st_gid != 0
-        || directory.st_nlink != 2
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "systemd registration credential directory attributes do not match",
-        ));
-    }
-    let filesystem = statfs_fd(parent.raw())?;
-    let mount = statvfs_fd(parent.raw())?;
-    let required_flags = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
-    // f_type 在不同 libc 上符号性不同（GNU 为带符号、musl 为无符号），
-    // 两边加宽到可无损容纳二者的 i128 后比较，未知取值仍按原判据拒绝。
-    if i128::from(filesystem.f_type) != i128::from(TMPFS_MAGIC)
-        || mount.f_flag & required_flags != required_flags
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "systemd registration credential mount attributes do not match",
-        ));
-    }
     let fd = unsafe {
         libc::openat(
             parent.raw(),
@@ -301,16 +278,12 @@ fn read_systemd_registration_credential(path: &Path, maximum_bytes: usize) -> io
     let mut file = unsafe { File::from_raw_fd(fd) };
     let stat = stat_fd(file.as_raw_fd())?;
     if file_type(stat.st_mode) != libc::S_IFREG
-        || stat.st_mode & 0o777 != 0o440
-        || stat.st_uid != 0
-        || stat.st_gid != 0
-        || stat.st_nlink != 1
         || stat.st_size < 0
         || stat.st_size as usize > maximum_bytes
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "systemd registration credential attributes do not match",
+            "systemd registration credential must be a bounded regular file",
         ));
     }
     let mut contents = Vec::with_capacity(stat.st_size as usize);
@@ -596,24 +569,6 @@ fn stat_fd(fd: RawFd) -> io::Result<libc::stat> {
     }
 }
 
-fn statfs_fd(fd: RawFd) -> io::Result<libc::statfs> {
-    let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
-    if unsafe { libc::fstatfs(fd, &mut stat) } != 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(stat)
-    }
-}
-
-fn statvfs_fd(fd: RawFd) -> io::Result<libc::statvfs> {
-    let mut stat = unsafe { std::mem::zeroed::<libc::statvfs>() };
-    if unsafe { libc::fstatvfs(fd, &mut stat) } != 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(stat)
-    }
-}
-
 fn stat_at(parent: RawFd, name: &CString) -> io::Result<libc::stat> {
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstatat(parent, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
@@ -729,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn systemd_delivered_registration_credential_is_exact_and_fail_closed() {
+    fn systemd_delivered_registration_credential_reads_bounded_regular_files() {
         if unsafe { libc::geteuid() } != 0 {
             return;
         }
@@ -756,31 +711,22 @@ mod tests {
             return;
         }
 
-        for tamper in [
-            "none",
-            "directory-owner",
-            "directory-mode",
-            "file-owner",
-            "file-mode",
-            "hardlink",
-            "symlink",
-            "path",
-            "writable-mount",
-        ] {
-            mount_systemd_credential(tamper);
+        for delivery in ["canonical", "platform-shape", "symlink", "path", "oversize"] {
+            mount_systemd_credential(delivery);
             unsafe {
                 std::env::set_var("CREDENTIALS_DIRECTORY", SYSTEMD_CREDENTIAL_DIRECTORY);
             }
-            let path = if tamper == "path" {
+            let path = if delivery == "path" {
                 Path::new(SYSTEMD_CREDENTIAL_DIRECTORY).join("other-attempt")
             } else {
                 Path::new(SYSTEMD_CREDENTIAL_PATH).to_path_buf()
             };
-            let result = read_registration_attempt_credential_bytes(&path, 1024);
-            if tamper == "none" {
-                assert_eq!(result.expect("canonical systemd credential"), b"canonical");
+            let maximum_bytes = if delivery == "oversize" { 4 } else { 1024 };
+            let result = read_registration_attempt_credential_bytes(&path, maximum_bytes);
+            if delivery == "canonical" || delivery == "platform-shape" {
+                assert_eq!(result.expect("delivered systemd credential"), b"canonical");
             } else {
-                assert!(result.is_err(), "tamper {tamper} must fail closed");
+                assert!(result.is_err(), "delivery {delivery} must fail closed");
             }
             unsafe {
                 std::env::remove_var("CREDENTIALS_DIRECTORY");
@@ -799,7 +745,11 @@ mod tests {
         fs::remove_dir(SYSTEMD_CREDENTIAL_DIRECTORY).expect("remove credential mountpoint");
     }
 
-    fn mount_systemd_credential(tamper: &str) {
+    /// 在私有挂载命名空间内以 systemd 固定交付路径提供一份凭据。`platform-shape`
+    /// 刻意使用撤销形态等式之外的目录与文件 mode、owner 和链接数，证明平台交付
+    /// 形态不再阻塞读取；`symlink`、`path`、`oversize` 分别保留常规文件、固定路径
+    /// 与大小上限三项仍须失败的判据。
+    fn mount_systemd_credential(delivery: &str) {
         fs::create_dir_all(SYSTEMD_CREDENTIAL_DIRECTORY).expect("credential mountpoint");
         let source = CString::new("tmpfs").unwrap();
         let target = CString::new(SYSTEMD_CREDENTIAL_DIRECTORY).unwrap();
@@ -818,51 +768,56 @@ mod tests {
             0,
             "credential tmpfs mounts",
         );
+        let directory = Path::new(SYSTEMD_CREDENTIAL_DIRECTORY);
         let path = Path::new(SYSTEMD_CREDENTIAL_PATH);
         fs::write(path, b"canonical").expect("credential contents");
         fs::set_permissions(path, fs::Permissions::from_mode(0o440)).expect("credential mode");
-        match tamper {
-            "directory-owner" => assert_eq!(unsafe { libc::chown(target.as_ptr(), 1, 1) }, 0),
-            "directory-mode" => fs::set_permissions(
-                SYSTEMD_CREDENTIAL_DIRECTORY,
-                fs::Permissions::from_mode(0o750),
-            )
-            .expect("tampered directory mode"),
-            "file-owner" => {
-                let path = CString::new(SYSTEMD_CREDENTIAL_PATH).unwrap();
-                assert_eq!(unsafe { libc::chown(path.as_ptr(), 1, 1) }, 0);
+        match delivery {
+            "platform-shape" => {
+                fs::create_dir(directory.join("sub")).expect("delivered directory link count");
+                fs::set_permissions(directory, fs::Permissions::from_mode(0o750))
+                    .expect("delivered directory mode");
+                assert_eq!(
+                    unsafe { libc::chown(target.as_ptr(), 1, 1) },
+                    0,
+                    "delivered directory owner",
+                );
+                fs::set_permissions(path, fs::Permissions::from_mode(0o400))
+                    .expect("delivered credential mode");
+                let credential = CString::new(SYSTEMD_CREDENTIAL_PATH).unwrap();
+                assert_eq!(
+                    unsafe { libc::chown(credential.as_ptr(), 1, 1) },
+                    0,
+                    "delivered credential owner",
+                );
+                fs::hard_link(path, directory.join("registration-copy"))
+                    .expect("delivered credential link count");
             }
-            "file-mode" => fs::set_permissions(path, fs::Permissions::from_mode(0o400))
-                .expect("tampered credential mode"),
-            "hardlink" => fs::hard_link(path, path.with_file_name("registration-copy"))
-                .expect("tampered hard link"),
             "symlink" => {
                 fs::rename(path, path.with_file_name("registration-referent"))
                     .expect("move credential referent");
-                symlink("registration-referent", path).expect("tampered credential symlink");
+                symlink("registration-referent", path).expect("credential symlink");
             }
-            "none" | "path" | "writable-mount" => {}
+            "canonical" | "path" | "oversize" => {}
             _ => unreachable!(),
         }
-        if tamper != "writable-mount" {
-            assert_eq!(
-                unsafe {
-                    libc::mount(
-                        std::ptr::null(),
-                        target.as_ptr(),
-                        std::ptr::null(),
-                        libc::MS_REMOUNT
-                            | libc::MS_RDONLY
-                            | libc::MS_NOSUID
-                            | libc::MS_NODEV
-                            | libc::MS_NOEXEC
-                            | libc::MS_NOSYMFOLLOW,
-                        std::ptr::null(),
-                    )
-                },
-                0,
-                "credential tmpfs becomes read-only",
-            );
-        }
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    target.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REMOUNT
+                        | libc::MS_RDONLY
+                        | libc::MS_NOSUID
+                        | libc::MS_NODEV
+                        | libc::MS_NOEXEC
+                        | libc::MS_NOSYMFOLLOW,
+                    std::ptr::null(),
+                )
+            },
+            0,
+            "credential tmpfs becomes read-only",
+        );
     }
 }
