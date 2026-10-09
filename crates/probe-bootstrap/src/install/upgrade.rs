@@ -1510,7 +1510,9 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
     }
 }
 
-fn invalidate_runtime_failure_epoch(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+pub(super) fn invalidate_runtime_failure_epoch(
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
     let mut changed = false;
     for path in [paths.runtime_failure_latch(), paths.runtime_failure_epoch()] {
         match fs::remove_file(path) {

@@ -543,7 +543,7 @@ const RUNTIME_REPAIR_DROP_IN: &str =
     "/run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf";
 // 验证 gate 只授权 root 修复角色读取固定别名 metadata；撤销 permit 即撤销授权。
 const VALIDATION_DROP_IN_TEMPORARY: &[u8] = b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n";
-const VALIDATION_DROP_IN_CANONICAL: &[u8] = b"[Unit]\nConditionPathExists=\nConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n";
+const VALIDATION_DROP_IN_CANONICAL: &[u8] = b"[Unit]\nConditionPathExists=\nConditionPathExists=!/var/lib/enoki-probe-bootstrap/runtime-failure/latch\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n[Service]\nEnvironment=ENOKI_RUNTIME_REPAIR_VALIDATION=1\nBindReadOnlyPaths=/run/enoki-probe/runtime-repair-permit:/run/enoki-runtime-repair-permit\n";
 
 fn rooted(root: &Path, absolute: &str) -> PathBuf {
     root.join(absolute.trim_start_matches('/'))
@@ -653,9 +653,14 @@ mod tests {
     };
 
     use crate::runtime_failure::{
-        InstalledBundleRepairProgress, RuntimeFailureSystemd,
+        BOOTSTRAP_STATE_ROOT, CANONICAL_PRIVATE_STATE_ROOT, EPOCH_NAME, FAILURE_DIR_NAME,
+        InstalledBundleRepairIntent, InstalledBundleRepairProgress, LATCH_NAME,
+        OPERATION_STATUS_PATH, REPAIR_INTENT_NAME, RuntimeFailureSystemd, current_epoch_at,
         installed_bundle_failure_is_current_at, resume_installed_bundle_repair_at,
-        tests::{repair_completion_fixture, repair_test_bundle},
+        tests::{
+            formal_begin_installed_bundle_repair_at_canonical_layout, repair_completion_fixture,
+            repair_test_bundle,
+        },
     };
 
     struct TerminalRuntime;
@@ -900,6 +905,7 @@ mod tests {
     struct TestStageOpener {
         directory: PathBuf,
         bundle: VerifiedBundle,
+        acquired: Rc<RefCell<usize>>,
         removed: Rc<RefCell<usize>>,
         fault: SharedFault,
     }
@@ -910,6 +916,7 @@ mod tests {
             _: &VerifiedUpgradeStageReceipt,
             _: u32,
         ) -> Result<RepairStage, LiveInstalledBundleRepairError> {
+            *self.acquired.borrow_mut() += 1;
             let open = |name: &str| {
                 File::open(self.directory.join(name))
                     .map_err(|_| LiveInstalledBundleRepairError::ManualReinstallRequired)
@@ -944,6 +951,7 @@ mod tests {
         runner: TestRunner,
         runtime: TestRuntime,
         state: SharedSystemState,
+        acquired: Rc<RefCell<usize>>,
         removed: Rc<RefCell<usize>>,
         fault: SharedFault,
     }
@@ -954,7 +962,22 @@ mod tests {
         }
 
         fn with_fault(target: Option<(FaultEvent, usize)>) -> Self {
-            let (root, _) = repair_completion_fixture(InstalledBundleRepairProgress::Admitted, 91);
+            Self::anchored(
+                repair_completion_fixture(InstalledBundleRepairProgress::Admitted, 91).0,
+                target,
+            )
+        }
+
+        /// R51-3 切点的唯一初始化：同一安装脚手架，但 intent 来自 exact canonical private 布局上
+        /// 的正式 recorder→Evidence／Authority→begin 链，而不是手写 checkpoint。
+        fn from_formal_begin() -> Self {
+            Self::anchored(
+                formal_begin_installed_bundle_repair_at_canonical_layout(93, "51"),
+                None,
+            )
+        }
+
+        fn anchored(root: tempfile::TempDir, target: Option<(FaultEvent, usize)>) -> Self {
             for directory in [
                 "usr/local/bin",
                 "var/lib/enoki-probe-bootstrap",
@@ -1032,6 +1055,7 @@ mod tests {
                     state: state.clone(),
                 },
                 state,
+                acquired: Rc::new(RefCell::new(0)),
                 removed: Rc::new(RefCell::new(0)),
                 fault,
             }
@@ -1050,6 +1074,7 @@ mod tests {
                 stages: TestStageOpener {
                     directory: self.stage.clone(),
                     bundle: repair_test_bundle(),
+                    acquired: self.acquired.clone(),
                     removed: self.removed.clone(),
                     fault: self.fault.clone(),
                 },
@@ -1094,7 +1119,7 @@ mod tests {
             !fixture
                 .root
                 .path()
-                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json")
                 .exists(),
             "repair intent must be retired"
         );
@@ -1315,7 +1340,7 @@ mod tests {
                     fixture
                         .root
                         .path()
-                        .join("var/lib/enoki-probe/runtime-failure/repair-intent.json"),
+                        .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json"),
                 )
                 .unwrap(),
             )
@@ -1567,7 +1592,7 @@ mod tests {
             fixture
                 .root
                 .path()
-                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json")
                 .exists(),
             "payload mismatch must retain StatusPublished intent"
         );
@@ -1611,7 +1636,7 @@ mod tests {
             fixture
                 .root
                 .path()
-                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json")
                 .exists(),
             "stage retirement 失败必须保留 StatusPublished intent 作为 resume authority"
         );
@@ -1628,7 +1653,7 @@ mod tests {
             !fixture
                 .root
                 .path()
-                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json")
                 .exists()
         );
     }
@@ -1897,7 +1922,7 @@ mod tests {
                 fixture
                     .root
                     .path()
-                    .join("var/lib/enoki-probe/runtime-failure/repair-intent.json"),
+                    .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json"),
             )
             .unwrap(),
         )
@@ -1970,7 +1995,7 @@ mod tests {
                 fixture
                     .root
                     .path()
-                    .join("var/lib/enoki-probe/runtime-failure/repair-intent.json"),
+                    .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json"),
             )
             .unwrap(),
         )
@@ -1991,6 +2016,188 @@ mod tests {
             drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
         assert_eq!(outcome.probe_id, "probe_01");
         assert_converged(&fixture, &identity_before);
+    }
+
+    /// R51-3：载体是正式 DynamicUser 布局（public 精确 symlink → 固定 private 状态根），intent 由
+    /// recorder→Evidence／Authority→begin 落盘。只在“latch 已移除”的 canonical 验证失败处切一刀，
+    /// 随后用全新 context 重入，证明无 raw pair 时仍绑定 begin 那一次的 operation／generation／stage、
+    /// verified stage 只 acquisition 一次、identity／status 留在 private 原投影，退休顺序保持偏序。
+    #[test]
+    fn a_post_latch_canonical_cut_recovers_from_root_custody_without_a_raw_pair() {
+        let fixture = LiveFixture::from_formal_begin();
+        let root = fixture.root.path();
+        let custody = rooted(root, BOOTSTRAP_STATE_ROOT).join(FAILURE_DIR_NAME);
+        let intent_path = custody.join(REPAIR_INTENT_NAME);
+        let private = rooted(root, CANONICAL_PRIVATE_STATE_ROOT);
+        let status_via_public_link = rooted(root, OPERATION_STATUS_PATH);
+        let status_on_private = private.join("probe-operation-status.toml");
+        let admitted: InstalledBundleRepairIntent =
+            serde_json::from_slice(&fs::read(&intent_path).unwrap()).unwrap();
+        assert_eq!(
+            admitted.state,
+            InstalledBundleRepairProgress::Admitted,
+            "切点的 checkpoint 必须是 begin 自己落盘的 Admitted，而非手写状态"
+        );
+        assert!(
+            fs::symlink_metadata(rooted(root, "/var/lib/enoki-probe"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "载体必须是 public 单链接指向固定 private 根的正式布局"
+        );
+        assert!(
+            fs::metadata(private.join("identity/probe-bootstrap.toml"))
+                .unwrap()
+                .is_file(),
+            "identity 必须真实住在 private 投影上"
+        );
+        assert_eq!(
+            fs::read(&status_via_public_link).unwrap(),
+            fs::read(&status_on_private).unwrap(),
+            "public 精确链接与 private 必须是同一份 status 投影"
+        );
+        let running = fs::read_to_string(&status_on_private).unwrap();
+        assert!(
+            running.contains("status = \"running\"") && running.contains("operation_id = \"51\""),
+            "正式 Authority 必须在 grant 前把 running 记在 Probe 原 concrete 投影上"
+        );
+        assert!(
+            custody.join(EPOCH_NAME).exists() && custody.join(LATCH_NAME).exists(),
+            "切点前 root 固定 child 必须有正式 recorder 发布的 raw pair"
+        );
+        assert!(
+            !private.join(FAILURE_DIR_NAME).exists(),
+            "故障保管不得落在 Probe private 状态根 child"
+        );
+
+        *fixture.runtime.fail_on.borrow_mut() = Some(RuntimeValidation::Canonical);
+        let identity_before = identity_of(&fixture);
+
+        let error =
+            match drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()) {
+                Ok(_) => panic!("latch 移除后的 canonical 验证失败必须阻断修复"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            error.code(),
+            "probe_repair_canonical_runtime_validation_failed"
+        );
+        assert_eq!(
+            *fixture.acquired.borrow(),
+            1,
+            "切点前正式 begin 授权的 verified stage 只允许 acquisition 一次"
+        );
+
+        assert!(
+            !custody.join(EPOCH_NAME).exists() && !custody.join(LATCH_NAME).exists(),
+            "已过提交边界的切点必须整体退休 raw pair"
+        );
+        assert!(
+            current_epoch_at(root, 0).is_err(),
+            "无 raw pair 时不得伪造一个当前 generation"
+        );
+        let checkpoint: InstalledBundleRepairIntent =
+            serde_json::from_slice(&fs::read(&intent_path).unwrap()).unwrap();
+        assert_eq!(
+            checkpoint.state,
+            InstalledBundleRepairProgress::LatchRemoved
+        );
+        assert!(
+            checkpoint.state.is_forward_only(),
+            "切点必须落在提交边界之后"
+        );
+        assert_eq!(
+            checkpoint.last_error_code.as_deref(),
+            Some("probe_repair_canonical_runtime_validation_failed")
+        );
+        assert_eq!(checkpoint.authority, admitted.authority);
+        assert_eq!(
+            checkpoint.signed_evidence, admitted.signed_evidence,
+            "forward-only 推进不得改写 begin 绑定的证据与 authority"
+        );
+
+        let resumed = fixture.resume();
+        assert_eq!(
+            resumed.progress,
+            InstalledBundleRepairProgress::LatchRemoved
+        );
+        assert_eq!(
+            resumed.grant.authority(),
+            &admitted.authority,
+            "重入必须复用 begin 签发的同一 operation／generation，而非重新取得 authority"
+        );
+        assert_eq!(resumed.stage_receipt, admitted.stage_receipt);
+        assert_eq!(resumed.stage_owner_uid, admitted.stage_owner_uid);
+        assert!(
+            fixture.stage.exists() && *fixture.removed.borrow() == 0,
+            "重入前 verified stage 必须仍在且只允许退休一次"
+        );
+
+        let interrupted = fs::read_to_string(&status_on_private).unwrap();
+        assert!(
+            interrupted.contains("status = \"running\"")
+                && !interrupted.contains("succeeded")
+                && !interrupted.contains("failed"),
+            "已过提交边界的失败不得发布终态 status，intent 才是 resume authority"
+        );
+        assert!(
+            !custody.join("probe-operation-status.toml").exists(),
+            "status 不得跟随故障保管迁入 root 固定 child"
+        );
+        assert!(
+            !private.join(FAILURE_DIR_NAME).exists(),
+            "保管迁移不得在 Probe 状态根复活 D8 形态 child"
+        );
+
+        *fixture.runtime.fail_on.borrow_mut() = None;
+        let outcome =
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
+        assert_eq!(outcome.probe_id, "probe_01");
+        assert_eq!(
+            *fixture.acquired.borrow(),
+            2,
+            "重入只补一次完成前的 Bundle 复核；重新 restore 或重新 begin 都会多一次 acquisition"
+        );
+        assert_converged(&fixture, &identity_before);
+        let converged = fs::read_to_string(&status_on_private).unwrap();
+        assert!(
+            converged.contains("status = \"succeeded\"")
+                && !custody.join("probe-operation-status.toml").exists(),
+            "恢复完成后 status 只能出现在 Probe 原 concrete 投影上"
+        );
+        assert_eq!(
+            fs::read(&status_via_public_link).unwrap(),
+            fs::read(&status_on_private).unwrap()
+        );
+        assert_eq!(
+            identity_of(&fixture),
+            identity_before,
+            "canonical private 布局的恢复不得改写 Probe identity"
+        );
+        assert!(
+            !custody.join(EPOCH_NAME).exists() && !custody.join(LATCH_NAME).exists(),
+            "forward-only 恢复不得重新发布一个 raw pair"
+        );
+
+        let transcript = fixture.fault.borrow().transcript.clone();
+        let position = |wanted: FaultEvent| {
+            transcript
+                .iter()
+                .rposition(|event| *event == wanted)
+                .expect("收敛运行必须留下该效应")
+        };
+        let canonical = position(FaultEvent::Runtime(RuntimeValidation::Canonical));
+        let retirement = position(FaultEvent::StageRetirement);
+        let ordinary_probe = position(FaultEvent::ProbeStart);
+        let intent_retired = position(FaultEvent::Gate(LiveRepairEffect::IntentRetired));
+        assert!(
+            canonical < retirement && retirement < ordinary_probe,
+            "stage 退休必须晚于 canonical 验证通过、早于最终普通探针"
+        );
+        assert!(
+            intent_retired > ordinary_probe,
+            "intent 必须在最终普通探针激活之后才退休"
+        );
     }
 
     #[test]
@@ -2035,7 +2242,7 @@ mod tests {
             fixture
                 .root
                 .path()
-                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .join("var/lib/enoki-probe-bootstrap/runtime-failure/repair-intent.json")
                 .exists(),
             "退休未完成必须保留 intent 作为 resume authority"
         );
@@ -2114,7 +2321,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            unit.contains("ConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch"),
+            unit.contains(
+                "ConditionPathExists=!/var/lib/enoki-probe-bootstrap/runtime-failure/latch"
+            ),
             "普通 Runtime 必须保留 latch 负启动条件"
         );
         assert!(

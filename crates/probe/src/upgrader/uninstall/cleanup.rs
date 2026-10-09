@@ -430,6 +430,26 @@ pub(super) fn remove_probe_bootstrap_state(
     Ok(())
 }
 
+/// committed Replacement 只在源授权清理阶段退休 D9 固定故障保管 child：该 child 属于被替换
+/// 的源安装，而 `trust`／`inbox` 与提交意图属于候选，必须原样留下。删除前重新复核整个
+/// bootstrap state，使 plan 之后新出现的未知对象、link 或额外硬链接仍被拒绝。child 已不存在
+/// 时按幂等成功返回，因此 cleanup_complete 之前的重入不会第二次删除源保管。
+pub(super) fn retire_bootstrap_runtime_failure_custody(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let Some(state_dir) = plan.install_metadata.bootstrap_state_dir.as_deref() else {
+        return Ok(());
+    };
+    let custody = state_dir.join("runtime-failure");
+    if fs::symlink_metadata(&custody)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    validate_owned_bootstrap_state(Some(state_dir))?;
+    fs::remove_dir_all(custody).map_err(ProbeUpgraderRunError::Io)
+}
+
 pub(super) fn remove_probe_install_identities(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -698,6 +718,7 @@ pub(super) fn execute_committed_replacement_cleanup(
 ) -> Result<(), ProbeUpgraderRunError> {
     prepare_probe_uninstall_cleanup(plan, systemd)?;
     remove_probe_bootstrap_roles(plan)?;
+    retire_bootstrap_runtime_failure_custody(plan)?;
     remove_probe_install_identities(plan, systemd)?;
     remove_lifecycle_companion_activation(plan, systemd)?;
     remove_lifecycle_companion_binary(plan)?;
@@ -765,6 +786,15 @@ pub(super) fn verify_replacement_residue_absent(
         ),
     ] {
         verify_path_absent(path, code, action)?;
+    }
+    // 源保管 child 属于被替换的源安装：committed Replacement 核验时它必须已实际退休，
+    // 候选的 bootstrap state 父目录本身不在退休清单内。
+    if let Some(state_dir) = plan.install_metadata.bootstrap_state_dir.as_deref() {
+        verify_path_absent(
+            &state_dir.join("runtime-failure"),
+            "probe_uninstall_bootstrap_state_residue",
+            "verifying the source runtime-failure custody is retired",
+        )?;
     }
     verify_state_root_retired(&plan.install_metadata.state_dir)?;
     verify_lifecycle_companion_binary_absent(plan)
@@ -998,6 +1028,24 @@ pub(super) fn validate_owned_bootstrap_state(
                     ));
                 }
             }
+            // D9 的固定故障保管 child：root 管理的 parent 使普通 Probe 无法改名或替换它，
+            // 因此卸载必须逐个复核其白名单对象后随整个 bootstrap state 一起退休，
+            // 而不是把该 child 当作未知对象拒绝，也不是整目录盲删。
+            Some("runtime-failure") => {
+                validate_owned_bootstrap_directory(&entry.path(), 0o700)?;
+                for failure in fs::read_dir(entry.path()).map_err(ProbeUpgraderRunError::Io)? {
+                    let failure = failure.map_err(ProbeUpgraderRunError::Io)?;
+                    if !matches!(
+                        failure.file_name().to_str(),
+                        Some("epoch.toml" | "latch" | "repair-intent.json")
+                    ) {
+                        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                            "Probe Bootstrap state contains an unexpected entry",
+                        ));
+                    }
+                    validate_owned_bootstrap_regular(&failure.path(), 0o600)?;
+                }
+            }
             _ => {
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                     "Probe Bootstrap state contains an unexpected entry",
@@ -1064,11 +1112,12 @@ pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgra
 mod tests {
     use super::{
         ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata,
-        commit_replacement_cleanup_with_metadata_retirement,
+        commit_replacement_cleanup_with_metadata_retirement, execute_committed_replacement_cleanup,
         execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
-        finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
-        plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
-        remove_lifecycle_companion_binary, remove_uninstall_local_state_with,
+        finalize_replacement_local_state_with, plan_committed_replacement_cleanup,
+        plan_probe_uninstall_cleanup, plan_probe_uninstall_recovery,
+        prepare_probe_uninstall_cleanup, remove_lifecycle_companion_binary,
+        remove_owned_bootstrap_state, remove_uninstall_local_state_with,
         validate_owned_bootstrap_state,
     };
     use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
@@ -1859,5 +1908,193 @@ mod tests {
             ))
         ));
         assert!(extra_state.join("unrecognised").exists());
+    }
+
+    #[test]
+    fn bootstrap_state_validation_retires_the_fixed_failure_child_contents() {
+        let temporary = tempfile::tempdir().expect("failure child temp");
+        let state = owned_state(temporary.path());
+        let failure = state.join("runtime-failure");
+        private_directory(&failure);
+        for name in ["epoch.toml", "latch", "repair-intent.json"] {
+            let path = failure.join(name);
+            fs::write(&path, b"custody").expect("failure datum");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("failure mode");
+        }
+
+        validate_owned_bootstrap_state(Some(&state))
+            .expect("固定故障 child 与其白名单数据是受支持的保管对象");
+        remove_owned_bootstrap_state(&state).expect("卸载退休固定 child 的实际数据");
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn bootstrap_state_validation_rejects_unknown_objects_inside_the_fixed_failure_child() {
+        let temporary = tempfile::tempdir().expect("unknown failure object temp");
+        let state = owned_state(temporary.path());
+        let failure = state.join("runtime-failure");
+        private_directory(&failure);
+        let epoch = failure.join("epoch.toml");
+        fs::write(&epoch, b"custody").expect("epoch");
+        fs::set_permissions(&epoch, fs::Permissions::from_mode(0o600)).expect("epoch mode");
+        let foreign = failure.join("attached");
+        fs::write(&foreign, b"foreign").expect("foreign entry");
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o600)).expect("foreign mode");
+
+        assert!(matches!(
+            validate_owned_bootstrap_state(Some(&state)),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
+        ));
+        assert!(matches!(
+            remove_owned_bootstrap_state(&state),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
+        ));
+        assert!(foreign.exists());
+        assert!(state.exists());
+    }
+
+    /// R51-4：committed Replacement 的 D9 固定故障保管 child 只在源授权清理阶段退休其实际数据。
+    /// 同一载体依次证明三件事：源阶段退休后候选 `trust`／`inbox`、bootstrap state 父目录与
+    /// 提交意图（可信 metadata）全部原样保留；cleanup_complete 之前重入同一源阶段不得第二次
+    /// 删除该保管（重复删除会在幂等边界上如实失败）；`cleanup_complete` 已持久化后的重入
+    /// 完全不再触及源保管，只退休 metadata。
+    #[test]
+    fn committed_replacement_retires_the_source_custody_child_only_in_the_source_phase() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 4);
+        let acquirer = temporary.path().join("bin/enoki-bootstrap-acquire");
+        let activator = temporary.path().join("bin/enoki-bootstrap-activate");
+        let bootstrap_state = owned_state(temporary.path());
+        let custody = bootstrap_state.join("runtime-failure");
+        private_directory(&custody);
+        for name in ["epoch.toml", "latch", "repair-intent.json"] {
+            let datum = custody.join(name);
+            fs::write(&datum, b"source custody").expect("failure datum");
+            fs::set_permissions(&datum, fs::Permissions::from_mode(0o600)).expect("failure mode");
+        }
+        let generation = bootstrap_state.join("trust/delegation-generation");
+        fs::write(&generation, b"candidate trust").expect("candidate trust");
+        fs::set_permissions(&generation, fs::Permissions::from_mode(0o600)).expect("trust mode");
+        let companion = temporary.path().join("bin/enoki-probe-lifecycle-companion");
+        let companion_service = temporary
+            .path()
+            .join("systemd/enoki-probe-lifecycle-companion@.service");
+        let companion_socket = temporary
+            .path()
+            .join("systemd/enoki-probe-lifecycle-companion.socket");
+        metadata.bootstrap_acquirer_path = Some(acquirer.clone());
+        metadata.bootstrap_activator_path = Some(activator.clone());
+        metadata.bootstrap_state_dir = Some(bootstrap_state.clone());
+        metadata.lifecycle_companion_path = Some(companion.clone());
+        metadata.observation_unit_paths = vec![companion_service.clone(), companion_socket.clone()];
+        metadata.probe_ipc_group = Some("enoki-probe-ipc".to_owned());
+        metadata.probe_ipc_group_ownership = Some("!enoki-bootstrap-owned".to_owned());
+        metadata.observation_ipc_group = Some("enoki-observation-ipc".to_owned());
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+            &companion,
+            &acquirer,
+            &activator,
+        ] {
+            create_file(path, 0o755);
+        }
+        for path in [&companion_service, &companion_socket] {
+            create_file(path, 0o600);
+        }
+        let install_metadata_path = temporary.path().join("etc/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+
+        let plan = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("schema four committed Replacement plan");
+        let mut systemd = TestSystemd::default();
+        execute_committed_replacement_cleanup(&plan, &mut systemd).expect("source phase cleanup");
+
+        assert!(!custody.exists(), "源固定 child 与其保管数据必须随源退休");
+        assert!(
+            bootstrap_state.exists(),
+            "候选 bootstrap state 父目录不属于源退休清单"
+        );
+        assert_eq!(
+            fs::read(&generation).expect("candidate trust remains"),
+            b"candidate trust"
+        );
+        assert!(bootstrap_state.join("inbox").is_dir());
+        assert!(
+            install_metadata_path.exists(),
+            "提交意图由 exact commit custody 独立退休"
+        );
+        assert!(!companion.exists());
+
+        let reentry = plan_committed_replacement_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("committed Replacement 重入计划");
+        let mut reentry_systemd = TestSystemd::default();
+        execute_committed_replacement_cleanup(&reentry, &mut reentry_systemd)
+            .expect("保管已退休时重入不得第二次删除源保管");
+        assert!(!custody.exists());
+        assert_eq!(
+            fs::read(&generation).expect("candidate trust remains"),
+            b"candidate trust"
+        );
+
+        fs::create_dir(&custody).expect("recreated custody");
+        fs::set_permissions(&custody, fs::Permissions::from_mode(0o700)).expect("custody mode");
+        let sentinel = custody.join("epoch.toml");
+        fs::write(&sentinel, b"late custody").expect("late custody");
+
+        struct Store(ReplacementCommitFact);
+        impl ReplacementCommitStore for Store {
+            type Error = ();
+            fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
+                Ok(Some(self.0.clone()))
+            }
+            fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
+                self.0 = fact.clone();
+                Ok(())
+            }
+        }
+        let intent = replacement_intent();
+        let mut store = Store(ReplacementCommitFact {
+            schema_version: 1,
+            canonical_intent_sha256: intent.canonical_sha256().expect("canonical intent"),
+            intent: intent.clone(),
+            cleanup_complete: true,
+            candidate_layout_complete: false,
+        });
+        let mut committed_systemd = TestSystemd::default();
+        let mut retired = Vec::new();
+        let committed = commit_replacement_cleanup_with_metadata_retirement(
+            intent,
+            &mut store,
+            Path::new("/etc/enoki/probe-install.toml"),
+            Some(temporary.path()),
+            &mut committed_systemd,
+            |path| {
+                retired.push(path.to_path_buf());
+                Ok(())
+            },
+        );
+
+        assert!(committed.is_ok());
+        assert!(
+            custody.join("epoch.toml").exists(),
+            "cleanup_complete 重入不得触及源保管"
+        );
+        assert_eq!(
+            fs::read(&sentinel).expect("late custody remains"),
+            b"late custody"
+        );
+        assert!(committed_systemd.calls.is_empty());
+        assert_eq!(retired.len(), 1);
+        assert!(retired[0].ends_with("etc/enoki/probe-install.toml"));
     }
 }
