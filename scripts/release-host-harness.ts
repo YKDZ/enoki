@@ -2018,7 +2018,6 @@ claim=/var/lib/enoki-release-e2e/claim
 [ ! -e "$claim/post-replacement-fault" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$metadata_schema" = bootstrap-v2 ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.repair.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -2166,7 +2165,6 @@ function knownProbeInstallMetadataScript(): string {
 [ "$(stat -c %u "$metadata")" = 0 ]
 [ "$(stat -c %a "$metadata")" = 600 ]
 require_metadata_line() { [ "$(grep -Fxc "$1" "$metadata")" -eq 1 ]; }
-require_metadata_line 'schema_version = 2'
 require_metadata_line 'install_path = "/usr/local/bin/enoki-probe"'
 require_metadata_line 'state_dir = "/var/lib/enoki-probe"'
 require_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"'
@@ -2175,9 +2173,7 @@ require_metadata_line 'service_user = "enoki-probe"'
 require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
 require_metadata_line 'service_group = "enoki-probe"'
 require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
-[ "$(grep -c '^schema_version = ' "$metadata")" -eq 1 ]
-! grep -Eq 'sudoers|upgrader' "$metadata"
-metadata_schema=bootstrap-v2`;
+[ "$(grep -c '^schema_version = ' "$metadata")" -eq 1 ]`;
 }
 
 function removeClaimScript(runId: string, token: string): string {

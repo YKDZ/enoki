@@ -1534,11 +1534,91 @@ describe("Probe Host Harness", () => {
     expect(completedOwnership).toContain(
       'mv -- "$temporary" "$claim/resources"',
     );
-    expect(completedOwnership).toContain("schema_version = 2");
-    expect(completedOwnership).toContain("! grep -Eq 'sudoers|upgrader'");
     expect(
       commands.filter((command) => command.includes("enk_enroll_secret")),
     ).toHaveLength(1);
+  });
+
+  it("gates Upgrade and Repair ownership completion on the verified operation state and run ownership", async () => {
+    // 公开 caller 业务合同：两种 completion 分别只接受成功／失败终态，非归属 run 拒绝。
+    // 当前 schema5 producer-shape 的原生成脚本合法完成与错误 operation/target/run 绑定拒绝
+    // 由 53/runtime 一次性 namespace 实际 Bash 反馈证明，见
+    // .scratch/probe-release-completion/execution/53/evidence/53-schema5-ownership-result.json。
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:bootstrap-acquire")) {
+          return { code: 91, stderr: "合成归属初态", stdout: "" };
+        }
+        return successfulCommandText("owned\n");
+      },
+    });
+
+    await harness.assertDisposable("run-ownership");
+    await expect(
+      harness.install(officialEnrollment(), "run-ownership"),
+    ).rejects.toThrow(/installation failed/i);
+
+    const base = {
+      acceptedAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1,
+      failure: null,
+      hostId: 7,
+      id: 41,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "pending",
+      targetProbeVersion: "1.2.3",
+      updatedAtMs: 1,
+    };
+    const succeeded = {
+      ...base,
+      acceptedAtMs: 2,
+      completedAtMs: 4,
+      runningAtMs: 2,
+      state: "succeeded",
+      updatedAtMs: 4,
+    };
+    const failed = {
+      ...base,
+      acceptedAtMs: 2,
+      completedAtMs: 4,
+      failure: { code: "running_timeout", message: "timed out" },
+      runningAtMs: 2,
+      state: "failed",
+      updatedAtMs: 4,
+    };
+
+    await harness.beginUpgradeOwnershipTransition("run-ownership", "1.2.3");
+    await harness.bindUpgradeOwnershipTransition("run-ownership", base);
+    await expect(
+      harness.completeUpgradeOwnershipTransition("run-ownership", succeeded),
+    ).resolves.toEqual({ operationId: 41, owned: true });
+
+    await expect(
+      harness.completeRepairOwnershipTransition("run-ownership", succeeded),
+    ).rejects.toThrow(/verified failed Probe Upgrade/i);
+
+    await expect(
+      harness.completeUpgradeOwnershipTransition("run-ownership", failed),
+    ).rejects.toThrow(/verified successful transition evidence/i);
+
+    await expect(
+      harness.completeUpgradeOwnershipTransition("run-other", succeeded),
+    ).rejects.toThrow(/not owned by run/i);
   });
 
   it("rejects an installed Probe binary from a different candidate version", async () => {
