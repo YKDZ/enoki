@@ -24,7 +24,6 @@ import {
   parseJson,
   parseKeyValues,
   probeOperationStateRank,
-  renderReleaseE2EResourceFingerprint,
   serializedError,
 } from "./release-host-harness.ts";
 import type {
@@ -52,7 +51,7 @@ import type {
 } from "./release-repair-closure-evidence.ts";
 import { probeRepairLocalCompletionOutput } from "./release-repair-closure-evidence.ts";
 
-export { createProbeHostHarness, renderReleaseE2EResourceFingerprint };
+export { createProbeHostHarness };
 
 type ProbeHost = ReturnType<typeof createProbeHostHarness>;
 type HubLifecycleClient = ReturnType<typeof createHubLifecycleClient>;

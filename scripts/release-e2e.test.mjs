@@ -2,13 +2,11 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  chmod,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
-  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -35,7 +33,6 @@ import {
   createHubLifecycleClient,
   createProbeHostHarness,
   redactReleaseE2EEvidence,
-  renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
   validateSuccessfulRepairBoundaryEvidence,
@@ -1009,9 +1006,6 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:claim")) {
           return successfulCommandText("owned\n");
         }
-        if (command.includes("# enoki-release-e2e:record-resources")) {
-          return successfulCommandText("recorded\n");
-        }
         if (
           command.includes("# enoki-release-e2e:canonical-runtime-unavailable")
         ) {
@@ -1070,174 +1064,6 @@ describe("Probe Host Harness", () => {
     expect(restart).toContain(
       "/run/credentials/enoki-probe.service/registration-attempt",
     );
-  });
-
-  it("fingerprints same-path content, recursive directory closure, and file ownership metadata", async () => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-e2e-fingerprint-"),
-    );
-    const binary = path.join(root, "enoki-probe");
-    const stateDirectory = path.join(root, "state");
-    const identity = path.join(stateDirectory, "identity.toml");
-    const resources = [
-      { kind: "file", path: binary },
-      { kind: "directory", path: stateDirectory },
-    ];
-    const fingerprint = async () => {
-      const result = await execFileAsync("sh", [
-        "-c",
-        `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
-      ]);
-      return result.stdout;
-    };
-
-    try {
-      await writeFile(binary, "first", "utf8");
-      await mkdir(stateDirectory);
-      await writeFile(identity, "identity", "utf8");
-      await chmod(binary, 0o644);
-      const baseline = await fingerprint();
-
-      await writeFile(binary, "other", "utf8");
-      await expect(fingerprint()).resolves.not.toBe(baseline);
-      await writeFile(binary, "first", "utf8");
-      await expect(fingerprint()).resolves.toBe(baseline);
-
-      const unexpectedMember = path.join(stateDirectory, "unexpected");
-      await writeFile(unexpectedMember, "new member", "utf8");
-      await expect(fingerprint()).resolves.not.toBe(baseline);
-      await rm(unexpectedMember);
-      await expect(fingerprint()).resolves.toBe(baseline);
-
-      await chmod(binary, 0o600);
-      await expect(fingerprint()).resolves.not.toBe(baseline);
-      await chmod(binary, 0o644);
-      await expect(fingerprint()).resolves.toBe(baseline);
-    } finally {
-      await rm(root, { force: true, recursive: true });
-    }
-  });
-
-  it("records systemd DynamicUser StateDirectory custody as one run-owned closure", async () => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-e2e-state-custody-"),
-    );
-    const publicState = path.join(root, "var/lib/enoki-probe");
-    const privateState = path.join(root, "var/lib/private/enoki-probe");
-    const identityName = "identity/probe-bootstrap.toml";
-    const resources = [
-      {
-        kind: "directory",
-        path: publicState,
-        privateCustodyPath: privateState,
-      },
-    ];
-    const fingerprint = async () => {
-      try {
-        const { stdout } = await execFileAsync("sh", [
-          "-c",
-          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
-        ]);
-        return { code: 0, stdout };
-      } catch (error) {
-        return { code: error?.code ?? 1, stdout: error?.stdout ?? "" };
-      }
-    };
-    const observedType = (output, target) => {
-      const digest = createHash("sha256").update(target).digest("hex");
-      return output
-        .split("\n")
-        .find((entry) => entry.includes(`\t${digest}\t`))
-        ?.split("\t")[2];
-    };
-
-    try {
-      // systemd 迁移形态：声明路径是相对 symlink，真实 identity 数据在固定 private 载体。
-      await mkdir(path.join(privateState, "identity"), { recursive: true });
-      await writeFile(
-        path.join(privateState, identityName),
-        'probe_id = "state-custody"\n',
-        "utf8",
-      );
-      await symlink("private/enoki-probe", publicState);
-      const migrated = await fingerprint();
-      expect(migrated.code).toBe(0);
-      expect(observedType(migrated.stdout, publicState)).toBe("symlink");
-      expect(observedType(migrated.stdout, privateState)).toBe("directory");
-      expect(
-        observedType(migrated.stdout, path.join(privateState, identityName)),
-      ).toBe("file");
-
-      // 只删 public 链接而留下 private 真实数据时，同一闭包仍观察到 private 载体，
-      // 指纹必然偏离已记录值，核验与清理不可能被判为干净。
-      await rm(publicState, { force: true });
-      const residue = await fingerprint();
-      expect(residue.code).toBe(0);
-      expect(observedType(residue.stdout, privateState)).toBe("directory");
-      expect(residue.stdout).not.toBe(migrated.stdout);
-
-      // 普通目录旧形态沿用同一机制。
-      await rm(privateState, { force: true, recursive: true });
-      await mkdir(path.join(publicState, "identity"), { recursive: true });
-      await writeFile(
-        path.join(publicState, identityName),
-        'probe_id = "state-custody"\n',
-        "utf8",
-      );
-      const ordinary = await fingerprint();
-      expect(ordinary.code).toBe(0);
-      expect(observedType(ordinary.stdout, publicState)).toBe("directory");
-      expect(observedType(ordinary.stdout, privateState)).toBeUndefined();
-    } finally {
-      await rm(root, { force: true, recursive: true });
-    }
-  });
-
-  it("keeps rejecting symlink shapes outside the declared StateDirectory custody", async () => {
-    const root = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-e2e-state-custody-reject-"),
-    );
-    const publicState = path.join(root, "var/lib/enoki-probe");
-    const privateState = path.join(root, "var/lib/private/enoki-probe");
-    const elsewhere = path.join(root, "var/lib/enoki-elsewhere");
-    const fingerprint = async (resources) => {
-      try {
-        const { stdout } = await execFileAsync("sh", [
-          "-c",
-          `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
-        ]);
-        return { code: 0, stdout };
-      } catch (error) {
-        return { code: error?.code ?? 1, stdout: error?.stdout ?? "" };
-      }
-    };
-
-    try {
-      await mkdir(elsewhere, { recursive: true });
-      await writeFile(path.join(elsewhere, "data.toml"), "foreign\n", "utf8");
-      await symlink(elsewhere, publicState);
-      const foreignTarget = await fingerprint([
-        {
-          kind: "directory",
-          path: publicState,
-          privateCustodyPath: privateState,
-        },
-      ]);
-      expect(foreignTarget.code).not.toBe(0);
-      expect(foreignTarget.stdout).toBe("");
-
-      const metadata = path.join(root, "etc/enoki/probe-install.toml");
-      await mkdir(path.dirname(metadata), { recursive: true });
-      await writeFile(path.join(root, "real-install.toml"), "real\n", "utf8");
-      await symlink(path.join(root, "real-install.toml"), metadata);
-      const declaredFile = await fingerprint([
-        { kind: "file", path: metadata },
-      ]);
-      expect(declaredFile.code).not.toBe(0);
-      expect(declaredFile.stdout).toBe("");
-    } finally {
-      await rm(root, { force: true, recursive: true });
-    }
   });
 
   it("proves the declared Ubuntu architecture and host systemd boundary", async () => {
@@ -1531,9 +1357,6 @@ describe("Probe Host Harness", () => {
     );
     expect(completedOwnership).toContain("operation-id");
     expect(completedOwnership).toContain("upgrade-target");
-    expect(completedOwnership).toContain(
-      'mv -- "$temporary" "$claim/resources"',
-    );
     expect(
       commands.filter((command) => command.includes("enk_enroll_secret")),
     ).toHaveLength(1);
@@ -1870,11 +1693,7 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:probe-repair")) {
           return successfulCommandText(`${probeRepairLocalCompletionOutput}\n`);
         }
-        return successfulCommandText(
-          command.includes("# enoki-release-e2e:record-resources")
-            ? "recorded\n"
-            : "owned\n",
-        );
+        return successfulCommandText("owned\n");
       },
     });
     const pending = {
@@ -1978,11 +1797,7 @@ describe("Probe Host Harness", () => {
             status: "failed",
           });
         }
-        return successfulCommandText(
-          command.includes("# enoki-release-e2e:record-resources")
-            ? "recorded\n"
-            : "owned\n",
-        );
+        return successfulCommandText("owned\n");
       },
     });
 
@@ -2066,11 +1881,7 @@ describe("Probe Host Harness", () => {
             ].join("\n"),
           );
         }
-        return successfulCommandText(
-          command.includes("# enoki-release-e2e:record-resources")
-            ? "recorded\n"
-            : "owned\n",
-        );
+        return successfulCommandText("owned\n");
       },
     });
 
@@ -2281,9 +2092,6 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:claim")) {
           return successfulCommandText("owned\n");
         }
-        if (command.includes("# enoki-release-e2e:record-resources")) {
-          return successfulCommandText("recorded\n");
-        }
         if (command.includes("# enoki-release-e2e:daemon-reload")) {
           return successfulCommandText("");
         }
@@ -2326,11 +2134,6 @@ describe("Probe Host Harness", () => {
         command.includes("# enoki-release-e2e:claim"),
       ),
     ).toHaveLength(1);
-    expect(
-      commands.some(({ command }) =>
-        command.includes("# enoki-release-e2e:renew-resources"),
-      ),
-    ).toBe(true);
   });
 
   it("captures an ordinary repeated Add rejection before the installed Probe mutates", async () => {
@@ -2364,9 +2167,6 @@ describe("Probe Host Harness", () => {
         }
         if (command.includes("# enoki-release-e2e:claim")) {
           return successfulCommandText("owned\n");
-        }
-        if (command.includes("# enoki-release-e2e:record-resources")) {
-          return successfulCommandText("recorded\n");
         }
         if (command.includes("# enoki-release-e2e:installed-state")) {
           return successfulCommand(state);
@@ -2435,9 +2235,6 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:claim")) {
           return successfulCommandText("owned\n");
         }
-        if (command.includes("# enoki-release-e2e:record-resources")) {
-          return successfulCommandText("recorded\n");
-        }
         if (
           command.includes("# enoki-release-e2e:permanent-report-rejection")
         ) {
@@ -2498,9 +2295,6 @@ describe("Probe Host Harness", () => {
         }
         if (command.includes("# enoki-release-e2e:claim")) {
           return successfulCommandText("owned\n");
-        }
-        if (command.includes("# enoki-release-e2e:record-resources")) {
-          return successfulCommandText("recorded\n");
         }
         if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
           return successfulCommand(diagnostics);
@@ -2780,51 +2574,9 @@ describe("Probe Host Harness", () => {
     );
     expect(emergency).toContain('cat "$claim/run-id"');
     expect(emergency).toContain('cat "$claim/token"');
-    expect(emergency).toContain('fingerprint > "$temporary"');
-    expect(emergency).toContain('cmp --silent "$claim/resources" "$temporary"');
-    expect(emergency).toContain("sha256sum");
-    expect(emergency).toContain("find -P");
-    expect(emergency).toContain("stat -c");
-    expect(emergency).not.toContain("expected_resource()");
-    expect(emergency).not.toContain('done < "$claim/resources"');
     expect(
       commands.some((command) => command.includes("ENOKI_UNINSTALL")),
     ).toBe(false);
-  });
-
-  it("retains successful installer evidence when run-resource recording fails", async () => {
-    const harness = createProbeHostHarness({
-      execute: async (command) => {
-        if (command.includes("# enoki-release-e2e:inventory")) {
-          return successfulCommand({
-            accounts: { group: false, user: false },
-            files: [],
-            units: [],
-          });
-        }
-        if (command.includes("# enoki-release-e2e:dependencies")) {
-          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-        }
-        if (command.includes("# enoki-release-e2e:claim")) {
-          return successfulCommandText("owned\n");
-        }
-        if (command.includes("# enoki-release-e2e:record-resources")) {
-          return { code: 1, stderr: "resource recording failed", stdout: "" };
-        }
-        return successfulCommandText(productInstallerOutput());
-      },
-    });
-
-    await harness.assertDisposable("run-recording-failure");
-    await expect(
-      harness.install(officialEnrollment(), "run-recording-failure"),
-    ).rejects.toMatchObject({
-      code: "probe_resource_recording_failed",
-      installerEvidence: {
-        code: 0,
-        stdout: expect.stringContaining("ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE"),
-      },
-    });
   });
 
   it("retains command evidence when a diagnostic parser rejects its output", async () => {
@@ -2918,6 +2670,62 @@ describe("Probe Host Harness", () => {
     ).toHaveLength(1);
   });
 
+  it("refuses every cleanup effect while the run claim is not attributable", async () => {
+    const commands = [];
+    let inventoryCount = 0;
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryCount += 1;
+          return successfulCommand(
+            inventoryCount === 1
+              ? {
+                  accounts: { group: false, user: false },
+                  files: [],
+                  units: [],
+                }
+              : {
+                  accounts: { group: true, user: true },
+                  files: ["/usr/local/bin/enoki-probe"],
+                  units: ["enoki-probe.service"],
+                },
+          );
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (
+          command.includes("# enoki-release-e2e:arm-post-replacement-fault")
+        ) {
+          return successfulCommandText("armed\n");
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return { code: 1, stderr: "ownership token changed", stdout: "" };
+        }
+        return successfulCommandText("");
+      },
+    });
+
+    await harness.assertDisposable("run-foreign-claim");
+    await harness.install(officialEnrollment(), "run-foreign-claim");
+    await harness.armPostReplacementRestartFault("run-foreign-claim", "1.2.3");
+
+    await expect(harness.cleanup("run-foreign-claim")).rejects.toThrow(
+      /not attributable to run run-foreign-claim/,
+    );
+    for (const marker of [
+      "# enoki-release-e2e:remove-post-replacement-fault",
+      "# enoki-release-e2e:restore-observation-runtime",
+      "# enoki-release-e2e:cleanup-observation-runtime-failure",
+      "# enoki-release-e2e:emergency-cleanup",
+      "# enoki-release-e2e:daemon-reload",
+      "# enoki-release-e2e:remove-claim",
+    ]) {
+      expect(commands.some((command) => command.includes(marker))).toBe(false);
+    }
+  });
+
   it("aggregates a cleanup failure while continuing run-owned fault removal, uninstall, residue verification, and claim release", async () => {
     const commands = [];
     let inventoryCount = 0;
@@ -2956,9 +2764,6 @@ describe("Probe Host Harness", () => {
         ) {
           return { code: 70, stderr: "drop-in removal failed", stdout: "" };
         }
-        if (command.includes("# enoki-release-e2e:verify-resources")) {
-          return successfulCommandText("owned\n");
-        }
         if (command.includes("# enoki-release-e2e:inspect-claim")) {
           return successfulCommandText("absent\n");
         }
@@ -2983,77 +2788,13 @@ describe("Probe Host Harness", () => {
     );
     for (const marker of [
       "# enoki-release-e2e:remove-post-replacement-fault",
-      "# enoki-release-e2e:verify-resources",
+      "# enoki-release-e2e:emergency-cleanup",
       "# enoki-release-e2e:daemon-reload",
       "# enoki-release-e2e:remove-claim",
       "# enoki-release-e2e:inspect-claim",
     ]) {
       expect(commands.some((command) => command.includes(marker))).toBe(true);
     }
-  });
-
-  it.each([
-    ["a same-path file replacement"],
-    ["an added member in a recorded directory"],
-    ["a recorded owner or mode change"],
-  ])("refuses emergency cleanup after %s", async () => {
-    const commands = [];
-    let inventoryCount = 0;
-    const harness = createProbeHostHarness({
-      execute: async (command) => {
-        commands.push(command);
-        if (command.includes("# enoki-release-e2e:inventory")) {
-          inventoryCount += 1;
-          return successfulCommand(
-            inventoryCount === 1
-              ? {
-                  accounts: { group: false, user: false },
-                  files: [],
-                  units: [],
-                }
-              : {
-                  accounts: { group: true, user: true },
-                  files: ["/usr/local/bin/enoki-probe"],
-                  units: ["enoki-probe.service"],
-                },
-          );
-        }
-        if (command.includes("# enoki-release-e2e:dependencies")) {
-          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-        }
-        if (command.includes("# enoki-release-e2e:verify-claim")) {
-          return successfulCommandText("owned\n");
-        }
-        if (command.includes("# enoki-release-e2e:verify-resources")) {
-          return {
-            code: 75,
-            stderr: "run-owned resource fingerprint changed\n",
-            stdout: "",
-          };
-        }
-        if (command.includes("# enoki-release-e2e:inspect-claim")) {
-          return successfulCommandText("owned\n");
-        }
-        return successfulCommandText("recorded\n");
-      },
-    });
-
-    await harness.assertDisposable("run-foreign-change");
-    await harness.install(officialEnrollment(), "run-foreign-change");
-
-    await expect(harness.cleanup("run-foreign-change")).rejects.toThrow(
-      /fingerprint changed/,
-    );
-    expect(
-      commands.some((command) =>
-        command.includes("# enoki-release-e2e:emergency-cleanup"),
-      ),
-    ).toBe(false);
-    expect(
-      commands.some((command) =>
-        command.includes("# enoki-release-e2e:remove-claim"),
-      ),
-    ).toBe(false);
   });
 });
 

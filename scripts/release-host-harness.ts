@@ -7,6 +7,8 @@
 // resource cleanup, the independent verify-clean result, the installed-bundle
 // failure repair driver and every original failure message and diagnostic are
 // preserved unchanged; only parameter, return and evidence types are added.
+// 本 run 清理的归属由独占 claim、空准入与固定资源清单建立；递归内容快照及其续签链
+// 已删除，合法生命周期内的内容变化不转属。
 
 import { randomUUID } from "node:crypto";
 
@@ -32,12 +34,12 @@ import {
 import { probeRepairLocalCompletionOutput } from "./release-repair-closure-evidence.ts";
 
 // Release E2E infrastructure has one narrowly scoped, run-owned resource
-// definition. It produces the preflight allowlist, recorded fingerprint, and
-// emergency-removal plan; the product installer and uninstaller are never
-// invoked by this test-only path.
+// definition. It produces the preflight allowlist and the emergency-removal
+// plan; the product installer and uninstaller are never invoked by this
+// test-only path.
 type ManagedFileResource = { kind: "file"; path: string };
 // systemd 在 DynamicUser 下把声明的 StateDirectory 迁到固定 private 载体，声明路径留 symlink；
-// privateCustodyPath 补齐同一资源的真实数据载体，使记录、清理与独立 inventory 消费同一闭包。
+// privateCustodyPath 补齐同一资源的真实数据载体，使清理与独立 inventory 消费同一闭包。
 type ManagedDirectoryResource = {
   kind: "directory";
   path: string;
@@ -85,7 +87,7 @@ const releaseE2EInfrastructureResources: readonly InfrastructureResource[] =
     { kind: "service", name: "enoki-probe.service" },
   ]);
 
-// 声明路径与其 private 真实载体是同一个 run-owned 闭包；preflight、指纹、清理与
+// 声明路径与其 private 真实载体是同一个 run-owned 闭包；preflight、清理与
 // 独立 inventory 都通过这一条映射消费同一份声明。
 function managedPathResourcePaths(
   resource: ManagedPathResource,
@@ -444,23 +446,6 @@ export function createProbeHostHarness({
         sensitive: true,
       },
     );
-    const recorded = await execute(
-      reinstallation
-        ? renewRunResourcesScript(runId, ownershipToken)
-        : recordRunResourcesScript(runId, ownershipToken),
-      { root: true },
-    );
-    if (recorded.code !== 0) {
-      throw Object.assign(
-        new Error(
-          `Could not record run-owned Probe resources: ${recorded.stderr}`,
-        ),
-        {
-          code: "probe_resource_recording_failed",
-          installerEvidence: commandEvidence(result),
-        },
-      );
-    }
     if (result.code !== 0) {
       throw Object.assign(
         new Error(
@@ -1161,6 +1146,7 @@ export function createProbeHostHarness({
           return null;
         }
       };
+      // 归属核对先于整个 cleanup：失去 claim 时夹具恢复、服务停止与删除都不发生。
       let claimOwned = false;
       await attempt(async () => {
         const claim = await execute(verifyClaimScript(runId, ownershipToken), {
@@ -1174,54 +1160,42 @@ export function createProbeHostHarness({
         claimOwned = true;
       });
 
-      if (postReplacementFaultArmed) {
-        await attempt(async () => {
-          const removed = await execute(
-            removePostReplacementRestartFaultScript(runId, ownershipToken),
-            { root: true },
-          );
-          if (removed.code !== 0 || removed.stdout.trim() !== "removed") {
-            throw new Error(
-              `Run-owned post-replacement fault cleanup failed: ${removed.stderr}`,
-            );
-          }
-          postReplacementFaultArmed = false;
-        });
-      }
-
-      if (canonicalRuntimeUnavailableArmed) {
-        await attempt(async () => {
-          const restored = await execute(restoreObservationRuntimeScript(), {
-            root: true,
-          });
-          if (restored.code !== 0 || restored.stdout.trim() !== "restored") {
-            throw new Error(
-              `Run-owned canonical Runtime fixture cleanup failed: ${restored.stderr}`,
-            );
-          }
-          canonicalRuntimeUnavailableArmed = false;
-        });
-      }
-
-      await attempt(() => installedBundleFailureRepair.cleanup(runId));
-
-      let inspected = await attempt(() => inventory());
-      let residue = inspected ? inventoryResidue(inspected) : null;
       let removedPartialInstallation = false;
-      if ((residue?.length ?? 0) > 0) {
-        const verifiedResources = await execute(
-          verifyRunResourcesScript(runId, ownershipToken),
-          { root: true },
-        );
-        const resourcesOwned = verifiedResources.code === 0;
-        if (!resourcesOwned) {
-          errors.push(
-            new Error(
-              `Refusing cleanup because Probe resources no longer match run ${runId}: ${verifiedResources.stderr}`,
-            ),
-          );
+      if (claimOwned) {
+        if (postReplacementFaultArmed) {
+          await attempt(async () => {
+            const removed = await execute(
+              removePostReplacementRestartFaultScript(runId, ownershipToken),
+              { root: true },
+            );
+            if (removed.code !== 0 || removed.stdout.trim() !== "removed") {
+              throw new Error(
+                `Run-owned post-replacement fault cleanup failed: ${removed.stderr}`,
+              );
+            }
+            postReplacementFaultArmed = false;
+          });
         }
-        if (resourcesOwned) {
+
+        if (canonicalRuntimeUnavailableArmed) {
+          await attempt(async () => {
+            const restored = await execute(restoreObservationRuntimeScript(), {
+              root: true,
+            });
+            if (restored.code !== 0 || restored.stdout.trim() !== "restored") {
+              throw new Error(
+                `Run-owned canonical Runtime fixture cleanup failed: ${restored.stderr}`,
+              );
+            }
+            canonicalRuntimeUnavailableArmed = false;
+          });
+        }
+
+        await attempt(() => installedBundleFailureRepair.cleanup(runId));
+
+        let inspected = await attempt(() => inventory());
+        let residue = inspected ? inventoryResidue(inspected) : null;
+        if ((residue?.length ?? 0) > 0) {
           await attempt(async () => {
             const cleaned = await execute(
               releaseEmergencyCleanupScript(runId, ownershipToken),
@@ -1252,33 +1226,33 @@ export function createProbeHostHarness({
             );
           }
         }
-      }
 
-      if (claimOwned && Array.isArray(residue) && residue.length === 0) {
+        if (Array.isArray(residue) && residue.length === 0) {
+          await attempt(async () => {
+            const released = await execute(
+              removeClaimScript(runId, ownershipToken),
+              { root: true },
+            );
+            if (released.code !== 0) {
+              throw new Error(`Could not remove run claim: ${released.stderr}`);
+            }
+          });
+        }
         await attempt(async () => {
-          const released = await execute(
-            removeClaimScript(runId, ownershipToken),
+          const releasedClaim = await execute(
+            inspectClaimScript(runId, ownershipToken),
             { root: true },
           );
-          if (released.code !== 0) {
-            throw new Error(`Could not remove run claim: ${released.stderr}`);
+          if (
+            releasedClaim.code !== 0 ||
+            releasedClaim.stdout.trim() !== "absent"
+          ) {
+            throw new Error("Run claim remains after Host cleanup");
           }
+          runOwnsMutation = false;
+          readyForReinstallation = false;
         });
       }
-      await attempt(async () => {
-        const releasedClaim = await execute(
-          inspectClaimScript(runId, ownershipToken),
-          { root: true },
-        );
-        if (
-          releasedClaim.code !== 0 ||
-          releasedClaim.stdout.trim() !== "absent"
-        ) {
-          throw new Error("Run claim remains after Host cleanup");
-        }
-        runOwnsMutation = false;
-        readyForReinstallation = false;
-      });
       if (errors.length > 0) {
         throw Object.assign(
           new AggregateError(
@@ -1770,73 +1744,6 @@ function verifyClaimScript(runId: string, token: string): string {
   return `# enoki-release-e2e:verify-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]\nprintf 'owned\\n'\n`;
 }
 
-function recordRunResourcesScript(runId: string, token: string): string {
-  return resourceFingerprintScript({
-    header: "record-resources",
-    runId,
-    token,
-    verify: false,
-  });
-}
-
-function renewRunResourcesScript(runId: string, token: string): string {
-  return `# enoki-release-e2e:renew-resources
-set -eu
-claim=/var/lib/enoki-release-e2e/claim
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-[ -f "$claim/resources" ]
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.renew.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
-printf 'renewed\\n'
-`;
-}
-
-function verifyRunResourcesScript(runId: string, token: string): string {
-  return resourceFingerprintScript({
-    header: "verify-resources",
-    runId,
-    token,
-    verify: true,
-  });
-}
-
-function resourceFingerprintScript({
-  header,
-  runId,
-  token,
-  verify,
-}: {
-  header: string;
-  runId: string;
-  token: string;
-  verify: boolean;
-}): string {
-  const action = verify
-    ? String.raw`temporary=$(mktemp "$claim/resources.verify.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\n' >&2; exit 75; }
-printf 'owned\n'`
-    : String.raw`[ ! -e "$claim/resources" ] || { printf 'run resource evidence already exists\n' >&2; exit 76; }
-( umask 077; fingerprint > "$claim/resources" )
-printf 'recorded\n'`;
-  return `# enoki-release-e2e:${header}
-set -eu
-claim=/var/lib/enoki-release-e2e/claim
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-${resourceFingerprintFunction()}
-${action}
-`;
-}
-
 function beginUpgradeOwnershipScript(
   runId: string,
   token: string,
@@ -1848,10 +1755,8 @@ claim=/var/lib/enoki-release-e2e/claim
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-[ -f "$claim/resources" ]
 [ ! -e "$claim/upgrade-target" ]
 [ ! -e "$claim/upgrade-operation-id" ]
-cp -- "$claim/resources" "$claim/upgrade-before-resources"
 ( umask 077; printf '%s\n' ${shellSingleQuote(targetProbeVersion)} > "$claim/upgrade-target" )
 printf 'owned\n'
 `;
@@ -1869,8 +1774,6 @@ claim=/var/lib/enoki-release-e2e/claim
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ "$(cat "$claim/upgrade-target")" = ${shellSingleQuote(operation.targetProbeVersion)} ]
-[ -f "$claim/upgrade-before-resources" ]
-cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 [ ! -e "$claim/upgrade-operation-id" ]
 ( umask 077; printf '%s\n' ${shellSingleQuote(String(operation.id))} > "$claim/upgrade-operation-id" )
 printf 'owned\n'
@@ -1891,7 +1794,6 @@ dropin="$dropin_dir/90-enoki-release-e2e-restart-failure.conf"
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ "$(cat "$claim/upgrade-target")" = ${shellSingleQuote(targetProbeVersion)} ]
-[ -f "$claim/upgrade-before-resources" ]
 [ ! -e "$claim/post-replacement-fault" ]
 [ ! -e "$dropin" ]
 [ "$(systemctl is-active enoki-probe.service)" = active ]
@@ -1987,16 +1889,8 @@ claim=/var/lib/enoki-release-e2e/claim
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ "$(cat "$claim/upgrade-target")" = ${shellSingleQuote(operation.targetProbeVersion)} ]
 [ "$(cat "$claim/upgrade-operation-id")" = ${shellSingleQuote(String(operation.id))} ]
-[ -f "$claim/upgrade-before-resources" ]
-cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.upgrade.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
-rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
+rm -- "$claim/upgrade-target" "$claim/upgrade-operation-id"
 printf 'owned\n'
 `;
 }
@@ -2014,148 +1908,11 @@ claim=/var/lib/enoki-release-e2e/claim
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 [ "$(cat "$claim/upgrade-target")" = ${shellSingleQuote(operation.targetProbeVersion)} ]
 [ "$(cat "$claim/upgrade-operation-id")" = ${shellSingleQuote(String(operation.id))} ]
-[ -f "$claim/upgrade-before-resources" ]
 [ ! -e "$claim/post-replacement-fault" ]
-cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.repair.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-mv -- "$temporary" "$claim/resources"
-trap - EXIT HUP INT TERM
-rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
+rm -- "$claim/upgrade-target" "$claim/upgrade-operation-id"
 printf 'owned\n'
 `;
-}
-
-function resourceFingerprintFunction(): string {
-  return renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources);
-}
-
-export function renderReleaseE2EResourceFingerprint(
-  resources: readonly InfrastructureResource[],
-): string {
-  const files = resources
-    .filter(
-      (resource): resource is ManagedFileResource => resource.kind === "file",
-    )
-    .map((resource) => shellSingleQuote(resource.path))
-    .join(" ");
-  const directories = resources
-    .filter(
-      (resource): resource is ManagedDirectoryResource =>
-        resource.kind === "directory" &&
-        resource.privateCustodyPath === undefined,
-    )
-    .map((resource) => shellSingleQuote(resource.path))
-    .join(" ");
-  const custodyPairs = resources
-    .filter(
-      (
-        resource,
-      ): resource is ManagedDirectoryResource & {
-        privateCustodyPath: string;
-      } =>
-        resource.kind === "directory" &&
-        resource.privateCustodyPath !== undefined,
-    )
-    .flatMap((resource) => [
-      shellSingleQuote(resource.path),
-      shellSingleQuote(resource.privateCustodyPath),
-    ])
-    .join(" ");
-  const users = resources
-    .filter(
-      (resource): resource is ProbeUserResource => resource.kind === "user",
-    )
-    .map((resource) => shellSingleQuote(resource.name))
-    .join(" ");
-  const groups = resources
-    .filter(
-      (resource): resource is ProbeGroupResource => resource.kind === "group",
-    )
-    .map((resource) => shellSingleQuote(resource.name))
-    .join(" ");
-  return String.raw`fingerprint_path() {
-  path=$1
-  metadata=$(stat -c '%u\t%g\t%a\t%d\t%i\t%s' -- "$path") || return 1
-  path_hash=$(printf '%s' "$path" | sha256sum | awk '{print $1}') || return 1
-  if [ -L "$path" ]; then
-    type=symlink
-    content_hash=$(readlink -- "$path" | sha256sum | awk '{print $1}') || return 1
-  elif [ -f "$path" ]; then
-    type=file
-    content_hash=$(sha256sum -- "$path" | awk '{print $1}') || return 1
-  elif [ -d "$path" ]; then
-    type=directory
-    content_hash=-
-  else
-    type=$(stat -c '%F' -- "$path") || return 1
-    content_hash=-
-  fi
-  printf 'path\t%s\t%s\t%s\t%s\n' "$path_hash" "$type" "$metadata" "$content_hash"
-}
-fingerprint_directory() {
-  directory=$1
-  members=$(find -P "$directory" -xdev -print | LC_ALL=C sort) || return 1
-  printf '%s\n' "$members" | while IFS= read -r member; do
-    [ -n "$member" ] || continue
-    fingerprint_path "$member" || exit 1
-  done
-}
-fingerprint_state_directory() {
-  declared=$1
-  private_carrier=$2
-  if [ -L "$declared" ]; then
-    [ "$(readlink -f -- "$declared")" = "$private_carrier" ] || return 1
-    fingerprint_path "$declared" || return 1
-  elif [ -e "$declared" ]; then
-    [ -d "$declared" ] || return 1
-    fingerprint_directory "$declared" || return 1
-  fi
-  if [ -e "$private_carrier" ] || [ -L "$private_carrier" ]; then
-    [ -d "$private_carrier" ] && [ ! -L "$private_carrier" ] || return 1
-    fingerprint_directory "$private_carrier" || return 1
-  fi
-}
-fingerprint_state_custody() {
-  set -- ${custodyPairs}
-  while [ "$#" -gt 0 ]; do
-    fingerprint_state_directory "$1" "$2" || return 1
-    shift 2
-  done
-}
-fingerprint() {
-  for candidate in ${files}; do
-    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
-      [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
-      fingerprint_path "$candidate" || return 1
-    fi
-  done
-  for candidate in ${directories}; do
-    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
-      [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
-      fingerprint_directory "$candidate" || return 1
-    fi
-  done
-  fingerprint_state_custody || return 1
-  for account in ${users}; do
-    if entry=$(getent passwd "$account"); then
-      uid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
-      gid=$(printf '%s' "$entry" | cut -d: -f4) || return 1
-      entry_hash=$(printf '%s' "$entry" | sha256sum | awk '{print $1}') || return 1
-      printf 'user\t%s\t%s\t%s\t%s\n' "$account" "$uid" "$gid" "$entry_hash"
-    fi
-  done
-  for account in ${groups}; do
-    if entry=$(getent group "$account"); then
-      gid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
-      entry_hash=$(printf '%s' "$entry" | sha256sum | awk '{print $1}') || return 1
-      printf 'group\t%s\t%s\t%s\n' "$account" "$gid" "$entry_hash"
-    fi
-  done
-}`;
 }
 
 function knownProbeInstallMetadataScript(): string {
@@ -2177,7 +1934,7 @@ require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.serv
 }
 
 function removeClaimScript(runId: string, token: string): string {
-  return `# enoki-release-e2e:remove-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]\nrm -f -- "$claim/resources" "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id" "$claim/post-replacement-fault"\nrm -- "$claim/run-id" "$claim/token"\nrmdir "$claim"\nrmdir /var/lib/enoki-release-e2e 2>/dev/null || true\n`;
+  return `# enoki-release-e2e:remove-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\n[ -d "$claim" ]\n[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]\n[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]\nrm -f -- "$claim/upgrade-target" "$claim/upgrade-operation-id" "$claim/post-replacement-fault"\nrm -- "$claim/run-id" "$claim/token"\nrmdir "$claim"\nrmdir /var/lib/enoki-release-e2e 2>/dev/null || true\n`;
 }
 
 function inspectClaimScript(runId: string, token: string): string {
@@ -2205,18 +1962,33 @@ function releaseEmergencyCleanupScript(runId: string, token: string): string {
   const users = namesFor("user");
   const groups = namesFor("group");
   const services = namesFor("service");
+  // 同一固定声明给出 public 链的封闭形态：ordinary 真实目录，或精确指向其 private
+  // 载体。未知 target 不跟随也不删除，整个清理 effect 前拒绝并保留 claim。
+  const stateCustodyGuards = releaseE2EInfrastructureResources
+    .filter(
+      (
+        resource,
+      ): resource is ManagedDirectoryResource & {
+        privateCustodyPath: string;
+      } =>
+        resource.kind === "directory" &&
+        resource.privateCustodyPath !== undefined,
+    )
+    .map(
+      (resource) => `if [ -L ${shellSingleQuote(resource.path)} ] &&
+  [ "$(readlink -f -- ${shellSingleQuote(resource.path)})" != ${shellSingleQuote(resource.privateCustodyPath)} ]; then
+  printf 'refusing to follow unknown Probe state link: %s\\n' ${shellSingleQuote(resource.path)} >&2
+  exit 75
+fi`,
+    )
+    .join("\n");
   return `# enoki-release-e2e:emergency-cleanup
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
 [ -d "$claim" ]
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-[ -f "$claim/resources" ]
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\\n' >&2; exit 75; }
+${stateCustodyGuards}
 systemctl disable --now ${services} >/dev/null 2>&1 || true
 rm -f -- ${files}
 rm -rf -- ${directories}
