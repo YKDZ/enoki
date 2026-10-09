@@ -2084,10 +2084,10 @@ describe("Probe Host Harness", () => {
     );
     expect(exhausted.command).toContain('"$live_result" = "$epoch_result"');
     expect(exhausted.command).toContain(
-      "epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml",
+      "epoch=/var/lib/enoki-probe-bootstrap/runtime-failure/epoch.toml",
     );
     expect(exhausted.command).toContain(
-      "latch=/var/lib/enoki-probe/runtime-failure/latch",
+      "latch=/var/lib/enoki-probe-bootstrap/runtime-failure/latch",
     );
     expect(exhausted.command).not.toContain("enoki-probe.service");
     expect(exhausted.command).not.toContain("systemctl is-failed");
