@@ -125,6 +125,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
       await route.abort("blockedbyclient");
     });
     let manualReinstallRequest: {
+      contentType: string | null;
       method: string;
       pathname: string;
       postData: string | null;
@@ -136,6 +137,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
         const request = route.request();
         manualReinstallRequestCount += 1;
         manualReinstallRequest = {
+          contentType: request.headers()["content-type"] ?? null,
           method: request.method(),
           pathname: new URL(request.url()).pathname,
           postData: request.postData(),
@@ -200,9 +202,10 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
       "sudo enoki-probe-bootstrap manual-reinstall",
     );
     expect(manualReinstallRequest).toEqual({
+      contentType: "application/json",
       method: "POST",
       pathname: `/api/web/enrollments/manual-reinstall/${hostId}`,
-      postData: null,
+      postData: "{}",
     });
     expect(manualReinstallRequestCount).toBe(1);
     expect(ordinaryEnrollmentPostCount).toBe(0);

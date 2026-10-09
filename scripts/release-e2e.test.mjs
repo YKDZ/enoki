@@ -3204,6 +3204,115 @@ describe("Hub Lifecycle Client", () => {
     });
   });
 
+  it("sends body-less Owner lifecycle writes in the JSON write form the Hub accepts", async () => {
+    const writes = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const parsed = new URL(url);
+        const headers = new Headers(init.headers);
+        writes.push({
+          body: init.body === undefined ? null : init.body,
+          contentType: headers.get("content-type"),
+          cookie: headers.get("cookie"),
+          method: init.method ?? "GET",
+          pathname: parsed.pathname,
+        });
+        if (parsed.pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (parsed.pathname === "/api/web/enrollments/manual-reinstall/7") {
+          return jsonResponse({ error: "manual_reinstall_not_required" }, 409);
+        }
+        if (parsed.pathname === "/api/web/hosts/7") {
+          return init.method === "DELETE"
+            ? jsonResponse(
+                { deletedHost: { deletedAtMs: 1_725_000_000_000, id: 7 } },
+                200,
+              )
+            : jsonResponse({ host: { id: 7 } }, 200);
+        }
+        if (parsed.pathname === "/api/web/hosts/8") {
+          return jsonResponse(
+            {
+              probeUninstallRequest: {
+                acceptedAtMs: null,
+                completedAtMs: null,
+                createdAtMs: 1,
+                failure: null,
+                id: 43,
+                runningAtMs: null,
+                state: "pending",
+                updatedAtMs: 1,
+              },
+            },
+            202,
+          );
+        }
+        throw new Error(`unexpected request ${parsed.pathname}`);
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(client.getHost(7)).resolves.toEqual({ id: 7 });
+    await expect(
+      client.createManualReinstallEnrollment(7),
+    ).rejects.toMatchObject({
+      code: "manual_reinstall_not_required",
+      status: 409,
+    });
+    await expect(client.deleteHostHubOnly(7)).resolves.toEqual({
+      deletedAtMs: 1_725_000_000_000,
+      id: 7,
+    });
+    await expect(client.requestProbeUninstall(8)).resolves.toMatchObject({
+      hostId: 8,
+      kind: "probe_uninstall",
+    });
+
+    expect(writes).toEqual(
+      expect.arrayContaining([
+        {
+          body: JSON.stringify({ password: "owner-password" }),
+          contentType: "application/json",
+          cookie: null,
+          method: "POST",
+          pathname: "/api/web/auth/login",
+        },
+        {
+          body: "{}",
+          contentType: "application/json",
+          cookie: "enoki_owner_session=session-1",
+          method: "POST",
+          pathname: "/api/web/enrollments/manual-reinstall/7",
+        },
+        {
+          body: null,
+          contentType: "application/json",
+          cookie: "enoki_owner_session=session-1",
+          method: "DELETE",
+          pathname: "/api/web/hosts/7",
+        },
+        {
+          body: null,
+          contentType: "application/json",
+          cookie: "enoki_owner_session=session-1",
+          method: "DELETE",
+          pathname: "/api/web/hosts/8",
+        },
+        {
+          body: null,
+          contentType: null,
+          cookie: "enoki_owner_session=session-1",
+          method: "GET",
+          pathname: "/api/web/hosts/7",
+        },
+      ]),
+    );
+  });
+
   it("keeps the DELETE response in evidence when the first poll fails", async () => {
     let deletes = 0;
     const client = createHubLifecycleClient({

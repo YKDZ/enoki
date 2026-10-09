@@ -3259,10 +3259,17 @@ export function createHubLifecycleClient({
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     if (ownerCookie) headers.set("cookie", ownerCookie);
-    if (init.body !== undefined)
+    // Hub 管理写在 CSRF 之后还有 JSON 体守卫：缺失 content-type 会被当作表单类型拒绝，
+    // 无体 POST 还需可解析体。这里让既有无体写操作符合现行 JSON 写合同，
+    // 显式请求体、GET 与错误处理保持原样。
+    const bodylessWrite =
+      init.body === undefined &&
+      (init.method === "POST" || init.method === "DELETE");
+    if (init.body !== undefined || bodylessWrite)
       headers.set("content-type", "application/json");
     const response = await fetch_(new URL(pathname, normalizedBaseUrl), {
       ...init,
+      ...(bodylessWrite && init.method === "POST" ? { body: "{}" } : {}),
       headers,
     });
     const text = await response.text();
