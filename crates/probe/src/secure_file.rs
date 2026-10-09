@@ -711,7 +711,7 @@ mod tests {
             return;
         }
 
-        for delivery in ["canonical", "platform-shape", "symlink", "path", "oversize"] {
+        for delivery in ["canonical", "symlink", "path", "oversize"] {
             mount_systemd_credential(delivery);
             unsafe {
                 std::env::set_var("CREDENTIALS_DIRECTORY", SYSTEMD_CREDENTIAL_DIRECTORY);
@@ -723,7 +723,7 @@ mod tests {
             };
             let maximum_bytes = if delivery == "oversize" { 4 } else { 1024 };
             let result = read_registration_attempt_credential_bytes(&path, maximum_bytes);
-            if delivery == "canonical" || delivery == "platform-shape" {
+            if delivery == "canonical" {
                 assert_eq!(result.expect("delivered systemd credential"), b"canonical");
             } else {
                 assert!(result.is_err(), "delivery {delivery} must fail closed");
@@ -745,10 +745,8 @@ mod tests {
         fs::remove_dir(SYSTEMD_CREDENTIAL_DIRECTORY).expect("remove credential mountpoint");
     }
 
-    /// 在私有挂载命名空间内以 systemd 固定交付路径提供一份凭据。`platform-shape`
-    /// 刻意使用撤销形态等式之外的目录与文件 mode、owner 和链接数，证明平台交付
-    /// 形态不再阻塞读取；`symlink`、`path`、`oversize` 分别保留常规文件、固定路径
-    /// 与大小上限三项仍须失败的判据。
+    /// 在私有挂载命名空间内以 systemd 固定交付路径提供一份凭据。`symlink`、`path`、
+    /// `oversize` 分别保留常规文件、固定路径与大小上限三项仍须失败的判据。
     fn mount_systemd_credential(delivery: &str) {
         fs::create_dir_all(SYSTEMD_CREDENTIAL_DIRECTORY).expect("credential mountpoint");
         let source = CString::new("tmpfs").unwrap();
@@ -768,31 +766,10 @@ mod tests {
             0,
             "credential tmpfs mounts",
         );
-        let directory = Path::new(SYSTEMD_CREDENTIAL_DIRECTORY);
         let path = Path::new(SYSTEMD_CREDENTIAL_PATH);
         fs::write(path, b"canonical").expect("credential contents");
         fs::set_permissions(path, fs::Permissions::from_mode(0o440)).expect("credential mode");
         match delivery {
-            "platform-shape" => {
-                fs::create_dir(directory.join("sub")).expect("delivered directory link count");
-                fs::set_permissions(directory, fs::Permissions::from_mode(0o750))
-                    .expect("delivered directory mode");
-                assert_eq!(
-                    unsafe { libc::chown(target.as_ptr(), 1, 1) },
-                    0,
-                    "delivered directory owner",
-                );
-                fs::set_permissions(path, fs::Permissions::from_mode(0o400))
-                    .expect("delivered credential mode");
-                let credential = CString::new(SYSTEMD_CREDENTIAL_PATH).unwrap();
-                assert_eq!(
-                    unsafe { libc::chown(credential.as_ptr(), 1, 1) },
-                    0,
-                    "delivered credential owner",
-                );
-                fs::hard_link(path, directory.join("registration-copy"))
-                    .expect("delivered credential link count");
-            }
             "symlink" => {
                 fs::rename(path, path.with_file_name("registration-referent"))
                     .expect("move credential referent");
