@@ -167,8 +167,13 @@ fn stdin_peer_uid() -> Option<u32> {
 }
 
 fn write_response(response: LifecycleResponse) -> ExitCode {
+    // 临时观察：在输出失败或未启用响应帧前，把已有响应码写入原 stderr，供 61 journal 捕获。
+    if response.status() != enoki_probe_bootstrap::lifecycle::LifecycleResultStatus::Succeeded {
+        eprintln!("Lifecycle response observation: code={}.", response.code());
+    }
     let mut stdout = std::io::stdout();
     if stdout.write_all(&response.encode()).is_err() || stdout.flush().is_err() {
+        eprintln!("Lifecycle response observation: stdout write failed.");
         return ExitCode::from(1);
     }
     lifecycle_response_exit(&response)
@@ -358,6 +363,21 @@ mod tests {
         assert_eq!(
             LifecycleResponse::decode(&writer.bytes),
             Ok(LifecycleResponse::succeeded())
+        );
+    }
+
+    #[test]
+    fn write_response_keeps_the_existing_exit_for_failed_not_enabled_and_succeeded_frames() {
+        // 临时观察的退出与帧语义基线：stderr 观察行由 --nocapture 原始输出核对。
+        for response in [
+            LifecycleResponse::failed("lifecycle.repair_unresolved"),
+            LifecycleResponse::not_enabled(),
+        ] {
+            assert_eq!(write_response(response.clone()), ExitCode::from(1));
+        }
+        assert_eq!(
+            write_response(LifecycleResponse::succeeded()),
+            ExitCode::SUCCESS
         );
     }
 }

@@ -24,6 +24,8 @@ use enoki_probe_bootstrap::lifecycle::{
 use crate::secure_file::{atomic_write, ensure_directory, remove_regular_file};
 
 const RUNTIME_UNIT: &str = "enoki-observation-runtime.service";
+/// Runtime 的固定 activation listener 单元：Runtime 只从 manager 转交的真实监听 FD 启动。
+const RUNTIME_SOCKET_UNIT: &str = "enoki-observation-runtime.socket";
 const RECORDER_UNIT: &str = "enoki-observation-runtime-failure.service";
 const METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 /// public 身份文件固定路径；生产 identity 由 concrete 状态根派生（见 IDENTITY_SUFFIX），
@@ -496,8 +498,12 @@ pub trait RuntimeRetrySystemd {
 
 impl RuntimeRetrySystemd for SystemRuntimeFailureSystemd {
     fn retry_fixed_runtime(&mut self) -> std::io::Result<()> {
+        // 显式 Retry 面对的既有形状是 socket 与 service 都已被停止：Runtime 必须收到
+        // 真实 activation listener，只启动 service 会把缺 FD 的确定退出 1 当成交付失败。
+        // 因此先恢复固定 listener 单元，再启动并核对固定 service；两者都只走固定 unit。
         for arguments in [
             &["reset-failed", RUNTIME_UNIT][..],
+            &["start", RUNTIME_SOCKET_UNIT][..],
             &["start", RUNTIME_UNIT][..],
             &["is-active", "--quiet", RUNTIME_UNIT][..],
         ] {

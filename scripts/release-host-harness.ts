@@ -23,7 +23,6 @@ import type {
 } from "./release-installed-bundle-failure-repair.ts";
 import {
   createInstalledBundleFailureRepairHostDriver,
-  generalCompanionFailureObservationScript,
   generalCompanionFailureObservationSnippet,
 } from "./release-installed-bundle-failure-repair.ts";
 import {
@@ -484,29 +483,6 @@ export function createProbeHostHarness({
         ...(output ? { output } : {}),
       };
     }
-  }
-
-  // 票61 临时观察：读取失败只追加不可用事实，调用方保留原错误继续聚合与清理。
-  async function observeCompanionFailureUnits(
-    section: string,
-  ): Promise<string> {
-    let observed;
-    try {
-      observed = await execute(
-        generalCompanionFailureObservationScript(section),
-        { root: true },
-      );
-    } catch (error) {
-      return `observation unavailable: ${error instanceof Error ? error.message : String(error)}`;
-    }
-    const facts = `${observed.stdout}${observed.stderr}`.trim();
-    if (observed.code !== 0) {
-      return `observation unavailable: the manager/journal script exited ${observed.code}${facts ? `: ${facts}` : ""}`;
-    }
-    return (
-      facts ||
-      "observation unavailable: the manager/journal script returned no facts"
-    );
   }
 
   async function prepareEnrollmentInstall(
@@ -1333,25 +1309,7 @@ export function createProbeHostHarness({
           });
         }
 
-        await attempt(async () => {
-          try {
-            return await installedBundleFailureRepair.cleanup(runId);
-          } catch (error) {
-            // cleanup 自身的失败原因只有在 emergency cleanup 破坏现场之前读取才可能被解释。
-            const observation = await observeCompanionFailureUnits(
-              "after the run-owned Observation Runtime failure cleanup failed",
-            );
-            const message =
-              error instanceof Error ? error.message : String(error);
-            const code = objectView(error).code;
-            throw Object.assign(
-              new Error(
-                `${message}; general Companion and Observation Runtime at this moment: ${observation}`,
-              ),
-              typeof code === "string" ? { code } : {},
-            );
-          }
-        });
+        await attempt(() => installedBundleFailureRepair.cleanup(runId));
 
         let inspected = await attempt(() => inventory());
         let residue = inspected ? inventoryResidue(inspected) : null;
@@ -1379,18 +1337,9 @@ export function createProbeHostHarness({
           inspected = await attempt(() => inventory());
           residue = inspected ? inventoryResidue(inspected) : null;
           if ((residue?.length ?? 0) > 0) {
-            const residueMessage = `Run-owned Probe cleanup left residue: ${residue?.join(", ")}`;
-            // 残留核对之后才取残留实例状态：loaded 与活跃能力不等价，这里只保留事实。
-            const companionResidue = (residue ?? []).filter((item) =>
-              /^enoki-probe-lifecycle-companion@[^/]+\.service$/.test(item),
-            );
             errors.push(
               new Error(
-                companionResidue.length === 0
-                  ? residueMessage
-                  : `${residueMessage}; residual general Companion instances at the final residue check: ${await observeCompanionFailureUnits(
-                      "at the final general Companion instance residue check",
-                    )}`,
+                `Run-owned Probe cleanup left residue: ${residue?.join(", ")}`,
               ),
             );
           }
@@ -1560,6 +1509,43 @@ function probeAccountQueryScript(): string {
 }`;
 }
 
+// 已卸载单元只有 manager 自己证明「没有 Fragment 也没有运行/激活能力」时才是历史记录；
+// 名字本身不能证明活跃安装（ADR0098）。任一属性缺失、查询失败，或仍有 PID、job、
+// 运行控制组，都返回非零，让调用方继续按残留处理，绝不把读取不完整折叠成空 Host。
+// 准入库存、claim 空库存重查与卸载后 systemd 计数共用这一份判据，不各自复制规则。
+// 判据内变量一律带前缀：POSIX sh 函数没有局部变量，未加前缀会覆盖调用方脚本的同名变量。
+function quiescentManagerRecordQueryScript(): string {
+  return String.raw`probe_unit_quiescent_record() {
+  quiescent_status=0
+  quiescent_facts=$(systemctl show "$1" --no-pager --property=LoadState --property=ActiveState --property=MainPID --property=ControlPID --property=Job --property=ControlGroup < /dev/null 2>/dev/null) || quiescent_status=$?
+  if [ "$quiescent_status" != 0 ] || [ -z "$quiescent_facts" ]; then return 1; fi
+  quiescent_load_state=__missing__
+  quiescent_active_state=__missing__
+  quiescent_main_pid=__missing__
+  quiescent_control_pid=__missing__
+  quiescent_job=__missing__
+  quiescent_control_group=__missing__
+  while IFS='=' read -r quiescent_key quiescent_value; do
+    case "$quiescent_key" in
+      LoadState) quiescent_load_state=$quiescent_value ;;
+      ActiveState) quiescent_active_state=$quiescent_value ;;
+      MainPID) quiescent_main_pid=$quiescent_value ;;
+      ControlPID) quiescent_control_pid=$quiescent_value ;;
+      Job) quiescent_job=$quiescent_value ;;
+      ControlGroup) quiescent_control_group=$quiescent_value ;;
+    esac
+  done <<EOUNITSTATE
+$quiescent_facts
+EOUNITSTATE
+  if [ "$quiescent_load_state" != not-found ]; then return 1; fi
+  case "$quiescent_active_state" in inactive|failed) ;; *) return 1 ;; esac
+  if [ "$quiescent_main_pid" != 0 ] || [ "$quiescent_control_pid" != 0 ]; then return 1; fi
+  if [ "$quiescent_job" = __missing__ ] || [ -n "$quiescent_job" ]; then return 1; fi
+  if [ "$quiescent_control_group" = __missing__ ] || [ -n "$quiescent_control_group" ]; then return 1; fi
+  return 0
+}`;
+}
+
 function hostInventoryScript(): string {
   const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
   const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
@@ -1572,6 +1558,7 @@ function hostInventoryScript(): string {
   return `# enoki-release-e2e:inventory
 set -eu
 ${probeAccountQueryScript()}
+${quiescentManagerRecordQueryScript()}
 group_present=false
 for account in ${groups}; do
   if probe_account group "$account"; then group_present=true; fi
@@ -1599,6 +1586,7 @@ units=$(systemctl list-units --all --full --plain ${unitPatterns} --no-legend --
 separator=
 while IFS=' ' read -r unit _; do
   [ -n "$unit" ] || continue
+  if probe_unit_quiescent_record "$unit"; then continue; fi
   printf '%s"%s"' "$separator" "$unit"
   separator=,
 done <<EOUNITINVENTORY
@@ -1864,10 +1852,27 @@ exit "$probe_status"
 function systemdEvidenceScript(): string {
   return String.raw`# enoki-release-e2e:systemd-evidence
 set -eu
+${quiescentManagerRecordQueryScript()}
 load_state=$(systemctl show enoki-probe.service --no-pager --property=LoadState --value)
 active_state=$(systemctl show enoki-probe.service --no-pager --property=ActiveState --value)
-unit_count=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager | awk 'NF { count += 1 } END { print count + 0 }')
-failed_unit_count=$(systemctl --failed --all --full --plain --no-legend --no-pager | awk '$1 ~ /^enoki-probe.*[.]service$/ { count += 1 } END { print count + 0 }')
+unit_count=0
+units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager)
+while IFS=' ' read -r unit _; do
+  [ -n "$unit" ] || continue
+  if probe_unit_quiescent_record "$unit"; then continue; fi
+  unit_count=$((unit_count + 1))
+done <<EOUNITEVIDENCE
+$units
+EOUNITEVIDENCE
+failed_unit_count=0
+failed_units=$(systemctl --failed --all --full --plain --no-legend --no-pager)
+while IFS=' ' read -r unit _; do
+  case "$unit" in enoki-probe*.service) ;; *) continue ;; esac
+  if probe_unit_quiescent_record "$unit"; then continue; fi
+  failed_unit_count=$((failed_unit_count + 1))
+done <<EOFAILEDUNITS
+$failed_units
+EOFAILEDUNITS
 [ "$load_state" = not-found ]
 [ "$active_state" = inactive ]
 [ "$unit_count" = 0 ]
@@ -1919,6 +1924,7 @@ function claimRunScript(runId: string, token: string): string {
   return `# enoki-release-e2e:claim
 set -eu
 ${probeAccountQueryScript()}
+${quiescentManagerRecordQueryScript()}
 claim_root=/var/lib/enoki-release-e2e
 claim_dir="$claim_root/claim"
 install -d -m 0700 "$claim_root"
@@ -1943,6 +1949,7 @@ done
 units=$(systemctl list-units --all --full --plain ${unitPatterns} --no-legend --no-pager)
 while IFS=' ' read -r unit _; do
   [ -n "$unit" ] || continue
+  if probe_unit_quiescent_record "$unit"; then continue; fi
   residue="$residue unit:$unit"
 done <<EOUNITINVENTORY
 $units

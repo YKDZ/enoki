@@ -2087,10 +2087,15 @@ fn probe_repair_lifecycle_response(
 ) -> LifecycleResponse {
     match result {
         Ok(_) => LifecycleResponse::succeeded(),
-        Err(error) if error.code() == "probe_manual_reinstall_required" => {
-            LifecycleResponse::failed("probe_manual_reinstall_required")
+        Err(error) => {
+            // 临时观察：typed code 会被下面两个分支折叠掉，先在原 stderr 保留一份。
+            eprintln!("Probe repair observation: code={}.", error.code());
+            if error.code() == "probe_manual_reinstall_required" {
+                LifecycleResponse::failed("probe_manual_reinstall_required")
+            } else {
+                LifecycleResponse::failed("lifecycle.repair_unresolved")
+            }
         }
-        Err(_) => LifecycleResponse::failed("lifecycle.repair_unresolved"),
     }
 }
 
