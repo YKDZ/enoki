@@ -759,9 +759,8 @@ function companionFailureObservationCall(
   return `{\n  companion_failure_observation ${shellSingleQuote(section)}\n} 1>&2${exitGuard}\n`;
 }
 
-// Harness 复用同一有限读取：既嵌入普通 Probe 诊断命令的 stderr，也独立执行采集 cleanup
-// 失败当下的事实。补充文本一律走 stderr；嵌入 Probe 诊断时观察自身失败被吸收，不得改写
-// 原命令退出码，独立执行时保留退出码供 Harness 解释成不可用事实。
+// Harness 复用同一有限读取：只嵌入普通 Probe 诊断命令的 stderr。补充文本一律走 stderr，
+// 观察自身失败被吸收，不得改写原命令退出码。
 export function generalCompanionFailureObservationSnippet(
   section: string,
 ): string {
@@ -769,12 +768,6 @@ export function generalCompanionFailureObservationSnippet(
     failureObservationFunctions +
     companionFailureObservationCall(section, " || true")
   );
-}
-
-export function generalCompanionFailureObservationScript(
-  section: string,
-): string {
-  return `# enoki-release-e2e:general-companion-failure-observation\nset -eu${failureObservationFunctions}${companionFailureObservationCall(section, "")}`;
 }
 
 export function probeOperationStatusSnapshotScript(): string {
