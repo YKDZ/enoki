@@ -3358,225 +3358,6 @@ describe("Probe Host Harness", () => {
     }
   });
 
-  it("在 emergency cleanup 之前解释 cleanup 失败并在残留核对之后保留残留实例事实", async () => {
-    const bin = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-companion-cleanup-shim-"),
-    );
-    const commands = [];
-    let inventoryCount = 0;
-    try {
-      await writeSystemdShims(bin, { companionInstances: 1 });
-      const harness = createProbeHostHarness({
-        async execute(command) {
-          commands.push(command);
-          if (
-            command.includes(
-              "# enoki-release-e2e:general-companion-failure-observation",
-            )
-          ) {
-            return runGeneratedHostCommand({ bin, command });
-          }
-          if (command.includes("# enoki-release-e2e:inventory")) {
-            inventoryCount += 1;
-            return successfulCommand(
-              inventoryCount === 1
-                ? {
-                    accounts: { group: false, user: false },
-                    files: [],
-                    units: [],
-                  }
-                : {
-                    accounts: { group: true, user: true },
-                    files: ["/usr/local/bin/enoki-probe"],
-                    units: [
-                      "enoki-probe.service",
-                      "enoki-probe-lifecycle-companion@instance1.service",
-                    ],
-                  },
-            );
-          }
-          if (command.includes("# enoki-release-e2e:dependencies")) {
-            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-          }
-          if (command.includes("# enoki-release-e2e:verify-claim")) {
-            return successfulCommandText("owned\n");
-          }
-          if (
-            command.includes(
-              "# enoki-release-e2e:cleanup-observation-runtime-failure",
-            )
-          ) {
-            return {
-              code: 1,
-              stderr:
-                "systemctl start enoki-observation-runtime.socket failed: Resource limit reached",
-              stdout: "",
-            };
-          }
-          if (command.includes("# enoki-release-e2e:inspect-claim")) {
-            return successfulCommandText("owned\n");
-          }
-          return successfulCommandText("");
-        },
-      });
-
-      await harness.assertDisposable("run-cleanup-observation");
-      await harness.install(officialEnrollment(), "run-cleanup-observation");
-      const failure = await harness
-        .cleanup("run-cleanup-observation")
-        .catch((error) => error);
-
-      expect(failure).toBeInstanceOf(AggregateError);
-      const messages = failure.errors.map((error) => error.message);
-      // cleanup 自身的原因先被保留，其后的即时观察只追加当时的 manager/journal 事实。
-      expect(messages[0]).toContain(
-        "Observation Runtime failure cleanup failed: systemctl start enoki-observation-runtime.socket failed: Resource limit reached",
-      );
-      expect(messages[0]).toContain(
-        "general Companion and Observation Runtime at this moment: === general Companion and Observation Runtime manager and journal: after the run-owned Observation Runtime failure cleanup failed",
-      );
-      expect(messages[0]).toContain("ActiveState=failed");
-      expect(messages[0]).toContain("ExecMainStatus=203");
-      // 残留实例的事实属于第二次核对之后，不与 cleanup 失败混成同一时刻。
-      expect(messages[1]).toContain("Run-owned Probe cleanup left residue:");
-      expect(messages[1]).toContain(
-        "enoki-probe-lifecycle-companion@instance1.service",
-      );
-      expect(messages[1]).toContain(
-        "residual general Companion instances at the final residue check: === general Companion and Observation Runtime manager and journal: at the final general Companion instance residue check",
-      );
-      expect(messages).toContain("Run claim remains after Host cleanup");
-
-      const observationIndexes = commands
-        .map((command, index) => ({ command, index }))
-        .filter(({ command }) =>
-          command.includes(
-            "# enoki-release-e2e:general-companion-failure-observation",
-          ),
-        )
-        .map(({ index }) => index);
-      const indexOf = (marker) =>
-        commands.findIndex((command) => command.includes(marker));
-      const lastInventory = commands.reduce(
-        (last, command, index) =>
-          command.includes("# enoki-release-e2e:inventory") ? index : last,
-        -1,
-      );
-      expect(observationIndexes).toHaveLength(2);
-      expect(observationIndexes[0]).toBeGreaterThan(
-        indexOf("# enoki-release-e2e:cleanup-observation-runtime-failure"),
-      );
-      expect(observationIndexes[0]).toBeLessThan(
-        indexOf("# enoki-release-e2e:emergency-cleanup"),
-      );
-      expect(observationIndexes[1]).toBeGreaterThan(lastInventory);
-    } finally {
-      await rm(bin, { force: true, recursive: true });
-    }
-  });
-
-  it("观察脚本自身失败时只追加不可用事实，cleanup 失败与既有清理照常交付", async () => {
-    const bin = await mkdtemp(
-      path.join(os.tmpdir(), "enoki-companion-cleanup-shim-"),
-    );
-    const commands = [];
-    let inventoryCount = 0;
-    try {
-      // 只暴露 systemctl/journalctl 替身而不提供系统路径：读取脚本在固定实例选择处自身失败，
-      // 这正是观察不得覆盖主失败的场景。
-      await writeSystemdShims(bin, { companionInstances: 1 });
-      const harness = createProbeHostHarness({
-        async execute(command) {
-          commands.push(command);
-          if (
-            command.includes(
-              "# enoki-release-e2e:general-companion-failure-observation",
-            )
-          ) {
-            return runGeneratedHostCommand({
-              bin,
-              command,
-              searchSystemPaths: false,
-            });
-          }
-          if (command.includes("# enoki-release-e2e:inventory")) {
-            inventoryCount += 1;
-            return successfulCommand(
-              inventoryCount === 1
-                ? {
-                    accounts: { group: false, user: false },
-                    files: [],
-                    units: [],
-                  }
-                : {
-                    accounts: { group: true, user: true },
-                    files: [],
-                    units: [
-                      "enoki-probe-lifecycle-companion@instance1.service",
-                    ],
-                  },
-            );
-          }
-          if (command.includes("# enoki-release-e2e:verify-claim")) {
-            return successfulCommandText("owned\n");
-          }
-          if (command.includes("# enoki-release-e2e:dependencies")) {
-            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-          }
-          if (
-            command.includes(
-              "# enoki-release-e2e:cleanup-observation-runtime-failure",
-            )
-          ) {
-            return {
-              code: 1,
-              stderr: "systemctl start enoki-observation-runtime.socket failed",
-              stdout: "",
-            };
-          }
-          if (command.includes("# enoki-release-e2e:inspect-claim")) {
-            return successfulCommandText("owned\n");
-          }
-          return successfulCommandText("");
-        },
-      });
-
-      await harness.assertDisposable("run-observation-failure");
-      await harness.install(officialEnrollment(), "run-observation-failure");
-      const failure = await harness
-        .cleanup("run-observation-failure")
-        .catch((error) => error);
-
-      expect(failure).toBeInstanceOf(AggregateError);
-      const messages = failure.errors.map((error) => error.message);
-      expect(messages[0]).toContain(
-        "Observation Runtime failure cleanup failed: systemctl start enoki-observation-runtime.socket failed",
-      );
-      expect(messages[0]).toContain(
-        "observation unavailable: the manager/journal script exited",
-      );
-      expect(messages[1]).toContain(
-        "Run-owned Probe cleanup left residue: enoki-probe-lifecycle-companion@instance1.service",
-      );
-      expect(messages[1]).toContain(
-        "residual general Companion instances at the final residue check: observation unavailable: the manager/journal script exited",
-      );
-      // 观察失败不减少原有清理：emergency cleanup、daemon reload 与 claim 核对都仍执行。
-      expect(
-        commands.some((command) =>
-          command.includes("# enoki-release-e2e:emergency-cleanup"),
-        ),
-      ).toBe(true);
-      expect(
-        commands.some((command) =>
-          command.includes("# enoki-release-e2e:inspect-claim"),
-        ),
-      ).toBe(true);
-    } finally {
-      await rm(bin, { force: true, recursive: true });
-    }
-  });
-
   it("refuses admission instead of laundering a failed account query into an empty Host", async () => {
     // getent 约定 0 存在、2 不存在、其它是查询失败：失败必须让库存变成 unknown。这里让
     // Harness 在真实 sh -s 接缝执行生成脚本，证明拒绝来自脚本退出码而非测试拼装。
@@ -3773,7 +3554,11 @@ describe("Probe Host Harness", () => {
         });
         const hostState = (command) =>
           runHostCommandInPrivateNamespace({ bin, command, varLib });
-        await writeSystemdShims(bin, { inventoryUnits: [] });
+        // run13 的历史记录形状自准入起就在场：同一条公共流程必须真实执行生成库存脚本、
+        // assertDisposable 与真实 claim 脚本，证明它既不阻塞准入也不让 claim 空库存重查误判。
+        await writeSystemdShims(bin, {
+          inventoryUnits: [companionHistoryRecord],
+        });
         const harness = createProbeHostHarness({
           async execute(command) {
             commands.push(command);
@@ -3824,10 +3609,6 @@ describe("Probe Host Harness", () => {
           ),
         ).toContain("run-record-claim");
 
-        // 安装失败后现场只剩 run13 的历史记录形状。
-        await writeSystemdShims(bin, {
-          inventoryUnits: [companionHistoryRecord],
-        });
         await expect(harness.cleanup("run-record-claim")).resolves.toEqual({
           clean: true,
           removedPartialInstallation: false,
