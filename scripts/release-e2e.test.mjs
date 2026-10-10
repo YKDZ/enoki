@@ -3632,6 +3632,317 @@ describe("Probe Host Harness", () => {
     }
   });
 
+  // run13 现场形状：emergency cleanup 之后 general Companion 实例只剩 manager 历史记录，
+  // 名字仍被 list-units 列出，但 LoadState/PID/job/控制组都证明它没有运行与激活能力。
+  const companionHistoryRecord = {
+    activeState: "failed",
+    controlGroup: "",
+    controlPid: "0",
+    job: "",
+    loadState: "not-found",
+    mainPid: "0",
+    name: "enoki-probe-lifecycle-companion@0-3446-0.service",
+  };
+  const probeMainUnitHistoryRecord = {
+    ...companionHistoryRecord,
+    activeState: "inactive",
+    name: "enoki-probe.service",
+  };
+  // 已卸载不等于已退休：仍加载的失败单元与有进程/控制组的单元都继续算残留。
+  const loadedFailedCompanionRecord = {
+    ...companionHistoryRecord,
+    loadState: "loaded",
+    name: "enoki-probe-lifecycle-companion@1-1111-1.service",
+  };
+  const runningObservationRuntime = {
+    ...companionHistoryRecord,
+    activeState: "active",
+    controlGroup:
+      "/sys/fs/cgroup/system.slice/enoki-observation-runtime.service",
+    loadState: "loaded",
+    mainPid: "9911",
+    name: "enoki-observation-runtime.service",
+  };
+  const unanswerableCompanionRecord = {
+    name: "enoki-probe-lifecycle-companion@9-9999-9.service",
+    showCode: 1,
+  };
+
+  it("classifies listed units by manager-attested capability instead of by name", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-manager-record-shim-"),
+    );
+    try {
+      await writeFile(path.join(bin, "getent"), "#!/bin/sh\nexit 2\n", {
+        mode: 0o700,
+      });
+      await writeSystemdShims(bin, {
+        inventoryUnits: [
+          companionHistoryRecord,
+          loadedFailedCompanionRecord,
+          runningObservationRuntime,
+          unanswerableCompanionRecord,
+        ],
+      });
+      const harness = createProbeHostHarness({
+        async execute(command) {
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            return runGeneratedHostCommand({ bin, command });
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText(
+              '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+            );
+          }
+          throw new Error("unexpected production Host command");
+        },
+      });
+
+      const refusal = await harness
+        .assertDisposable("run-record-classification")
+        .catch((error) => error);
+      expect(refusal.message).toContain(
+        "Release Test Host has a pre-existing Enoki installation",
+      );
+      expect(refusal.message).toContain(
+        "enoki-probe-lifecycle-companion@1-1111-1.service",
+      );
+      expect(refusal.message).toContain("enoki-observation-runtime.service");
+      expect(refusal.message).toContain(
+        "enoki-probe-lifecycle-companion@9-9999-9.service",
+      );
+      expect(refusal.message).not.toContain("0-3446-0");
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
+  });
+
+  it("counts post-uninstall systemd evidence with the same capability judgment", async () => {
+    const bin = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-systemd-evidence-shim-"),
+    );
+    try {
+      await writeFile(path.join(bin, "getent"), "#!/bin/sh\nexit 2\n", {
+        mode: 0o700,
+      });
+      const harness = createProbeHostHarness({
+        async execute(command) {
+          return runGeneratedHostCommand({ bin, command });
+        },
+      });
+
+      await writeSystemdShims(bin, {
+        inventoryUnits: [probeMainUnitHistoryRecord, companionHistoryRecord],
+      });
+      const retired = await harness.collectEvidence("run-evidence-retired");
+      // Probe 主单元的实际状态原样保留，只有证明无害的历史记录不再计入。
+      expect(retired.systemd).toMatchObject({
+        code: 0,
+        stdout: expect.stringMatching(
+          /LoadState=not-found\nActiveState=inactive\nunitCount=0\nfailedUnitCount=0/,
+        ),
+      });
+
+      await writeSystemdShims(bin, {
+        inventoryUnits: [
+          probeMainUnitHistoryRecord,
+          companionHistoryRecord,
+          loadedFailedCompanionRecord,
+        ],
+      });
+      const stillLoaded = await harness.collectEvidence("run-evidence-loaded");
+      expect(stillLoaded.systemd.code).not.toBe(0);
+    } finally {
+      await rm(bin, { force: true, recursive: true });
+    }
+  });
+
+  it.runIf(hostClaimNamespaceAvailable())(
+    "releases the run claim when only a proven quiescent manager record remains",
+    async () => {
+      const bin = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-claim-record-shim-"),
+      );
+      const varLib = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-claim-record-varlib-"),
+      );
+      const commands = [];
+      try {
+        await writeFile(path.join(bin, "getent"), "#!/bin/sh\nexit 2\n", {
+          mode: 0o700,
+        });
+        const hostState = (command) =>
+          runHostCommandInPrivateNamespace({ bin, command, varLib });
+        await writeSystemdShims(bin, { inventoryUnits: [] });
+        const harness = createProbeHostHarness({
+          async execute(command) {
+            commands.push(command);
+            if (command.includes("# enoki-release-e2e:inventory")) {
+              return hostState(command);
+            }
+            for (const marker of [
+              "# enoki-release-e2e:claim",
+              "# enoki-release-e2e:verify-claim",
+              "# enoki-release-e2e:remove-claim",
+              "# enoki-release-e2e:inspect-claim",
+            ]) {
+              if (command.includes(marker)) {
+                return hostState(command);
+              }
+            }
+            if (command.includes("# enoki-release-e2e:dependencies")) {
+              return successfulCommandText(
+                '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+              );
+            }
+            if (
+              command.includes(
+                "# enoki-release-e2e:cleanup-observation-runtime-failure",
+              )
+            ) {
+              return successfulCommandText("cleaned\n");
+            }
+            if (command.includes("enk_enroll_secret")) {
+              return {
+                code: 1,
+                stderr: "installer stopped before the companion retired",
+                stdout: "",
+              };
+            }
+            throw new Error("unexpected production Host command");
+          },
+        });
+
+        await harness.assertDisposable("run-record-claim");
+        await expect(
+          harness.install(officialEnrollment(), "run-record-claim"),
+        ).rejects.toMatchObject({ code: "probe_installation_failed" });
+        expect(
+          await readFile(
+            path.join(varLib, "enoki-release-e2e", "claim", "run-id"),
+            "utf8",
+          ),
+        ).toContain("run-record-claim");
+
+        // 安装失败后现场只剩 run13 的历史记录形状。
+        await writeSystemdShims(bin, {
+          inventoryUnits: [companionHistoryRecord],
+        });
+        await expect(harness.cleanup("run-record-claim")).resolves.toEqual({
+          clean: true,
+          removedPartialInstallation: false,
+        });
+        expect(
+          commands.some((command) =>
+            command.includes("# enoki-release-e2e:emergency-cleanup"),
+          ),
+        ).toBe(false);
+        // claim 目录由真实生成脚本删除，不只在测试里被声称释放。
+        await expect(
+          readFile(
+            path.join(varLib, "enoki-release-e2e", "claim", "run-id"),
+            "utf8",
+          ),
+        ).rejects.toThrow();
+      } finally {
+        await rm(bin, { force: true, recursive: true });
+        await rm(varLib, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.runIf(hostClaimNamespaceAvailable())(
+    "keeps the run claim and reports residue when a unit is still retired-worthy",
+    async () => {
+      const bin = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-claim-residue-shim-"),
+      );
+      const varLib = await mkdtemp(
+        path.join(os.tmpdir(), "enoki-claim-residue-varlib-"),
+      );
+      const commands = [];
+      try {
+        await writeFile(path.join(bin, "getent"), "#!/bin/sh\nexit 2\n", {
+          mode: 0o700,
+        });
+        const hostState = (command) =>
+          runHostCommandInPrivateNamespace({ bin, command, varLib });
+        await writeSystemdShims(bin, { inventoryUnits: [] });
+        const harness = createProbeHostHarness({
+          async execute(command) {
+            commands.push(command);
+            if (command.includes("# enoki-release-e2e:inventory")) {
+              return hostState(command);
+            }
+            for (const marker of [
+              "# enoki-release-e2e:claim",
+              "# enoki-release-e2e:verify-claim",
+              "# enoki-release-e2e:remove-claim",
+              "# enoki-release-e2e:inspect-claim",
+            ]) {
+              if (command.includes(marker)) {
+                return hostState(command);
+              }
+            }
+            if (command.includes("# enoki-release-e2e:dependencies")) {
+              return successfulCommandText(
+                '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+              );
+            }
+            if (
+              command.includes(
+                "# enoki-release-e2e:cleanup-observation-runtime-failure",
+              )
+            ) {
+              return successfulCommandText("cleaned\n");
+            }
+            if (command.includes("# enoki-release-e2e:emergency-cleanup")) {
+              return successfulCommandText("cleaned\n");
+            }
+            if (command.includes("# enoki-release-e2e:daemon-reload")) {
+              return successfulCommandText("");
+            }
+            if (command.includes("enk_enroll_secret")) {
+              return {
+                code: 1,
+                stderr: "installer stopped before the companion retired",
+                stdout: "",
+              };
+            }
+            throw new Error("unexpected production Host command");
+          },
+        });
+
+        await harness.assertDisposable("run-residue-claim");
+        await expect(
+          harness.install(officialEnrollment(), "run-residue-claim"),
+        ).rejects.toMatchObject({ code: "probe_installation_failed" });
+
+        await writeSystemdShims(bin, {
+          inventoryUnits: [companionHistoryRecord, runningObservationRuntime],
+        });
+        const failure = await harness
+          .cleanup("run-residue-claim")
+          .catch((error) => error);
+        expect(failure.code).toBe("release_test_host_cleanup_failed");
+        expect(failure.message).toContain("enoki-observation-runtime.service");
+        expect(failure.message).toContain(
+          "Run claim remains after Host cleanup",
+        );
+        expect(failure.message).not.toContain("0-3446-0");
+        await expect(
+          readFile(
+            path.join(varLib, "enoki-release-e2e", "claim", "run-id"),
+            "utf8",
+          ),
+        ).resolves.toContain("run-residue-claim");
+      } finally {
+        await rm(bin, { force: true, recursive: true });
+        await rm(varLib, { force: true, recursive: true });
+      }
+    },
+  );
+
   it("retains the run claim and reports cleanup incomplete when the residue query fails", async () => {
     const commands = [];
     let inventoryCount = 0;
@@ -9784,8 +10095,47 @@ async function captureRepairFailureFromRealStatusRead({
 // 返回形状，不建立真实 unit 或日志平台。
 async function writeSystemdShims(
   bin,
-  { companionInstances = 1, journalRefused = false, probeExitCode = 0 } = {},
+  {
+    companionInstances = 1,
+    inventoryUnits = null,
+    journalRefused = false,
+    probeExitCode = 0,
+  } = {},
 ) {
+  // inventoryUnits 让同一个替身按固定 unit 回答 list-units、--failed 与 show
+  // （含 --value 形态）。名字要不要算残留完全由实际生成的库存脚本判断，测试不拼装库存结果。
+  const listedUnits = (inventoryUnits ?? []).map(
+    (unit) =>
+      `${unit.name} ${unit.loadState ?? "not-found"} ${unit.activeState ?? "failed"} ${unit.activeState ?? "failed"} ${unit.name}`,
+  );
+  const failedUnits = (inventoryUnits ?? [])
+    .filter((unit) => unit.activeState === "failed")
+    .map(
+      (unit) =>
+        `${unit.name} ${unit.loadState ?? "not-found"} failed failed ${unit.name}`,
+    );
+  const unitShowCases = (inventoryUnits ?? [])
+    .map((unit) =>
+      unit.showCode === undefined
+        ? `  '${unit.name}')
+    case "$*" in
+      *--value*)
+        case "$*" in
+          *--property=LoadState*) printf '${unit.loadState}\\n' ;;
+          *--property=ActiveState*) printf '${unit.activeState}\\n' ;;
+        esac
+        exit 0
+        ;;
+    esac
+    printf 'LoadState=${unit.loadState}\\nActiveState=${unit.activeState}\\nMainPID=${unit.mainPid}\\nControlPID=${unit.controlPid}\\nJob=${unit.job}\\nControlGroup=${unit.controlGroup}\\n'
+    exit 0
+    ;;`
+        : `  '${unit.name}')
+    printf 'manager unavailable\\n' 1>&2
+    exit ${unit.showCode}
+    ;;`,
+    )
+    .join("\n");
   await writeFile(
     path.join(bin, "systemctl"),
     `#!/bin/sh
@@ -9793,15 +10143,37 @@ set -eu
 case "$1" in
   show) ;;
   list-units)
+${listedUnits.map((line) => `    printf '%s\\n' '${line}'`).join("\n")}${
+      inventoryUnits === null
+        ? `
     index=0
     while [ "$index" -lt ${companionInstances} ]; do
       index=$((index + 1))
       printf 'enoki-probe-lifecycle-companion@instance%s.service loaded active running Enoki Probe lifecycle companion\\n' "$index"
-    done
+    done`
+        : ""
+    }
     exit 0
-    ;;
+    ;;${
+      inventoryUnits === null
+        ? ""
+        : `
+  --failed)
+${failedUnits.map((line) => `    printf '%s\\n' '${line}'`).join("\n")}${
+            failedUnits.length === 0 ? "    true\n" : ""
+          }
+    exit 0
+    ;;`
+    }
   *) exit 2 ;;
-esac
+esac${
+      inventoryUnits === null
+        ? ""
+        : `
+case "$2" in
+${unitShowCases}
+esac`
+    }
 if [ "$2" = enoki-probe.service ]; then
   printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\nResult=success\\nExecMainStatus=0\\nNRestarts=0\\n'
   exit ${probeExitCode}
@@ -9836,6 +10208,45 @@ function runGeneratedHostCommand({ bin, command, searchSystemPaths = true }) {
     },
     input: command,
   });
+  return {
+    code: result.status ?? 1,
+    stderr: result.stderr ?? "",
+    stdout: result.stdout ?? "",
+  };
+}
+
+// claim 由生成脚本写在宿主固定路径 /var/lib，库存又读取 /run：这类测试只在私有 mount
+// namespace 里把本人临时目录绑定为 /var/lib、/run 挂空 tmpfs。namespace 随命令结束释放，
+// 不写宿主 /var/lib 或 /run，也不执行宿主 manager。
+function hostClaimNamespaceAvailable() {
+  if (!(typeof process.getuid === "function" && process.getuid() === 0)) {
+    return false;
+  }
+  return (
+    spawnSync("/usr/bin/unshare", ["-m", "true"], { encoding: "utf8" })
+      .status === 0
+  );
+}
+
+function runHostCommandInPrivateNamespace({ bin, command, varLib }) {
+  const result = spawnSync(
+    "/usr/bin/unshare",
+    [
+      "-m",
+      "--propagation",
+      "private",
+      "/bin/sh",
+      "-c",
+      'set -eu\nmount --bind "$1" /var/lib\nmount -t tmpfs tmpfs /run\nshift\nexec /bin/sh -s',
+      "sh",
+      varLib,
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+      input: command,
+    },
+  );
   return {
     code: result.status ?? 1,
     stderr: result.stderr ?? "",
