@@ -9,7 +9,7 @@ use std::{
     fmt, fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    os::unix::process::{CommandExt, ExitStatusExt},
+    os::unix::process::CommandExt,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -1421,67 +1421,6 @@ fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError
     (code == Some(3)).then(|| ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
 }
 
-// 票 05 临时观察：取得正式 Fresh 分类并完成因果重放后删除。
-#[derive(Clone, Copy)]
-enum RepairAcquirerExchangeFailureStage {
-    Spawn,
-    Stdin,
-    Wait,
-    ChildExit,
-    StdoutContract,
-}
-
-impl RepairAcquirerExchangeFailureStage {
-    fn code(self) -> &'static str {
-        match self {
-            Self::Spawn => "spawn",
-            Self::Stdin => "stdin",
-            Self::Wait => "wait",
-            Self::ChildExit => "child_exit",
-            Self::StdoutContract => "stdout_contract",
-        }
-    }
-}
-
-fn write_repair_acquirer_exchange_failure(
-    stage: RepairAcquirerExchangeFailureStage,
-    exit_code: Option<i32>,
-    signal: Option<i32>,
-    os_error: Option<i32>,
-    output: &mut impl Write,
-) {
-    let _ = write!(
-        output,
-        "probe_repair_acquirer_exchange_failure stage={}",
-        stage.code()
-    );
-    if let Some(os_error) = os_error {
-        let _ = write!(output, " os_error={os_error}");
-    }
-    if let Some(exit_code) = exit_code {
-        let _ = write!(output, " exit_code={exit_code}");
-    } else if let Some(signal) = signal {
-        let _ = write!(output, " signal={signal}");
-    }
-    let _ = writeln!(output);
-}
-
-fn observe_repair_acquirer_exchange_failure(
-    stage: RepairAcquirerExchangeFailureStage,
-    exit_code: Option<i32>,
-    signal: Option<i32>,
-    os_error: Option<i32>,
-) {
-    let mut diagnostic_output = std::io::stderr().lock();
-    write_repair_acquirer_exchange_failure(
-        stage,
-        exit_code,
-        signal,
-        os_error,
-        &mut diagnostic_output,
-    );
-}
-
 fn fresh_repair_exchange_facts() -> Result<(String, u64), ProbeRepairRunError> {
     let mut nonce = [0_u8; 16];
     fs::File::open("/dev/urandom")
@@ -1512,22 +1451,8 @@ fn exchange_repair_authority(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|error| {
-            observe_repair_acquirer_exchange_failure(
-                RepairAcquirerExchangeFailureStage::Spawn,
-                None,
-                None,
-                error.raw_os_error(),
-            );
-            repair_contract_failure("probe_repair_authority_acquire_failed")
-        })?;
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
     let Some(mut stdin) = child.stdin.take() else {
-        observe_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Stdin,
-            None,
-            None,
-            None,
-        );
         return Err(repair_contract_failure(
             "probe_repair_authority_acquire_failed",
         ));
@@ -1535,52 +1460,17 @@ fn exchange_repair_authority(
     let stdin_result = stdin.write_all(request);
     drop(stdin);
     if stdin_result.is_err() {
-        observe_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Stdin,
-            None,
-            None,
-            None,
-        );
         return Err(repair_contract_failure(
             "probe_repair_authority_acquire_failed",
         ));
     }
-    let output = child.wait_with_output().map_err(|_| {
-        observe_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Wait,
-            None,
-            None,
-            None,
-        );
-        repair_contract_failure("probe_repair_authority_acquire_failed")
-    })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
     if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
-        observe_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::ChildExit,
-            output.status.code(),
-            output.status.signal(),
-            None,
-        );
         return Err(error);
     }
-    if !output.status.success() {
-        observe_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::ChildExit,
-            output.status.code(),
-            output.status.signal(),
-            None,
-        );
-        return Err(repair_contract_failure(
-            "probe_repair_authority_acquire_failed",
-        ));
-    }
-    if output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
-        observe_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::StdoutContract,
-            None,
-            None,
-            None,
-        );
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
         return Err(repair_contract_failure(
             "probe_repair_authority_acquire_failed",
         ));
@@ -1602,269 +1492,19 @@ fn configure_repair_acquirer_privileges(command: &mut Command, uid: u32, gid: u3
     unsafe {
         command.pre_exec(move || {
             if libc::setgroups(0, std::ptr::null()) != 0 {
-                return Err(observe_repair_acquirer_pre_exec_failure(
-                    RepairAcquirerPreExecFailure::Groups,
-                    std::io::Error::last_os_error(),
-                    uid,
-                ));
+                return Err(std::io::Error::last_os_error());
             }
             if libc::setgid(gid) != 0 {
-                return Err(observe_repair_acquirer_pre_exec_failure(
-                    RepairAcquirerPreExecFailure::Gid,
-                    std::io::Error::last_os_error(),
-                    uid,
-                ));
+                return Err(std::io::Error::last_os_error());
             }
             if libc::setuid(uid) != 0 {
-                return Err(observe_repair_acquirer_pre_exec_failure(
-                    RepairAcquirerPreExecFailure::Uid,
-                    std::io::Error::last_os_error(),
-                    uid,
-                ));
+                return Err(std::io::Error::last_os_error());
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(observe_repair_acquirer_pre_exec_failure(
-                    RepairAcquirerPreExecFailure::NoNewPrivileges,
-                    std::io::Error::last_os_error(),
-                    uid,
-                ));
+                return Err(std::io::Error::last_os_error());
             }
-            observe_repair_acquirer_pre_exec_complete();
             Ok(())
         });
-    }
-}
-
-// 票 05 临时观察：只用于判定正式 Fresh spawn errno 所在的既有 pre_exec 边界。
-#[derive(Clone, Copy)]
-enum RepairAcquirerPreExecFailure {
-    Groups,
-    Gid,
-    Uid,
-    NoNewPrivileges,
-}
-
-#[derive(Clone, Copy)]
-enum RepairAcquirerTargetUidClass {
-    Root,
-    RealOrSaved,
-    Other,
-    Unknown,
-}
-
-#[derive(Clone, Copy)]
-enum RepairAcquirerClosedAvailability {
-    Present,
-    Absent,
-    Unknown,
-}
-
-#[derive(Clone, Copy)]
-enum RepairAcquirerSeccompMode {
-    Disabled,
-    Strict,
-    Filter,
-    Unknown,
-}
-
-#[derive(Clone, Copy)]
-struct RepairAcquirerSetuidContext {
-    euid_is_root: bool,
-    target_uid_class: RepairAcquirerTargetUidClass,
-    cap_setuid_effective: RepairAcquirerClosedAvailability,
-    seccomp_mode: RepairAcquirerSeccompMode,
-}
-
-impl RepairAcquirerTargetUidClass {
-    fn code(self) -> &'static [u8] {
-        match self {
-            Self::Root => b"root",
-            Self::RealOrSaved => b"real_or_saved",
-            Self::Other => b"other",
-            Self::Unknown => b"unknown",
-        }
-    }
-}
-
-impl RepairAcquirerClosedAvailability {
-    fn code(self) -> &'static [u8] {
-        match self {
-            Self::Present => b"present",
-            Self::Absent => b"absent",
-            Self::Unknown => b"unknown",
-        }
-    }
-}
-
-impl RepairAcquirerSeccompMode {
-    fn from_raw(mode: libc::c_int) -> Self {
-        match mode {
-            0 => Self::Disabled,
-            1 => Self::Strict,
-            2 => Self::Filter,
-            _ => Self::Unknown,
-        }
-    }
-
-    fn code(self) -> &'static [u8] {
-        match self {
-            Self::Disabled => b"0",
-            Self::Strict => b"1",
-            Self::Filter => b"2",
-            Self::Unknown => b"unknown",
-        }
-    }
-}
-
-fn repair_acquirer_target_uid_class(
-    target_uid: libc::uid_t,
-    real_uid: libc::uid_t,
-    saved_uid: libc::uid_t,
-) -> RepairAcquirerTargetUidClass {
-    if target_uid == 0 {
-        RepairAcquirerTargetUidClass::Root
-    } else if target_uid == real_uid || target_uid == saved_uid {
-        RepairAcquirerTargetUidClass::RealOrSaved
-    } else {
-        RepairAcquirerTargetUidClass::Other
-    }
-}
-
-fn repair_acquirer_cap_setuid_effective() -> RepairAcquirerClosedAvailability {
-    #[repr(C)]
-    struct CapabilityHeader {
-        version: u32,
-        pid: libc::pid_t,
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct CapabilityData {
-        effective: u32,
-        permitted: u32,
-        inheritable: u32,
-    }
-
-    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-    const CAP_SETUID: u32 = 7;
-    let mut header = CapabilityHeader {
-        version: LINUX_CAPABILITY_VERSION_3,
-        pid: 0,
-    };
-    let mut data = [CapabilityData::default(), CapabilityData::default()];
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_capget,
-            &mut header as *mut CapabilityHeader,
-            data.as_mut_ptr(),
-        )
-    };
-    if result != 0 {
-        RepairAcquirerClosedAvailability::Unknown
-    } else if data[0].effective & (1 << CAP_SETUID) != 0 {
-        RepairAcquirerClosedAvailability::Present
-    } else {
-        RepairAcquirerClosedAvailability::Absent
-    }
-}
-
-fn repair_acquirer_setuid_context(target_uid: libc::uid_t) -> RepairAcquirerSetuidContext {
-    let euid_is_root = unsafe { libc::geteuid() } == 0;
-    let mut real_uid = 0;
-    let mut effective_uid = 0;
-    let mut saved_uid = 0;
-    let target_uid_class =
-        if unsafe { libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid) } == 0 {
-            repair_acquirer_target_uid_class(target_uid, real_uid, saved_uid)
-        } else if target_uid == 0 {
-            RepairAcquirerTargetUidClass::Root
-        } else {
-            RepairAcquirerTargetUidClass::Unknown
-        };
-    let seccomp_mode = RepairAcquirerSeccompMode::from_raw(unsafe {
-        libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0)
-    });
-    RepairAcquirerSetuidContext {
-        euid_is_root,
-        target_uid_class,
-        cap_setuid_effective: repair_acquirer_cap_setuid_effective(),
-        seccomp_mode,
-    }
-}
-
-fn repair_acquirer_setuid_context_line(context: RepairAcquirerSetuidContext) -> ([u8; 192], usize) {
-    fn append(line: &mut [u8; 192], length: &mut usize, bytes: &[u8]) {
-        let Some(end) = length.checked_add(bytes.len()) else {
-            return;
-        };
-        if let Some(output) = line.get_mut(*length..end) {
-            output.copy_from_slice(bytes);
-            *length = end;
-        }
-    }
-
-    let mut line = [0_u8; 192];
-    let mut length = 0;
-    append(
-        &mut line,
-        &mut length,
-        b"probe_repair_pre_exec_setuid_context euid_root=",
-    );
-    append(
-        &mut line,
-        &mut length,
-        if context.euid_is_root {
-            b"root"
-        } else {
-            b"nonroot"
-        },
-    );
-    append(&mut line, &mut length, b" target_uid_class=");
-    append(&mut line, &mut length, context.target_uid_class.code());
-    append(&mut line, &mut length, b" cap_setuid_effective=");
-    append(&mut line, &mut length, context.cap_setuid_effective.code());
-    append(&mut line, &mut length, b" seccomp_mode=");
-    append(&mut line, &mut length, context.seccomp_mode.code());
-    append(&mut line, &mut length, b"\n");
-    (line, length)
-}
-
-impl RepairAcquirerPreExecFailure {
-    fn marker(self) -> &'static [u8] {
-        match self {
-            Self::Groups => b"probe_repair_pre_exec_failure=setgroups\n",
-            Self::Gid => b"probe_repair_pre_exec_failure=setgid\n",
-            Self::Uid => b"probe_repair_pre_exec_failure=setuid\n",
-            Self::NoNewPrivileges => b"probe_repair_pre_exec_failure=prctl_no_new_privs\n",
-        }
-    }
-}
-
-fn observe_repair_acquirer_pre_exec_failure(
-    stage: RepairAcquirerPreExecFailure,
-    error: std::io::Error,
-    target_uid: libc::uid_t,
-) -> std::io::Error {
-    let original_errno = error.raw_os_error();
-    let marker = stage.marker();
-    unsafe {
-        libc::write(libc::STDERR_FILENO, marker.as_ptr().cast(), marker.len());
-    }
-    if matches!(stage, RepairAcquirerPreExecFailure::Uid) {
-        let context = repair_acquirer_setuid_context(target_uid);
-        let (line, length) = repair_acquirer_setuid_context_line(context);
-        unsafe {
-            libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), length);
-        }
-    }
-    let _ = original_errno;
-    error
-}
-
-fn observe_repair_acquirer_pre_exec_complete() {
-    const MARKER: &[u8] = b"probe_repair_pre_exec=complete\n";
-    unsafe {
-        libc::write(libc::STDERR_FILENO, MARKER.as_ptr().cast(), MARKER.len());
     }
 }
 
@@ -2467,26 +2107,13 @@ pub fn run_lifecycle_companion_from_peer(
     )
 }
 
-// 票 05 临时观察：取得正式 Fresh 分类并完成因果重放后删除。
 fn probe_repair_lifecycle_response(
     result: Result<ProbeRepairResult, ProbeRepairRunError>,
-) -> LifecycleResponse {
-    let mut diagnostic_output = std::io::stderr().lock();
-    probe_repair_lifecycle_response_with_diagnostic_writer(result, &mut diagnostic_output)
-}
-
-fn probe_repair_lifecycle_response_with_diagnostic_writer(
-    result: Result<ProbeRepairResult, ProbeRepairRunError>,
-    diagnostic_output: &mut impl Write,
 ) -> LifecycleResponse {
     match result {
         Ok(_) => LifecycleResponse::succeeded(),
         Err(error) => {
             let code = error.code();
-            let _ = writeln!(
-                diagnostic_output,
-                "probe_repair_internal_failure code={code}"
-            );
             if code == "probe_manual_reinstall_required" {
                 LifecycleResponse::failed("probe_manual_reinstall_required")
             } else {
@@ -5524,33 +5151,18 @@ mod tests {
     use std::{collections::HashMap, fs};
 
     #[test]
-    fn repair_lifecycle_fold_records_only_static_code_and_preserves_public_response() {
-        let mut diagnostics = Vec::new();
-        let response = probe_repair_lifecycle_response_with_diagnostic_writer(
-            Err(ProbeRepairRunError::IdentityRejected(
-                "private response detail".to_owned(),
-            )),
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            "probe_repair_internal_failure code=probe_repair_identity_rejected\n"
-        );
+    fn repair_lifecycle_response_preserves_public_failure_mapping() {
+        let response = probe_repair_lifecycle_response(Err(ProbeRepairRunError::IdentityRejected(
+            "private response detail".to_owned(),
+        )));
         assert_eq!(
             response,
             LifecycleResponse::failed("lifecycle.repair_unresolved")
         );
 
-        let mut manual_diagnostics = Vec::new();
-        let manual_response = probe_repair_lifecycle_response_with_diagnostic_writer(
-            Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into()),
-            &mut manual_diagnostics,
-        );
-        assert_eq!(
-            String::from_utf8(manual_diagnostics).unwrap(),
-            "probe_repair_internal_failure code=probe_manual_reinstall_required\n"
-        );
+        let manual_response = probe_repair_lifecycle_response(Err(
+            ProbeUpgraderRunError::ManualProbeReinstallRequired.into(),
+        ));
         assert_eq!(
             manual_response,
             LifecycleResponse::failed("probe_manual_reinstall_required")
@@ -5559,137 +5171,6 @@ mod tests {
             repair_acquirer_exit_failure(Some(3)).map(|error| error.code()),
             Some("probe_manual_reinstall_required")
         );
-    }
-
-    #[test]
-    fn repair_acquirer_exchange_observation_keeps_only_static_numeric_fields() {
-        let mut diagnostics = Vec::new();
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Spawn,
-            None,
-            None,
-            Some(2),
-            &mut diagnostics,
-        );
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Spawn,
-            None,
-            None,
-            None,
-            &mut diagnostics,
-        );
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Stdin,
-            None,
-            None,
-            None,
-            &mut diagnostics,
-        );
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::Wait,
-            None,
-            None,
-            None,
-            &mut diagnostics,
-        );
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::ChildExit,
-            Some(17),
-            None,
-            None,
-            &mut diagnostics,
-        );
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::ChildExit,
-            None,
-            Some(9),
-            None,
-            &mut diagnostics,
-        );
-        write_repair_acquirer_exchange_failure(
-            RepairAcquirerExchangeFailureStage::StdoutContract,
-            None,
-            None,
-            None,
-            &mut diagnostics,
-        );
-
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            concat!(
-                "probe_repair_acquirer_exchange_failure stage=spawn os_error=2\n",
-                "probe_repair_acquirer_exchange_failure stage=spawn\n",
-                "probe_repair_acquirer_exchange_failure stage=stdin\n",
-                "probe_repair_acquirer_exchange_failure stage=wait\n",
-                "probe_repair_acquirer_exchange_failure stage=child_exit exit_code=17\n",
-                "probe_repair_acquirer_exchange_failure stage=child_exit signal=9\n",
-                "probe_repair_acquirer_exchange_failure stage=stdout_contract\n",
-            )
-        );
-    }
-
-    #[test]
-    fn repair_acquirer_setuid_observation_uses_only_closed_classes() {
-        let facts = RepairAcquirerSetuidContext {
-            euid_is_root: false,
-            target_uid_class: RepairAcquirerTargetUidClass::Unknown,
-            cap_setuid_effective: RepairAcquirerClosedAvailability::Unknown,
-            seccomp_mode: RepairAcquirerSeccompMode::Unknown,
-        };
-        let (line, length) = repair_acquirer_setuid_context_line(facts);
-
-        assert_eq!(
-            std::str::from_utf8(&line[..length]).unwrap(),
-            "probe_repair_pre_exec_setuid_context euid_root=nonroot target_uid_class=unknown cap_setuid_effective=unknown seccomp_mode=unknown\n"
-        );
-
-        let known_facts = RepairAcquirerSetuidContext {
-            euid_is_root: true,
-            target_uid_class: RepairAcquirerTargetUidClass::RealOrSaved,
-            cap_setuid_effective: RepairAcquirerClosedAvailability::Present,
-            seccomp_mode: RepairAcquirerSeccompMode::Filter,
-        };
-        let (line, length) = repair_acquirer_setuid_context_line(known_facts);
-        assert_eq!(
-            std::str::from_utf8(&line[..length]).unwrap(),
-            "probe_repair_pre_exec_setuid_context euid_root=root target_uid_class=real_or_saved cap_setuid_effective=present seccomp_mode=2\n"
-        );
-    }
-
-    #[test]
-    fn repair_acquirer_setuid_context_classifies_only_the_approved_uid_relations() {
-        assert!(matches!(
-            repair_acquirer_target_uid_class(0, 10, 20),
-            RepairAcquirerTargetUidClass::Root
-        ));
-        assert!(matches!(
-            repair_acquirer_target_uid_class(10, 10, 20),
-            RepairAcquirerTargetUidClass::RealOrSaved
-        ));
-        assert!(matches!(
-            repair_acquirer_target_uid_class(20, 10, 20),
-            RepairAcquirerTargetUidClass::RealOrSaved
-        ));
-        assert!(matches!(
-            repair_acquirer_target_uid_class(30, 10, 20),
-            RepairAcquirerTargetUidClass::Other
-        ));
-        assert!(matches!(
-            RepairAcquirerSeccompMode::from_raw(0),
-            RepairAcquirerSeccompMode::Disabled
-        ));
-        assert!(matches!(
-            RepairAcquirerSeccompMode::from_raw(1),
-            RepairAcquirerSeccompMode::Strict
-        ));
-        assert!(matches!(
-            RepairAcquirerSeccompMode::from_raw(2),
-            RepairAcquirerSeccompMode::Filter
-        ));
-        assert!(matches!(
-            RepairAcquirerSeccompMode::from_raw(-1),
-            RepairAcquirerSeccompMode::Unknown
-        ));
     }
 
     #[test]
