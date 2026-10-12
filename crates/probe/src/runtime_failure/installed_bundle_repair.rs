@@ -421,7 +421,7 @@ pub(super) fn installed_bundle_failure_is_current_at(
     ) {
         return true;
     }
-    let Ok((epoch, _)) = current_epoch_at(root, expected_uid) else {
+    let Ok((epoch, _, _)) = current_epoch_at(root, expected_uid) else {
         return false;
     };
     valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result).is_ok()
@@ -491,7 +491,7 @@ fn repair_generation_is_still_terminal(
     if intent.state.is_forward_only() {
         return Ok(intent.authority.generation == intent.signed_evidence.evidence.generation);
     }
-    if let Ok((epoch, _)) = current_epoch_at(root, expected_uid) {
+    if let Ok((epoch, _, _)) = current_epoch_at(root, expected_uid) {
         return Ok(intent.authority.generation == epoch.generation);
     }
     if intent.state != InstalledBundleRepairProgress::TemporaryRuntimeHealthy {
@@ -546,7 +546,7 @@ pub(super) fn invalidate_installed_bundle_failure_at(
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
     let generation_matches = if epoch_path.exists() {
         current_epoch_at(root, expected_uid)
-            .map(|(epoch, _)| epoch.generation == authority.generation)
+            .map(|(epoch, _, _)| epoch.generation == authority.generation)
             .unwrap_or(false)
     } else {
         intent.state.is_forward_only()
