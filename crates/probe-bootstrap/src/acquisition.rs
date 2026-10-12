@@ -2085,6 +2085,11 @@ mod tests {
 
     #[test]
     fn failed_upgrade_repair_authorization_uses_the_hub_origin_path() {
+        if run_repair_authorization_test_as_nonroot_if_root(
+            "acquisition::tests::failed_upgrade_repair_authorization_uses_the_hub_origin_path",
+        ) {
+            return;
+        }
         const OPERATION_ID: &str = "operation_01";
         const EXPECTED_TARGET: &str = "/api/probe/operations/operation_01/repair-authorize";
         let (hub_origin, server) =
@@ -2126,6 +2131,11 @@ mod tests {
 
     #[test]
     fn installed_bundle_repair_authorization_uses_the_hub_origin_path() {
+        if run_repair_authorization_test_as_nonroot_if_root(
+            "acquisition::tests::installed_bundle_repair_authorization_uses_the_hub_origin_path",
+        ) {
+            return;
+        }
         const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         const EXPECTED_TARGET: &str = "/api/probe/runtime-failures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/repair-authorize";
         const MANUAL_REINSTALL_RESPONSE: &[u8] = br#"{"disposition":"manual_reinstall_required"}"#;
@@ -2166,6 +2176,33 @@ mod tests {
             result,
             Err(AcquisitionFailure::ManualReinstallRequired)
         ));
+    }
+
+    fn run_repair_authorization_test_as_nonroot_if_root(test_name: &str) -> bool {
+        if unsafe { libc::geteuid() } != 0 {
+            return false;
+        }
+
+        use std::{os::unix::process::CommandExt, process::Command};
+
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command.arg("--exact").arg(test_name);
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setgroups(0, std::ptr::null()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setgid(65_534) != 0 || libc::setuid(65_534) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let status = command
+            .status()
+            .expect("run loopback test as an unprivileged identity");
+        assert!(status.success(), "child test failed: {test_name}");
+        true
     }
 
     fn start_repair_authorization_server(
