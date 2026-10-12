@@ -3302,6 +3302,10 @@ mod tests {
         assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
+        assert!(lifecycle.contains("\nAmbientCapabilities=CAP_SETUID\n"));
+        assert_eq!(lifecycle.matches("AmbientCapabilities=").count(), 2);
+        let lifecycle_upgrade = lifecycle_upgrade_unit();
+        assert!(!lifecycle_upgrade.contains("AmbientCapabilities=CAP_SETUID\n"));
         let lifecycle_socket = lifecycle_companion_socket_unit();
         assert!(lifecycle_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(lifecycle_socket.contains("Accept=yes"));
