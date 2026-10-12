@@ -99,6 +99,7 @@ async function createEnrollmentToken(
 async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
+  probeVersion = "0.1.0",
 ) {
   const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
@@ -118,7 +119,7 @@ async function registerProbe(
               kernel: "6.8.0",
               memoryTotalBytes: 2_147_483_648,
               os: "linux",
-              probeVersion: "0.1.0",
+              probeVersion,
             },
           },
         ],
@@ -4457,7 +4458,7 @@ describe("Probe report API", () => {
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
+    const registration = await registerProbe(app, enrollmentToken, "v0.1.0");
     const host = database.sqlite
       .prepare("select id from managed_hosts where probe_id = ?")
       .get(registration.probeId) as { id: number };

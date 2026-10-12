@@ -240,9 +240,10 @@ fn plan_committed_replacement_cleanup_with_commit_custody<'a>(
         validate_owned_bootstrap_role_for_recovery(
             install_metadata.bootstrap_activator_path.as_deref(),
         )?;
-        validate_owned_bootstrap_state_with_commit_custody(
+        validate_owned_bootstrap_state_with_commit_custody_and_layout_version(
             install_metadata.bootstrap_state_dir.as_deref(),
             commit_custody.as_ref(),
+            install_metadata.bundle_version.as_deref(),
         )?;
     }
     plan.authorized_commit_fact = commit_custody;
@@ -307,7 +308,10 @@ pub(super) fn validate_owned_bootstrap_assets_for_cleanup(
     if matches!(metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role(metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role(metadata.bootstrap_activator_path.as_deref())?;
-        validate_owned_bootstrap_state(metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state_with_layout_version(
+            metadata.bootstrap_state_dir.as_deref(),
+            metadata.bundle_version.as_deref(),
+        )?;
     }
     Ok(())
 }
@@ -318,7 +322,10 @@ pub(super) fn validate_owned_bootstrap_assets_for_recovery(
     if matches!(metadata.schema_version, 2..=5) {
         validate_owned_bootstrap_role_for_recovery(metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role_for_recovery(metadata.bootstrap_activator_path.as_deref())?;
-        validate_owned_bootstrap_state_for_recovery(metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_state_for_recovery_with_layout_version(
+            metadata.bootstrap_state_dir.as_deref(),
+            metadata.bundle_version.as_deref(),
+        )?;
     }
     Ok(())
 }
@@ -480,7 +487,10 @@ pub(super) fn remove_probe_bootstrap_state(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        remove_owned_bootstrap_state(path)?;
+        remove_owned_bootstrap_state_with_layout_version(
+            path,
+            plan.install_metadata.bundle_version.as_deref(),
+        )?;
     }
     Ok(())
 }
@@ -501,9 +511,10 @@ pub(super) fn retire_bootstrap_runtime_failure_custody(
     {
         return Ok(());
     }
-    validate_owned_bootstrap_state_with_commit_custody(
+    validate_owned_bootstrap_state_with_commit_custody_and_layout_version(
         Some(state_dir),
         plan.authorized_commit_fact.as_ref(),
+        plan.install_metadata.bundle_version.as_deref(),
     )?;
     fs::remove_dir_all(custody).map_err(ProbeUpgraderRunError::Io)
 }
@@ -1058,15 +1069,25 @@ pub(super) fn validate_owned_bootstrap_role_for_recovery(
     validate_owned_bootstrap_role(path)
 }
 
+#[cfg(test)]
 pub(super) fn validate_owned_bootstrap_state(
     path: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
     validate_owned_bootstrap_state_with_commit_custody(path, None)
 }
 
+#[cfg(test)]
 fn validate_owned_bootstrap_state_with_commit_custody(
     path: Option<&Path>,
     commit: Option<&AuthorizedReplacementCommitFact>,
+) -> Result<(), ProbeUpgraderRunError> {
+    validate_owned_bootstrap_state_with_commit_custody_and_layout_version(path, commit, None)
+}
+
+fn validate_owned_bootstrap_state_with_commit_custody_and_layout_version(
+    path: Option<&Path>,
+    commit: Option<&AuthorizedReplacementCommitFact>,
+    current_layout_version: Option<&str>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
         "schema v2 metadata is missing Probe Bootstrap ownership",
@@ -1120,6 +1141,30 @@ fn validate_owned_bootstrap_state_with_commit_custody(
                     validate_owned_bootstrap_regular(&failure.path(), 0o600)?;
                 }
             }
+            // Bootstrap 在 fresh install 成功提交时持久化当前候选布局；Replacement finalizer
+            // 继续依赖它证明候选布局完整。只在可信安装 metadata 提供的版本逐字节匹配时
+            // 接纳，卸载最终退休整个 Bootstrap state；无可信版本或任何差异仍失败关闭。
+            Some("current-layout") => {
+                let Some(version) = current_layout_version else {
+                    return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "Probe Bootstrap state contains an unexpected entry",
+                    ));
+                };
+                let receipt_path = entry.path();
+                validate_owned_bootstrap_regular(&receipt_path, 0o600)?;
+                let expected = format!("schema_version=1\nversion={version}\n");
+                let metadata =
+                    fs::symlink_metadata(&receipt_path).map_err(ProbeUpgraderRunError::Io)?;
+                if metadata.mode() & 0o7777 != 0o600
+                    || metadata.len() != expected.len() as u64
+                    || fs::read(&receipt_path).map_err(ProbeUpgraderRunError::Io)?
+                        != expected.as_bytes()
+                {
+                    return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "candidate layout receipt does not match trusted install version",
+                    ));
+                }
+            }
             // committed Replacement 在源清理之前 durable 写入的提交事实。只有当前源阶段
             // 授权的那一份绑定才是本次替换的恢复凭据；同名但未绑定、位于别处或没有授权
             // （普通卸载与恢复）时，仍按未知对象失败关闭。绑定校验直接复用生产文件存储的
@@ -1152,15 +1197,27 @@ fn validate_owned_bootstrap_state_with_commit_custody(
     Ok(())
 }
 
-pub(super) fn validate_owned_bootstrap_state_for_recovery(
+fn validate_owned_bootstrap_state_for_recovery_with_layout_version(
     path: Option<&Path>,
+    current_layout_version: Option<&str>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if path.is_some_and(|path| {
         fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
     }) {
         return Ok(());
     }
-    validate_owned_bootstrap_state(path)
+    validate_owned_bootstrap_state_with_layout_version(path, current_layout_version)
+}
+
+fn validate_owned_bootstrap_state_with_layout_version(
+    path: Option<&Path>,
+    current_layout_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
+    validate_owned_bootstrap_state_with_commit_custody_and_layout_version(
+        path,
+        None,
+        current_layout_version,
+    )
 }
 
 pub(super) fn validate_owned_bootstrap_directory(
@@ -1196,11 +1253,19 @@ pub(super) fn validate_owned_bootstrap_regular(
     }
     Ok(())
 }
+#[cfg(test)]
 pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    remove_owned_bootstrap_state_with_layout_version(path, None)
+}
+
+fn remove_owned_bootstrap_state_with_layout_version(
+    path: &Path,
+    current_layout_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
         return Ok(());
     }
-    validate_owned_bootstrap_state(Some(path))?;
+    validate_owned_bootstrap_state_with_layout_version(Some(path), current_layout_version)?;
     fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
 }
 
