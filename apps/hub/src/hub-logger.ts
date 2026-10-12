@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 
 import type { MiddlewareHandler } from "hono";
 
+declare module "hono" {
+  interface ContextVariableMap {
+    hubRequestId: string;
+  }
+}
+
 export type HubLogLevel = "debug" | "info" | "warn" | "error";
 
 export type HubLogEvent = {
@@ -13,6 +19,7 @@ export type HubLogEvent = {
   listener?: HubListener;
   method?: string;
   outcome?: string;
+  probeReportRejection?: HubProbeReportRejection;
   requestId?: string;
   routeId?: HubRouteId;
   status?: number;
@@ -41,7 +48,55 @@ export type HubLogEventName =
   | "process.fatal"
   | "process.shutdown.completed"
   | "process.shutdown.started"
+  | "probe.report.rejected"
   | "request.completed";
+
+const probeReportRejectionPredicates = [
+  "collector_outcome.invalid",
+  "enrollment.invalid_report_reference",
+  "enrollment.produced_profile_missing",
+  "enrollment.startup_profile_missing",
+  "enrollment.startup_reference_mismatch",
+  "envelope.cpu_outcome_coverage",
+  "envelope.cpu_outcome_invalid",
+  "envelope.empty_window_without_evidence",
+  "envelope.sample_cpu_non_finite",
+  "envelope.sample_count_mismatch",
+  "envelope.sample_duplicate",
+  "envelope.sample_sequence_gap",
+  "envelope.sample_sequence_out_of_bounds",
+  "envelope.sample_time_invalid",
+  "envelope.sequence_bounds",
+  "envelope.unknown_window_failure",
+  "envelope.window_failure_with_cpu_outcomes",
+  "envelope.window_failure_with_samples",
+  "host_profile.hash_mismatch",
+  "host_profile.outcome_bundle_version_absent",
+  "host_profile.outcome_failed_with_snapshot",
+  "host_profile.outcome_multiple_for_sample",
+  "host_profile.outcome_outside_first_sample",
+  "host_profile.outcome_snapshot_count_invalid",
+  "host_profile.outcome_snapshot_hash_absent",
+  "host_profile.outcome_state_invalid",
+  "host_profile.outcome_success_with_failure",
+  "protobuf.decode_failed",
+  "responsibility.invalid_snapshot_replay_shape",
+  "responsibility.invalid_snapshot_shape",
+  "responsibility.invalid_startup_shape",
+  "responsibility.snapshot_hash_absent",
+  "snapshot.payload_collector_mismatch",
+  "snapshot_replay.fulfillment_failed",
+  "snapshot_replay.hash_absent",
+  "snapshot_replay.receipt_not_fulfilled",
+  "snapshot_replay.sequence_not_accepted",
+] as const;
+
+export type HubProbeReportRejectionPredicate =
+  (typeof probeReportRejectionPredicates)[number];
+export type HubProbeReportRejection = {
+  predicate: HubProbeReportRejectionPredicate;
+  [field: string]: string | number | boolean | null | undefined;
+};
 
 export type HubRouteId =
   | "health"
@@ -94,7 +149,63 @@ const eventNames = new Set<HubLogEventName>([
   "process.fatal",
   "process.shutdown.completed",
   "process.shutdown.started",
+  "probe.report.rejected",
   "request.completed",
+]);
+const probeReportRejectionPredicateSet = new Set<string>(
+  probeReportRejectionPredicates,
+);
+const probeReportRejectionNumberFields = new Set([
+  "collectedAtMs",
+  "collectorFailurePhase",
+  "collectorLegacyFailureCode",
+  "collectorState",
+  "cpuOutcomeCount",
+  "cpuOutcomeReason",
+  "cpuOutcomeSequence",
+  "enrollmentHostId",
+  "failureReason",
+  "hostProfileOutcomeCount",
+  "hostProfileOutcomeSampleIndex",
+  "hostProfileOutcomeState",
+  "hostId",
+  "metricsCount",
+  "missingSequence",
+  "operationAcknowledgementCount",
+  "operationStatusCount",
+  "requestBytes",
+  "sampleCount",
+  "sampleIndex",
+  "sampleSequence",
+  "snapshotCount",
+  "sequenceCount",
+  "sequenceEnd",
+  "sequenceStart",
+]);
+const probeReportRejectionBooleanFields = new Set([
+  "bootIdPresent",
+  "collectorLegacyFailureCodeMatches",
+  "collectorOutcomeDuplicate",
+  "enrollmentFound",
+  "legacyFailureCodeMatches",
+  "observationWindowFailurePresent",
+  "outcomeFailurePresent",
+  "payloadPresent",
+  "probeAssetBundleVersionPresent",
+  "probeConfigurationErrorPresent",
+  "probeConfigurationVersionPresent",
+  "snapshotAlreadyStored",
+  "snapshotHashPresent",
+  "snapshotSequenceAccepted",
+]);
+const probeReportRejectionStringFields = new Set([
+  "canonicalHash",
+  "collectorFailureCode",
+  "collectorId",
+  "enrollmentId",
+  "reportedEnrollmentId",
+  "resolvedEnrollmentId",
+  "snapshotHash",
 ]);
 const routeIds = new Set<HubRouteId>([
   "health",
@@ -270,6 +381,7 @@ export function createHubRequestLoggingMiddleware(options: {
       component,
       requestId: generatedRequestId,
     });
+    context.set("hubRequestId", generatedRequestId);
 
     try {
       await next();
@@ -467,8 +579,90 @@ function sanitizeHubLogEvent(event: HubLogEvent): HubLogEvent {
   }
   if (event.status !== undefined)
     sanitized.status = boundedStatus(event.status);
+  if (event.probeReportRejection !== undefined) {
+    const probeReportRejection = sanitizeProbeReportRejection(
+      event.probeReportRejection,
+    );
+    if (probeReportRejection) {
+      sanitized.probeReportRejection = probeReportRejection;
+    }
+  }
 
   return sanitized;
+}
+
+function sanitizeProbeReportRejection(
+  value: HubProbeReportRejection,
+): HubProbeReportRejection | undefined {
+  if (!probeReportRejectionPredicateSet.has(value.predicate)) return undefined;
+
+  const sanitized: Record<string, unknown> = { predicate: value.predicate };
+  for (const field of probeReportRejectionNumberFields) {
+    const candidate = value[field];
+    if (typeof candidate === "number") {
+      sanitized[field] = boundedReportNumber(candidate);
+    }
+  }
+  for (const field of probeReportRejectionBooleanFields) {
+    const candidate = value[field];
+    if (typeof candidate === "boolean") sanitized[field] = candidate;
+  }
+  for (const field of probeReportRejectionStringFields) {
+    const candidate = value[field];
+    if (typeof candidate !== "string") continue;
+    const bounded = boundedProbeReportString(field, candidate);
+    if (bounded !== undefined) sanitized[field] = bounded;
+  }
+  if (
+    typeof value.enrollmentStatus === "string" &&
+    ["expired", "pending", "ready", "rejected", "verifying"].includes(
+      value.enrollmentStatus,
+    )
+  ) {
+    sanitized.enrollmentStatus = value.enrollmentStatus;
+  }
+  if (
+    typeof value.enrollmentTargetKind === "string" &&
+    ["existing_host", "manual_reinstall", "new_host"].includes(
+      value.enrollmentTargetKind,
+    )
+  ) {
+    sanitized.enrollmentTargetKind = value.enrollmentTargetKind;
+  }
+  if (
+    value.snapshotReplayStatus === null ||
+    (typeof value.snapshotReplayStatus === "string" &&
+      ["fulfilled", "pending"].includes(value.snapshotReplayStatus))
+  ) {
+    sanitized.snapshotReplayStatus = value.snapshotReplayStatus;
+  }
+
+  return sanitized as HubProbeReportRejection;
+}
+
+function boundedReportNumber(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(
+    -Number.MAX_SAFE_INTEGER,
+    Math.min(Math.trunc(value), Number.MAX_SAFE_INTEGER),
+  );
+}
+
+function boundedProbeReportString(field: string, value: string) {
+  if (field === "canonicalHash" || field === "snapshotHash") {
+    return /^[a-fA-F0-9]{64}$/.test(value) ? value.toLowerCase() : undefined;
+  }
+  if (field === "collectorFailureCode") {
+    return /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+){1,8}$/.test(value)
+      ? value.slice(0, 96)
+      : undefined;
+  }
+  if (field === "collectorId") {
+    return /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+){0,5}$/.test(value)
+      ? value.slice(0, 64)
+      : undefined;
+  }
+  return /^[A-Za-z0-9_-]{1,96}$/.test(value) ? value : undefined;
 }
 
 function requestLogLevel(
