@@ -515,11 +515,19 @@ function collectWebSocketJson(
   return new Promise<unknown[]>((resolve, reject) => {
     const messages: unknown[] = [];
     let quietTimer: NodeJS.Timeout | null = null;
+    let timeout: NodeJS.Timeout | null = null;
+    let settled = false;
     let actionCompleted = options.waitForAction === undefined;
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error("Timed out waiting for WebSocket messages."));
-    }, timeoutMs);
+    const startTimeout = () => {
+      if (settled) {
+        return;
+      }
+
+      timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out waiting for WebSocket messages."));
+      }, timeoutMs);
+    };
     const finishAfterQuiet = () => {
       if (quietTimer) {
         clearTimeout(quietTimer);
@@ -546,7 +554,10 @@ function collectWebSocketJson(
       reject(error);
     };
     const cleanup = () => {
-      clearTimeout(timeout);
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
       if (quietTimer) {
         clearTimeout(quietTimer);
       }
@@ -563,12 +574,15 @@ function collectWebSocketJson(
         .then(
           () => {
             actionCompleted = true;
+            startTimeout();
           },
           (error: unknown) => {
             cleanup();
             reject(error);
           },
         );
+    } else {
+      startTimeout();
     }
   });
 }
