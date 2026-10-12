@@ -264,7 +264,14 @@ export type ProbeUpgradeAllResponse = {
 };
 
 export type ProbeOperationResponse = {
-  probeOperation: ProbeUpgradeStatus & {
+  probeOperation: Omit<ProbeUpgradeStatus, "failure"> & {
+    failure:
+      | ProbeUpgradeStatus["failure"]
+      | {
+          code: string;
+          message: string;
+          recoveryDisposition: null;
+        };
     hostId: number;
     kind: "probe_upgrade" | "probe_repair" | "probe_uninstall";
   };
