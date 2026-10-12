@@ -1695,7 +1695,6 @@ describe("Probe report API", () => {
 
   it("keeps manual reinstall verifying until the replacement identity reports a full Host Profile", async () => {
     const database = await createTemporaryDatabase();
-    const memory = createMemoryHubLogger();
     let nowMs = 1_725_000_000_000;
     const app = createHubApp({
       auth: {
@@ -1704,7 +1703,6 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
-      logger: memory.logger,
       now: () => nowMs,
     });
     const ownerSession = await loginOwner(app);
@@ -1715,10 +1713,15 @@ describe("Probe report API", () => {
     const host = database.hosts.findByProbeId(firstRegistration.probeId);
     if (!host) throw new Error("registered Host is missing");
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const targetProbeVersion = "0.1.75";
+    const installedProbeVersion = `v${targetProbeVersion}`;
     const hostProfile = sampleHostProfileSnapshot({
-      probeAssetBundleVersion: "0.1.0",
+      probeAssetBundleVersion: installedProbeVersion,
+      probeVersion: installedProbeVersion,
     });
     const snapshotHash = hashStableHostProfile(hostProfile);
+    let probeConfigurationVersion = "default-v1";
     const send = (
       registration: {
         enrollmentId?: string;
@@ -1728,10 +1731,16 @@ describe("Probe report API", () => {
       sequence: number,
       full: boolean,
       produced: boolean,
+      options: {
+        bootId?: string;
+        hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+        probeAssetBundleVersion?: string;
+      } = {},
     ) => {
+      const reportedHostProfile = options.hostProfile ?? hostProfile;
       const body = ReportRequest.encode(
         ReportRequest.create({
-          bootId: `boot-${registration.probeId}`,
+          bootId: options.bootId ?? `boot-${registration.probeId}`,
           enrollmentId: registration.enrollmentId,
           metrics: produced
             ? [
@@ -1744,8 +1753,11 @@ describe("Probe report API", () => {
                 },
               ]
             : [],
-          probeAssetBundleVersion: sequence === 1 ? "0.1.0" : undefined,
-          probeConfigurationVersion: "default-v1",
+          probeAssetBundleVersion:
+            sequence === 1
+              ? (options.probeAssetBundleVersion ?? installedProbeVersion)
+              : undefined,
+          probeConfigurationVersion,
           probeId: registration.probeId,
           sequenceEnd: sequence,
           sequenceStart: sequence,
@@ -1755,8 +1767,8 @@ describe("Probe report API", () => {
               : [
                   {
                     collectorId: "official.host-profile",
-                    ...(full ? { hostProfile } : {}),
-                    snapshotHash,
+                    ...(full ? { hostProfile: reportedHostProfile } : {}),
+                    snapshotHash: hashStableHostProfile(reportedHostProfile),
                   },
                 ],
         }),
@@ -1793,7 +1805,7 @@ describe("Probe report API", () => {
           target_asset_set_digest, target_probe_version, status,
           managed_host_id, verification_deadline_at_ms
         ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, '0.1.0', ?, ?,
-          '0.1.0', 'verifying', ?, ?)`,
+          ?, 'verifying', ?, ?)`,
       )
       .run(
         currentRegistration.enrollmentId,
@@ -1806,16 +1818,100 @@ describe("Probe report API", () => {
         firstRegistration.probeId,
         JSON.stringify(["a".repeat(64)]),
         `sha256:${"b".repeat(64)}`,
+        targetProbeVersion,
         host.id,
         nowMs + 600_000,
       );
     expect(currentRegistration.probeId).not.toBe(firstRegistration.probeId);
+    const configurationUpdate = await app.request(
+      `/api/web/hosts/${host.id}/probe-configuration`,
+      {
+        body: JSON.stringify({
+          configuration: {
+            enabledCollectorIds: ["official.cpu"],
+            metricsCollectionIntervalSeconds: 17,
+          },
+          mode: "override",
+        }),
+        headers: {
+          "content-type": "application/json",
+          cookie: ownerSession,
+        },
+        method: "PUT",
+      },
+    );
+    expect(configurationUpdate.status).toBe(200);
+    const updatedConfiguration = (await configurationUpdate.json()) as {
+      configuration: { version: string };
+    };
+    probeConfigurationVersion = updatedConfiguration.configuration.version;
+    expect(probeConfigurationVersion).not.toBe("default-v1");
     expect(
       database.snapshotCollectors.hostProfile.hasSnapshot(
         host.id,
         snapshotHash,
       ),
     ).toBe(true);
+
+    const readManualReinstallState = () =>
+      database.sqlite
+        .prepare(
+          `select
+            (select status from enrollment_tokens where enrollment_id = ?) as status,
+            (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
+            (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
+            (select count(*) from report_observations) as observationCount,
+            (select count(*) from metric_samples) as metricCount,
+            (select count(*) from audit_log) as auditCount`,
+        )
+        .get(
+          currentRegistration.enrollmentId,
+          currentRegistration.enrollmentId,
+          host.id,
+        );
+
+    const reportVersionInNewBoot = async (version: string, bootId: string) => {
+      const profile = sampleHostProfileSnapshot({
+        probeAssetBundleVersion: version,
+        probeVersion: version,
+      });
+      const boot = await send(currentRegistration, 1, false, false, {
+        bootId,
+        hostProfile: profile,
+        probeAssetBundleVersion: version,
+      });
+      const fullProfile = await send(currentRegistration, 2, true, true, {
+        bootId,
+        hostProfile: profile,
+        probeAssetBundleVersion: version,
+      });
+
+      expect(boot.status).toBe(200);
+      expect(fullProfile.status).toBe(200);
+      expect(readManualReinstallState()).toMatchObject({
+        readyAtMs: null,
+        status: "verifying",
+      });
+    };
+
+    await reportVersionInNewBoot(
+      "0.1.74",
+      `boot-${currentRegistration.probeId}-older-version`,
+    );
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set target_probe_version = ? where enrollment_id = ?",
+      )
+      .run("not-semver", currentRegistration.enrollmentId);
+    await reportVersionInNewBoot(
+      "not-semver",
+      `boot-${currentRegistration.probeId}-invalid-version`,
+    );
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set target_probe_version = ? where enrollment_id = ?",
+      )
+      .run(targetProbeVersion, currentRegistration.enrollmentId);
     expect((await send(currentRegistration, 1, false, false)).status).toBe(200);
 
     const oldIdentityCompact = await send(firstRegistration, 3, false, true);
@@ -1865,29 +1961,7 @@ describe("Probe report API", () => {
           host.id,
         ),
     ).toEqual(beforeWrongEnrollment);
-    const readManualReinstallState = () =>
-      database.sqlite
-        .prepare(
-          `select
-            (select status from enrollment_tokens where enrollment_id = ?) as status,
-            (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
-            (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
-            (select count(*) from report_observations) as observationCount,
-            (select count(*) from metric_samples) as metricCount,
-            (select count(*) from audit_log) as auditCount`,
-        )
-        .get(
-          currentRegistration.enrollmentId,
-          currentRegistration.enrollmentId,
-          host.id,
-        );
     const beforeMissingProfile = readManualReinstallState();
-    const rejectionCountBefore = memory.events.filter(
-      (event) =>
-        event.event === "probe.report.rejected" &&
-        event.probeReportRejection?.predicate ===
-          "enrollment.produced_profile_missing",
-    ).length;
 
     const missingProfile = await send(currentRegistration, 2, false, true);
 
@@ -1896,43 +1970,36 @@ describe("Probe report API", () => {
       error: "malformed_probe_report",
     });
     expect(readManualReinstallState()).toEqual(beforeMissingProfile);
-    const profileRejections = memory.events.filter(
-      (event) =>
-        event.event === "probe.report.rejected" &&
-        event.probeReportRejection?.predicate ===
-          "enrollment.produced_profile_missing",
+    const fullProfile = await send(currentRegistration, 2, true, true);
+    const stateAfterFullProfile = readManualReinstallState();
+    const compactAfterFullProfile = await send(
+      currentRegistration,
+      3,
+      false,
+      true,
     );
-    expect(profileRejections).toHaveLength(rejectionCountBefore + 1);
-    expect(profileRejections.at(-1)).toMatchObject({
-      component: "management-listener",
-      event: "probe.report.rejected",
-      level: "info",
-      listener: "management",
-      method: "POST",
-      outcome: "malformed_probe_report",
-      status: 400,
-      probeReportRejection: {
-        enrollmentId: currentRegistration.enrollmentId,
-        enrollmentStatus: "verifying",
-        enrollmentTargetKind: "manual_reinstall",
-        predicate: "enrollment.produced_profile_missing",
-        reportedEnrollmentId: currentRegistration.enrollmentId,
-      },
-    });
 
-    expect((await send(currentRegistration, 2, true, true)).status).toBe(200);
-    expect(readManualReinstallState()).toMatchObject({
-      status: "ready",
+    expect({
+      fullProfileStatus: fullProfile.status,
+      enrollmentStatusAfterFullProfile: stateAfterFullProfile?.status,
+      compactReportStatus: compactAfterFullProfile.status,
+    }).toEqual({
+      fullProfileStatus: 200,
+      enrollmentStatusAfterFullProfile: "ready",
+      compactReportStatus: 200,
     });
-    expect(
-      memory.events.filter(
-        (event) =>
-          event.event === "probe.report.rejected" &&
-          event.probeReportRejection?.predicate ===
-            "enrollment.produced_profile_missing",
-      ),
-    ).toHaveLength(rejectionCountBefore + 1);
-    expect((await send(currentRegistration, 3, false, true)).status).toBe(200);
+    const fullProfileResponse = ReportResponse.decode(
+      new Uint8Array(await fullProfile.arrayBuffer()),
+    );
+    const compactResponse = ReportResponse.decode(
+      new Uint8Array(await compactAfterFullProfile.arrayBuffer()),
+    );
+    expect(fullProfileResponse.currentProbeConfigurationVersion).toBe(
+      probeConfigurationVersion,
+    );
+    expect(compactResponse.currentProbeConfigurationVersion).toBe(
+      probeConfigurationVersion,
+    );
 
     database.close();
   });
