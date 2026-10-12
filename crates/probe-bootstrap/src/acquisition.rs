@@ -37,112 +37,11 @@ use crate::{
 
 const MAX_REPAIR_EXCHANGE_BYTES: u64 = 8 * 1024;
 
-// 票 05 临时观察：取得正式 Fresh 分类并完成因果重放后删除。
-#[derive(Clone, Copy)]
-enum RepairAcquisitionFailureStage {
-    Request,
-    Transport,
-    HttpStatus,
-    SuccessResponse,
-    StageAcquisition,
-    ResponseEncoding,
-}
-
-impl RepairAcquisitionFailureStage {
-    fn code(self) -> &'static str {
-        match self {
-            Self::Request => "request",
-            Self::Transport => "transport",
-            Self::HttpStatus => "http_status",
-            Self::SuccessResponse => "success_response",
-            Self::StageAcquisition => "stage_acquisition",
-            Self::ResponseEncoding => "response_encoding",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RepairAcquisitionFailureObservation {
-    stage: RepairAcquisitionFailureStage,
-    http_status: Option<u16>,
-    transport_kind: Option<&'static str>,
-}
-
-impl RepairAcquisitionFailureObservation {
-    const fn request() -> Self {
-        Self {
-            stage: RepairAcquisitionFailureStage::Request,
-            http_status: None,
-            transport_kind: None,
-        }
-    }
-
-    fn write(self, output: &mut impl Write) {
-        if let Some(status) = self.http_status {
-            let _ = writeln!(
-                output,
-                "probe_repair_acquisition_failure stage={} http_status={status}",
-                self.stage.code()
-            );
-        } else if let Some(kind) = self.transport_kind {
-            let _ = writeln!(
-                output,
-                "probe_repair_acquisition_failure stage={} transport_kind={kind}",
-                self.stage.code()
-            );
-        } else {
-            let _ = writeln!(
-                output,
-                "probe_repair_acquisition_failure stage={}",
-                self.stage.code()
-            );
-        }
-    }
-}
-
-fn repair_transport_error_kind(kind: ureq::ErrorKind) -> &'static str {
-    match kind {
-        ureq::ErrorKind::InvalidUrl => "invalid_url",
-        ureq::ErrorKind::UnknownScheme => "unknown_scheme",
-        ureq::ErrorKind::Dns => "dns",
-        ureq::ErrorKind::InsecureRequestHttpsOnly => "insecure_request_https_only",
-        ureq::ErrorKind::ConnectionFailed => "connection_failed",
-        ureq::ErrorKind::TooManyRedirects => "too_many_redirects",
-        ureq::ErrorKind::BadStatus => "bad_status",
-        ureq::ErrorKind::BadHeader => "bad_header",
-        ureq::ErrorKind::Io => "io",
-        ureq::ErrorKind::InvalidProxyUrl => "invalid_proxy_url",
-        ureq::ErrorKind::ProxyConnect => "proxy_connect",
-        ureq::ErrorKind::ProxyUnauthorized => "proxy_unauthorized",
-        ureq::ErrorKind::HTTP => "http",
-    }
-}
-
 /// Exchanges a fresh root-signed Repair Evidence bearer for one short-lived
 /// Repair Authority. The unprivileged acquirer never receives installation
 /// keys or the long-lived Probe identity credential.
 pub fn acquire_probe_repair_authority_once(
     request_body: &[u8],
-) -> Result<Vec<u8>, AcquisitionFailure> {
-    let mut diagnostic_output = io::stderr().lock();
-    acquire_probe_repair_authority_once_with_diagnostic_writer(request_body, &mut diagnostic_output)
-}
-
-fn acquire_probe_repair_authority_once_with_diagnostic_writer(
-    request_body: &[u8],
-    diagnostic_output: &mut impl Write,
-) -> Result<Vec<u8>, AcquisitionFailure> {
-    let mut observation = RepairAcquisitionFailureObservation::request();
-    let result = acquire_probe_repair_authority_once_inner(request_body, &mut observation);
-    if result.is_err() {
-        observation.write(diagnostic_output);
-    }
-    result
-}
-
-fn acquire_probe_repair_authority_once_inner(
-    request_body: &[u8],
-    observation: &mut RepairAcquisitionFailureObservation,
 ) -> Result<Vec<u8>, AcquisitionFailure> {
     if unsafe { libc::geteuid() } == 0 || request_body.is_empty() || request_body.len() > 8 * 1024 {
         return Err(AcquisitionFailure::RootRefused);
@@ -196,7 +95,6 @@ fn acquire_probe_repair_authority_once_inner(
             (url.to_string(), Some(envelope.evidence))
         }
     };
-    observation.stage = RepairAcquisitionFailureStage::Transport;
     let response = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
@@ -208,13 +106,8 @@ fn acquire_probe_repair_authority_once_inner(
         .set("content-type", "application/json")
         .send_bytes(request_body);
     let response = match response {
-        Ok(response) => {
-            observation.stage = RepairAcquisitionFailureStage::SuccessResponse;
-            response
-        }
+        Ok(response) => response,
         Err(ureq::Error::Status(status, response)) => {
-            observation.stage = RepairAcquisitionFailureStage::HttpStatus;
-            observation.http_status = Some(status);
             let retry_after_ms = response
                 .header("retry-after")
                 .and_then(|value| value.parse::<u64>().ok())
@@ -234,8 +127,7 @@ fn acquire_probe_repair_authority_once_inner(
                 retry_after_ms,
             ));
         }
-        Err(ureq::Error::Transport(error)) => {
-            observation.transport_kind = Some(repair_transport_error_kind(error.kind()));
+        Err(ureq::Error::Transport(_)) => {
             return Err(AcquisitionFailure::Temporary {
                 retry_after_ms: None,
             });
@@ -278,14 +170,12 @@ fn acquire_probe_repair_authority_once_inner(
     {
         return Err(AcquisitionFailure::Permanent);
     }
-    observation.stage = RepairAcquisitionFailureStage::StageAcquisition;
     let stage_receipt = acquire_probe_upgrade_once(ProbeUpgradeAcquisition {
         hub_origin: evidence.hub_origin,
         operation_id: exchange.authority.repair_operation_id.clone(),
         target_asset_set_digest: exchange.target_asset_set_digest,
         target_version: evidence.bundle_version,
     })?;
-    observation.stage = RepairAcquisitionFailureStage::ResponseEncoding;
     serde_json::to_vec(&InstalledAcquisition {
         authority: exchange.authority,
         signature: exchange.signature,
@@ -2343,58 +2233,5 @@ mod tests {
         });
 
         (origin, server)
-    }
-
-    #[test]
-    fn repair_acquisition_failure_observation_is_bounded_to_its_static_stage() {
-        let mut diagnostics = Vec::new();
-
-        assert!(
-            acquire_probe_repair_authority_once_with_diagnostic_writer(b"", &mut diagnostics,)
-                .is_err()
-        );
-
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            "probe_repair_acquisition_failure stage=request\n"
-        );
-    }
-
-    #[test]
-    fn repair_transport_observation_uses_only_closed_ureq_kinds() {
-        let cases = [
-            (ureq::ErrorKind::InvalidUrl, "invalid_url"),
-            (ureq::ErrorKind::UnknownScheme, "unknown_scheme"),
-            (ureq::ErrorKind::Dns, "dns"),
-            (
-                ureq::ErrorKind::InsecureRequestHttpsOnly,
-                "insecure_request_https_only",
-            ),
-            (ureq::ErrorKind::ConnectionFailed, "connection_failed"),
-            (ureq::ErrorKind::TooManyRedirects, "too_many_redirects"),
-            (ureq::ErrorKind::BadStatus, "bad_status"),
-            (ureq::ErrorKind::BadHeader, "bad_header"),
-            (ureq::ErrorKind::Io, "io"),
-            (ureq::ErrorKind::InvalidProxyUrl, "invalid_proxy_url"),
-            (ureq::ErrorKind::ProxyConnect, "proxy_connect"),
-            (ureq::ErrorKind::ProxyUnauthorized, "proxy_unauthorized"),
-            (ureq::ErrorKind::HTTP, "http"),
-        ];
-
-        for (kind, expected) in cases {
-            assert_eq!(repair_transport_error_kind(kind), expected);
-        }
-
-        let observation = RepairAcquisitionFailureObservation {
-            stage: RepairAcquisitionFailureStage::Transport,
-            http_status: None,
-            transport_kind: Some("io"),
-        };
-        let mut diagnostics = Vec::new();
-        observation.write(&mut diagnostics);
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            "probe_repair_acquisition_failure stage=transport transport_kind=io\n"
-        );
     }
 }
