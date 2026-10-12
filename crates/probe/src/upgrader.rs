@@ -1583,19 +1583,70 @@ fn configure_repair_acquirer_privileges(command: &mut Command, uid: u32, gid: u3
     unsafe {
         command.pre_exec(move || {
             if libc::setgroups(0, std::ptr::null()) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(observe_repair_acquirer_pre_exec_failure(
+                    RepairAcquirerPreExecFailure::Groups,
+                    std::io::Error::last_os_error(),
+                ));
             }
             if libc::setgid(gid) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(observe_repair_acquirer_pre_exec_failure(
+                    RepairAcquirerPreExecFailure::Gid,
+                    std::io::Error::last_os_error(),
+                ));
             }
             if libc::setuid(uid) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(observe_repair_acquirer_pre_exec_failure(
+                    RepairAcquirerPreExecFailure::Uid,
+                    std::io::Error::last_os_error(),
+                ));
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
+                return Err(observe_repair_acquirer_pre_exec_failure(
+                    RepairAcquirerPreExecFailure::NoNewPrivileges,
+                    std::io::Error::last_os_error(),
+                ));
             }
+            observe_repair_acquirer_pre_exec_complete();
             Ok(())
         });
+    }
+}
+
+// 票 05 临时观察：只用于判定正式 Fresh spawn errno 所在的既有 pre_exec 边界。
+#[derive(Clone, Copy)]
+enum RepairAcquirerPreExecFailure {
+    Groups,
+    Gid,
+    Uid,
+    NoNewPrivileges,
+}
+
+impl RepairAcquirerPreExecFailure {
+    fn marker(self) -> &'static [u8] {
+        match self {
+            Self::Groups => b"probe_repair_pre_exec_failure=setgroups\n",
+            Self::Gid => b"probe_repair_pre_exec_failure=setgid\n",
+            Self::Uid => b"probe_repair_pre_exec_failure=setuid\n",
+            Self::NoNewPrivileges => b"probe_repair_pre_exec_failure=prctl_no_new_privs\n",
+        }
+    }
+}
+
+fn observe_repair_acquirer_pre_exec_failure(
+    stage: RepairAcquirerPreExecFailure,
+    error: std::io::Error,
+) -> std::io::Error {
+    let marker = stage.marker();
+    unsafe {
+        libc::write(libc::STDERR_FILENO, marker.as_ptr().cast(), marker.len());
+    }
+    error
+}
+
+fn observe_repair_acquirer_pre_exec_complete() {
+    const MARKER: &[u8] = b"probe_repair_pre_exec=complete\n";
+    unsafe {
+        libc::write(libc::STDERR_FILENO, MARKER.as_ptr().cast(), MARKER.len());
     }
 }
 

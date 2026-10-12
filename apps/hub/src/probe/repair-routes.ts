@@ -35,6 +35,14 @@ import {
 
 const maxProbeOperationPayloadBytes = 16 * 1024;
 const probeRepairAuthorityTtlMs = 60 * 1000;
+// 票 05 临时观察：在真实 Fresh 拒绝分类完成后随因果重放删除。
+type InstalledBundleRepairRejectionGate =
+  | "envelope"
+  | "host_boundary"
+  | "evidence_bindings"
+  | "asset_transition"
+  | "repair_operation"
+  | "authority_decision";
 
 export type ProbeRepairAuthorizationRouteServices = {
   enrollments: EnrollmentRepository;
@@ -118,6 +126,12 @@ export function createProbeRepairAuthorizationRoutes(
   routes.post(
     "/runtime-failures/:generation/repair-authorize",
     async (context) => {
+      const rejectInstalledBundleRepair = (
+        gate: InstalledBundleRepairRejectionGate,
+      ) => {
+        console.info(`probe_repair_rejection_gate=${gate}`);
+        return manualReinstallRequired(context);
+      };
       const limited = anonymousLimit(context);
       if (limited) return limited;
       const requestBody = await readCappedRequestBody(
@@ -136,8 +150,14 @@ export function createProbeRepairAuthorizationRoutes(
         !host ||
         !host.probeVersion ||
         generation !== body.evidence.generation
-      )
-        return manualReinstallRequired(context);
+      ) {
+        const gate: InstalledBundleRepairRejectionGate = !body
+          ? "envelope"
+          : !boundary || !host || !host.probeVersion
+            ? "host_boundary"
+            : "evidence_bindings";
+        return rejectInstalledBundleRepair(gate);
+      }
 
       const { hubOrigin, installKey } = boundary;
       const operationNowMs = now();
@@ -151,12 +171,12 @@ export function createProbeRepairAuthorizationRoutes(
         installKey,
         nowMs: operationNowMs,
       });
-      if (!verified) return manualReinstallRequired(context);
+      if (!verified) return rejectInstalledBundleRepair("evidence_bindings");
       if (
         !services.probeAssetDir ||
         !services.probeDistributionRootPublicKeyPem
       )
-        return manualReinstallRequired(context);
+        return rejectInstalledBundleRepair("asset_transition");
 
       const release = await readProbeReleaseContextFromDirectory({
         assetDir: services.probeAssetDir,
@@ -174,7 +194,7 @@ export function createProbeRepairAuthorizationRoutes(
             bundle.bundleManifestSha256 === body.evidence.manifestSha256,
         )
       )
-        return manualReinstallRequired(context);
+        return rejectInstalledBundleRepair("asset_transition");
 
       const hostLimited = verifiedHostLimit(host.id);
       if (hostLimited) return hostLimited;
@@ -207,7 +227,7 @@ export function createProbeRepairAuthorizationRoutes(
         !repair.repairAuthorityExpiresAtMs ||
         repair.repairAuthorityExpiresAtMs <= operationNowMs
       )
-        return manualReinstallRequired(context);
+        return rejectInstalledBundleRepair("repair_operation");
 
       const decision = authorizeInstalledBundleRepair({
         authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,
@@ -223,8 +243,10 @@ export function createProbeRepairAuthorizationRoutes(
         repairOperationId: String(repair.id),
         targetAssetSetDigest,
       });
-      if (decision.disposition !== "probe_repair")
+      if (decision.disposition !== "probe_repair") {
+        console.info("probe_repair_rejection_gate=authority_decision");
         return context.json(decision, 409, { "cache-control": "no-store" });
+      }
       return context.json(
         {
           authority: decision.authority,
