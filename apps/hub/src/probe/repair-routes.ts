@@ -6,6 +6,7 @@ import { Hono, type Context } from "hono";
 import type { EnrollmentRepository } from "../database/enrollments.js";
 import type { HostRepository } from "../database/hosts.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import type { HubRepairGate } from "../hub-logger.js";
 import type { TrustedProxyCidr } from "../network.js";
 import { deriveLifecycleAuthorityKey } from "./lifecycle-authority.js";
 import {
@@ -35,15 +36,6 @@ import {
 
 const maxProbeOperationPayloadBytes = 16 * 1024;
 const probeRepairAuthorityTtlMs = 60 * 1000;
-// 票 05 临时观察：在真实 Fresh 拒绝分类完成后随因果重放删除。
-type InstalledBundleRepairRejectionGate =
-  | "envelope"
-  | "host_boundary"
-  | "evidence_bindings"
-  | "asset_transition"
-  | "repair_operation"
-  | "authority_decision";
-
 export type ProbeRepairAuthorizationRouteServices = {
   enrollments: EnrollmentRepository;
   hosts: HostRepository;
@@ -126,10 +118,15 @@ export function createProbeRepairAuthorizationRoutes(
   routes.post(
     "/runtime-failures/:generation/repair-authorize",
     async (context) => {
-      const rejectInstalledBundleRepair = (
-        gate: InstalledBundleRepairRejectionGate,
-      ) => {
-        console.info(`probe_repair_rejection_gate=${gate}`);
+      const rejectInstalledBundleRepair = (gate: HubRepairGate) => {
+        context.get("hubLogger").log({
+          event: "probe.repair.rejected",
+          level: "info",
+          method: "POST",
+          repairGate: gate,
+          routeId: "probe_repair_authorize",
+          status: 409,
+        });
         return manualReinstallRequired(context);
       };
       const limited = anonymousLimit(context);
@@ -151,7 +148,7 @@ export function createProbeRepairAuthorizationRoutes(
         !host.probeVersion ||
         generation !== body.evidence.generation
       ) {
-        const gate: InstalledBundleRepairRejectionGate = !body
+        const gate: HubRepairGate = !body
           ? "envelope"
           : !boundary || !host || !host.probeVersion
             ? "host_boundary"
@@ -244,7 +241,14 @@ export function createProbeRepairAuthorizationRoutes(
         targetAssetSetDigest,
       });
       if (decision.disposition !== "probe_repair") {
-        console.info("probe_repair_rejection_gate=authority_decision");
+        context.get("hubLogger").log({
+          event: "probe.repair.rejected",
+          level: "info",
+          method: "POST",
+          repairGate: "authority_decision",
+          routeId: "probe_repair_authorize",
+          status: 409,
+        });
         return context.json(decision, 409, { "cache-control": "no-store" });
       }
       return context.json(
