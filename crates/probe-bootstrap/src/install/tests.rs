@@ -3303,8 +3303,14 @@ mod tests {
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
         assert!(lifecycle.contains("\nAmbientCapabilities=CAP_SETUID\n"));
+        assert!(lifecycle.contains("\nTemporaryFileSystem=/var/lib/private:ro,mode=0711\n"));
+        assert!(lifecycle.contains(
+            "\nBindPaths=-/var/lib/enoki-probe:/var/lib/private/enoki-probe\n"
+        ));
         let lifecycle_upgrade = lifecycle_upgrade_unit();
         assert!(!lifecycle_upgrade.contains("AmbientCapabilities=CAP_SETUID\n"));
+        assert!(!lifecycle_upgrade.contains("TemporaryFileSystem=/var/lib/private"));
+        assert!(!lifecycle_upgrade.contains("/var/lib/private/enoki-probe"));
         let lifecycle_socket = lifecycle_companion_socket_unit();
         assert!(lifecycle_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(lifecycle_socket.contains("Accept=yes"));
