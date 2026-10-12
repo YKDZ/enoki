@@ -29,6 +29,10 @@ fn failed_repair_response_decodes_with_installed_companion_descriptors() {
         unit_property(&service_unit, "StandardOutput"),
         Some("socket")
     );
+    assert_eq!(
+        unit_property(&service_unit, "StandardError"),
+        Some("journal")
+    );
 
     // systemd 的 StandardError 默认继承 StandardOutput；测试据此复现安装 unit 的真实描述符关系。
     let standard_error = unit_property(&service_unit, "StandardError").unwrap_or("inherit");

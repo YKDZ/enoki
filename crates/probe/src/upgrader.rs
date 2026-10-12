@@ -2082,15 +2082,32 @@ pub fn run_lifecycle_companion_from_peer(
     )
 }
 
+// 票 05 临时观察：取得正式 Fresh 分类并完成因果重放后删除。
 fn probe_repair_lifecycle_response(
     result: Result<ProbeRepairResult, ProbeRepairRunError>,
 ) -> LifecycleResponse {
+    let mut diagnostic_output = std::io::stderr().lock();
+    probe_repair_lifecycle_response_with_diagnostic_writer(result, &mut diagnostic_output)
+}
+
+fn probe_repair_lifecycle_response_with_diagnostic_writer(
+    result: Result<ProbeRepairResult, ProbeRepairRunError>,
+    diagnostic_output: &mut impl Write,
+) -> LifecycleResponse {
     match result {
         Ok(_) => LifecycleResponse::succeeded(),
-        Err(error) if error.code() == "probe_manual_reinstall_required" => {
-            LifecycleResponse::failed("probe_manual_reinstall_required")
+        Err(error) => {
+            let code = error.code();
+            let _ = writeln!(
+                diagnostic_output,
+                "probe_repair_internal_failure code={code}"
+            );
+            if code == "probe_manual_reinstall_required" {
+                LifecycleResponse::failed("probe_manual_reinstall_required")
+            } else {
+                LifecycleResponse::failed("lifecycle.repair_unresolved")
+            }
         }
-        Err(_) => LifecycleResponse::failed("lifecycle.repair_unresolved"),
     }
 }
 
@@ -5120,6 +5137,44 @@ mod tests {
         signature::{RandomizedSigner, SignatureEncoding},
     };
     use std::{collections::HashMap, fs};
+
+    #[test]
+    fn repair_lifecycle_fold_records_only_static_code_and_preserves_public_response() {
+        let mut diagnostics = Vec::new();
+        let response = probe_repair_lifecycle_response_with_diagnostic_writer(
+            Err(ProbeRepairRunError::IdentityRejected(
+                "private response detail".to_owned(),
+            )),
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            "probe_repair_internal_failure code=probe_repair_identity_rejected\n"
+        );
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("lifecycle.repair_unresolved")
+        );
+
+        let mut manual_diagnostics = Vec::new();
+        let manual_response = probe_repair_lifecycle_response_with_diagnostic_writer(
+            Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into()),
+            &mut manual_diagnostics,
+        );
+        assert_eq!(
+            String::from_utf8(manual_diagnostics).unwrap(),
+            "probe_repair_internal_failure code=probe_manual_reinstall_required\n"
+        );
+        assert_eq!(
+            manual_response,
+            LifecycleResponse::failed("probe_manual_reinstall_required")
+        );
+        assert_eq!(
+            repair_acquirer_exit_failure(Some(3)).map(|error| error.code()),
+            Some("probe_manual_reinstall_required")
+        );
+    }
 
     #[test]
     fn preboundary_repair_failure_keeps_latch_and_resumes_probe_reporting_after_each_fail_once() {
