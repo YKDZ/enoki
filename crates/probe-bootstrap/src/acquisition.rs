@@ -37,112 +37,11 @@ use crate::{
 
 const MAX_REPAIR_EXCHANGE_BYTES: u64 = 8 * 1024;
 
-// 票 05 临时观察：取得正式 Fresh 分类并完成因果重放后删除。
-#[derive(Clone, Copy)]
-enum RepairAcquisitionFailureStage {
-    Request,
-    Transport,
-    HttpStatus,
-    SuccessResponse,
-    StageAcquisition,
-    ResponseEncoding,
-}
-
-impl RepairAcquisitionFailureStage {
-    fn code(self) -> &'static str {
-        match self {
-            Self::Request => "request",
-            Self::Transport => "transport",
-            Self::HttpStatus => "http_status",
-            Self::SuccessResponse => "success_response",
-            Self::StageAcquisition => "stage_acquisition",
-            Self::ResponseEncoding => "response_encoding",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct RepairAcquisitionFailureObservation {
-    stage: RepairAcquisitionFailureStage,
-    http_status: Option<u16>,
-    transport_kind: Option<&'static str>,
-}
-
-impl RepairAcquisitionFailureObservation {
-    const fn request() -> Self {
-        Self {
-            stage: RepairAcquisitionFailureStage::Request,
-            http_status: None,
-            transport_kind: None,
-        }
-    }
-
-    fn write(self, output: &mut impl Write) {
-        if let Some(status) = self.http_status {
-            let _ = writeln!(
-                output,
-                "probe_repair_acquisition_failure stage={} http_status={status}",
-                self.stage.code()
-            );
-        } else if let Some(kind) = self.transport_kind {
-            let _ = writeln!(
-                output,
-                "probe_repair_acquisition_failure stage={} transport_kind={kind}",
-                self.stage.code()
-            );
-        } else {
-            let _ = writeln!(
-                output,
-                "probe_repair_acquisition_failure stage={}",
-                self.stage.code()
-            );
-        }
-    }
-}
-
-fn repair_transport_error_kind(kind: ureq::ErrorKind) -> &'static str {
-    match kind {
-        ureq::ErrorKind::InvalidUrl => "invalid_url",
-        ureq::ErrorKind::UnknownScheme => "unknown_scheme",
-        ureq::ErrorKind::Dns => "dns",
-        ureq::ErrorKind::InsecureRequestHttpsOnly => "insecure_request_https_only",
-        ureq::ErrorKind::ConnectionFailed => "connection_failed",
-        ureq::ErrorKind::TooManyRedirects => "too_many_redirects",
-        ureq::ErrorKind::BadStatus => "bad_status",
-        ureq::ErrorKind::BadHeader => "bad_header",
-        ureq::ErrorKind::Io => "io",
-        ureq::ErrorKind::InvalidProxyUrl => "invalid_proxy_url",
-        ureq::ErrorKind::ProxyConnect => "proxy_connect",
-        ureq::ErrorKind::ProxyUnauthorized => "proxy_unauthorized",
-        ureq::ErrorKind::HTTP => "http",
-    }
-}
-
 /// Exchanges a fresh root-signed Repair Evidence bearer for one short-lived
 /// Repair Authority. The unprivileged acquirer never receives installation
 /// keys or the long-lived Probe identity credential.
 pub fn acquire_probe_repair_authority_once(
     request_body: &[u8],
-) -> Result<Vec<u8>, AcquisitionFailure> {
-    let mut diagnostic_output = io::stderr().lock();
-    acquire_probe_repair_authority_once_with_diagnostic_writer(request_body, &mut diagnostic_output)
-}
-
-fn acquire_probe_repair_authority_once_with_diagnostic_writer(
-    request_body: &[u8],
-    diagnostic_output: &mut impl Write,
-) -> Result<Vec<u8>, AcquisitionFailure> {
-    let mut observation = RepairAcquisitionFailureObservation::request();
-    let result = acquire_probe_repair_authority_once_inner(request_body, &mut observation);
-    if result.is_err() {
-        observation.write(diagnostic_output);
-    }
-    result
-}
-
-fn acquire_probe_repair_authority_once_inner(
-    request_body: &[u8],
-    observation: &mut RepairAcquisitionFailureObservation,
 ) -> Result<Vec<u8>, AcquisitionFailure> {
     if unsafe { libc::geteuid() } == 0 || request_body.is_empty() || request_body.len() > 8 * 1024 {
         return Err(AcquisitionFailure::RootRefused);
@@ -170,11 +69,13 @@ fn acquire_probe_repair_authority_once_inner(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = format!(
-                "{origin}/api/probe/operations/{}/repair-authorize",
-                envelope.evidence.failed_operation_id
-            );
-            (url, None)
+            let url = origin
+                .join(&format!(
+                    "api/probe/operations/{}/repair-authorize",
+                    envelope.evidence.failed_operation_id
+                ))
+                .map_err(|_| AcquisitionFailure::InvalidOrigin)?;
+            (url.to_string(), None)
         }
         ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
             if envelope.evidence_signature.len() != 64
@@ -185,14 +86,15 @@ fn acquire_probe_repair_authority_once_inner(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = format!(
-                "{origin}/api/probe/runtime-failures/{}/repair-authorize",
-                envelope.evidence.generation
-            );
-            (url, Some(envelope.evidence))
+            let url = origin
+                .join(&format!(
+                    "api/probe/runtime-failures/{}/repair-authorize",
+                    envelope.evidence.generation
+                ))
+                .map_err(|_| AcquisitionFailure::InvalidOrigin)?;
+            (url.to_string(), Some(envelope.evidence))
         }
     };
-    observation.stage = RepairAcquisitionFailureStage::Transport;
     let response = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))
@@ -204,13 +106,8 @@ fn acquire_probe_repair_authority_once_inner(
         .set("content-type", "application/json")
         .send_bytes(request_body);
     let response = match response {
-        Ok(response) => {
-            observation.stage = RepairAcquisitionFailureStage::SuccessResponse;
-            response
-        }
+        Ok(response) => response,
         Err(ureq::Error::Status(status, response)) => {
-            observation.stage = RepairAcquisitionFailureStage::HttpStatus;
-            observation.http_status = Some(status);
             let retry_after_ms = response
                 .header("retry-after")
                 .and_then(|value| value.parse::<u64>().ok())
@@ -230,8 +127,7 @@ fn acquire_probe_repair_authority_once_inner(
                 retry_after_ms,
             ));
         }
-        Err(ureq::Error::Transport(error)) => {
-            observation.transport_kind = Some(repair_transport_error_kind(error.kind()));
+        Err(ureq::Error::Transport(_)) => {
             return Err(AcquisitionFailure::Temporary {
                 retry_after_ms: None,
             });
@@ -274,14 +170,12 @@ fn acquire_probe_repair_authority_once_inner(
     {
         return Err(AcquisitionFailure::Permanent);
     }
-    observation.stage = RepairAcquisitionFailureStage::StageAcquisition;
     let stage_receipt = acquire_probe_upgrade_once(ProbeUpgradeAcquisition {
         hub_origin: evidence.hub_origin,
         operation_id: exchange.authority.repair_operation_id.clone(),
         target_asset_set_digest: exchange.target_asset_set_digest,
         target_version: evidence.bundle_version,
     })?;
-    observation.stage = RepairAcquisitionFailureStage::ResponseEncoding;
     serde_json::to_vec(&InstalledAcquisition {
         authority: exchange.authority,
         signature: exchange.signature,
@@ -2190,55 +2084,213 @@ mod tests {
     }
 
     #[test]
-    fn repair_acquisition_failure_observation_is_bounded_to_its_static_stage() {
-        let mut diagnostics = Vec::new();
+    fn failed_upgrade_repair_authorization_uses_the_hub_origin_path() {
+        if run_repair_authorization_test_as_nonroot_if_root(
+            "acquisition::tests::failed_upgrade_repair_authorization_uses_the_hub_origin_path",
+        ) {
+            return;
+        }
+        const OPERATION_ID: &str = "operation_01";
+        const EXPECTED_TARGET: &str = "/api/probe/operations/operation_01/repair-authorize";
+        let (hub_origin, server) =
+            start_repair_authorization_server(EXPECTED_TARGET, 200, b"upgrade-repair-authority");
+        let evidence = crate::lifecycle::RepairEvidenceV1 {
+            schema_version: 1,
+            hub_origin,
+            host_id: "7".into(),
+            probe_id: "probe_01".into(),
+            failed_operation_id: OPERATION_ID.into(),
+            failed_authority_sha256: "b".repeat(64),
+            journal_sha256: "c".repeat(64),
+            journal_phase: "repair-required".into(),
+            activated_targets: 3,
+            finalized_targets: 0,
+            target_bundle_version: "1.2.4".into(),
+            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+            verified_stage_sha256: "e".repeat(64),
+            issued_at_ms: 1_725_000_001_000,
+            expires_at_ms: 1_725_000_061_000,
+            request_nonce: "request_nonce_01".into(),
+        };
+        let evidence_signature = evidence.sign(&[0x11; 32]);
+        assert!(evidence.verify(&[0x11; 32], &evidence_signature));
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "evidence": evidence,
+            "evidenceSignature": evidence_signature,
+        }))
+        .unwrap();
 
-        assert!(
-            acquire_probe_repair_authority_once_with_diagnostic_writer(b"", &mut diagnostics,)
-                .is_err()
-        );
+        let result = acquire_probe_repair_authority_once(&request_body);
+        let (request_target, forwarded_body) = server.join().expect("Hub request");
 
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            "probe_repair_acquisition_failure stage=request\n"
-        );
+        assert_eq!(request_target, EXPECTED_TARGET);
+        assert_eq!(forwarded_body, request_body);
+        assert_eq!(result.unwrap(), b"upgrade-repair-authority");
     }
 
     #[test]
-    fn repair_transport_observation_uses_only_closed_ureq_kinds() {
-        let cases = [
-            (ureq::ErrorKind::InvalidUrl, "invalid_url"),
-            (ureq::ErrorKind::UnknownScheme, "unknown_scheme"),
-            (ureq::ErrorKind::Dns, "dns"),
-            (
-                ureq::ErrorKind::InsecureRequestHttpsOnly,
-                "insecure_request_https_only",
-            ),
-            (ureq::ErrorKind::ConnectionFailed, "connection_failed"),
-            (ureq::ErrorKind::TooManyRedirects, "too_many_redirects"),
-            (ureq::ErrorKind::BadStatus, "bad_status"),
-            (ureq::ErrorKind::BadHeader, "bad_header"),
-            (ureq::ErrorKind::Io, "io"),
-            (ureq::ErrorKind::InvalidProxyUrl, "invalid_proxy_url"),
-            (ureq::ErrorKind::ProxyConnect, "proxy_connect"),
-            (ureq::ErrorKind::ProxyUnauthorized, "proxy_unauthorized"),
-            (ureq::ErrorKind::HTTP, "http"),
-        ];
+    fn installed_bundle_repair_authorization_uses_the_hub_origin_path() {
+        if run_repair_authorization_test_as_nonroot_if_root(
+            "acquisition::tests::installed_bundle_repair_authorization_uses_the_hub_origin_path",
+        ) {
+            return;
+        }
+        const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const EXPECTED_TARGET: &str = "/api/probe/runtime-failures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/repair-authorize";
+        const MANUAL_REINSTALL_RESPONSE: &[u8] = br#"{"disposition":"manual_reinstall_required"}"#;
+        let (hub_origin, server) =
+            start_repair_authorization_server(EXPECTED_TARGET, 409, MANUAL_REINSTALL_RESPONSE);
+        let evidence = crate::lifecycle::InstalledBundleFailureEvidenceV1 {
+            kind: "installed_bundle_failure".into(),
+            schema_version: 1,
+            hub_origin,
+            host_id: "7".into(),
+            probe_id: "probe_01".into(),
+            generation: GENERATION.into(),
+            boot_id: "boot-01".into(),
+            unit: "enoki-observation-runtime.service".into(),
+            unit_sha256: "b".repeat(64),
+            identity_receipt_sha256: "c".repeat(64),
+            install_state_sha256: "d".repeat(64),
+            manifest_sha256: "e".repeat(64),
+            bundle_version: "1.2.3".into(),
+            issued_at_ms: 10,
+            expires_at_ms: 20,
+            request_nonce: "request-01".into(),
+        };
+        let evidence_signature = evidence.sign(&[0x11; 32]);
+        assert!(evidence.verify(&[0x11; 32], &evidence_signature));
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "evidence": evidence,
+            "evidenceSignature": evidence_signature,
+        }))
+        .unwrap();
 
-        for (kind, expected) in cases {
-            assert_eq!(repair_transport_error_kind(kind), expected);
+        let result = acquire_probe_repair_authority_once(&request_body);
+        let (request_target, forwarded_body) = server.join().expect("Hub request");
+
+        assert_eq!(request_target, EXPECTED_TARGET);
+        assert_eq!(forwarded_body, request_body);
+        assert!(matches!(
+            result,
+            Err(AcquisitionFailure::ManualReinstallRequired)
+        ));
+    }
+
+    fn run_repair_authorization_test_as_nonroot_if_root(test_name: &str) -> bool {
+        if unsafe { libc::geteuid() } != 0 {
+            return false;
         }
 
-        let observation = RepairAcquisitionFailureObservation {
-            stage: RepairAcquisitionFailureStage::Transport,
-            http_status: None,
-            transport_kind: Some("io"),
+        use std::{
+            fs,
+            os::unix::{fs::PermissionsExt, process::CommandExt},
+            process::Command,
         };
-        let mut diagnostics = Vec::new();
-        observation.write(&mut diagnostics);
-        assert_eq!(
-            String::from_utf8(diagnostics).unwrap(),
-            "probe_repair_acquisition_failure stage=transport transport_kind=io\n"
+
+        let child_dir = tempfile::Builder::new()
+            .prefix("enoki-repair-loopback-test-")
+            .tempdir_in("/tmp")
+            .expect("public temporary directory for the unprivileged child");
+        fs::set_permissions(child_dir.path(), fs::Permissions::from_mode(0o755))
+            .expect("make child directory traversable");
+        let child_executable = child_dir.path().join("test-harness");
+        fs::copy(
+            std::env::current_exe().expect("test executable"),
+            &child_executable,
+        )
+        .expect("copy test executable to a traversable path");
+        fs::set_permissions(&child_executable, fs::Permissions::from_mode(0o755))
+            .expect("make copied test executable runnable");
+
+        let mut command = Command::new(&child_executable);
+        command
+            .arg("--exact")
+            .arg(test_name)
+            .current_dir(child_dir.path());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setgroups(0, std::ptr::null()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setgid(65_534) != 0 || libc::setuid(65_534) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let status = command
+            .status()
+            .expect("run loopback test as an unprivileged identity");
+        assert!(status.success(), "child test failed: {test_name}");
+        true
+    }
+
+    fn start_repair_authorization_server(
+        expected_target: &'static str,
+        expected_status: u16,
+        expected_body: &'static [u8],
+    ) -> (String, std::thread::JoinHandle<(String, Vec<u8>)>) {
+        use std::{
+            io::{BufRead, BufReader, Read, Write},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback Hub listener");
+        let origin = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
         );
+        let expected_body = expected_body.to_vec();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("acquirer connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("request timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("request reader"));
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).expect("request line");
+            let request_target = request_line
+                .split_ascii_whitespace()
+                .nth(1)
+                .expect("request target")
+                .to_owned();
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("request header");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse::<usize>().expect("content length");
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("request body");
+            let (status, reason, response_body) = if request_target == expected_target {
+                let reason = match expected_status {
+                    200 => "OK",
+                    409 => "Conflict",
+                    _ => panic!("unexpected fixture status"),
+                };
+                (expected_status, reason, expected_body)
+            } else {
+                (404, "Not Found", br#"{"error":"not_found"}"#.to_vec())
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .expect("Hub response headers");
+            stream.write_all(&response_body).expect("Hub response body");
+            (request_target, body)
+        });
+
+        (origin, server)
     }
 }

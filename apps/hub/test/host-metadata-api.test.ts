@@ -730,6 +730,114 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
+  it("returns a typed failure after a Probe reports an uninstall failure", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_060_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+    await reportMetric(app, registration, 1);
+
+    const deleteResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+      method: "DELETE",
+    });
+    expect(deleteResponse.status).toBe(202);
+    const { probeUninstallRequest } = (await deleteResponse.json()) as {
+      probeUninstallRequest: { id: number };
+    };
+
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const runningReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-uninstall-failure",
+            operationAcknowledgements: [
+              { operationId: String(probeUninstallRequest.id) },
+            ],
+            operationStatuses: [
+              {
+                operationId: String(probeUninstallRequest.id),
+                running: {},
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(runningReport.status).toBe(200);
+
+    const failedReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-uninstall-failure",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "probe_uninstall_failed",
+                  message: "",
+                },
+                operationId: String(probeUninstallRequest.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 3,
+            sequenceStart: 3,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(failedReport.status).toBe(200);
+
+    const operationResponse = await app.request(
+      `/api/web/probe-operations/${probeUninstallRequest.id}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(operationResponse.status).toBe(200);
+    await expect(operationResponse.json()).resolves.toEqual({
+      probeOperation: expect.objectContaining({
+        failure: expect.objectContaining({
+          code: "probe_uninstall_failed",
+          message: "",
+        }),
+        hostId,
+        id: probeUninstallRequest.id,
+        kind: "probe_uninstall",
+        state: "failed",
+      }),
+    });
+
+    const hostResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(hostResponse.status).toBe(200);
+
+    database.close();
+  });
+
   it("keeps a succeeded Probe Uninstall observable when Host removal delivery fails", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
