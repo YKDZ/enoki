@@ -2183,10 +2183,32 @@ mod tests {
             return false;
         }
 
-        use std::{os::unix::process::CommandExt, process::Command};
+        use std::{
+            fs,
+            os::unix::{fs::PermissionsExt, process::CommandExt},
+            process::Command,
+        };
 
-        let mut command = Command::new(std::env::current_exe().expect("test executable"));
-        command.arg("--exact").arg(test_name);
+        let child_dir = tempfile::Builder::new()
+            .prefix("enoki-repair-loopback-test-")
+            .tempdir_in("/tmp")
+            .expect("public temporary directory for the unprivileged child");
+        fs::set_permissions(child_dir.path(), fs::Permissions::from_mode(0o755))
+            .expect("make child directory traversable");
+        let child_executable = child_dir.path().join("test-harness");
+        fs::copy(
+            std::env::current_exe().expect("test executable"),
+            &child_executable,
+        )
+        .expect("copy test executable to a traversable path");
+        fs::set_permissions(&child_executable, fs::Permissions::from_mode(0o755))
+            .expect("make copied test executable runnable");
+
+        let mut command = Command::new(&child_executable);
+        command
+            .arg("--exact")
+            .arg(test_name)
+            .current_dir(child_dir.path());
         unsafe {
             command.pre_exec(|| {
                 if libc::setgroups(0, std::ptr::null()) != 0 {
