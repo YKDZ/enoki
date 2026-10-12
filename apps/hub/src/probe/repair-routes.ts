@@ -6,8 +6,8 @@ import { Hono, type Context } from "hono";
 import type { EnrollmentRepository } from "../database/enrollments.js";
 import type { HostRepository } from "../database/hosts.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
-import type { HubRepairGate } from "../hub-logger.js";
 import type { TrustedProxyCidr } from "../network.js";
+import { normalizeSemVer } from "./asset-set.js";
 import { deriveLifecycleAuthorityKey } from "./lifecycle-authority.js";
 import {
   createInstalledBundleRepairRequest,
@@ -36,6 +36,7 @@ import {
 
 const maxProbeOperationPayloadBytes = 16 * 1024;
 const probeRepairAuthorityTtlMs = 60 * 1000;
+
 export type ProbeRepairAuthorizationRouteServices = {
   enrollments: EnrollmentRepository;
   hosts: HostRepository;
@@ -118,18 +119,6 @@ export function createProbeRepairAuthorizationRoutes(
   routes.post(
     "/runtime-failures/:generation/repair-authorize",
     async (context) => {
-      const rejectInstalledBundleRepair = (gate: HubRepairGate) => {
-        context.get("hubLogger")?.log({
-          component: "probe-listener",
-          event: "probe.repair.rejected",
-          level: "info",
-          method: "POST",
-          repairGate: gate,
-          routeId: "probe_repair_authorize",
-          status: 409,
-        });
-        return manualReinstallRequired(context);
-      };
       const limited = anonymousLimit(context);
       if (limited) return limited;
       const requestBody = await readCappedRequestBody(
@@ -148,33 +137,29 @@ export function createProbeRepairAuthorizationRoutes(
         !host ||
         !host.probeVersion ||
         generation !== body.evidence.generation
-      ) {
-        const gate: HubRepairGate = !body
-          ? "envelope"
-          : !boundary || !host || !host.probeVersion
-            ? "host_boundary"
-            : "evidence_bindings";
-        return rejectInstalledBundleRepair(gate);
-      }
+      )
+        return manualReinstallRequired(context);
 
       const { hubOrigin, installKey } = boundary;
+      const expectedBundleVersion =
+        normalizeSemVer(host.probeVersion) ?? host.probeVersion;
       const operationNowMs = now();
       const verified = verifyInstalledBundleFailureEvidence({
         evidence: body.evidence,
         evidenceSignature: body.evidenceSignature,
-        expectedBundleVersion: host.probeVersion,
+        expectedBundleVersion,
         expectedHubOrigin: hubOrigin,
         expectedHostId: String(host.id),
         expectedProbeId: host.probeId,
         installKey,
         nowMs: operationNowMs,
       });
-      if (!verified) return rejectInstalledBundleRepair("evidence_bindings");
+      if (!verified) return manualReinstallRequired(context);
       if (
         !services.probeAssetDir ||
         !services.probeDistributionRootPublicKeyPem
       )
-        return rejectInstalledBundleRepair("asset_transition");
+        return manualReinstallRequired(context);
 
       const release = await readProbeReleaseContextFromDirectory({
         assetDir: services.probeAssetDir,
@@ -192,7 +177,7 @@ export function createProbeRepairAuthorizationRoutes(
             bundle.bundleManifestSha256 === body.evidence.manifestSha256,
         )
       )
-        return rejectInstalledBundleRepair("asset_transition");
+        return manualReinstallRequired(context);
 
       const hostLimited = verifiedHostLimit(host.id);
       if (hostLimited) return hostLimited;
@@ -225,13 +210,13 @@ export function createProbeRepairAuthorizationRoutes(
         !repair.repairAuthorityExpiresAtMs ||
         repair.repairAuthorityExpiresAtMs <= operationNowMs
       )
-        return rejectInstalledBundleRepair("repair_operation");
+        return manualReinstallRequired(context);
 
       const decision = authorizeInstalledBundleRepair({
         authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,
         evidence: body.evidence,
         evidenceSignature: body.evidenceSignature,
-        expectedBundleVersion: host.probeVersion,
+        expectedBundleVersion,
         expectedHubOrigin: hubOrigin,
         expectedHostId: String(host.id),
         expectedProbeId: host.probeId,
@@ -241,18 +226,8 @@ export function createProbeRepairAuthorizationRoutes(
         repairOperationId: String(repair.id),
         targetAssetSetDigest,
       });
-      if (decision.disposition !== "probe_repair") {
-        context.get("hubLogger")?.log({
-          component: "probe-listener",
-          event: "probe.repair.rejected",
-          level: "info",
-          method: "POST",
-          repairGate: "authority_decision",
-          routeId: "probe_repair_authorize",
-          status: 409,
-        });
+      if (decision.disposition !== "probe_repair")
         return context.json(decision, 409, { "cache-control": "no-store" });
-      }
       return context.json(
         {
           authority: decision.authority,

@@ -13,7 +13,6 @@ export type HubLogEvent = {
   listener?: HubListener;
   method?: string;
   outcome?: string;
-  repairGate?: HubRepairGate;
   requestId?: string;
   routeId?: HubRouteId;
   status?: number;
@@ -25,12 +24,6 @@ export type HubLogger = {
     context: Pick<HubLogEvent, "component" | "requestId">,
   ) => HubLogger;
 };
-
-declare module "hono" {
-  interface ContextVariableMap {
-    hubLogger?: HubLogger;
-  }
-}
 
 export type HubListener = "management" | "probe";
 
@@ -48,16 +41,7 @@ export type HubLogEventName =
   | "process.fatal"
   | "process.shutdown.completed"
   | "process.shutdown.started"
-  | "probe.repair.rejected"
   | "request.completed";
-
-export type HubRepairGate =
-  | "asset_transition"
-  | "authority_decision"
-  | "envelope"
-  | "evidence_bindings"
-  | "host_boundary"
-  | "repair_operation";
 
 export type HubRouteId =
   | "health"
@@ -66,7 +50,6 @@ export type HubRouteId =
   | "probe_operation_status"
   | "probe_operation_token_validation"
   | "probe_registration"
-  | "probe_repair_authorize"
   | "probe_report"
   | "unknown"
   | "web_audit_log"
@@ -111,7 +94,6 @@ const eventNames = new Set<HubLogEventName>([
   "process.fatal",
   "process.shutdown.completed",
   "process.shutdown.started",
-  "probe.repair.rejected",
   "request.completed",
 ]);
 const routeIds = new Set<HubRouteId>([
@@ -121,7 +103,6 @@ const routeIds = new Set<HubRouteId>([
   "probe_operation_status",
   "probe_operation_token_validation",
   "probe_registration",
-  "probe_repair_authorize",
   "probe_report",
   "unknown",
   "web_audit_log",
@@ -138,14 +119,6 @@ const routeIds = new Set<HubRouteId>([
   "web_probe_operation",
   "web_probe_upgrade_request",
   "web_static_asset",
-]);
-const repairGates = new Set<HubRepairGate>([
-  "asset_transition",
-  "authority_decision",
-  "envelope",
-  "evidence_bindings",
-  "host_boundary",
-  "repair_operation",
 ]);
 const knownRequestOutcomes = new Set([
   "enrollment_not_found",
@@ -297,7 +270,6 @@ export function createHubRequestLoggingMiddleware(options: {
       component,
       requestId: generatedRequestId,
     });
-    context.set("hubLogger", logger);
 
     try {
       await next();
@@ -414,12 +386,6 @@ export function hubRouteId(method: string, pathname: string): HubRouteId {
     return "probe_configuration";
   if (
     method === "POST" &&
-    /^\/api\/probe\/runtime-failures\/[^/]+\/repair-authorize$/.test(pathname)
-  ) {
-    return "probe_repair_authorize";
-  }
-  if (
-    method === "POST" &&
     /^\/api\/probe\/operations\/[^/]+\/token\/validate$/.test(pathname)
   ) {
     return "probe_operation_token_validation";
@@ -494,8 +460,6 @@ function sanitizeHubLogEvent(event: HubLogEvent): HubLogEvent {
     sanitized.method = boundedMethod(event.method);
   if (event.outcome !== undefined)
     sanitized.outcome = boundedOutcome(event.outcome);
-  if (event.repairGate !== undefined && repairGates.has(event.repairGate))
-    sanitized.repairGate = event.repairGate;
   if (event.requestId !== undefined)
     sanitized.requestId = boundedRequestId(event.requestId);
   if (event.routeId !== undefined) {
