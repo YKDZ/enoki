@@ -1680,7 +1680,6 @@ mod tests {
         for path in [
             &acquirer,
             &activator,
-            &bootstrap_state,
             &metadata.install_path,
             &metadata.service_unit_path,
             &metadata.identity_path,
@@ -1689,6 +1688,7 @@ mod tests {
         ] {
             assert!(!path.exists(), "owned path remains: {}", path.display());
         }
+        super::super::tests::assert_bootstrap_lock_shell_retained(&bootstrap_state);
         assert_eq!(
             fs::read(&undeclared_legacy_sudoers).expect("legacy sudoers remains"),
             legacy_bytes
@@ -1846,15 +1846,17 @@ mod tests {
                 &metadata.service_unit_path,
                 &metadata.identity_path,
                 &metadata.state_dir,
-                metadata
-                    .bootstrap_state_dir
-                    .as_ref()
-                    .expect("bootstrap state"),
                 &install_metadata_path,
             ])
         {
             assert!(!path.exists(), "schema three residue: {}", path.display());
         }
+        super::super::tests::assert_bootstrap_lock_shell_retained(
+            metadata
+                .bootstrap_state_dir
+                .as_ref()
+                .expect("bootstrap state"),
+        );
         assert_eq!(
             systemd.calls,
             [
@@ -1981,7 +1983,6 @@ mod tests {
             &metadata.service_unit_path,
             &acquirer,
             &activator,
-            &bootstrap_state,
             &observation_runtime,
             &cpu_provider,
             &disk_provider,
@@ -1994,6 +1995,7 @@ mod tests {
         {
             assert!(!path.exists(), "schema four residue: {}", path.display());
         }
+        super::super::tests::assert_bootstrap_lock_shell_retained(&bootstrap_state);
         assert_eq!(
             systemd.calls,
             [

@@ -1553,7 +1553,7 @@ fn assert_state_shell_retained(state_dir: &Path) {
     );
 }
 
-fn assert_bootstrap_lock_shell_retained(state_dir: &Path) {
+pub(super) fn assert_bootstrap_lock_shell_retained(state_dir: &Path) {
     let directory = fs::symlink_metadata(state_dir).expect("Bootstrap activation lock shell");
     assert!(directory.is_dir() && !directory.file_type().is_symlink());
     assert_eq!(directory.uid(), 0);
