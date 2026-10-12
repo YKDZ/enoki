@@ -1589,6 +1589,10 @@ describe("Probe Host Harness", () => {
       };
 
       expect(inventoryFiles()).not.toContain(bootstrapState);
+      const findShim = path.join(bin, "find");
+      await writeFile(findShim, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+      expect(inventoryFiles()).toContain(bootstrapState);
+      await rm(findShim);
       await writeFile(path.join(bootstrapState, "unexpected-child"), "data");
       expect(inventoryFiles()).toContain(bootstrapState);
     } finally {

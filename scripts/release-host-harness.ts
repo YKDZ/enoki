@@ -1568,7 +1568,8 @@ probe_harmless_bootstrap_lock_shell() {
   bootstrap_shell_mode=$(stat -c %a "$bootstrap_shell_candidate")
   [ "$((0$bootstrap_shell_mode & 0777))" -eq 448 ] || return 1
   probe_valid_bootstrap_activation_lock_file "$bootstrap_shell_candidate/activation.lock" || return 1
-  [ -z "$(find "$bootstrap_shell_candidate" -mindepth 1 -maxdepth 1 ! -name activation.lock -print -quit)" ]
+  bootstrap_shell_children=$(find "$bootstrap_shell_candidate" -mindepth 1 -maxdepth 1 ! -name activation.lock -print -quit) || return 1
+  [ -z "$bootstrap_shell_children" ]
 }`;
 }
 
