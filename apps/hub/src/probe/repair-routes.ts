@@ -119,7 +119,8 @@ export function createProbeRepairAuthorizationRoutes(
     "/runtime-failures/:generation/repair-authorize",
     async (context) => {
       const rejectInstalledBundleRepair = (gate: HubRepairGate) => {
-        context.get("hubLogger").log({
+        context.get("hubLogger")?.log({
+          component: "probe-listener",
           event: "probe.repair.rejected",
           level: "info",
           method: "POST",
@@ -241,7 +242,8 @@ export function createProbeRepairAuthorizationRoutes(
         targetAssetSetDigest,
       });
       if (decision.disposition !== "probe_repair") {
-        context.get("hubLogger").log({
+        context.get("hubLogger")?.log({
+          component: "probe-listener",
           event: "probe.repair.rejected",
           level: "info",
           method: "POST",

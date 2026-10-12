@@ -19,11 +19,8 @@ export type HubLogEvent = {
   status?: number;
 };
 
-export type HubLogEventInput = Omit<HubLogEvent, "component" | "requestId"> &
-  Partial<Pick<HubLogEvent, "component" | "requestId">>;
-
 export type HubLogger = {
-  log: (event: HubLogEventInput) => void;
+  log: (event: HubLogEvent) => void;
   withContext: (
     context: Pick<HubLogEvent, "component" | "requestId">,
   ) => HubLogger;
@@ -31,7 +28,7 @@ export type HubLogger = {
 
 declare module "hono" {
   interface ContextVariableMap {
-    hubLogger: HubLogger;
+    hubLogger?: HubLogger;
   }
 }
 
@@ -455,30 +452,26 @@ function createHubLogger(
   level: HubLogLevel,
   write: (event: HubLogEvent) => void,
 ): HubLogger {
-  const writeEvent = (event: HubLogEventInput) => {
-    if (levelRank[event.level] < levelRank[level]) {
-      return;
-    }
-
-    write(
-      sanitizeHubLogEvent({
-        component: "hub",
-        ...event,
-      }),
-    );
-  };
   const withContext = (
     context: Pick<HubLogEvent, "component" | "requestId">,
   ): HubLogger => ({
     log(event) {
-      writeEvent({ ...context, ...event });
+      log({ ...context, ...event });
     },
     withContext(nextContext) {
       return withContext({ ...context, ...nextContext });
     },
   });
 
-  return { log: writeEvent, withContext };
+  const log = (event: HubLogEvent) => {
+    if (levelRank[event.level] < levelRank[level]) {
+      return;
+    }
+
+    write(sanitizeHubLogEvent(event));
+  };
+
+  return { log, withContext };
 }
 
 function sanitizeHubLogEvent(event: HubLogEvent): HubLogEvent {
