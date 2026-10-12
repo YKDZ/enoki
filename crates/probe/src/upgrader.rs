@@ -1225,7 +1225,7 @@ fn run_authorized_probe_repair_for_invoking_admin(
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
     }
     if installed_failure_is_current {
-        return run_authorized_installed_bundle_repair(invoking_uid, invoking_gid);
+        return run_authorized_installed_bundle_repair();
     }
     if Path::new("/var/lib/enoki-probe-bootstrap/runtime-failure/latch").exists() {
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
@@ -1297,10 +1297,7 @@ fn run_authorized_probe_repair_for_invoking_admin(
     })
 }
 
-fn run_authorized_installed_bundle_repair(
-    invoking_uid: u32,
-    invoking_gid: u32,
-) -> Result<ProbeRepairResult, ProbeRepairRunError> {
+fn run_authorized_installed_bundle_repair() -> Result<ProbeRepairResult, ProbeRepairRunError> {
     if let Some(resumable) = crate::runtime_failure::resume_installed_bundle_repair()
         .map_err(|_| repair_contract_failure("probe_repair_intent_invalid"))?
     {
@@ -1309,12 +1306,18 @@ fn run_authorized_installed_bundle_repair(
         );
     }
     let (request_nonce, now_ms) = fresh_repair_exchange_facts()?;
-    let signed = crate::runtime_failure::issue_installed_bundle_failure_evidence(
-        now_ms,
-        now_ms.saturating_add(60_000),
-        &request_nonce,
-    )
-    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    let (signed, identity_owner) =
+        crate::runtime_failure::issue_installed_bundle_failure_evidence_with_identity_owner(
+            now_ms,
+            now_ms.saturating_add(60_000),
+            &request_nonce,
+        )
+        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    if identity_owner.uid == 0 {
+        return Err(repair_contract_failure(
+            "probe_repair_authority_acquire_failed",
+        ));
+    }
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Request<'a> {
@@ -1326,7 +1329,7 @@ fn run_authorized_installed_bundle_repair(
         evidence_signature: &signed.signature,
     })
     .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
-    let output = exchange_repair_authority(&request, invoking_uid, invoking_gid)?;
+    let output = exchange_repair_authority(&request, identity_owner.uid, identity_owner.gid)?;
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Response {
@@ -1343,13 +1346,10 @@ fn run_authorized_installed_bundle_repair(
         now_ms,
     )
     .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
-    let identity_metadata =
-        fs::symlink_metadata("/var/lib/enoki-probe/identity/probe-bootstrap.toml")
-            .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
     let session = crate::runtime_failure::begin_installed_bundle_repair(
         grant,
         response.stage_receipt,
-        identity_metadata.uid(),
+        identity_owner.uid,
     )
     .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
     adapt_installed_bundle_repair_result(
@@ -1586,24 +1586,28 @@ fn configure_repair_acquirer_privileges(command: &mut Command, uid: u32, gid: u3
                 return Err(observe_repair_acquirer_pre_exec_failure(
                     RepairAcquirerPreExecFailure::Groups,
                     std::io::Error::last_os_error(),
+                    uid,
                 ));
             }
             if libc::setgid(gid) != 0 {
                 return Err(observe_repair_acquirer_pre_exec_failure(
                     RepairAcquirerPreExecFailure::Gid,
                     std::io::Error::last_os_error(),
+                    uid,
                 ));
             }
             if libc::setuid(uid) != 0 {
                 return Err(observe_repair_acquirer_pre_exec_failure(
                     RepairAcquirerPreExecFailure::Uid,
                     std::io::Error::last_os_error(),
+                    uid,
                 ));
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                 return Err(observe_repair_acquirer_pre_exec_failure(
                     RepairAcquirerPreExecFailure::NoNewPrivileges,
                     std::io::Error::last_os_error(),
+                    uid,
                 ));
             }
             observe_repair_acquirer_pre_exec_complete();
@@ -1621,6 +1625,191 @@ enum RepairAcquirerPreExecFailure {
     NoNewPrivileges,
 }
 
+#[derive(Clone, Copy)]
+enum RepairAcquirerTargetUidClass {
+    Root,
+    RealOrSaved,
+    Other,
+    Unknown,
+}
+
+#[derive(Clone, Copy)]
+enum RepairAcquirerClosedAvailability {
+    Present,
+    Absent,
+    Unknown,
+}
+
+#[derive(Clone, Copy)]
+enum RepairAcquirerSeccompMode {
+    Disabled,
+    Strict,
+    Filter,
+    Unknown,
+}
+
+#[derive(Clone, Copy)]
+struct RepairAcquirerSetuidContext {
+    euid_is_root: bool,
+    target_uid_class: RepairAcquirerTargetUidClass,
+    cap_setuid_effective: RepairAcquirerClosedAvailability,
+    seccomp_mode: RepairAcquirerSeccompMode,
+}
+
+impl RepairAcquirerTargetUidClass {
+    fn code(self) -> &'static [u8] {
+        match self {
+            Self::Root => b"root",
+            Self::RealOrSaved => b"real_or_saved",
+            Self::Other => b"other",
+            Self::Unknown => b"unknown",
+        }
+    }
+}
+
+impl RepairAcquirerClosedAvailability {
+    fn code(self) -> &'static [u8] {
+        match self {
+            Self::Present => b"present",
+            Self::Absent => b"absent",
+            Self::Unknown => b"unknown",
+        }
+    }
+}
+
+impl RepairAcquirerSeccompMode {
+    fn from_raw(mode: libc::c_int) -> Self {
+        match mode {
+            0 => Self::Disabled,
+            1 => Self::Strict,
+            2 => Self::Filter,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn code(self) -> &'static [u8] {
+        match self {
+            Self::Disabled => b"0",
+            Self::Strict => b"1",
+            Self::Filter => b"2",
+            Self::Unknown => b"unknown",
+        }
+    }
+}
+
+fn repair_acquirer_target_uid_class(
+    target_uid: libc::uid_t,
+    real_uid: libc::uid_t,
+    saved_uid: libc::uid_t,
+) -> RepairAcquirerTargetUidClass {
+    if target_uid == 0 {
+        RepairAcquirerTargetUidClass::Root
+    } else if target_uid == real_uid || target_uid == saved_uid {
+        RepairAcquirerTargetUidClass::RealOrSaved
+    } else {
+        RepairAcquirerTargetUidClass::Other
+    }
+}
+
+fn repair_acquirer_cap_setuid_effective() -> RepairAcquirerClosedAvailability {
+    #[repr(C)]
+    struct CapabilityHeader {
+        version: u32,
+        pid: libc::pid_t,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct CapabilityData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    const CAP_SETUID: u32 = 7;
+    let mut header = CapabilityHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut data = [CapabilityData::default(), CapabilityData::default()];
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_capget,
+            &mut header as *mut CapabilityHeader,
+            data.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        RepairAcquirerClosedAvailability::Unknown
+    } else if data[0].effective & (1 << CAP_SETUID) != 0 {
+        RepairAcquirerClosedAvailability::Present
+    } else {
+        RepairAcquirerClosedAvailability::Absent
+    }
+}
+
+fn repair_acquirer_setuid_context(target_uid: libc::uid_t) -> RepairAcquirerSetuidContext {
+    let euid_is_root = unsafe { libc::geteuid() } == 0;
+    let mut real_uid = 0;
+    let mut effective_uid = 0;
+    let mut saved_uid = 0;
+    let target_uid_class =
+        if unsafe { libc::getresuid(&mut real_uid, &mut effective_uid, &mut saved_uid) } == 0 {
+            repair_acquirer_target_uid_class(target_uid, real_uid, saved_uid)
+        } else if target_uid == 0 {
+            RepairAcquirerTargetUidClass::Root
+        } else {
+            RepairAcquirerTargetUidClass::Unknown
+        };
+    let seccomp_mode = RepairAcquirerSeccompMode::from_raw(unsafe {
+        libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0)
+    });
+    RepairAcquirerSetuidContext {
+        euid_is_root,
+        target_uid_class,
+        cap_setuid_effective: repair_acquirer_cap_setuid_effective(),
+        seccomp_mode,
+    }
+}
+
+fn repair_acquirer_setuid_context_line(context: RepairAcquirerSetuidContext) -> ([u8; 192], usize) {
+    fn append(line: &mut [u8; 192], length: &mut usize, bytes: &[u8]) {
+        let Some(end) = length.checked_add(bytes.len()) else {
+            return;
+        };
+        if let Some(output) = line.get_mut(*length..end) {
+            output.copy_from_slice(bytes);
+            *length = end;
+        }
+    }
+
+    let mut line = [0_u8; 192];
+    let mut length = 0;
+    append(
+        &mut line,
+        &mut length,
+        b"probe_repair_pre_exec_setuid_context euid_root=",
+    );
+    append(
+        &mut line,
+        &mut length,
+        if context.euid_is_root {
+            b"root"
+        } else {
+            b"nonroot"
+        },
+    );
+    append(&mut line, &mut length, b" target_uid_class=");
+    append(&mut line, &mut length, context.target_uid_class.code());
+    append(&mut line, &mut length, b" cap_setuid_effective=");
+    append(&mut line, &mut length, context.cap_setuid_effective.code());
+    append(&mut line, &mut length, b" seccomp_mode=");
+    append(&mut line, &mut length, context.seccomp_mode.code());
+    append(&mut line, &mut length, b"\n");
+    (line, length)
+}
+
 impl RepairAcquirerPreExecFailure {
     fn marker(self) -> &'static [u8] {
         match self {
@@ -1635,11 +1824,21 @@ impl RepairAcquirerPreExecFailure {
 fn observe_repair_acquirer_pre_exec_failure(
     stage: RepairAcquirerPreExecFailure,
     error: std::io::Error,
+    target_uid: libc::uid_t,
 ) -> std::io::Error {
+    let original_errno = error.raw_os_error();
     let marker = stage.marker();
     unsafe {
         libc::write(libc::STDERR_FILENO, marker.as_ptr().cast(), marker.len());
     }
+    if matches!(stage, RepairAcquirerPreExecFailure::Uid) {
+        let context = repair_acquirer_setuid_context(target_uid);
+        let (line, length) = repair_acquirer_setuid_context_line(context);
+        unsafe {
+            libc::write(libc::STDERR_FILENO, line.as_ptr().cast(), length);
+        }
+    }
+    let _ = original_errno;
     error
 }
 
@@ -5408,6 +5607,70 @@ mod tests {
                 "probe_repair_acquirer_exchange_failure stage=stdout_contract\n",
             )
         );
+    }
+
+    #[test]
+    fn repair_acquirer_setuid_observation_uses_only_closed_classes() {
+        let facts = RepairAcquirerSetuidContext {
+            euid_is_root: false,
+            target_uid_class: RepairAcquirerTargetUidClass::Unknown,
+            cap_setuid_effective: RepairAcquirerClosedAvailability::Unknown,
+            seccomp_mode: RepairAcquirerSeccompMode::Unknown,
+        };
+        let (line, length) = repair_acquirer_setuid_context_line(facts);
+
+        assert_eq!(
+            std::str::from_utf8(&line[..length]).unwrap(),
+            "probe_repair_pre_exec_setuid_context euid_root=nonroot target_uid_class=unknown cap_setuid_effective=unknown seccomp_mode=unknown\n"
+        );
+
+        let known_facts = RepairAcquirerSetuidContext {
+            euid_is_root: true,
+            target_uid_class: RepairAcquirerTargetUidClass::RealOrSaved,
+            cap_setuid_effective: RepairAcquirerClosedAvailability::Present,
+            seccomp_mode: RepairAcquirerSeccompMode::Filter,
+        };
+        let (line, length) = repair_acquirer_setuid_context_line(known_facts);
+        assert_eq!(
+            std::str::from_utf8(&line[..length]).unwrap(),
+            "probe_repair_pre_exec_setuid_context euid_root=root target_uid_class=real_or_saved cap_setuid_effective=present seccomp_mode=2\n"
+        );
+    }
+
+    #[test]
+    fn repair_acquirer_setuid_context_classifies_only_the_approved_uid_relations() {
+        assert!(matches!(
+            repair_acquirer_target_uid_class(0, 10, 20),
+            RepairAcquirerTargetUidClass::Root
+        ));
+        assert!(matches!(
+            repair_acquirer_target_uid_class(10, 10, 20),
+            RepairAcquirerTargetUidClass::RealOrSaved
+        ));
+        assert!(matches!(
+            repair_acquirer_target_uid_class(20, 10, 20),
+            RepairAcquirerTargetUidClass::RealOrSaved
+        ));
+        assert!(matches!(
+            repair_acquirer_target_uid_class(30, 10, 20),
+            RepairAcquirerTargetUidClass::Other
+        ));
+        assert!(matches!(
+            RepairAcquirerSeccompMode::from_raw(0),
+            RepairAcquirerSeccompMode::Disabled
+        ));
+        assert!(matches!(
+            RepairAcquirerSeccompMode::from_raw(1),
+            RepairAcquirerSeccompMode::Strict
+        ));
+        assert!(matches!(
+            RepairAcquirerSeccompMode::from_raw(2),
+            RepairAcquirerSeccompMode::Filter
+        ));
+        assert!(matches!(
+            RepairAcquirerSeccompMode::from_raw(-1),
+            RepairAcquirerSeccompMode::Unknown
+        ));
     }
 
     #[test]

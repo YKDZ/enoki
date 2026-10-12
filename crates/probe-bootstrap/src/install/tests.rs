@@ -4812,6 +4812,13 @@ mod tests {
         );
         assert!(paths.bootstrap_state().join("activation-journal.json").exists());
         fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        let lock_path = paths.bootstrap_state().join("activation.lock");
+        let lock_before = fs::symlink_metadata(&lock_path).unwrap();
+        assert!(lock_before.is_file());
+        assert_eq!(lock_before.uid(), paths.expected_root_uid());
+        assert_eq!(lock_before.nlink(), 1);
+        assert_eq!(lock_before.mode() & 0o777, 0o600);
+        assert_eq!(lock_before.len(), 0);
         finalize_complete_replacement_current_probe(
             &paths,
             &binding,
@@ -4819,6 +4826,10 @@ mod tests {
             &commit,
         )
         .unwrap();
+        let lock_after = fs::symlink_metadata(&lock_path).unwrap();
+        assert_eq!(lock_after.dev(), lock_before.dev());
+        assert_eq!(lock_after.ino(), lock_before.ino());
+        assert!(lock_path.is_file(), "Replacement 收尾保留稳定激活锁");
         assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
         assert!(paths.etc_enoki().is_dir());
         for guarded in [paths.identity(), paths.metadata()] {

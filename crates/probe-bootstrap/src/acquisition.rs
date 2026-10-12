@@ -2195,16 +2195,14 @@ mod tests {
             .expect("public temporary directory for the unprivileged child");
         fs::set_permissions(child_dir.path(), fs::Permissions::from_mode(0o755))
             .expect("make child directory traversable");
-        let child_executable = child_dir.path().join("test-harness");
-        fs::copy(
-            std::env::current_exe().expect("test executable"),
-            &child_executable,
-        )
-        .expect("copy test executable to a traversable path");
-        fs::set_permissions(&child_executable, fs::Permissions::from_mode(0o755))
-            .expect("make copied test executable runnable");
+        let test_executable = File::open(std::env::current_exe().expect("test executable"))
+            .expect("open test executable for the unprivileged child");
+        let executable_path = format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&test_executable)
+        );
 
-        let mut command = Command::new(&child_executable);
+        let mut command = Command::new(executable_path);
         command
             .arg("--exact")
             .arg(test_name)

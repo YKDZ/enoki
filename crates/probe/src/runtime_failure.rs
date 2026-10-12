@@ -565,18 +565,37 @@ pub struct SignedInstalledBundleFailureEvidence {
     pub signature: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InstalledIdentityOwner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
 pub fn issue_installed_bundle_failure_evidence(
     issued_at_ms: u64,
     expires_at_ms: u64,
     request_nonce: &str,
 ) -> std::io::Result<SignedInstalledBundleFailureEvidence> {
+    issue_installed_bundle_failure_evidence_with_identity_owner(
+        issued_at_ms,
+        expires_at_ms,
+        request_nonce,
+    )
+    .map(|(signed, _)| signed)
+}
+
+pub(crate) fn issue_installed_bundle_failure_evidence_with_identity_owner(
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    request_nonce: &str,
+) -> std::io::Result<(SignedInstalledBundleFailureEvidence, InstalledIdentityOwner)> {
     if unsafe { libc::geteuid() } != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "root required",
         ));
     }
-    issue_installed_bundle_failure_evidence_at(
+    issue_installed_bundle_failure_evidence_with_identity_owner_at(
         Path::new("/"),
         0,
         &mut SystemRuntimeFailureSystemd,
@@ -669,13 +688,32 @@ fn issue_installed_bundle_failure_evidence_at(
     expires_at_ms: u64,
     request_nonce: &str,
 ) -> std::io::Result<SignedInstalledBundleFailureEvidence> {
+    issue_installed_bundle_failure_evidence_with_identity_owner_at(
+        root,
+        expected_uid,
+        systemd,
+        issued_at_ms,
+        expires_at_ms,
+        request_nonce,
+    )
+    .map(|(signed, _)| signed)
+}
+
+fn issue_installed_bundle_failure_evidence_with_identity_owner_at(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    request_nonce: &str,
+) -> std::io::Result<(SignedInstalledBundleFailureEvidence, InstalledIdentityOwner)> {
     if expires_at_ms <= issued_at_ms
         || expires_at_ms - issued_at_ms > 120_000
         || !valid_identifier(request_nonce)
     {
         return Err(std::io::Error::other("failure evidence lifetime invalid"));
     }
-    let (epoch, metadata) = current_epoch_at(root, expected_uid)?;
+    let (epoch, metadata, identity_owner) = current_epoch_at(root, expected_uid)?;
     valid_current_failure_evidence_snapshot(root, expected_uid, systemd, &epoch.result)?;
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
@@ -698,10 +736,13 @@ fn issue_installed_bundle_failure_evidence_at(
         expires_at_ms,
         request_nonce: request_nonce.to_owned(),
     };
-    Ok(SignedInstalledBundleFailureEvidence {
-        signature: evidence.sign(&install_key),
-        evidence,
-    })
+    Ok((
+        SignedInstalledBundleFailureEvidence {
+            signature: evidence.sign(&install_key),
+            evidence,
+        },
+        identity_owner,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -723,7 +764,7 @@ fn validate_installed_bundle_repair_authority_at(
         &signed.evidence.request_nonce,
     )
     .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
-    let (_, metadata) = current_epoch_at(root, expected_uid)
+    let (_, metadata, _) = current_epoch_at(root, expected_uid)
         .map_err(|_| InstalledBundleRepairError::InvalidBoundary)?;
     let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
         .and_then(|value| decode_lower_hex_32(&value))
@@ -755,7 +796,7 @@ fn validate_installed_bundle_repair_authority_at(
 fn current_epoch_at(
     root: &Path,
     expected_uid: u32,
-) -> std::io::Result<(RuntimeFailureEpoch, toml::Value)> {
+) -> std::io::Result<(RuntimeFailureEpoch, toml::Value, InstalledIdentityOwner)> {
     let paths = runtime_failure_paths(root, expected_uid)?;
     let epoch_bytes = trusted_file(&paths.epoch, expected_uid, 0o600)?;
     let epoch: RuntimeFailureEpoch = toml::from_str(
@@ -765,7 +806,7 @@ fn current_epoch_at(
     .map_err(|_| std::io::Error::other("failure epoch invalid"))?;
     let latch = trusted_file(&paths.latch, expected_uid, 0o600)?;
     let metadata_bytes = trusted_file(&rooted(root, METADATA_PATH), expected_uid, 0o600)?;
-    let identity = trusted_identity_file(&paths.identity)?;
+    let (identity, identity_owner) = trusted_identity_file_with_owner(&paths.identity)?;
     let unit = trusted_file(&rooted(root, UNIT_PATH), expected_uid, 0o644)?;
     let boot_id = trusted_fixed_boot_id(root, expected_uid, FixedBootIdSource::NamespaceAlias)?;
     let metadata: toml::Value = toml::from_str(
@@ -797,7 +838,7 @@ fn current_epoch_at(
     {
         return Err(std::io::Error::other("failure epoch binding invalid"));
     }
-    Ok((epoch, metadata))
+    Ok((epoch, metadata, identity_owner))
 }
 
 fn record_runtime_failure_at(
@@ -1075,6 +1116,12 @@ fn trusted_file(path: &Path, uid: u32, mode: u32) -> std::io::Result<Vec<u8>> {
 }
 
 fn trusted_identity_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    trusted_identity_file_with_owner(path).map(|(bytes, _)| bytes)
+}
+
+fn trusted_identity_file_with_owner(
+    path: &Path,
+) -> std::io::Result<(Vec<u8>, InstalledIdentityOwner)> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
@@ -1100,7 +1147,13 @@ fn trusted_identity_file(path: &Path) -> std::io::Result<Vec<u8>> {
     if bytes.len() as u64 != metadata.len() {
         return Err(std::io::Error::other("identity receipt changed"));
     }
-    Ok(bytes)
+    Ok((
+        bytes,
+        InstalledIdentityOwner {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        },
+    ))
 }
 
 fn trusted_directory(path: &Path, uid: u32, mode: u32) -> std::io::Result<()> {
@@ -1537,6 +1590,27 @@ pub(super) mod tests {
             &"a".repeat(64),
             b"probe",
         )
+    }
+
+    #[test]
+    fn current_failure_evidence_returns_its_trusted_installed_identity_owner() {
+        let root = fixture();
+        let expected_uid = unsafe { libc::geteuid() };
+        record_terminal(root.path(), 41).unwrap();
+        let issued_at_ms = 1;
+        let (_, owner) = issue_installed_bundle_failure_evidence_with_identity_owner_at(
+            root.path(),
+            expected_uid,
+            &mut Snapshots::terminal(2),
+            issued_at_ms,
+            issued_at_ms + 60_000,
+            "identity_owner_test",
+        )
+        .unwrap();
+        let identity = fs::symlink_metadata(rooted(root.path(), IDENTITY_PATH)).unwrap();
+
+        assert_eq!(owner.uid, identity.uid());
+        assert_eq!(owner.gid, identity.gid());
     }
 
     fn fixture() -> tempfile::TempDir {
