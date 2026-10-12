@@ -60,7 +60,7 @@ pub fn acquire_probe_repair_authority_once(
     }
     let envelope: ClosedRepairEvidence =
         serde_json::from_slice(request_body).map_err(|_| AcquisitionFailure::Permanent)?;
-    let (url, installed_evidence) = match envelope {
+    let (url, installed_evidence, observe_failure) = match envelope {
         ClosedRepairEvidence::FailedUpgrade(envelope) => {
             if envelope.evidence_signature.len() != 64
                 || !valid_stage_identifier(&envelope.evidence.failed_operation_id)
@@ -75,7 +75,7 @@ pub fn acquire_probe_repair_authority_once(
                     envelope.evidence.failed_operation_id
                 ))
                 .map_err(|_| AcquisitionFailure::InvalidOrigin)?;
-            (url.to_string(), None)
+            (url.to_string(), None, false)
         }
         ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
             if envelope.evidence_signature.len() != 64
@@ -92,7 +92,7 @@ pub fn acquire_probe_repair_authority_once(
                     envelope.evidence.generation
                 ))
                 .map_err(|_| AcquisitionFailure::InvalidOrigin)?;
-            (url.to_string(), Some(envelope.evidence))
+            (url.to_string(), Some(envelope.evidence), true)
         }
     };
     let response = ureq::AgentBuilder::new()
@@ -118,31 +118,63 @@ pub fn acquire_probe_repair_authority_once(
                 .into_reader()
                 .take(MAX_REPAIR_EXCHANGE_BYTES + 1)
                 .read_to_end(&mut body)
-                .map_err(|_| AcquisitionFailure::Temporary {
-                    retry_after_ms: None,
+                .map_err(|_| {
+                    observe_repair_acquisition_failure(
+                        observe_failure,
+                        RepairAcquisitionFailureStage::AuthorityResponseBody,
+                        Some(status),
+                        None,
+                        AcquisitionFailure::Temporary {
+                            retry_after_ms: None,
+                        },
+                    )
                 })?;
-            return Err(classify_repair_authorization_error(
-                status,
-                &body,
-                retry_after_ms,
+            let failure = classify_repair_authorization_error(status, &body, retry_after_ms);
+            return Err(observe_repair_acquisition_failure(
+                observe_failure,
+                RepairAcquisitionFailureStage::AuthorityHttp,
+                Some(status),
+                None,
+                failure,
             ));
         }
-        Err(ureq::Error::Transport(_)) => {
-            return Err(AcquisitionFailure::Temporary {
-                retry_after_ms: None,
-            });
+        Err(ureq::Error::Transport(error)) => {
+            return Err(observe_repair_acquisition_failure(
+                observe_failure,
+                RepairAcquisitionFailureStage::AuthorityTransport,
+                None,
+                Some(ureq_error_kind_code(error.kind())),
+                AcquisitionFailure::Temporary {
+                    retry_after_ms: None,
+                },
+            ));
         }
     };
     let mut output = Vec::new();
+    let response_status = response.status();
     response
         .into_reader()
         .take(MAX_REPAIR_EXCHANGE_BYTES + 1)
         .read_to_end(&mut output)
-        .map_err(|_| AcquisitionFailure::Temporary {
-            retry_after_ms: None,
+        .map_err(|_| {
+            observe_repair_acquisition_failure(
+                observe_failure,
+                RepairAcquisitionFailureStage::AuthorityResponseBody,
+                Some(response_status),
+                None,
+                AcquisitionFailure::Temporary {
+                    retry_after_ms: None,
+                },
+            )
         })?;
     if output.is_empty() || output.len() as u64 > MAX_REPAIR_EXCHANGE_BYTES {
-        return Err(AcquisitionFailure::Permanent);
+        return Err(observe_repair_acquisition_failure(
+            observe_failure,
+            RepairAcquisitionFailureStage::AuthorityResponseContract,
+            Some(response_status),
+            None,
+            AcquisitionFailure::Permanent,
+        ));
     }
     let Some(evidence) = installed_evidence else {
         return Ok(output);
@@ -161,27 +193,147 @@ pub fn acquire_probe_repair_authority_once(
         signature: String,
         stage_receipt: VerifiedUpgradeStageReceipt,
     }
-    let exchange: InstalledExchange =
-        serde_json::from_slice(&output).map_err(|_| AcquisitionFailure::Permanent)?;
+    let exchange: InstalledExchange = serde_json::from_slice(&output).map_err(|_| {
+        observe_repair_acquisition_failure(
+            observe_failure,
+            RepairAcquisitionFailureStage::AuthorityResponseContract,
+            Some(response_status),
+            None,
+            AcquisitionFailure::Permanent,
+        )
+    })?;
     if !exchange.authority.matches_evidence(&evidence)
         || exchange.authority.target_asset_set_digest != exchange.target_asset_set_digest
         || exchange.signature.len() != 64
         || !valid_stage_identifier(&exchange.authority.repair_operation_id)
     {
-        return Err(AcquisitionFailure::Permanent);
+        return Err(observe_repair_acquisition_failure(
+            observe_failure,
+            RepairAcquisitionFailureStage::AuthorityResponseContract,
+            Some(response_status),
+            None,
+            AcquisitionFailure::Permanent,
+        ));
     }
     let stage_receipt = acquire_probe_upgrade_once(ProbeUpgradeAcquisition {
         hub_origin: evidence.hub_origin,
         operation_id: exchange.authority.repair_operation_id.clone(),
         target_asset_set_digest: exchange.target_asset_set_digest,
         target_version: evidence.bundle_version,
+    })
+    .map_err(|failure| {
+        observe_repair_acquisition_failure(
+            observe_failure,
+            RepairAcquisitionFailureStage::StageAcquisition,
+            Some(response_status),
+            None,
+            failure,
+        )
     })?;
     serde_json::to_vec(&InstalledAcquisition {
         authority: exchange.authority,
         signature: exchange.signature,
         stage_receipt,
     })
-    .map_err(|_| AcquisitionFailure::Local)
+    .map_err(|_| {
+        observe_repair_acquisition_failure(
+            observe_failure,
+            RepairAcquisitionFailureStage::ResponseEncoding,
+            Some(response_status),
+            None,
+            AcquisitionFailure::Local,
+        )
+    })
+}
+
+#[derive(Clone, Copy)]
+enum RepairAcquisitionFailureStage {
+    AuthorityTransport,
+    AuthorityHttp,
+    AuthorityResponseBody,
+    AuthorityResponseContract,
+    StageAcquisition,
+    ResponseEncoding,
+}
+
+impl RepairAcquisitionFailureStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::AuthorityTransport => "authority_transport",
+            Self::AuthorityHttp => "authority_http",
+            Self::AuthorityResponseBody => "authority_response_body",
+            Self::AuthorityResponseContract => "authority_response_contract",
+            Self::StageAcquisition => "stage_acquisition",
+            Self::ResponseEncoding => "response_encoding",
+        }
+    }
+}
+
+fn acquisition_failure_code(failure: AcquisitionFailure) -> &'static str {
+    match failure {
+        AcquisitionFailure::BuildTrustUnavailable => "build_trust_unavailable",
+        AcquisitionFailure::InvalidEnrollment => "invalid_enrollment",
+        AcquisitionFailure::RootRefused => "root_refused",
+        AcquisitionFailure::InvalidOrigin => "invalid_origin",
+        AcquisitionFailure::Local => "local",
+        AcquisitionFailure::ManualReinstallRequired => "manual_reinstall_required",
+        AcquisitionFailure::Permanent => "permanent",
+        AcquisitionFailure::Temporary { .. } => "temporary",
+    }
+}
+
+fn ureq_error_kind_code(kind: ureq::ErrorKind) -> &'static str {
+    match kind {
+        ureq::ErrorKind::InvalidUrl => "invalid_url",
+        ureq::ErrorKind::UnknownScheme => "unknown_scheme",
+        ureq::ErrorKind::Dns => "dns",
+        ureq::ErrorKind::InsecureRequestHttpsOnly => "insecure_request_https_only",
+        ureq::ErrorKind::ConnectionFailed => "connection_failed",
+        ureq::ErrorKind::TooManyRedirects => "too_many_redirects",
+        ureq::ErrorKind::BadStatus => "bad_status",
+        ureq::ErrorKind::BadHeader => "bad_header",
+        ureq::ErrorKind::Io => "io",
+        ureq::ErrorKind::InvalidProxyUrl => "invalid_proxy_url",
+        ureq::ErrorKind::ProxyConnect => "proxy_connect",
+        ureq::ErrorKind::ProxyUnauthorized => "proxy_unauthorized",
+        ureq::ErrorKind::HTTP => "http",
+    }
+}
+
+fn observe_repair_acquisition_failure(
+    enabled: bool,
+    stage: RepairAcquisitionFailureStage,
+    status: Option<u16>,
+    transport_kind: Option<&'static str>,
+    failure: AcquisitionFailure,
+) -> AcquisitionFailure {
+    if enabled {
+        let mut stderr = io::stderr().lock();
+        write_repair_acquisition_failure(stage, status, transport_kind, failure, &mut stderr);
+    }
+    failure
+}
+
+fn write_repair_acquisition_failure(
+    stage: RepairAcquisitionFailureStage,
+    status: Option<u16>,
+    transport_kind: Option<&'static str>,
+    failure: AcquisitionFailure,
+    output: &mut impl Write,
+) {
+    let _ = write!(
+        output,
+        "probe_repair_acquisition_failure stage={} failure={}",
+        stage.code(),
+        acquisition_failure_code(failure),
+    );
+    if let Some(status) = status {
+        let _ = write!(output, " authority_http_status={status}");
+    }
+    if let Some(transport_kind) = transport_kind {
+        let _ = write!(output, " transport_kind={transport_kind}");
+    }
+    let _ = writeln!(output);
 }
 
 fn classify_repair_authorization_error(
@@ -2080,6 +2232,43 @@ mod tests {
             AcquisitionFailure::Temporary {
                 retry_after_ms: Some(2_000)
             },
+        );
+    }
+
+    #[test]
+    fn repair_acquisition_observation_uses_only_closed_stages_and_numeric_status() {
+        let mut diagnostics = Vec::new();
+        write_repair_acquisition_failure(
+            RepairAcquisitionFailureStage::AuthorityTransport,
+            None,
+            Some("io"),
+            AcquisitionFailure::Temporary {
+                retry_after_ms: None,
+            },
+            &mut diagnostics,
+        );
+        write_repair_acquisition_failure(
+            RepairAcquisitionFailureStage::AuthorityHttp,
+            Some(409),
+            None,
+            AcquisitionFailure::Permanent,
+            &mut diagnostics,
+        );
+        write_repair_acquisition_failure(
+            RepairAcquisitionFailureStage::StageAcquisition,
+            None,
+            None,
+            AcquisitionFailure::Local,
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            concat!(
+                "probe_repair_acquisition_failure stage=authority_transport failure=temporary transport_kind=io\n",
+                "probe_repair_acquisition_failure stage=authority_http failure=permanent authority_http_status=409\n",
+                "probe_repair_acquisition_failure stage=stage_acquisition failure=local\n",
+            )
         );
     }
 

@@ -5801,6 +5801,7 @@ describe("Release E2E Orchestrator", () => {
     let candidateReportingReady = true;
     let configurationVersion = "default-v1";
     let metricsEpoch = 0;
+    let uninstallWaitTimesOut = false;
     const hub = {
       async authenticate() {
         calls.push(`hub.authenticate:${activeHub}`);
@@ -5946,6 +5947,21 @@ describe("Release E2E Orchestrator", () => {
             },
           ];
         }
+        if (uninstallWaitTimesOut) {
+          const error = new Error("Probe Operation 42 did not complete");
+          error.code = "probe_operation_timeout";
+          error.timeline = [
+            operation,
+            {
+              ...operation,
+              acceptedAtMs: 6,
+              runningAtMs: 6,
+              state: "running",
+              updatedAtMs: 6,
+            },
+          ];
+          throw error;
+        }
         return [
           operation,
           {
@@ -5991,6 +6007,10 @@ describe("Release E2E Orchestrator", () => {
       async collectEvidence() {
         calls.push("host.collectEvidence");
         return { journaldRetained: true };
+      },
+      async collectDiagnostics() {
+        calls.push("host.collectDiagnostics");
+        return { systemd: { stderr: "companion manager snapshot" } };
       },
       async completeUpgradeOwnershipTransition(_runId, operation) {
         calls.push(`host.completeUpgradeOwnershipTransition:${operation.id}`);
@@ -6077,6 +6097,45 @@ describe("Release E2E Orchestrator", () => {
       ]),
     });
 
+    activeHub = "baseline";
+    upgraded = false;
+    configurationVersion = "default-v1";
+    installed = false;
+    metricsEpoch = 0;
+    uninstallWaitTimesOut = true;
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          async cleanup() {
+            calls.push("environment.cleanup");
+            return { clean: true };
+          },
+          async start() {
+            calls.push("environment.start:baseline");
+            return { host, hub };
+          },
+        },
+        evidenceSink: { write: async (value) => written.push(value) },
+        ownerPassword: "owner-password",
+        runId: "run-baseline-uninstall-timeout",
+        scenario: "compatible-upgrade-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).rejects.toMatchObject({ code: "probe_operation_timeout" });
+    const diagnosticIndex = calls.lastIndexOf("host.collectDiagnostics");
+    expect(diagnosticIndex).toBeGreaterThan(-1);
+    expect(diagnosticIndex).toBeLessThan(
+      calls.lastIndexOf("host.collectEvidence"),
+    );
+    expect(calls.lastIndexOf("host.collectEvidence")).toBeLessThan(
+      calls.lastIndexOf("host.cleanup"),
+    );
+    expect(written.at(-1).diagnostics).toEqual({
+      host: { systemd: { stderr: "companion manager snapshot" } },
+    });
+
+    uninstallWaitTimesOut = false;
     activeHub = "baseline";
     upgraded = false;
     candidateReportingReady = false;
