@@ -227,7 +227,7 @@ export function createEnrollmentRepository(
         if (
           !host ||
           host.probeId !== pending.expectedProbeId ||
-          !hostVersionMatchesExpectedSourceVersion(
+          !hostVersionMatchesExpectedVersion(
             host.probeVersion,
             pending.expectedProbeVersion,
           )
@@ -383,8 +383,14 @@ export function createEnrollmentRepository(
           enrollment.targetKind === "manual_reinstall" &&
           (!input.producedCurrentHostProfile ||
             !enrollment.targetProbeVersion ||
-            input.probeVersion !== enrollment.targetProbeVersion ||
-            input.probeAssetBundleVersion !== enrollment.targetProbeVersion)
+            !hostVersionMatchesExpectedVersion(
+              input.probeVersion,
+              enrollment.targetProbeVersion,
+            ) ||
+            !hostVersionMatchesExpectedVersion(
+              input.probeAssetBundleVersion,
+              enrollment.targetProbeVersion,
+            ))
         ) {
           return { enrollment, status: "verifying" };
         }
@@ -570,7 +576,7 @@ export function createEnrollmentRepository(
           if (
             !target ||
             target.probeId !== input.target.expectedProbeId ||
-            !hostVersionMatchesExpectedSourceVersion(
+            !hostVersionMatchesExpectedVersion(
               target.probeVersion,
               input.target.expectedProbeVersion,
             )
@@ -774,7 +780,7 @@ export function createEnrollmentRepository(
               !pending.targetAssetSetDigest ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
-              !hostVersionMatchesExpectedSourceVersion(
+              !hostVersionMatchesExpectedVersion(
                 existingHost.probeVersion,
                 pending.expectedProbeVersion,
               ))
@@ -983,7 +989,7 @@ function validSourceProbeSha256(value: unknown): value is string[] {
 
 // ADR 0058 允许 Host 上报带可选 v 前缀的版本，因此这些比较只在双方按既有 SemVer
 // 语义规范化后相等时放行；无效值之间不得互相匹配。
-function hostVersionMatchesExpectedSourceVersion(
+function hostVersionMatchesExpectedVersion(
   hostProbeVersion: string | null | undefined,
   expectedProbeVersion: string,
 ): boolean {
