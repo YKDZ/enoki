@@ -101,23 +101,10 @@ export type InstalledBundleFailureRepairDriver = {
 const observationRuntimeUnit = "enoki-observation-runtime.service";
 const observationRuntimeRole = "observation_runtime";
 
-// Fresh 故障的最小可达观察（票61，临时采集，真实修复交付前退休）：正式 Repair CLI
-// 前后各读一次既有操作状态白名单四行，用同次 operation/version 关联解释外层 unresolved
-// 之下的既有 producer code；解释不了的一律保持 unknown，不填推定 code。
-const probeOperationStatusPath =
-  "/var/lib/enoki-probe/probe-operation-status.toml";
 const companionSocketUnit = "enoki-probe-lifecycle-companion.socket";
 const companionGeneralInstancePattern =
   "enoki-probe-lifecycle-companion@*.service";
 const observationRuntimeSocketUnit = "enoki-observation-runtime.socket";
-
-export type ProbeOperationStatusSnapshot = {
-  availability: "absent" | "present" | "unreadable";
-  errorCode: string;
-  operationId: string;
-  status: string;
-  targetProbeVersion: string;
-};
 
 // 07 已接受合同：受支持主机上 Runtime 预算耗尽的真实终态 Result 由 durable epoch
 // 绑定；`start-limit-hit` 在受支持主机从未出现，不构成耗尽资格。
@@ -197,7 +184,6 @@ export function createInstalledBundleFailureRepairHostDriver({
         exhausted.stdout,
         expectedBundleVersion,
       );
-      const statusBefore = await readProbeOperationStatusSnapshot(execute);
       const repaired = await execute(
         repairObservationRuntimeFailureScript(
           runId,
@@ -207,15 +193,8 @@ export function createInstalledBundleFailureRepairHostDriver({
         { root: true },
       );
       if (repaired.code !== 0) {
-        const statusAfter = await readProbeOperationStatusSnapshot(execute);
         throw new Error(
-          `Installed Bundle Failure Repair failed (${repaired.code}): ${
-            repaired.stderr || repaired.stdout
-          }${explainProbeOperationStatusComparison(
-            statusBefore,
-            statusAfter,
-            expectedBundleVersion,
-          )}`,
+          `Installed Bundle Failure Repair failed (${repaired.code}): ${repaired.stderr || repaired.stdout}`,
         );
       }
       const repair = parseRepairEvidence(
@@ -768,125 +747,4 @@ export function generalCompanionFailureObservationSnippet(
     failureObservationFunctions +
     companionFailureObservationCall(section, " || true")
   );
-}
-
-export function probeOperationStatusSnapshotScript(): string {
-  return `# enoki-release-e2e:probe-operation-status-snapshot
-set -eu
-status=${shellSingleQuote(probeOperationStatusPath)}
-report_unavailable() {
-  printf 'availability=%s\\nerrorCode=\\noperationId=\\nstatus=\\ntargetProbeVersion=\\n' "$1"
-  exit 0
-}
-if [ ! -e "$status" ]; then report_unavailable absent; fi
-if [ -L "$status" ] || [ ! -f "$status" ] || [ ! -r "$status" ]; then
-  report_unavailable unreadable
-fi
-field() {
-  sed -n "s/^$1 = \\"\\([^\\"]*\\)\\"$/\\1/p" "$status" | head -n 1
-}
-printf 'availability=present\\nerrorCode=%s\\noperationId=%s\\nstatus=%s\\ntargetProbeVersion=%s\\n' \\
-  "$(field error_code)" "$(field operation_id)" "$(field status)" \\
-  "$(field target_probe_version)"
-`;
-}
-
-async function readProbeOperationStatusSnapshot(
-  execute: CommandExecutor,
-): Promise<ProbeOperationStatusSnapshot> {
-  const unavailable = (
-    availability: ProbeOperationStatusSnapshot["availability"],
-  ): ProbeOperationStatusSnapshot => ({
-    availability,
-    errorCode: "",
-    operationId: "",
-    status: "",
-    targetProbeVersion: "",
-  });
-  let result;
-  try {
-    result = await execute(probeOperationStatusSnapshotScript(), {
-      root: true,
-    });
-  } catch {
-    return unavailable("unreadable");
-  }
-  if (result.code !== 0) return unavailable("unreadable");
-  let values;
-  try {
-    values = exactKeyValues(result.stdout, [
-      "availability",
-      "errorCode",
-      "operationId",
-      "status",
-      "targetProbeVersion",
-    ]);
-  } catch {
-    return unavailable("unreadable");
-  }
-  if (values.availability === "absent") return unavailable("absent");
-  if (values.availability !== "present") return unavailable("unreadable");
-  return {
-    availability: "present",
-    errorCode: stringValue(values.errorCode),
-    operationId: stringValue(values.operationId),
-    status: stringValue(values.status),
-    targetProbeVersion: stringValue(values.targetProbeVersion),
-  };
-}
-
-function formatProbeOperationStatusSnapshot(
-  snapshot: ProbeOperationStatusSnapshot,
-): string {
-  if (snapshot.availability !== "present") return snapshot.availability;
-  return [
-    `operation_id=${snapshot.operationId || "-"}`,
-    `target_probe_version=${snapshot.targetProbeVersion || "-"}`,
-    `status=${snapshot.status || "-"}`,
-    `error_code=${snapshot.errorCode || "-"}`,
-  ].join(" ");
-}
-
-function interpretProbeOperationStatus(
-  before: ProbeOperationStatusSnapshot,
-  after: ProbeOperationStatusSnapshot,
-  expectedBundleVersion: string,
-): string {
-  const unknown = (reason: string): string =>
-    `repair failure code=unknown reason=${reason}`;
-  if (after.availability !== "present") {
-    return unknown(`operation-status-${after.availability}`);
-  }
-  if (before.availability === "unreadable") {
-    return unknown("operation-status-before-unreadable");
-  }
-  if (!/^[1-9]\d*$/.test(after.operationId)) {
-    return unknown("operation-id-invalid");
-  }
-  if (after.targetProbeVersion !== expectedBundleVersion) {
-    return unknown("target-probe-version-mismatch");
-  }
-  // 同次关联只接受“CLI 前无状态，之后出现新 ID”或“前后 ID 发生变化”；相同 ID 无法
-  // 证明属于本次操作，保持 unknown，也不冒充独立的 Hub authority 证明。
-  let association = "";
-  if (before.availability === "absent") association = "fresh-operation";
-  else if (before.operationId !== after.operationId)
-    association = "changed-operation";
-  else return unknown("operation-id-unchanged");
-  if (after.status === "running") return unknown("operation-still-running");
-  if (after.status === "succeeded")
-    return unknown("operation-status-succeeded");
-  if (after.status !== "failed") return unknown("operation-status-invalid");
-  if (!/^[a-z][a-z0-9_]*$/.test(after.errorCode)) {
-    return unknown("error-code-unprojected");
-  }
-  return `repair failure code=${after.errorCode} operation_id=${after.operationId} association=${association} (local read only, not an independent Hub authority proof)`;
-}
-
-export function explainProbeOperationStatusComparison(
-  before: ProbeOperationStatusSnapshot,
-  after: ProbeOperationStatusSnapshot,
-  expectedBundleVersion: string,
-): string {
-  return ` [probe operation status before CLI: ${formatProbeOperationStatusSnapshot(before)}] [probe operation status after the failed CLI: ${formatProbeOperationStatusSnapshot(after)}; ${interpretProbeOperationStatus(before, after, expectedBundleVersion)}]`;
 }
