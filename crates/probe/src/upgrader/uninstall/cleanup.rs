@@ -1155,7 +1155,8 @@ fn validate_owned_bootstrap_state_with_commit_custody_and_layout_version(
                 let expected = format!("schema_version=1\nversion={version}\n");
                 let metadata =
                     fs::symlink_metadata(&receipt_path).map_err(ProbeUpgraderRunError::Io)?;
-                if metadata.len() != expected.len() as u64
+                if metadata.mode() & 0o7777 != 0o600
+                    || metadata.len() != expected.len() as u64
                     || fs::read(&receipt_path).map_err(ProbeUpgraderRunError::Io)?
                         != expected.as_bytes()
                 {

@@ -934,6 +934,7 @@ fn schema_five_uninstall_removes_upgrade_companion_roles_and_complete_layout() {
 fn run_schema_five_hub_uninstall_with_layout_receipt(
     root: &Path,
     receipt: Option<&str>,
+    receipt_mode: u32,
 ) -> (
     UninstallCoordinatorFixture,
     LifecycleResponse,
@@ -951,8 +952,16 @@ fn run_schema_five_hub_uninstall_with_layout_receipt(
             .expect("Bootstrap state")
             .join("current-layout");
         fs::write(&path, contents).expect("candidate layout receipt");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(&path, fs::Permissions::from_mode(receipt_mode))
             .expect("candidate layout receipt mode");
+        assert_eq!(
+            fs::symlink_metadata(&path)
+                .expect("candidate layout receipt metadata")
+                .mode()
+                & 0o7777,
+            receipt_mode,
+            "test fixture must preserve the requested receipt mode"
+        );
     }
     let request = LifecycleRequest::hub_uninstall(
         "probe_01",
@@ -996,7 +1005,7 @@ fn run_schema_five_hub_uninstall_with_layout_receipt(
 fn schema_five_hub_uninstall_retires_the_exact_candidate_layout_receipt() {
     let control_temporary = tempfile::tempdir().expect("control temporary directory");
     let (control, control_response, control_transport, control_systemd) =
-        run_schema_five_hub_uninstall_with_layout_receipt(control_temporary.path(), None);
+        run_schema_five_hub_uninstall_with_layout_receipt(control_temporary.path(), None, 0o600);
     assert_eq!(control_response, LifecycleResponse::succeeded());
     assert!(control_transport.url.contains("operation_42"));
     assert!(!control_systemd.calls.is_empty());
@@ -1006,6 +1015,7 @@ fn schema_five_hub_uninstall_retires_the_exact_candidate_layout_receipt() {
     let (fixture, response, transport, systemd) = run_schema_five_hub_uninstall_with_layout_receipt(
         temporary.path(),
         Some("schema_version=1\nversion=1.2.3\n"),
+        0o600,
     );
     assert_eq!(response, LifecycleResponse::succeeded());
     assert!(transport.url.contains("operation_42"));
@@ -1026,6 +1036,7 @@ fn schema_five_hub_uninstall_keeps_a_mismatched_candidate_layout_receipt_fail_cl
     let (fixture, response, transport, systemd) = run_schema_five_hub_uninstall_with_layout_receipt(
         temporary.path(),
         Some("schema_version=1\nversion=9.9.9\n"),
+        0o600,
     );
 
     assert_eq!(
@@ -1045,6 +1056,32 @@ fn schema_five_hub_uninstall_keeps_a_mismatched_candidate_layout_receipt_fail_cl
             .join("current-layout")
             .exists()
     );
+}
+
+#[test]
+fn schema_five_hub_uninstall_rejects_a_candidate_layout_receipt_with_special_mode_bits() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let (fixture, response, transport, systemd) = run_schema_five_hub_uninstall_with_layout_receipt(
+        temporary.path(),
+        Some("schema_version=1\nversion=1.2.3\n"),
+        0o4600,
+    );
+    let receipt = fixture
+        .metadata
+        .bootstrap_state_dir
+        .as_ref()
+        .expect("Bootstrap state")
+        .join("current-layout");
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(transport.url.is_empty());
+    assert!(systemd.calls.is_empty());
+    assert!(fixture.metadata_path.exists());
+    assert!(fixture.identity_path.exists());
+    assert!(receipt.exists());
 }
 
 fn assert_single_authority_field_mismatch_is_rejected(
