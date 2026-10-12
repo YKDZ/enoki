@@ -698,6 +698,7 @@ type ForwardLifecycleScenarioEvidence = {
     host: ReturnType<typeof compactHostEvidence>;
     status: string;
   } | null;
+  diagnostics?: UnknownRecord;
   hostBoundary: Awaited<ReturnType<ProbeHost["assertInstalled"]>> | null;
   hostEvidence: HostEvidenceField | null;
   hubEvidence: HubEvidenceField | null;
@@ -2634,6 +2635,23 @@ async function runForwardLifecycleScenario({
         evidence.upgradeOperationTimeline = error.timeline;
       } else {
         evidence.operationTimeline = error.timeline;
+        if (
+          error.code === "probe_operation_timeout" &&
+          error.timeline.some(
+            (operation) => operation?.kind === "probe_uninstall",
+          ) &&
+          resources?.host?.collectDiagnostics
+        ) {
+          try {
+            evidence.diagnostics = {
+              host: await resources.host.collectDiagnostics(runId),
+            };
+          } catch (diagnosticError) {
+            evidence.diagnostics = {
+              error: serializedError(diagnosticError),
+            };
+          }
+        }
       }
     }
     evidence.result = { error: serializedError(error), status: "failed" };
