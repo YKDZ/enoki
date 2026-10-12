@@ -95,7 +95,7 @@ export type HubProbeReportRejectionPredicate =
   (typeof probeReportRejectionPredicates)[number];
 export type HubProbeReportRejection = {
   predicate: HubProbeReportRejectionPredicate;
-  [field: string]: string | number | boolean | undefined;
+  [field: string]: string | number | boolean | null | undefined;
 };
 
 export type HubRouteId =
@@ -177,6 +177,7 @@ const probeReportRejectionNumberFields = new Set([
   "sampleCount",
   "sampleIndex",
   "sampleSequence",
+  "snapshotCount",
   "sequenceCount",
   "sequenceEnd",
   "sequenceStart",
@@ -629,8 +630,9 @@ function sanitizeProbeReportRejection(
     sanitized.enrollmentTargetKind = value.enrollmentTargetKind;
   }
   if (
-    typeof value.snapshotReplayStatus === "string" &&
-    ["fulfilled", "pending"].includes(value.snapshotReplayStatus)
+    value.snapshotReplayStatus === null ||
+    (typeof value.snapshotReplayStatus === "string" &&
+      ["fulfilled", "pending"].includes(value.snapshotReplayStatus))
   ) {
     sanitized.snapshotReplayStatus = value.snapshotReplayStatus;
   }

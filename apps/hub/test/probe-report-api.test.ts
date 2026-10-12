@@ -922,6 +922,75 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it("preserves the observed snapshot count in a report rejection", async () => {
+    const database = await createTemporaryDatabase();
+    const memory = createMemoryHubLogger();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      listener: "probe",
+      logger: memory.logger,
+    });
+
+    try {
+      const ownerSession = await loginOwner(app);
+      const registration = await registerProbe(
+        app,
+        await createEnrollmentToken(app, ownerSession),
+      );
+      const ReportRequest = root.enoki.v1.ProbeReportRequest;
+
+      for (const snapshotCount of [0, 2]) {
+        const body = ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-snapshot-count-observation",
+            metrics: [
+              {
+                collectedAtMs: 1_725_000_000_000,
+                collectorOutcomes: [
+                  { collectorId: "official.host-profile", state: 1 },
+                ],
+                sequence: 1,
+              },
+            ],
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+            snapshots: Array.from({ length: snapshotCount }, () => ({
+              collectorId: "official.host-profile",
+            })),
+          }),
+        ).finish();
+        const response = await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", body),
+        );
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({
+          error: "malformed_probe_report",
+        });
+      }
+
+      const rejections = memory.events.filter(
+        (event) =>
+          event.event === "probe.report.rejected" &&
+          event.probeReportRejection?.predicate ===
+            "host_profile.outcome_snapshot_count_invalid",
+      );
+      expect(
+        rejections.map((event) => event.probeReportRejection?.snapshotCount),
+      ).toEqual([0, 2]);
+      expect(rejections.every((event) => event.level === "info")).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
+
   it("persists one idempotent CPU resource acquisition outcome without Metrics", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -3013,6 +3082,7 @@ describe("Probe report API", () => {
 
   it("rejects an old Snapshot Replay after the Hub replaces it with a newer request", async () => {
     const database = await createTemporaryDatabase();
+    const memory = createMemoryHubLogger();
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -3020,6 +3090,8 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      listener: "probe",
+      logger: memory.logger,
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -3128,8 +3200,28 @@ describe("Probe report API", () => {
       snapshot_hash: newReplayHash,
     });
 
+    const observationCountBeforeRejection = database.sqlite
+      .prepare("select count(*) as count from report_observations")
+      .get();
     const historicOldReplay = await send(oldReplayBody);
     expect(historicOldReplay.status).toBe(400);
+    await expect(historicOldReplay.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+    const receiptRejections = memory.events.filter(
+      (event) =>
+        event.event === "probe.report.rejected" &&
+        event.probeReportRejection?.predicate ===
+          "snapshot_replay.receipt_not_fulfilled",
+    );
+    const receiptRequestAfterRejection = database.sqlite
+      .prepare(
+        "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+      )
+      .get();
+    const observationCountAfterRejection = database.sqlite
+      .prepare("select count(*) as count from report_observations")
+      .get();
 
     const wrongHashReplay = await send(
       ReportRequest.encode(
@@ -3210,6 +3302,28 @@ describe("Probe report API", () => {
     ).toEqual({ observations: 3, samples: 0 });
 
     database.close();
+    expect(receiptRejections).toHaveLength(1);
+    expect(receiptRejections[0]).toMatchObject({
+      level: "info",
+      outcome: "malformed_probe_report",
+      status: 400,
+      probeReportRejection: {
+        predicate: "snapshot_replay.receipt_not_fulfilled",
+        snapshotAlreadyStored: true,
+        snapshotHash: oldReplayHash,
+        snapshotReplayStatus: null,
+        snapshotSequenceAccepted: true,
+      },
+    });
+    expect(receiptRequestAfterRejection).toEqual({
+      boot_id: "boot-replay-request-replacement",
+      fulfilled_at_ms: null,
+      sequence: 3,
+      snapshot_hash: newReplayHash,
+    });
+    expect(observationCountAfterRejection).toEqual(
+      observationCountBeforeRejection,
+    );
   });
 
   it("marks an active Probe Upgrade Request succeeded from a Host Profile snapshot report", async () => {

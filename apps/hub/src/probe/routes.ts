@@ -611,7 +611,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
               predicate: "snapshot_replay.receipt_not_fulfilled",
               snapshotAlreadyStored,
               snapshotHash,
-              snapshotReplayStatus: "fulfilled",
+              snapshotReplayStatus: replayRequestStatus,
               snapshotSequenceAccepted: replaySequenceAlreadyAccepted,
             });
           }
