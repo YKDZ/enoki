@@ -11,7 +11,10 @@ use crate::upgrader::{
     read_trusted_probe_install_preflight, rebase_trusted_install_metadata_paths,
     remove_empty_parent_dir, remove_path_if_exists, uninstall_cleanup_failure, verify_path_absent,
 };
-use enoki_probe_bootstrap::install::{ProbeStateRoot, ProbeStateRootError};
+use enoki_probe_bootstrap::install::{
+    BootstrapActivationLock, InstallError as BootstrapInstallError, ProbeStateRoot,
+    ProbeStateRootError,
+};
 use enoki_probe_bootstrap::replacement::{
     FileReplacementCommitStore, ReplacementCommitError, ReplacementCommitFact,
     ReplacementCommitStore, ReplacementIntent, commit_and_cleanup_replacement,
@@ -20,7 +23,10 @@ use std::{
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+const BOOTSTRAP_ACTIVATION_LOCK: &str = "activation.lock";
 
 #[cfg(test)]
 fn execute_probe_uninstall_with_install_metadata_path(
@@ -183,6 +189,7 @@ pub(super) struct ProbeUninstallCleanupPlan<'a> {
     pub(super) install_metadata: &'a TrustedProbeInstallMetadata,
     pub(super) install_metadata_path: &'a Path,
     authorized_commit_fact: Option<AuthorizedReplacementCommitFact>,
+    activation_lock: Option<BootstrapActivationLock>,
 }
 
 /// Establishes every local deletion target before systemd or filesystem
@@ -193,7 +200,9 @@ pub(super) fn plan_probe_uninstall_cleanup<'a>(
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    validate_owned_bootstrap_assets_for_cleanup(install_metadata)?;
+    plan.activation_lock = acquire_bootstrap_activation_lock(&plan, false)?;
     validate_owned_bootstrap_assets_for_cleanup(install_metadata)?;
     Ok(plan)
 }
@@ -203,9 +212,39 @@ pub(super) fn plan_probe_uninstall_recovery<'a>(
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    let mut plan = plan_probe_uninstall_paths(input, install_metadata, install_metadata_path)?;
+    validate_owned_bootstrap_assets_for_recovery(install_metadata)?;
+    plan.activation_lock = acquire_bootstrap_activation_lock(&plan, true)?;
     validate_owned_bootstrap_assets_for_recovery(install_metadata)?;
     Ok(plan)
+}
+
+fn acquire_bootstrap_activation_lock(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+    recovery: bool,
+) -> Result<Option<BootstrapActivationLock>, ProbeUpgraderRunError> {
+    let Some(state_dir) = plan.install_metadata.bootstrap_state_dir.as_deref() else {
+        return Ok(None);
+    };
+    if recovery
+        && fs::symlink_metadata(state_dir)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(None);
+    }
+    BootstrapActivationLock::acquire(state_dir, Duration::ZERO)
+        .map(Some)
+        .map_err(|error| match error {
+            BootstrapInstallError::ExistingResidue => {
+                ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe Bootstrap activation lock is not safe to acquire",
+                )
+            }
+            _ => ProbeUpgraderRunError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "Probe Bootstrap activation is in progress",
+            )),
+        })
 }
 
 /// 测试侧的三参数投影：生产源阶段总是经 `..._with_commit_custody` 传入按 intent 授予的保管，
@@ -299,6 +338,7 @@ pub(super) fn plan_probe_uninstall_paths<'a>(
         install_metadata,
         install_metadata_path,
         authorized_commit_fact: None,
+        activation_lock: None,
     })
 }
 
@@ -487,9 +527,10 @@ pub(super) fn remove_probe_bootstrap_state(
     plan: &ProbeUninstallCleanupPlan<'_>,
 ) -> Result<(), ProbeUpgraderRunError> {
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        remove_owned_bootstrap_state_with_layout_version(
+        remove_owned_bootstrap_state_with_layout_version_and_lock(
             path,
             plan.install_metadata.bundle_version.as_deref(),
+            plan.activation_lock.is_some(),
         )?;
     }
     Ok(())
@@ -837,11 +878,15 @@ pub(super) fn verify_uninstall_residue_absent(
     verify_common_cleanup_residue_absent(plan, systemd)?;
     verify_uninstall_local_state_retired(plan)?;
     if let Some(path) = plan.install_metadata.bootstrap_state_dir.as_deref() {
-        verify_path_absent(
-            path,
-            "probe_uninstall_bootstrap_state_residue",
-            "verifying Probe Bootstrap state is absent",
-        )?;
+        if plan.activation_lock.is_some() {
+            verify_bootstrap_activation_lock_shell(path)?;
+        } else {
+            verify_path_absent(
+                path,
+                "probe_uninstall_bootstrap_state_residue",
+                "verifying Probe Bootstrap state is absent",
+            )?;
+        }
     }
     Ok(())
 }
@@ -1165,6 +1210,9 @@ fn validate_owned_bootstrap_state_with_commit_custody_and_layout_version(
                     ));
                 }
             }
+            Some(BOOTSTRAP_ACTIVATION_LOCK) => {
+                validate_owned_bootstrap_activation_lock(&entry.path())?;
+            }
             // committed Replacement 在源清理之前 durable 写入的提交事实。只有当前源阶段
             // 授权的那一份绑定才是本次替换的恢复凭据；同名但未绑定、位于别处或没有授权
             // （普通卸载与恢复）时，仍按未知对象失败关闭。绑定校验直接复用生产文件存储的
@@ -1253,20 +1301,102 @@ pub(super) fn validate_owned_bootstrap_regular(
     }
     Ok(())
 }
+
+fn validate_owned_bootstrap_activation_lock(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.len() != 0
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap activation lock is not an exact owned lock file",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_bootstrap_activation_lock_shell(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let directory = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if directory.file_type().is_symlink()
+        || !directory.is_dir()
+        || directory.uid() != 0
+        || directory.mode() & 0o777 != 0o700
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap state is not the exact activation lock shell",
+        ));
+    }
+    let mut entries = fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)?;
+    let Some(lock) = entries.next() else {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap activation lock shell is missing its lock file",
+        ));
+    };
+    let lock = lock.map_err(ProbeUpgraderRunError::Io)?;
+    if lock.file_name() != BOOTSTRAP_ACTIVATION_LOCK || entries.next().is_some() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap activation lock shell contains unexpected state",
+        ));
+    }
+    validate_owned_bootstrap_activation_lock(&lock.path())
+}
+
 #[cfg(test)]
 pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgraderRunError> {
     remove_owned_bootstrap_state_with_layout_version(path, None)
 }
 
+#[cfg(test)]
 fn remove_owned_bootstrap_state_with_layout_version(
     path: &Path,
     current_layout_version: Option<&str>,
+) -> Result<(), ProbeUpgraderRunError> {
+    remove_owned_bootstrap_state_with_layout_version_and_lock(path, current_layout_version, false)
+}
+
+fn remove_owned_bootstrap_state_with_layout_version_and_lock(
+    path: &Path,
+    current_layout_version: Option<&str>,
+    preserve_lock: bool,
 ) -> Result<(), ProbeUpgraderRunError> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
         return Ok(());
     }
     validate_owned_bootstrap_state_with_layout_version(Some(path), current_layout_version)?;
-    fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
+    if preserve_lock {
+        validate_owned_bootstrap_activation_lock(&path.join(BOOTSTRAP_ACTIVATION_LOCK))?;
+    }
+    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
+        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
+        if preserve_lock && entry.file_name() == BOOTSTRAP_ACTIVATION_LOCK {
+            continue;
+        }
+        let child = entry.path();
+        let metadata = fs::symlink_metadata(&child).map_err(ProbeUpgraderRunError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state changed during cleanup",
+            ));
+        }
+        if metadata.is_dir() {
+            fs::remove_dir_all(child).map_err(ProbeUpgraderRunError::Io)?;
+        } else if metadata.is_file() {
+            fs::remove_file(child).map_err(ProbeUpgraderRunError::Io)?;
+        } else {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state changed during cleanup",
+            ));
+        }
+    }
+    if preserve_lock {
+        verify_bootstrap_activation_lock_shell(path)?;
+    } else {
+        fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

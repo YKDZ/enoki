@@ -196,6 +196,8 @@ const managedHostPaths: readonly string[] = Object.freeze(
     .flatMap(managedPathResourcePaths),
 );
 
+const bootstrapStatePath = "/var/lib/enoki-probe-bootstrap";
+
 const releaseE2EUsers: readonly string[] = Object.freeze(
   releaseE2EInfrastructureResources
     .filter(
@@ -1546,6 +1548,30 @@ EOUNITSTATE
 }`;
 }
 
+// ADR0098 保留空的稳定 ActivationLock inode，供后续 Bootstrap Fresh 安装复用。
+// inventory 与 claim 只把这个精确壳视为空；所有其他子项仍是残留。mode 比较沿
+// ActivationLock 的现有权限位合同检查 0777，不增加对特殊位的新限制。
+function bootstrapActivationLockQueryScript(): string {
+  return String.raw`probe_valid_bootstrap_activation_lock_file() {
+  bootstrap_lock_candidate=$1
+  [ -f "$bootstrap_lock_candidate" ] && [ ! -L "$bootstrap_lock_candidate" ] || return 1
+  [ "$(stat -c %u "$bootstrap_lock_candidate")" = 0 ] || return 1
+  [ "$(stat -c %h "$bootstrap_lock_candidate")" = 1 ] || return 1
+  [ "$(stat -c %s "$bootstrap_lock_candidate")" = 0 ] || return 1
+  bootstrap_lock_mode=$(stat -c %a "$bootstrap_lock_candidate")
+  [ "$((0$bootstrap_lock_mode & 0777))" -eq 384 ]
+}
+probe_harmless_bootstrap_lock_shell() {
+  bootstrap_shell_candidate=$1
+  [ -d "$bootstrap_shell_candidate" ] && [ ! -L "$bootstrap_shell_candidate" ] || return 1
+  [ "$(stat -c %u "$bootstrap_shell_candidate")" = 0 ] || return 1
+  bootstrap_shell_mode=$(stat -c %a "$bootstrap_shell_candidate")
+  [ "$((0$bootstrap_shell_mode & 0777))" -eq 448 ] || return 1
+  probe_valid_bootstrap_activation_lock_file "$bootstrap_shell_candidate/activation.lock" || return 1
+  [ -z "$(find "$bootstrap_shell_candidate" -mindepth 1 -maxdepth 1 ! -name activation.lock -print -quit)" ]
+}`;
+}
+
 function hostInventoryScript(): string {
   const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
   const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
@@ -1559,6 +1585,7 @@ function hostInventoryScript(): string {
 set -eu
 ${probeAccountQueryScript()}
 ${quiescentManagerRecordQueryScript()}
+${bootstrapActivationLockQueryScript()}
 group_present=false
 for account in ${groups}; do
   if probe_account group "$account"; then group_present=true; fi
@@ -1570,6 +1597,7 @@ done
 printf '{"accounts":{"group":%s,"user":%s},"files":[' "$group_present" "$user_present"
 separator=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
+  if [ "$candidate" = ${shellSingleQuote(bootstrapStatePath)} ] && probe_harmless_bootstrap_lock_shell "$candidate"; then continue; fi
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     printf '%s"%s"' "$separator" "$candidate"
     separator=,
@@ -1925,6 +1953,7 @@ function claimRunScript(runId: string, token: string): string {
 set -eu
 ${probeAccountQueryScript()}
 ${quiescentManagerRecordQueryScript()}
+${bootstrapActivationLockQueryScript()}
 claim_root=/var/lib/enoki-release-e2e
 claim_dir="$claim_root/claim"
 install -d -m 0700 "$claim_root"
@@ -1938,6 +1967,7 @@ trap cleanup_rejected_claim EXIT HUP INT TERM
 # enoki-release-e2e:claim-empty-recheck
 residue=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} ${releaseE2ERuntimeUnitPaths.join(" ")}; do
+  if [ "$candidate" = ${shellSingleQuote(bootstrapStatePath)} ] && probe_harmless_bootstrap_lock_shell "$candidate"; then continue; fi
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then residue="$residue $candidate"; fi
 done
 for account in ${users}; do
@@ -2191,7 +2221,14 @@ function releaseEmergencyCleanupScript(runId: string, token: string): string {
       .map(shellSingleQuote)
       .join(" ");
   const files = pathsFor("file");
-  const directories = pathsFor("directory");
+  const directories = releaseE2EInfrastructureResources
+    .filter(
+      (resource): resource is ManagedDirectoryResource =>
+        resource.kind === "directory" && resource.path !== bootstrapStatePath,
+    )
+    .flatMap(managedPathResourcePaths)
+    .map((resource) => shellSingleQuote(resource))
+    .join(" ");
   const users = namesFor("user");
   const groups = namesFor("group");
   const sockets = patternsFor(".socket");
@@ -2230,6 +2267,23 @@ claim=/var/lib/enoki-release-e2e/claim
 [ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
 [ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
 ${stateCustodyGuards}
+${bootstrapActivationLockQueryScript()}
+bootstrap_state=${shellSingleQuote(bootstrapStatePath)}
+bootstrap_state_exists=false
+bootstrap_lock_retained=false
+if [ -e "$bootstrap_state" ] || [ -L "$bootstrap_state" ]; then
+  bootstrap_state_exists=true
+  [ -d "$bootstrap_state" ] && [ ! -L "$bootstrap_state" ] || { printf 'refusing unknown Bootstrap state root: %s\\n' "$bootstrap_state" >&2; exit 75; }
+  [ "$(stat -c %u "$bootstrap_state")" = 0 ] || { printf 'refusing unowned Bootstrap state root: %s\\n' "$bootstrap_state" >&2; exit 75; }
+  bootstrap_state_mode=$(stat -c %a "$bootstrap_state")
+  [ "$((0$bootstrap_state_mode & 0777))" -eq 448 ] || { printf 'refusing unexpected Bootstrap state permissions: %s\\n' "$bootstrap_state" >&2; exit 75; }
+  if [ -e "$bootstrap_state/activation.lock" ] || [ -L "$bootstrap_state/activation.lock" ]; then
+    probe_valid_bootstrap_activation_lock_file "$bootstrap_state/activation.lock" || { printf 'refusing unexpected Bootstrap activation lock: %s\\n' "$bootstrap_state/activation.lock" >&2; exit 75; }
+    exec 9<> "$bootstrap_state/activation.lock"
+    flock -n 9 || { printf 'Bootstrap activation is busy: %s\\n' "$bootstrap_state" >&2; exit 75; }
+    bootstrap_lock_retained=true
+  fi
+fi
 # 退休顺序沿用产品自己的固定 stop 列表：先收 socket 激活源，再停 service 与实例，
 # 否则正常停止 Probe 后 socket 会重新拉起 Runtime／Provider。stop 走官方
 # expand_unit_names（systemctl-util.c:263—291），glob 由 manager 展开成已加载实例；
@@ -2240,6 +2294,13 @@ systemctl stop ${services} >/dev/null 2>&1 || true
 systemctl disable ${unitFiles} >/dev/null 2>&1 || true
 rm -f -- ${files}
 rm -rf -- ${directories}
+if [ "$bootstrap_state_exists" = true ]; then
+  if [ "$bootstrap_lock_retained" = true ]; then
+    find "$bootstrap_state" -mindepth 1 -maxdepth 1 ! -name activation.lock -exec rm -rf -- {} +
+  else
+    rm -rf -- "$bootstrap_state"
+  fi
+fi
 for account in ${users}; do userdel -- "$account" >/dev/null 2>&1 || true; done
 for account in ${groups}; do groupdel -- "$account" >/dev/null 2>&1 || true; done
 printf 'cleaned\\n'

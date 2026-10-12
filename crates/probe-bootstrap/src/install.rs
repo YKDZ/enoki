@@ -98,6 +98,31 @@ const OPERATION_SUDOERS: &str = "/etc/sudoers.d/enoki-probe-operations";
 const COLLECTOR_SUDOERS: &str = "/etc/sudoers.d/enoki-probe-collector-helpers";
 const LEGACY_SUDOERS: &str = "/etc/sudoers.d/enoki-probe-upgrader";
 
+/// 供普通 Probe 清理复用的 Bootstrap 激活锁。
+///
+/// 清理通过同一把安装锁串行化，不另行实现 flock 协议。卸载成功后保留锁文件，
+/// 让后续全新安装继续复用同一个 inode。
+#[doc(hidden)]
+pub struct BootstrapActivationLock {
+    _lock: ActivationLock,
+}
+
+impl std::fmt::Debug for BootstrapActivationLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BootstrapActivationLock")
+    }
+}
+
+impl BootstrapActivationLock {
+    /// 获取 root 所有的 Bootstrap 状态目录中的稳定锁。
+    /// 等待时限由调用方选择；Hub 卸载使用非阻塞尝试。
+    #[doc(hidden)]
+    pub fn acquire(state_directory: &Path, timeout: Duration) -> Result<Self, InstallError> {
+        let lock = ActivationLock::acquire(state_directory, 0, Instant::now() + timeout)?;
+        Ok(Self { _lock: lock })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ServiceIdentity {
     pub uid: u32,
@@ -712,10 +737,74 @@ pub(crate) fn coordinate_fresh_install(
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
 ) -> Result<(), InstallError> {
-    let verified = verify_fresh_install(components, enrollment, bundle, trust)?;
     let paths = FixedInstallPaths::production();
     let mut accounts = SystemAccounts::default();
     let mut systemd = SystemSystemd::default();
+    coordinate_fresh_install_with_ports(
+        components,
+        enrollment,
+        bundle,
+        trust,
+        &paths,
+        &mut accounts,
+        &mut systemd,
+    )
+}
+
+#[cfg(feature = "deterministic-test-seams")]
+#[doc(hidden)]
+pub struct FreshInstallTestComponents<'a> {
+    pub probe: &'a mut File,
+    pub observation_runtime: &'a mut File,
+    pub cpu_provider: &'a mut File,
+    pub disk_health_provider: &'a mut File,
+    pub lifecycle_companion: &'a mut File,
+    pub bootstrap_acquirer: &'a mut File,
+    pub bootstrap_activator: &'a mut File,
+}
+
+/// 使用显式本地端口和测试根路径运行正式全新安装协调器。
+/// 此入口只替换环境归属；校验、Bootstrap 加锁、日志顺序和激活仍走正式实现。
+#[cfg(feature = "deterministic-test-seams")]
+#[doc(hidden)]
+pub fn install_fresh_for_test(
+    components: FreshInstallTestComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    coordinate_fresh_install_with_ports(
+        VerifiedCompleteFreshComponents {
+            probe: components.probe,
+            observation_runtime: components.observation_runtime,
+            cpu_provider: components.cpu_provider,
+            disk_health_provider: components.disk_health_provider,
+            lifecycle_companion: components.lifecycle_companion,
+            bootstrap_acquirer: components.bootstrap_acquirer,
+            bootstrap_activator: components.bootstrap_activator,
+        },
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        accounts,
+        systemd,
+    )
+}
+
+fn coordinate_fresh_install_with_ports(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    let verified = verify_fresh_install(components, enrollment, bundle, trust)?;
     let mut files = SystemInstallFiles;
     activate_verified_fresh_install(
         verified.components.probe,
@@ -732,10 +821,10 @@ pub(crate) fn coordinate_fresh_install(
         verified.authority.enrollment,
         verified.bundle,
         verified.trust,
-        &paths,
+        paths,
         &mut InstallPorts {
-            accounts: &mut accounts,
-            systemd: &mut systemd,
+            accounts,
+            systemd,
             files: &mut files,
         },
         InstallFailureSemantics::FreshRollback,

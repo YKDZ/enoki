@@ -18,17 +18,25 @@ use crate::{
     },
 };
 use enoki_probe_bootstrap::handoff::Enrollment;
+use enoki_probe_bootstrap::install::{
+    AccountPort as BootstrapAccountPort, BootstrapActivationLock, FixedInstallPaths,
+    FreshInstallTestComponents, InstallError as BootstrapInstallError, ServiceIdentity,
+    SystemdPort as BootstrapSystemdPort, install_fresh_for_test,
+};
 use enoki_probe_bootstrap::lifecycle::{LifecycleRequest, LifecycleResponse};
 use enoki_probe_bootstrap::replacement::{
     FileReplacementCommitStore, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
 };
+use enoki_probe_bootstrap::trust::{BootstrapRole, BuildTrust as DistributionTrust};
+use enoki_probe_bootstrap::verifier::VerifiedBundle;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 #[derive(Default)]
@@ -775,7 +783,6 @@ fn complete_local_workflow_maps_account_failure_at_the_exact_effect_boundary() {
     for path in [
         fixture.metadata.bootstrap_acquirer_path.as_ref().unwrap(),
         fixture.metadata.bootstrap_activator_path.as_ref().unwrap(),
-        fixture.metadata.bootstrap_state_dir.as_ref().unwrap(),
         &fixture.metadata.install_path,
         &fixture.metadata.service_unit_path,
     ]
@@ -801,6 +808,7 @@ fn complete_local_workflow_maps_account_failure_at_the_exact_effect_boundary() {
             path.display()
         );
     }
+    assert_bootstrap_lock_shell_retained(fixture.metadata.bootstrap_state_dir.as_ref().unwrap());
 }
 
 #[test]
@@ -909,16 +917,18 @@ fn schema_five_uninstall_removes_upgrade_companion_roles_and_complete_layout() {
             &fixture.identity_path,
             &fixture.metadata_path,
             &fixture.metadata.state_dir,
-            fixture
-                .metadata
-                .bootstrap_state_dir
-                .as_ref()
-                .expect("bootstrap state"),
             &fixture.companion_path,
         ])
     {
         assert!(!path.exists(), "{} remains", path.display());
     }
+    assert_bootstrap_lock_shell_retained(
+        fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .expect("bootstrap state"),
+    );
     assert!(
         systemd
             .calls
@@ -1020,13 +1030,12 @@ fn schema_five_hub_uninstall_retires_the_exact_candidate_layout_receipt() {
     assert_eq!(response, LifecycleResponse::succeeded());
     assert!(transport.url.contains("operation_42"));
     assert!(!systemd.calls.is_empty());
-    assert!(
-        !fixture
+    assert_bootstrap_lock_shell_retained(
+        fixture
             .metadata
             .bootstrap_state_dir
             .as_ref()
-            .expect("Bootstrap state")
-            .exists()
+            .expect("Bootstrap state"),
     );
 }
 
@@ -1544,6 +1553,25 @@ fn assert_state_shell_retained(state_dir: &Path) {
     );
 }
 
+fn assert_bootstrap_lock_shell_retained(state_dir: &Path) {
+    let directory = fs::symlink_metadata(state_dir).expect("Bootstrap activation lock shell");
+    assert!(directory.is_dir() && !directory.file_type().is_symlink());
+    assert_eq!(directory.uid(), 0);
+    assert_eq!(directory.mode() & 0o777, 0o700);
+    let entries = fs::read_dir(state_dir)
+        .expect("enumerate Bootstrap lock shell")
+        .map(|entry| entry.expect("Bootstrap lock shell entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(entries, [std::ffi::OsString::from("activation.lock")]);
+    let lock = fs::symlink_metadata(state_dir.join("activation.lock"))
+        .expect("stable Bootstrap activation lock");
+    assert!(lock.is_file() && !lock.file_type().is_symlink());
+    assert_eq!(lock.uid(), 0);
+    assert_eq!(lock.nlink(), 1);
+    assert_eq!(lock.mode() & 0o777, 0o600);
+    assert_eq!(lock.len(), 0);
+}
+
 #[test]
 fn production_uninstall_entries_complete_around_a_harmless_empty_state_shell() {
     let identity = TrustedProbeInstallPreflight {
@@ -1574,6 +1602,9 @@ fn production_uninstall_entries_complete_around_a_harmless_empty_state_shell() {
     assert!(local_transport.url.is_empty());
     assert!(local_transport.status_url.is_empty());
     assert_state_shell_retained(&local_fixture.metadata.state_dir);
+    assert_bootstrap_lock_shell_retained(
+        local_fixture.metadata.bootstrap_state_dir.as_ref().unwrap(),
+    );
     for path in [
         &local_fixture.metadata_path,
         &local_fixture.identity_path,
@@ -1621,6 +1652,9 @@ fn production_uninstall_entries_complete_around_a_harmless_empty_state_shell() {
             .contains("\"status\":\"succeeded\"")
     );
     assert_state_shell_retained(&hub_fixture.metadata.state_dir);
+    assert_bootstrap_lock_shell_retained(
+        hub_fixture.metadata.bootstrap_state_dir.as_ref().unwrap(),
+    );
     for path in [
         &hub_fixture.metadata_path,
         &hub_fixture.identity_path,
@@ -1722,6 +1756,14 @@ fn a_proven_harmless_state_shell_does_not_keep_recovery_pending_forever() {
         LifecycleResponse::failed("probe_uninstall_failed")
     );
     assert!(capsule_path.exists(), "中断保留既有恢复事实");
+    let retired_bootstrap_state = fixture
+        .metadata
+        .bootstrap_state_dir
+        .as_deref()
+        .expect("Bootstrap state ownership")
+        .to_path_buf();
+    fs::remove_dir_all(&retired_bootstrap_state).expect("simulate already retired Bootstrap state");
+    assert!(!retired_bootstrap_state.exists());
 
     let mut retry_transport = RecordingValidationTransport::default();
     let retry = run_uninstall_lifecycle_adapter(
@@ -1736,6 +1778,10 @@ fn a_proven_harmless_state_shell_does_not_keep_recovery_pending_forever() {
 
     assert_eq!(retry, LifecycleResponse::succeeded());
     assert!(!capsule_path.exists());
+    assert!(
+        !retired_bootstrap_state.exists(),
+        "recovery accepts an already retired Bootstrap root without recreating it"
+    );
     assert_state_shell_retained(&fixture.metadata.state_dir);
 }
 
@@ -2752,4 +2798,320 @@ fn legacy_state_root_formal_recovery_child_process() {
         transport.downloads.is_empty(),
         "恢复路径不访问 Hub，反馈只来自本机清理"
     );
+}
+
+struct FreshInstallAccounts;
+
+impl BootstrapAccountPort for FreshInstallAccounts {
+    fn require_absent(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+
+    fn create_transaction_identity(
+        &mut self,
+        _transaction_id: &str,
+    ) -> Result<ServiceIdentity, BootstrapInstallError> {
+        Ok(ServiceIdentity {
+            uid: unsafe { libc::geteuid() },
+            gid: unsafe { libc::getegid() },
+        })
+    }
+
+    fn remove_transaction_identity(
+        &mut self,
+        _transaction_id: &str,
+        _identity: Option<ServiceIdentity>,
+    ) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+}
+
+struct FreshInstallSystemd {
+    identity_path: PathBuf,
+    private_key_pem: String,
+}
+
+impl BootstrapSystemdPort for FreshInstallSystemd {
+    fn require_absent(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+
+    fn daemon_reload(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+
+    fn enable(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+
+    fn wait_local_activated(&mut self) -> Result<(), BootstrapInstallError> {
+        let pending =
+            fs::read_to_string(&self.identity_path).map_err(|_| BootstrapInstallError::Io)?;
+        let registered = pending.replace(
+            "enrollment_token = \"enk_enroll_secret\"\n",
+            &format!(
+                "enrollment_id = \"enrollment_13\"\nprobe_id = \"probe_13_lock\"\nhost_id = \"host_13\"\nprobe_private_key_pem = {:?}\n",
+                self.private_key_pem
+            ),
+        );
+        if registered == pending {
+            return Err(BootstrapInstallError::InvalidVerifiedComponent);
+        }
+        fs::write(&self.identity_path, registered).map_err(|_| BootstrapInstallError::Io)
+    }
+
+    fn stop(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+
+    fn disable(&mut self) -> Result<(), BootstrapInstallError> {
+        Ok(())
+    }
+}
+
+fn fresh_install_component() -> File {
+    let temporary = tempfile::NamedTempFile::new().expect("temporary component");
+    fs::write(temporary.path(), b"probe").expect("component bytes");
+    temporary.reopen().expect("component handle")
+}
+
+fn install_fresh_test_probe(root: &Path, private_key_pem: &str) {
+    for parent in [
+        "usr/local/bin",
+        "var/lib",
+        "etc/systemd/system",
+        "etc/sudoers.d",
+    ] {
+        fs::create_dir_all(root.join(parent)).expect("fresh install parent chain");
+    }
+    let paths = FixedInstallPaths::under_test_root(root);
+    let enrollment =
+        Enrollment::new("https://hub.example", "enk_enroll_secret").expect("fresh enrollment");
+    let bundle = VerifiedBundle::deterministic_complete_for_test(
+        "1.2.3",
+        "x86_64-unknown-linux-gnu",
+        &"b".repeat(64),
+        &"c".repeat(64),
+        b"probe",
+    );
+    let trust = DistributionTrust {
+        distribution: "enoki",
+        role: BootstrapRole::Activator,
+        root_pem: "",
+        root_fingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        root_key_id: "test-root",
+        target: "x86_64-unknown-linux-gnu",
+        version: "v1.2.3",
+    };
+    let [
+        mut probe,
+        mut runtime,
+        mut provider,
+        mut disk_health,
+        mut lifecycle,
+        mut acquirer,
+        mut activator,
+    ] = std::array::from_fn(|_| fresh_install_component());
+    let mut accounts = FreshInstallAccounts;
+    let mut systemd = FreshInstallSystemd {
+        identity_path: root.join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+        private_key_pem: private_key_pem.to_owned(),
+    };
+    install_fresh_for_test(
+        FreshInstallTestComponents {
+            probe: &mut probe,
+            observation_runtime: &mut runtime,
+            cpu_provider: &mut provider,
+            disk_health_provider: &mut disk_health,
+            lifecycle_companion: &mut lifecycle,
+            bootstrap_acquirer: &mut acquirer,
+            bootstrap_activator: &mut activator,
+        },
+        &enrollment,
+        &bundle,
+        &trust,
+        &paths,
+        &mut accounts,
+        &mut systemd,
+    )
+    .expect("production Bootstrap fresh-install coordinator");
+
+    let identity_path = root.join("var/lib/enoki-probe/identity/probe-bootstrap.toml");
+    let mut config = fs::read_to_string(&identity_path).expect("installed Probe config");
+    for (field, production, rooted) in [
+        (
+            "install_path",
+            "/usr/local/bin/enoki-probe",
+            root.join("usr/local/bin/enoki-probe"),
+        ),
+        (
+            "operation_status_path",
+            "/var/lib/enoki-probe/probe-operation-status.toml",
+            root.join("var/lib/enoki-probe/probe-operation-status.toml"),
+        ),
+        (
+            "state_dir",
+            "/var/lib/enoki-probe",
+            root.join("var/lib/enoki-probe"),
+        ),
+    ] {
+        let before = format!("{field} = {production:?}");
+        let after = format!("{field} = {:?}", rooted.display().to_string());
+        assert!(config.contains(&before), "fresh config contains {field}");
+        config = config.replacen(&before, &after, 1);
+    }
+    fs::write(identity_path, config).expect("rooted local test config");
+}
+
+fn fresh_test_probe_private_key() -> String {
+    use rsa::{RsaPrivateKey, pkcs8::EncodePrivateKey, rand_core::OsRng};
+
+    RsaPrivateKey::new(&mut OsRng, 1024)
+        .expect("test Probe key")
+        .to_pkcs8_pem(rsa::pkcs8::LineEnding::LF)
+        .expect("test Probe key PEM")
+        .to_string()
+}
+
+#[test]
+fn hub_uninstall_preserves_bootstrap_activation_lock_and_allows_fresh_install() {
+    let temporary = tempfile::tempdir().expect("test installation root");
+    let root = temporary.path();
+    let private_key_pem = fresh_test_probe_private_key();
+    install_fresh_test_probe(root, &private_key_pem);
+
+    let metadata_path = root.join("etc/enoki/probe-install.toml");
+    let mut metadata =
+        crate::upgrader::read_trusted_probe_install_metadata_read_only(&metadata_path, None)
+            .expect("production install metadata");
+    let identity =
+        crate::upgrader::read_trusted_probe_install_preflight(&metadata_path, Some(root))
+            .expect("registered install identity");
+    crate::upgrader::rebase_trusted_install_metadata_paths(&mut metadata, Some(root));
+    let bootstrap_state = metadata
+        .bootstrap_state_dir
+        .as_deref()
+        .expect("Bootstrap state ownership");
+    let lock_path = bootstrap_state.join("activation.lock");
+    let lock_before = fs::symlink_metadata(&lock_path).expect("Bootstrap activation lock");
+    let request = || {
+        LifecycleRequest::hub_uninstall(
+            &identity.probe_id,
+            "operation_13_lock_shell",
+            "operation_13_token",
+            metadata
+                .install_state_sha256
+                .as_deref()
+                .expect("install state digest"),
+            metadata
+                .target_manifest_sha256
+                .as_deref()
+                .expect("target manifest digest"),
+            metadata.bundle_version.as_deref().expect("bundle version"),
+        )
+        .expect("formal HubOperation request")
+    };
+
+    let unexpected = bootstrap_state.join("unexpected-state");
+    fs::write(&unexpected, b"unowned").expect("unexpected state child");
+    fs::set_permissions(&unexpected, fs::Permissions::from_mode(0o600))
+        .expect("unexpected child mode");
+    let mut unexpected_transport = RecordingValidationTransport::default();
+    let mut unexpected_systemd = RecordingSystemdRunner::default();
+    assert_eq!(
+        run_uninstall_lifecycle_adapter(
+            &request(),
+            &metadata,
+            &identity,
+            &metadata_path,
+            &mut unexpected_transport,
+            &mut unexpected_systemd,
+        ),
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(unexpected_transport.url.is_empty());
+    assert!(unexpected_systemd.calls.is_empty());
+    assert!(unexpected.exists());
+    fs::remove_file(&unexpected).expect("remove isolated negative child");
+
+    let held_lock = BootstrapActivationLock::acquire(bootstrap_state, Duration::ZERO)
+        .expect("hold the same production activation lock");
+    let mut busy_transport = RecordingValidationTransport::default();
+    let mut busy_systemd = RecordingSystemdRunner::default();
+    assert_eq!(
+        run_uninstall_lifecycle_adapter(
+            &request(),
+            &metadata,
+            &identity,
+            &metadata_path,
+            &mut busy_transport,
+            &mut busy_systemd,
+        ),
+        LifecycleResponse::failed("probe_uninstall_failed")
+    );
+    assert!(busy_transport.url.is_empty());
+    assert!(busy_systemd.calls.is_empty());
+    assert!(metadata_path.is_file());
+    drop(held_lock);
+
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: metadata.identity_path.clone(),
+    };
+
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    assert_eq!(
+        run_uninstall_lifecycle_adapter(
+            &request(),
+            &metadata,
+            &identity,
+            &metadata_path,
+            &mut transport,
+            &mut systemd,
+        ),
+        LifecycleResponse::succeeded(),
+        "systemd={:?} token_url={:?} status_url={:?}",
+        systemd.calls,
+        transport.url,
+        transport.status_url,
+    );
+    assert!(transport.url.contains("operation_13_lock_shell"));
+    assert!(transport.status_body.contains("succeeded"));
+    assert!(!systemd.calls.is_empty());
+
+    // Companion 进程先写出规范响应，再于最后一步删除自身可执行文件；
+    // 此处沿用这一既有外层边界。
+    let companion_plan =
+        super::cleanup::plan_probe_uninstall_paths(&input, &metadata, &metadata_path)
+            .expect("post-response companion finalizer plan");
+    super::cleanup::remove_lifecycle_companion_binary(&companion_plan)
+        .expect("post-response companion binary retirement");
+    assert!(!metadata_path.exists());
+
+    let shell_entries = fs::read_dir(bootstrap_state)
+        .expect("retained Bootstrap lock shell")
+        .map(|entry| entry.expect("lock shell entry").file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(shell_entries, [std::ffi::OsString::from("activation.lock")]);
+    let lock_after_uninstall = fs::symlink_metadata(&lock_path).expect("retained lock");
+    assert_eq!(lock_after_uninstall.dev(), lock_before.dev());
+    assert_eq!(lock_after_uninstall.ino(), lock_before.ino());
+
+    install_fresh_test_probe(root, &private_key_pem);
+    assert!(
+        metadata_path.is_file(),
+        "fresh installation completed after uninstall"
+    );
+    assert!(
+        lock_path.is_file(),
+        "fresh installation reuses the retained lock path"
+    );
+    let lock_after_reinstall = fs::symlink_metadata(&lock_path).expect("reused lock");
+    assert_eq!(lock_after_reinstall.dev(), lock_before.dev());
+    assert_eq!(lock_after_reinstall.ino(), lock_before.ino());
+    assert!(bootstrap_state.join("current-layout").is_file());
 }

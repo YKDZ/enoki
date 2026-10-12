@@ -1485,6 +1485,15 @@ describe("Probe Host Harness", () => {
       expect(claim).toContain(resource);
       expect(emergency).toContain(resource);
     }
+    expect(inventory).toContain("probe_harmless_bootstrap_lock_shell");
+    expect(claim).toContain("probe_harmless_bootstrap_lock_shell");
+    expect(emergency).toContain("probe_valid_bootstrap_activation_lock_file");
+    expect(emergency).toContain(
+      'find "$bootstrap_state" -mindepth 1 -maxdepth 1 ! -name activation.lock',
+    );
+    expect(emergency.indexOf("flock -n 9")).toBeLessThan(
+      emergency.indexOf("systemctl stop "),
+    );
     for (const script of [inventory, claim]) {
       expect(script).toContain("/run/systemd/system/enoki-probe*.service");
       const unitQuery = script
@@ -1514,6 +1523,76 @@ describe("Probe Host Harness", () => {
       await expect(
         execFileAsync("/bin/sh", ["-n", "-c", script]),
       ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    }
+  });
+
+  it("treats only the exact Bootstrap activation-lock shell as empty inventory", async () => {
+    let inventoryScript = "";
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          inventoryScript = command;
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        throw new Error("unexpected Release Host command");
+      },
+    });
+
+    await harness.assertDisposable("run-bootstrap-lock-shell");
+    expect(inventoryScript).not.toBe("");
+
+    const fixtureRoot = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-bootstrap-lock-shell-"),
+    );
+    const bootstrapState = path.join(fixtureRoot, "bootstrap-state");
+    const bin = path.join(fixtureRoot, "bin");
+    try {
+      await mkdir(bootstrapState, { mode: 0o700 });
+      await mkdir(bin, { mode: 0o700 });
+      await writeFile(path.join(bootstrapState, "activation.lock"), "", {
+        mode: 0o600,
+      });
+      await writeFile(path.join(bin, "getent"), "#!/bin/sh\nexit 2\n", {
+        mode: 0o700,
+      });
+      await writeFile(path.join(bin, "systemctl"), "#!/bin/sh\nexit 0\n", {
+        mode: 0o700,
+      });
+      await writeFile(
+        path.join(bin, "stat"),
+        '#!/bin/sh\nif [ "$1" = -c ] && [ "$2" = %u ]; then case "$3" in "$BOOTSTRAP_STATE"|"$BOOTSTRAP_STATE"/*) printf \'0\\n\'; exit 0;; esac; fi\nexec /usr/bin/stat "$@"\n',
+        { mode: 0o700 },
+      );
+
+      const inventoryFiles = () => {
+        const result = spawnSync("/bin/sh", ["-s"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            BOOTSTRAP_STATE: bootstrapState,
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          input: inventoryScript.replaceAll(
+            "/var/lib/enoki-probe-bootstrap",
+            bootstrapState,
+          ),
+        });
+        expect(result.status, result.stderr).toBe(0);
+        return JSON.parse(result.stdout).files;
+      };
+
+      expect(inventoryFiles()).not.toContain(bootstrapState);
+      await writeFile(path.join(bootstrapState, "unexpected-child"), "data");
+      expect(inventoryFiles()).toContain(bootstrapState);
+    } finally {
+      await rm(fixtureRoot, { force: true, recursive: true });
     }
   });
 
