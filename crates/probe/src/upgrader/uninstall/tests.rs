@@ -931,6 +931,122 @@ fn schema_five_uninstall_removes_upgrade_companion_roles_and_complete_layout() {
     );
 }
 
+fn run_schema_five_hub_uninstall_with_layout_receipt(
+    root: &Path,
+    receipt: Option<&str>,
+) -> (
+    UninstallCoordinatorFixture,
+    LifecycleResponse,
+    RecordingValidationTransport,
+    RecordingSystemdRunner,
+) {
+    let mut fixture = uninstall_coordinator_fixture(root);
+    fixture.metadata.schema_version = 5;
+    fixture.metadata.lifecycle_authority_install_key = Some("e".repeat(64));
+    if let Some(contents) = receipt {
+        let path = fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .expect("Bootstrap state")
+            .join("current-layout");
+        fs::write(&path, contents).expect("candidate layout receipt");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("candidate layout receipt mode");
+    }
+    let request = LifecycleRequest::hub_uninstall(
+        "probe_01",
+        "operation_42",
+        "operation-token",
+        fixture
+            .metadata
+            .install_state_sha256
+            .as_deref()
+            .expect("install state digest"),
+        fixture
+            .metadata
+            .target_manifest_sha256
+            .as_deref()
+            .expect("candidate manifest digest"),
+        fixture
+            .metadata
+            .bundle_version
+            .as_deref()
+            .expect("candidate bundle version"),
+    )
+    .expect("bound Hub uninstall request");
+    let identity = TrustedProbeInstallPreflight {
+        hub_url: fixture.metadata.hub_url.clone(),
+        probe_id: "probe_01".to_owned(),
+    };
+    let mut transport = RecordingValidationTransport::default();
+    let mut systemd = RecordingSystemdRunner::default();
+    let response = run_uninstall_lifecycle_adapter(
+        &request,
+        &fixture.metadata,
+        &identity,
+        &fixture.metadata_path,
+        &mut transport,
+        &mut systemd,
+    );
+    (fixture, response, transport, systemd)
+}
+
+#[test]
+fn schema_five_hub_uninstall_retires_the_exact_candidate_layout_receipt() {
+    let control_temporary = tempfile::tempdir().expect("control temporary directory");
+    let (control, control_response, control_transport, control_systemd) =
+        run_schema_five_hub_uninstall_with_layout_receipt(control_temporary.path(), None);
+    assert_eq!(control_response, LifecycleResponse::succeeded());
+    assert!(control_transport.url.contains("operation_42"));
+    assert!(!control_systemd.calls.is_empty());
+    assert!(!control.metadata_path.exists());
+
+    let temporary = tempfile::tempdir().expect("candidate temporary directory");
+    let (fixture, response, transport, systemd) = run_schema_five_hub_uninstall_with_layout_receipt(
+        temporary.path(),
+        Some("schema_version=1\nversion=1.2.3\n"),
+    );
+    assert_eq!(response, LifecycleResponse::succeeded());
+    assert!(transport.url.contains("operation_42"));
+    assert!(!systemd.calls.is_empty());
+    assert!(
+        !fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .expect("Bootstrap state")
+            .exists()
+    );
+}
+
+#[test]
+fn schema_five_hub_uninstall_keeps_a_mismatched_candidate_layout_receipt_fail_closed() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let (fixture, response, transport, systemd) = run_schema_five_hub_uninstall_with_layout_receipt(
+        temporary.path(),
+        Some("schema_version=1\nversion=9.9.9\n"),
+    );
+
+    assert_eq!(
+        response,
+        LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+    );
+    assert!(transport.url.is_empty());
+    assert!(systemd.calls.is_empty());
+    assert!(fixture.metadata_path.exists());
+    assert!(fixture.identity_path.exists());
+    assert!(
+        fixture
+            .metadata
+            .bootstrap_state_dir
+            .as_ref()
+            .expect("Bootstrap state")
+            .join("current-layout")
+            .exists()
+    );
+}
+
 fn assert_single_authority_field_mismatch_is_rejected(
     conflicting_operation: &str,
     conflicting_token: &str,
