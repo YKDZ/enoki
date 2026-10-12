@@ -911,18 +911,37 @@ fn verify_systemd_service_absent_with(
     run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let action = "verifying the service is absent";
-    let output = run(
-        "systemctl",
-        &["show", "--property=LoadState", "--value", service_name],
-    )
-    .map_err(|error| {
+    let instance_glob = service_name.ends_with("@*.service");
+    let args = if instance_glob {
+        vec![
+            "show",
+            "--all",
+            "--property=LoadState",
+            "--value",
+            service_name,
+        ]
+    } else {
+        vec!["show", "--property=LoadState", "--value", service_name]
+    };
+    let output = run("systemctl", &args).map_err(|error| {
         uninstall_cleanup_failure(
             "probe_uninstall_service_verification_failed",
             action,
             error.to_string(),
         )
     })?;
-    if output.successful && output.stdout.trim() == "not-found" {
+    let load_states = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|state| !state.is_empty())
+        .collect::<Vec<_>>();
+    let absent = if instance_glob {
+        load_states.is_empty() || load_states.iter().all(|state| *state == "not-found")
+    } else {
+        output.stdout.trim() == "not-found"
+    };
+    if output.successful && absent {
         return Ok(());
     }
     if output.successful {
@@ -7636,6 +7655,61 @@ mod tests {
             |_program: &str, _args: &[&str]| Ok(CleanupCommandOutput::success("not-found\n"));
         verify_systemd_service_absent_with("enoki-probe", &mut missing)
             .expect("an explicit not-found LoadState is absent");
+    }
+
+    #[test]
+    fn systemd_service_absence_check_handles_empty_instance_globs_without_weakening_exact_units() {
+        let calls = {
+            let mut calls = Vec::new();
+            let mut no_instances = |program: &str, args: &[&str]| {
+                calls.push((
+                    program.to_string(),
+                    args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>(),
+                ));
+                Ok(CleanupCommandOutput::success(""))
+            };
+            verify_systemd_service_absent_with(
+                "enoki-cpu-resource-provider@*.service",
+                &mut no_instances,
+            )
+            .expect("an empty all-units instance glob means no matching service remains");
+            calls
+        };
+        assert_eq!(
+            calls,
+            [(
+                "systemctl".to_string(),
+                vec![
+                    "show".to_string(),
+                    "--all".to_string(),
+                    "--property=LoadState".to_string(),
+                    "--value".to_string(),
+                    "enoki-cpu-resource-provider@*.service".to_string(),
+                ],
+            )]
+        );
+
+        let mut loaded_instance =
+            |_program: &str, _args: &[&str]| Ok(CleanupCommandOutput::success("loaded\n"));
+        let error = verify_systemd_service_absent_with(
+            "enoki-cpu-resource-provider@*.service",
+            &mut loaded_instance,
+        )
+        .expect_err("a matching loaded instance is residue");
+        assert_eq!(
+            probe_upgrader_error_code(&error),
+            "probe_uninstall_service_residue"
+        );
+
+        let mut empty_exact_unit =
+            |_program: &str, _args: &[&str]| Ok(CleanupCommandOutput::success(""));
+        let error =
+            verify_systemd_service_absent_with("enoki-probe.service", &mut empty_exact_unit)
+                .expect_err("an empty exact-unit result does not prove absence");
+        assert_eq!(
+            probe_upgrader_error_code(&error),
+            "probe_uninstall_service_residue"
+        );
     }
 
     #[test]
