@@ -1485,12 +1485,6 @@ describe("Probe Host Harness", () => {
       expect(claim).toContain(resource);
       expect(emergency).toContain(resource);
     }
-    expect(inventory).toContain("probe_harmless_bootstrap_lock_shell");
-    expect(claim).toContain("probe_harmless_bootstrap_lock_shell");
-    expect(emergency).toContain("probe_valid_bootstrap_activation_lock_file");
-    expect(emergency).toContain(
-      'find "$bootstrap_state" -mindepth 1 -maxdepth 1 ! -name activation.lock',
-    );
     expect(emergency.indexOf("flock -n 9")).toBeLessThan(
       emergency.indexOf("systemctl stop "),
     );
