@@ -9,7 +9,7 @@ use std::{
     fmt, fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    os::unix::process::CommandExt,
+    os::unix::process::{CommandExt, ExitStatusExt},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -1402,6 +1402,64 @@ fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError
     (code == Some(3)).then(|| ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
 }
 
+// 票 05 临时观察：取得正式 Fresh 分类并完成因果重放后删除。
+#[derive(Clone, Copy)]
+enum RepairAcquirerExchangeFailureStage {
+    Spawn,
+    Stdin,
+    Wait,
+    ChildExit,
+    StdoutContract,
+}
+
+impl RepairAcquirerExchangeFailureStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Stdin => "stdin",
+            Self::Wait => "wait",
+            Self::ChildExit => "child_exit",
+            Self::StdoutContract => "stdout_contract",
+        }
+    }
+}
+
+fn write_repair_acquirer_exchange_failure(
+    stage: RepairAcquirerExchangeFailureStage,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    output: &mut impl Write,
+) {
+    if let Some(exit_code) = exit_code {
+        let _ = writeln!(
+            output,
+            "probe_repair_acquirer_exchange_failure stage={} exit_code={exit_code}",
+            stage.code()
+        );
+    } else if let Some(signal) = signal {
+        let _ = writeln!(
+            output,
+            "probe_repair_acquirer_exchange_failure stage={} signal={signal}",
+            stage.code()
+        );
+    } else {
+        let _ = writeln!(
+            output,
+            "probe_repair_acquirer_exchange_failure stage={}",
+            stage.code()
+        );
+    }
+}
+
+fn observe_repair_acquirer_exchange_failure(
+    stage: RepairAcquirerExchangeFailureStage,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+) {
+    let mut diagnostic_output = std::io::stderr().lock();
+    write_repair_acquirer_exchange_failure(stage, exit_code, signal, &mut diagnostic_output);
+}
+
 fn fresh_repair_exchange_facts() -> Result<(String, u64), ProbeRepairRunError> {
     let mut nonce = [0_u8; 16];
     fs::File::open("/dev/urandom")
@@ -1432,20 +1490,68 @@ fn exchange_repair_authority(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
-        .write_all(request)
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+        .map_err(|_| {
+            observe_repair_acquirer_exchange_failure(
+                RepairAcquirerExchangeFailureStage::Spawn,
+                None,
+                None,
+            );
+            repair_contract_failure("probe_repair_authority_acquire_failed")
+        })?;
+    let Some(mut stdin) = child.stdin.take() else {
+        observe_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::Stdin,
+            None,
+            None,
+        );
+        return Err(repair_contract_failure(
+            "probe_repair_authority_acquire_failed",
+        ));
+    };
+    let stdin_result = stdin.write_all(request);
+    drop(stdin);
+    if stdin_result.is_err() {
+        observe_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::Stdin,
+            None,
+            None,
+        );
+        return Err(repair_contract_failure(
+            "probe_repair_authority_acquire_failed",
+        ));
+    }
+    let output = child.wait_with_output().map_err(|_| {
+        observe_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::Wait,
+            None,
+            None,
+        );
+        repair_contract_failure("probe_repair_authority_acquire_failed")
+    })?;
     if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
+        observe_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::ChildExit,
+            output.status.code(),
+            output.status.signal(),
+        );
         return Err(error);
     }
-    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
+    if !output.status.success() {
+        observe_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::ChildExit,
+            output.status.code(),
+            output.status.signal(),
+        );
+        return Err(repair_contract_failure(
+            "probe_repair_authority_acquire_failed",
+        ));
+    }
+    if output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
+        observe_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::StdoutContract,
+            None,
+            None,
+        );
         return Err(repair_contract_failure(
             "probe_repair_authority_acquire_failed",
         ));
@@ -5173,6 +5279,59 @@ mod tests {
         assert_eq!(
             repair_acquirer_exit_failure(Some(3)).map(|error| error.code()),
             Some("probe_manual_reinstall_required")
+        );
+    }
+
+    #[test]
+    fn repair_acquirer_exchange_observation_is_closed_and_keeps_only_exit_numbers() {
+        let mut diagnostics = Vec::new();
+        write_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::Spawn,
+            None,
+            None,
+            &mut diagnostics,
+        );
+        write_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::Stdin,
+            None,
+            None,
+            &mut diagnostics,
+        );
+        write_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::Wait,
+            None,
+            None,
+            &mut diagnostics,
+        );
+        write_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::ChildExit,
+            Some(17),
+            None,
+            &mut diagnostics,
+        );
+        write_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::ChildExit,
+            None,
+            Some(9),
+            &mut diagnostics,
+        );
+        write_repair_acquirer_exchange_failure(
+            RepairAcquirerExchangeFailureStage::StdoutContract,
+            None,
+            None,
+            &mut diagnostics,
+        );
+
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            concat!(
+                "probe_repair_acquirer_exchange_failure stage=spawn\n",
+                "probe_repair_acquirer_exchange_failure stage=stdin\n",
+                "probe_repair_acquirer_exchange_failure stage=wait\n",
+                "probe_repair_acquirer_exchange_failure stage=child_exit exit_code=17\n",
+                "probe_repair_acquirer_exchange_failure stage=child_exit signal=9\n",
+                "probe_repair_acquirer_exchange_failure stage=stdout_contract\n",
+            )
         );
     }
 

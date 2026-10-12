@@ -65,6 +65,7 @@ impl RepairAcquisitionFailureStage {
 struct RepairAcquisitionFailureObservation {
     stage: RepairAcquisitionFailureStage,
     http_status: Option<u16>,
+    transport_kind: Option<&'static str>,
 }
 
 impl RepairAcquisitionFailureObservation {
@@ -72,6 +73,7 @@ impl RepairAcquisitionFailureObservation {
         Self {
             stage: RepairAcquisitionFailureStage::Request,
             http_status: None,
+            transport_kind: None,
         }
     }
 
@@ -82,6 +84,12 @@ impl RepairAcquisitionFailureObservation {
                 "probe_repair_acquisition_failure stage={} http_status={status}",
                 self.stage.code()
             );
+        } else if let Some(kind) = self.transport_kind {
+            let _ = writeln!(
+                output,
+                "probe_repair_acquisition_failure stage={} transport_kind={kind}",
+                self.stage.code()
+            );
         } else {
             let _ = writeln!(
                 output,
@@ -89,6 +97,24 @@ impl RepairAcquisitionFailureObservation {
                 self.stage.code()
             );
         }
+    }
+}
+
+fn repair_transport_error_kind(kind: ureq::ErrorKind) -> &'static str {
+    match kind {
+        ureq::ErrorKind::InvalidUrl => "invalid_url",
+        ureq::ErrorKind::UnknownScheme => "unknown_scheme",
+        ureq::ErrorKind::Dns => "dns",
+        ureq::ErrorKind::InsecureRequestHttpsOnly => "insecure_request_https_only",
+        ureq::ErrorKind::ConnectionFailed => "connection_failed",
+        ureq::ErrorKind::TooManyRedirects => "too_many_redirects",
+        ureq::ErrorKind::BadStatus => "bad_status",
+        ureq::ErrorKind::BadHeader => "bad_header",
+        ureq::ErrorKind::Io => "io",
+        ureq::ErrorKind::InvalidProxyUrl => "invalid_proxy_url",
+        ureq::ErrorKind::ProxyConnect => "proxy_connect",
+        ureq::ErrorKind::ProxyUnauthorized => "proxy_unauthorized",
+        ureq::ErrorKind::HTTP => "http",
     }
 }
 
@@ -204,7 +230,8 @@ fn acquire_probe_repair_authority_once_inner(
                 retry_after_ms,
             ));
         }
-        Err(ureq::Error::Transport(_)) => {
+        Err(ureq::Error::Transport(error)) => {
+            observation.transport_kind = Some(repair_transport_error_kind(error.kind()));
             return Err(AcquisitionFailure::Temporary {
                 retry_after_ms: None,
             });
@@ -2174,6 +2201,44 @@ mod tests {
         assert_eq!(
             String::from_utf8(diagnostics).unwrap(),
             "probe_repair_acquisition_failure stage=request\n"
+        );
+    }
+
+    #[test]
+    fn repair_transport_observation_uses_only_closed_ureq_kinds() {
+        let cases = [
+            (ureq::ErrorKind::InvalidUrl, "invalid_url"),
+            (ureq::ErrorKind::UnknownScheme, "unknown_scheme"),
+            (ureq::ErrorKind::Dns, "dns"),
+            (
+                ureq::ErrorKind::InsecureRequestHttpsOnly,
+                "insecure_request_https_only",
+            ),
+            (ureq::ErrorKind::ConnectionFailed, "connection_failed"),
+            (ureq::ErrorKind::TooManyRedirects, "too_many_redirects"),
+            (ureq::ErrorKind::BadStatus, "bad_status"),
+            (ureq::ErrorKind::BadHeader, "bad_header"),
+            (ureq::ErrorKind::Io, "io"),
+            (ureq::ErrorKind::InvalidProxyUrl, "invalid_proxy_url"),
+            (ureq::ErrorKind::ProxyConnect, "proxy_connect"),
+            (ureq::ErrorKind::ProxyUnauthorized, "proxy_unauthorized"),
+            (ureq::ErrorKind::HTTP, "http"),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(repair_transport_error_kind(kind), expected);
+        }
+
+        let observation = RepairAcquisitionFailureObservation {
+            stage: RepairAcquisitionFailureStage::Transport,
+            http_status: None,
+            transport_kind: Some("io"),
+        };
+        let mut diagnostics = Vec::new();
+        observation.write(&mut diagnostics);
+        assert_eq!(
+            String::from_utf8(diagnostics).unwrap(),
+            "probe_repair_acquisition_failure stage=transport transport_kind=io\n"
         );
     }
 }
