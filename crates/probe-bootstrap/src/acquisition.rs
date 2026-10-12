@@ -170,11 +170,13 @@ fn acquire_probe_repair_authority_once_inner(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = format!(
-                "{origin}/api/probe/operations/{}/repair-authorize",
-                envelope.evidence.failed_operation_id
-            );
-            (url, None)
+            let url = origin
+                .join(&format!(
+                    "api/probe/operations/{}/repair-authorize",
+                    envelope.evidence.failed_operation_id
+                ))
+                .map_err(|_| AcquisitionFailure::InvalidOrigin)?;
+            (url.to_string(), None)
         }
         ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
             if envelope.evidence_signature.len() != 64
@@ -185,11 +187,13 @@ fn acquire_probe_repair_authority_once_inner(
             }
             let origin = exact_origin(&envelope.evidence.hub_origin)
                 .ok_or(AcquisitionFailure::InvalidOrigin)?;
-            let url = format!(
-                "{origin}/api/probe/runtime-failures/{}/repair-authorize",
-                envelope.evidence.generation
-            );
-            (url, Some(envelope.evidence))
+            let url = origin
+                .join(&format!(
+                    "api/probe/runtime-failures/{}/repair-authorize",
+                    envelope.evidence.generation
+                ))
+                .map_err(|_| AcquisitionFailure::InvalidOrigin)?;
+            (url.to_string(), Some(envelope.evidence))
         }
     };
     observation.stage = RepairAcquisitionFailureStage::Transport;
@@ -2187,6 +2191,158 @@ mod tests {
                 retry_after_ms: Some(2_000)
             },
         );
+    }
+
+    #[test]
+    fn failed_upgrade_repair_authorization_uses_the_hub_origin_path() {
+        const OPERATION_ID: &str = "operation_01";
+        const EXPECTED_TARGET: &str = "/api/probe/operations/operation_01/repair-authorize";
+        let (hub_origin, server) =
+            start_repair_authorization_server(EXPECTED_TARGET, 200, b"upgrade-repair-authority");
+        let evidence = crate::lifecycle::RepairEvidenceV1 {
+            schema_version: 1,
+            hub_origin,
+            host_id: "7".into(),
+            probe_id: "probe_01".into(),
+            failed_operation_id: OPERATION_ID.into(),
+            failed_authority_sha256: "b".repeat(64),
+            journal_sha256: "c".repeat(64),
+            journal_phase: "repair-required".into(),
+            activated_targets: 3,
+            finalized_targets: 0,
+            target_bundle_version: "1.2.4".into(),
+            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+            verified_stage_sha256: "e".repeat(64),
+            issued_at_ms: 1_725_000_001_000,
+            expires_at_ms: 1_725_000_061_000,
+            request_nonce: "request_nonce_01".into(),
+        };
+        let evidence_signature = evidence.sign(&[0x11; 32]);
+        assert!(evidence.verify(&[0x11; 32], &evidence_signature));
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "evidence": evidence,
+            "evidenceSignature": evidence_signature,
+        }))
+        .unwrap();
+
+        let result = acquire_probe_repair_authority_once(&request_body);
+        let (request_target, forwarded_body) = server.join().expect("Hub request");
+
+        assert_eq!(request_target, EXPECTED_TARGET);
+        assert_eq!(forwarded_body, request_body);
+        assert_eq!(result.unwrap(), b"upgrade-repair-authority");
+    }
+
+    #[test]
+    fn installed_bundle_repair_authorization_uses_the_hub_origin_path() {
+        const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const EXPECTED_TARGET: &str = "/api/probe/runtime-failures/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/repair-authorize";
+        const MANUAL_REINSTALL_RESPONSE: &[u8] = br#"{"disposition":"manual_reinstall_required"}"#;
+        let (hub_origin, server) =
+            start_repair_authorization_server(EXPECTED_TARGET, 409, MANUAL_REINSTALL_RESPONSE);
+        let evidence = crate::lifecycle::InstalledBundleFailureEvidenceV1 {
+            kind: "installed_bundle_failure".into(),
+            schema_version: 1,
+            hub_origin,
+            host_id: "7".into(),
+            probe_id: "probe_01".into(),
+            generation: GENERATION.into(),
+            boot_id: "boot-01".into(),
+            unit: "enoki-observation-runtime.service".into(),
+            unit_sha256: "b".repeat(64),
+            identity_receipt_sha256: "c".repeat(64),
+            install_state_sha256: "d".repeat(64),
+            manifest_sha256: "e".repeat(64),
+            bundle_version: "1.2.3".into(),
+            issued_at_ms: 10,
+            expires_at_ms: 20,
+            request_nonce: "request-01".into(),
+        };
+        let evidence_signature = evidence.sign(&[0x11; 32]);
+        assert!(evidence.verify(&[0x11; 32], &evidence_signature));
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "evidence": evidence,
+            "evidenceSignature": evidence_signature,
+        }))
+        .unwrap();
+
+        let result = acquire_probe_repair_authority_once(&request_body);
+        let (request_target, forwarded_body) = server.join().expect("Hub request");
+
+        assert_eq!(request_target, EXPECTED_TARGET);
+        assert_eq!(forwarded_body, request_body);
+        assert!(matches!(
+            result,
+            Err(AcquisitionFailure::ManualReinstallRequired)
+        ));
+    }
+
+    fn start_repair_authorization_server(
+        expected_target: &'static str,
+        expected_status: u16,
+        expected_body: &'static [u8],
+    ) -> (String, std::thread::JoinHandle<(String, Vec<u8>)>) {
+        use std::{
+            io::{BufRead, BufReader, Read, Write},
+            net::TcpListener,
+        };
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback Hub listener");
+        let origin = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let expected_body = expected_body.to_vec();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("acquirer connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("request timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("request reader"));
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).expect("request line");
+            let request_target = request_line
+                .split_ascii_whitespace()
+                .nth(1)
+                .expect("request target")
+                .to_owned();
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("request header");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse::<usize>().expect("content length");
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("request body");
+            let (status, reason, response_body) = if request_target == expected_target {
+                let reason = match expected_status {
+                    200 => "OK",
+                    409 => "Conflict",
+                    _ => panic!("unexpected fixture status"),
+                };
+                (expected_status, reason, expected_body)
+            } else {
+                (404, "Not Found", br#"{"error":"not_found"}"#.to_vec())
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            )
+            .expect("Hub response headers");
+            stream.write_all(&response_body).expect("Hub response body");
+            (request_target, body)
+        });
+
+        (origin, server)
     }
 
     #[test]
