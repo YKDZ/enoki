@@ -741,7 +741,7 @@ companion_failure_observation() {
     fi
     printf '%s\n' "$selected" | while IFS=' ' read -r unit remainder; do
       [ -n "$unit" ] || continue
-      companion_observation_manager "$unit" ''
+      companion_observation_manager "$unit" '--property=StandardInput --property=StandardOutput --property=StandardError'
       companion_observation_journal "$unit"
     done
   fi
