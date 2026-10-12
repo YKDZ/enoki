@@ -1693,8 +1693,9 @@ describe("Probe report API", () => {
     database.close();
   });
 
-  it("rejects an old-identity Host Profile hash until the current identity sends the full snapshot", async () => {
+  it("keeps manual reinstall verifying until the replacement identity reports a full Host Profile", async () => {
     const database = await createTemporaryDatabase();
+    const memory = createMemoryHubLogger();
     let nowMs = 1_725_000_000_000;
     const app = createHubApp({
       auth: {
@@ -1703,6 +1704,7 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      logger: memory.logger,
       now: () => nowMs,
     });
     const ownerSession = await loginOwner(app);
@@ -1863,8 +1865,73 @@ describe("Probe report API", () => {
           host.id,
         ),
     ).toEqual(beforeWrongEnrollment);
-    expect((await send(currentRegistration, 2, false, true)).status).toBe(400);
+    const readManualReinstallState = () =>
+      database.sqlite
+        .prepare(
+          `select
+            (select status from enrollment_tokens where enrollment_id = ?) as status,
+            (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
+            (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
+            (select count(*) from report_observations) as observationCount,
+            (select count(*) from metric_samples) as metricCount,
+            (select count(*) from audit_log) as auditCount`,
+        )
+        .get(
+          currentRegistration.enrollmentId,
+          currentRegistration.enrollmentId,
+          host.id,
+        );
+    const beforeMissingProfile = readManualReinstallState();
+    const rejectionCountBefore = memory.events.filter(
+      (event) =>
+        event.event === "probe.report.rejected" &&
+        event.probeReportRejection?.predicate ===
+          "enrollment.produced_profile_missing",
+    ).length;
+
+    const missingProfile = await send(currentRegistration, 2, false, true);
+
+    expect(missingProfile.status).toBe(400);
+    await expect(missingProfile.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+    expect(readManualReinstallState()).toEqual(beforeMissingProfile);
+    const profileRejections = memory.events.filter(
+      (event) =>
+        event.event === "probe.report.rejected" &&
+        event.probeReportRejection?.predicate ===
+          "enrollment.produced_profile_missing",
+    );
+    expect(profileRejections).toHaveLength(rejectionCountBefore + 1);
+    expect(profileRejections.at(-1)).toMatchObject({
+      component: "management-listener",
+      event: "probe.report.rejected",
+      level: "info",
+      listener: "management",
+      method: "POST",
+      outcome: "malformed_probe_report",
+      status: 400,
+      probeReportRejection: {
+        enrollmentId: currentRegistration.enrollmentId,
+        enrollmentStatus: "verifying",
+        enrollmentTargetKind: "manual_reinstall",
+        predicate: "enrollment.produced_profile_missing",
+        reportedEnrollmentId: currentRegistration.enrollmentId,
+      },
+    });
+
     expect((await send(currentRegistration, 2, true, true)).status).toBe(200);
+    expect(readManualReinstallState()).toMatchObject({
+      status: "ready",
+    });
+    expect(
+      memory.events.filter(
+        (event) =>
+          event.event === "probe.report.rejected" &&
+          event.probeReportRejection?.predicate ===
+            "enrollment.produced_profile_missing",
+      ),
+    ).toHaveLength(rejectionCountBefore + 1);
     expect((await send(currentRegistration, 3, false, true)).status).toBe(200);
 
     database.close();
