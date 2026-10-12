@@ -153,10 +153,17 @@ export function createHubApp(options: HubAppOptions = {}) {
       })
     : null;
 
-  mountProbeApiSurface(app, {
-    ...options,
-    liveUpdates: liveUpdates ?? undefined,
-  });
+  mountProbeApiSurface(
+    app,
+    {
+      ...options,
+      liveUpdates: liveUpdates ?? undefined,
+    },
+    {
+      listener: options.listener ?? "management",
+      logger,
+    },
+  );
   app.route("/api/probe", createProbeAssetRoutes(options.probeAssets));
 
   if (auth) {
@@ -301,7 +308,10 @@ export function createProbeApiApp(options: ProbeApiAppOptions = {}) {
     }),
   );
 
-  mountProbeApiSurface(app, options);
+  mountProbeApiSurface(app, options, {
+    listener: "probe",
+    logger: options.logger ?? createNoopHubLogger(),
+  });
   app.route("/api/probe", createProbeAssetRoutes(options.probeAssets));
 
   return app;
@@ -335,7 +345,11 @@ export function createHubAppFromEnvironment(
   });
 }
 
-function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
+function mountProbeApiSurface(
+  app: Hono,
+  options: ProbeApiAppOptions,
+  requestLogging: { listener: HubListener; logger: HubLogger },
+) {
   app.get("/api/health", (context) =>
     context.json<HubHealth>({
       service: "enoki-hub",
@@ -363,6 +377,8 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       clockSkewThresholdMs: options.clockSkewThresholdMs,
       hostStatus: options.hostStatus,
       liveUpdates: options.liveUpdates ?? null,
+      listener: requestLogging.listener,
+      logger: requestLogging.logger,
       now: options.now,
       probeOperationTokenSecret: options.probeOperationTokenSecret,
       probeAssetDir: options.probeAssets?.assetDir,

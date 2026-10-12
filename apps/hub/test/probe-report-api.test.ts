@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { createMemoryHubLogger } from "../src/hub-logger";
 import {
   createForwardTransitions,
   type AuthenticatedForwardEvidence,
@@ -846,6 +847,78 @@ describe("Probe report API", () => {
     await expect(response.json()).resolves.toEqual({
       error: "malformed_probe_report",
     });
+    database.close();
+  });
+
+  it("records the bounded reason for a signed malformed report", async () => {
+    const database = await createTemporaryDatabase();
+    const memory = createMemoryHubLogger();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      listener: "probe",
+      logger: memory.logger,
+      requestId: () => "report_reject_request_1234",
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-report-count-mismatch",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            sequence: 1,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 1,
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+    const rejections = memory.events.filter(
+      (event) => event.event === "probe.report.rejected",
+    );
+    expect(rejections).toHaveLength(1);
+    expect(rejections[0]).toMatchObject({
+      component: "probe-listener",
+      event: "probe.report.rejected",
+      level: "info",
+      listener: "probe",
+      method: "POST",
+      outcome: "malformed_probe_report",
+      requestId: "report_reject_request_1234",
+      routeId: "probe_report",
+      status: 400,
+      probeReportRejection: expect.objectContaining({
+        predicate: "envelope.sample_count_mismatch",
+        sampleCount: 1,
+        sequenceEnd: 2,
+        sequenceStart: 1,
+      }),
+    });
+    expect(JSON.stringify(memory.events)).not.toContain(
+      "boot-report-count-mismatch",
+    );
+
     database.close();
   });
 

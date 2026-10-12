@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 
 import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
@@ -29,6 +29,11 @@ import {
 import { hashSecret } from "../enrollment/routes.js";
 import { broadcastHostSummaryHint } from "../hosts/live-summary.js";
 import { defaultProbeOperationTimeouts } from "../hosts/probe-upgrade-timeout.js";
+import type {
+  HubListener,
+  HubLogger,
+  HubProbeReportRejection,
+} from "../hub-logger.js";
 import {
   broadcastHostReadyHint,
   broadcastHostRemovedHint,
@@ -99,6 +104,7 @@ class ReportBusinessRejection extends Error {
   constructor(
     readonly code: string,
     readonly status: 400 | 409,
+    readonly probeReportRejection?: HubProbeReportRejection,
   ) {
     super(code);
   }
@@ -123,9 +129,33 @@ export type ProbeRouteServices = {
   probeAssetDir?: string;
   probeDistributionRootPublicKeyPem?: Buffer | string;
   probeApiOrigin?: string;
+  listener: HubListener;
+  logger: HubLogger;
   repairAuthorizationBudget?: RepairAuthorizationBudget;
   trustedProxyCidrs?: TrustedProxyCidr[];
 };
+
+function logProbeReportRejection(
+  context: Context,
+  services: Pick<ProbeRouteServices, "listener" | "logger">,
+  probeReportRejection: HubProbeReportRejection,
+) {
+  services.logger.log({
+    component:
+      services.listener === "management"
+        ? "management-listener"
+        : "probe-listener",
+    event: "probe.report.rejected",
+    level: "info",
+    listener: services.listener,
+    method: context.req.method,
+    outcome: "malformed_probe_report",
+    probeReportRejection,
+    requestId: context.get("hubRequestId"),
+    routeId: "probe_report",
+    status: 400,
+  });
+}
 
 export function createProbeRoutes(services: ProbeRouteServices) {
   const routes = new Hono();
@@ -433,6 +463,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const request = decodeReportRequest(requestBody);
 
     if (!request) {
+      logProbeReportRejection(context, services, {
+        predicate: "protobuf.decode_failed",
+        requestBytes: requestBody.byteLength,
+      });
       return probeJsonError("malformed_probe_report", 400);
     }
 
@@ -440,16 +474,26 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_identity_required", 401);
     }
 
-    const validatedReport = validateReportEnvelope(request);
+    const validatedReport = validateReportEnvelope(request, (rejection) =>
+      logProbeReportRejection(context, services, rejection),
+    );
 
     if (!validatedReport) {
       return probeJsonError("malformed_probe_report", 400);
     }
 
-    if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
+    if (
+      !snapshotPayloadBranchesMatchCollectorIds(request, (rejection) =>
+        logProbeReportRejection(context, services, rejection),
+      )
+    ) {
       return probeJsonError("malformed_probe_report", 400);
     }
-    if (!hostProfileOutcomeWindowIsCoherent(request)) {
+    if (
+      !hostProfileOutcomeWindowIsCoherent(request, (rejection) =>
+        logProbeReportRejection(context, services, rejection),
+      )
+    ) {
       return probeJsonError("malformed_probe_report", 400);
     }
 
@@ -460,6 +504,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       hostProfileSnapshot.snapshotHash &&
       hostProfileSnapshot.snapshotHash !== hostProfileSnapshot.canonicalHash
     ) {
+      logProbeReportRejection(context, services, {
+        canonicalHash: hostProfileSnapshot.canonicalHash ?? undefined,
+        predicate: "host_profile.hash_mismatch",
+        snapshotHash: hostProfileSnapshot.snapshotHash,
+      });
       return probeJsonError("malformed_probe_report", 400);
     }
 
@@ -467,6 +516,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       hostProfileSnapshot,
       report: validatedReport,
       request,
+      observeRejection: (rejection) =>
+        logProbeReportRejection(context, services, rejection),
     });
     if (!reportResponsibility) {
       return probeJsonError("malformed_probe_report", 400);
@@ -514,7 +565,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           hostProfileSnapshot?.snapshotHash ??
           hostProfileSnapshot?.canonicalHash;
         if (!snapshotHash) {
-          throw new ReportBusinessRejection("malformed_probe_report", 400);
+          throw new ReportBusinessRejection("malformed_probe_report", 400, {
+            predicate: "snapshot_replay.hash_absent",
+            sequenceStart: validatedReport.sequenceStart,
+            snapshotCount: ((request.snapshots ?? []) as ProtoMessage[]).length,
+            snapshotHashPresent: false,
+          });
         }
         const replayRequest: SnapshotReplayRequestKey = {
           bootId: request.bootId,
@@ -538,7 +594,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         // route services predating Snapshot Replay request persistence.
         if (services.snapshotCollectors) {
           if (!replaySequenceAlreadyAccepted) {
-            throw new ReportBusinessRejection("malformed_probe_report", 400);
+            throw new ReportBusinessRejection("malformed_probe_report", 400, {
+              predicate: "snapshot_replay.sequence_not_accepted",
+              sequenceStart: validatedReport.sequenceStart,
+              snapshotHash: snapshotHash,
+              snapshotSequenceAccepted: false,
+            });
           }
           if (replayRequestStatus === "pending") {
             snapshotReplayToFulfill = replayRequest;
@@ -546,7 +607,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             replayRequestStatus !== "fulfilled" ||
             !snapshotAlreadyStored
           ) {
-            throw new ReportBusinessRejection("malformed_probe_report", 400);
+            throw new ReportBusinessRejection("malformed_probe_report", 400, {
+              predicate: "snapshot_replay.receipt_not_fulfilled",
+              snapshotAlreadyStored,
+              snapshotHash,
+              snapshotReplayStatus: "fulfilled",
+              snapshotSequenceAccepted: replaySequenceAlreadyAccepted,
+            });
           }
         }
       }
@@ -561,7 +628,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         reportedEnrollmentId &&
         (!reportedEnrollment || reportedEnrollment.hostId !== host.id)
       ) {
-        throw new ReportBusinessRejection("malformed_probe_report", 400);
+        throw new ReportBusinessRejection("malformed_probe_report", 400, {
+          enrollmentFound: Boolean(reportedEnrollment),
+          enrollmentHostId: reportedEnrollment?.hostId ?? undefined,
+          enrollmentId: reportedEnrollmentId ?? undefined,
+          hostId: host.id,
+          predicate: "enrollment.invalid_report_reference",
+          reportedEnrollmentId: reportedEnrollmentId ?? undefined,
+        });
       }
       if (
         hasProducedHostProfile(request) &&
@@ -569,7 +643,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         reportedEnrollment?.targetKind === "manual_reinstall" &&
         reportedEnrollment.status === "verifying"
       ) {
-        throw new ReportBusinessRejection("malformed_probe_report", 400);
+        throw new ReportBusinessRejection("malformed_probe_report", 400, {
+          enrollmentId: reportedEnrollmentId ?? undefined,
+          enrollmentStatus: reportedEnrollment.status,
+          enrollmentTargetKind: reportedEnrollment.targetKind,
+          predicate: "enrollment.produced_profile_missing",
+          reportedEnrollmentId: reportedEnrollmentId ?? undefined,
+        });
       }
       const startupEnrollment =
         !isSnapshotReplay &&
@@ -599,7 +679,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         startupEnrollment &&
         startupEnrollment.enrollment.enrollmentId !== reportedEnrollmentId
       ) {
-        throw new ReportBusinessRejection("malformed_probe_report", 400);
+        throw new ReportBusinessRejection("malformed_probe_report", 400, {
+          predicate: "enrollment.startup_reference_mismatch",
+          reportedEnrollmentId: reportedEnrollmentId ?? undefined,
+          resolvedEnrollmentId:
+            startupEnrollment.enrollment.enrollmentId ?? undefined,
+        });
       }
 
       if (startupEnrollment?.status === "rejected") {
@@ -625,7 +710,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         !hostProfileSnapshot?.hostProfile &&
         startupEnrollment?.status === "verifying"
       ) {
-        throw new ReportBusinessRejection("malformed_probe_report", 400);
+        throw new ReportBusinessRejection("malformed_probe_report", 400, {
+          enrollmentStatus: startupEnrollment.status,
+          predicate: "enrollment.startup_profile_missing",
+          reportedEnrollmentId: reportedEnrollmentId ?? undefined,
+          resolvedEnrollmentId:
+            startupEnrollment.enrollment.enrollmentId ?? undefined,
+        });
       }
 
       const operationPlan = planProbeOperationReportApplication({
@@ -750,7 +841,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           fulfilledAtMs: reportReceivedAtMs,
         })
       ) {
-        throw new ReportBusinessRejection("malformed_probe_report", 400);
+        throw new ReportBusinessRejection("malformed_probe_report", 400, {
+          predicate: "snapshot_replay.fulfillment_failed",
+          sequenceStart: snapshotReplayToFulfill.sequence,
+          snapshotHash: snapshotReplayToFulfill.snapshotHash,
+        });
       }
       const samplesBySequence = new Map<number, ProtoMessage>(
         ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
@@ -1010,6 +1105,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       );
     } catch (error) {
       if (error instanceof ReportBusinessRejection) {
+        if (error.probeReportRejection) {
+          logProbeReportRejection(
+            context,
+            services,
+            error.probeReportRejection,
+          );
+        }
         return probeJsonError(error.code, error.status);
       }
       throw error;
@@ -2296,14 +2398,25 @@ function hostProfileSnapshotFromReport(request: ProtoMessage) {
   };
 }
 
-function snapshotPayloadBranchesMatchCollectorIds(request: ProtoMessage) {
-  return ((request.snapshots ?? []) as ProtoMessage[]).every((snapshot) => {
+function snapshotPayloadBranchesMatchCollectorIds(
+  request: ProtoMessage,
+  observeRejection?: (rejection: HubProbeReportRejection) => void,
+) {
+  const snapshots = (request.snapshots ?? []) as ProtoMessage[];
+  for (const snapshot of snapshots) {
     if (snapshot.hostProfile) {
-      return snapshot.collectorId === hostProfileCollectorId;
+      if (snapshot.collectorId !== hostProfileCollectorId) {
+        observeRejection?.({
+          collectorId: String(snapshot.collectorId ?? ""),
+          payloadPresent: true,
+          predicate: "snapshot.payload_collector_mismatch",
+          snapshotCount: snapshots.length,
+        });
+        return false;
+      }
     }
-
-    return true;
-  });
+  }
+  return true;
 }
 
 const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
@@ -2515,7 +2628,14 @@ function compareProtoStrings(left: unknown, right: unknown) {
   );
 }
 
-function validateReportEnvelope(request: ProtoMessage) {
+function validateReportEnvelope(
+  request: ProtoMessage,
+  observeRejection: (rejection: HubProbeReportRejection) => void = () => {},
+) {
+  const reject = (rejection: HubProbeReportRejection) => {
+    observeRejection(rejection);
+    return null;
+  };
   const sequenceStart = unsignedNumber(request.sequenceStart);
   const sequenceEnd = unsignedNumber(request.sequenceEnd);
 
@@ -2525,7 +2645,12 @@ function validateReportEnvelope(request: ProtoMessage) {
     sequenceEnd < sequenceStart ||
     sequenceEnd - sequenceStart + 1 > maxReportObservationRange
   ) {
-    return null;
+    return reject({
+      bootIdPresent: Boolean(request.bootId),
+      predicate: "envelope.sequence_bounds",
+      sequenceEnd,
+      sequenceStart,
+    });
   }
 
   const samples = request.metrics ?? [];
@@ -2541,17 +2666,34 @@ function validateReportEnvelope(request: ProtoMessage) {
     request.observationWindowFailure != null &&
     observationWindowFailureReason === null
   ) {
-    return null;
+    return reject({
+      failureReason: unsignedNumber(request.observationWindowFailure.reason),
+      predicate: "envelope.unknown_window_failure",
+      sequenceEnd,
+      sequenceStart,
+    });
   }
   if (
     observationWindowFailureReason !== null &&
     cpuResourceCollectionOutcomes.length > 0
   ) {
-    return null;
+    return reject({
+      cpuOutcomeCount: cpuResourceCollectionOutcomes.length,
+      failureReason: observationWindowFailureReason,
+      predicate: "envelope.window_failure_with_cpu_outcomes",
+      sequenceEnd,
+      sequenceStart,
+    });
   }
 
   if (observationWindowFailureReason !== null && samples.length !== 0) {
-    return null;
+    return reject({
+      failureReason: observationWindowFailureReason,
+      predicate: "envelope.window_failure_with_samples",
+      sampleCount: samples.length,
+      sequenceEnd,
+      sequenceStart,
+    });
   }
 
   if (
@@ -2560,11 +2702,24 @@ function validateReportEnvelope(request: ProtoMessage) {
     observationWindowFailureReason === null &&
     cpuResourceCollectionOutcomes.length === 0
   ) {
-    return null;
+    return reject({
+      cpuOutcomeCount: 0,
+      predicate: "envelope.empty_window_without_evidence",
+      sampleCount: 0,
+      sequenceCount,
+      sequenceEnd,
+      sequenceStart,
+    });
   }
 
   if (samples.length > 0 && samples.length !== sequenceCount) {
-    return null;
+    return reject({
+      predicate: "envelope.sample_count_mismatch",
+      sampleCount: samples.length,
+      sequenceCount,
+      sequenceEnd,
+      sequenceStart,
+    });
   }
 
   const sampleSequences = new Set<number>();
@@ -2572,13 +2727,21 @@ function validateReportEnvelope(request: ProtoMessage) {
   for (const outcome of cpuResourceCollectionOutcomes) {
     const sequence = unsignedNumber(outcome.sequence);
     const reason = cpuResourceCollectionOutcomeReasonFor(outcome);
+    const duplicate = cpuResourceCollectionOutcomeReasons.has(sequence);
     if (
       sequence < sequenceStart ||
       sequence > sequenceEnd ||
       reason === null ||
-      cpuResourceCollectionOutcomeReasons.has(sequence)
+      duplicate
     ) {
-      return null;
+      return reject({
+        cpuOutcomeCount: cpuResourceCollectionOutcomes.length,
+        cpuOutcomeReason: reason ?? unsignedNumber(outcome.reason),
+        cpuOutcomeSequence: sequence,
+        predicate: "envelope.cpu_outcome_invalid",
+        sequenceEnd,
+        sequenceStart,
+      });
     }
     cpuResourceCollectionOutcomeReasons.set(sequence, reason);
   }
@@ -2588,25 +2751,53 @@ function validateReportEnvelope(request: ProtoMessage) {
     cpuResourceCollectionOutcomes.length > 0 &&
     cpuResourceCollectionOutcomeReasons.size !== sequenceCount
   ) {
-    return null;
+    return reject({
+      cpuOutcomeCount: cpuResourceCollectionOutcomeReasons.size,
+      predicate: "envelope.cpu_outcome_coverage",
+      sequenceCount,
+      sequenceEnd,
+      sequenceStart,
+    });
   }
 
-  for (const sample of samples) {
+  for (const [sampleIndex, sample] of samples.entries()) {
     const sequence = unsignedNumber(sample.sequence);
     const collectedAtMs = signedNumber(sample.collectedAtMs);
 
+    if (sequence < sequenceStart || sequence > sequenceEnd) {
+      return reject({
+        predicate: "envelope.sample_sequence_out_of_bounds",
+        sampleIndex,
+        sampleSequence: sequence,
+        sequenceEnd,
+        sequenceStart,
+      });
+    }
+    if (collectedAtMs < 1) {
+      return reject({
+        collectedAtMs,
+        predicate: "envelope.sample_time_invalid",
+        sampleIndex,
+        sampleSequence: sequence,
+      });
+    }
     if (
-      sequence < sequenceStart ||
-      sequence > sequenceEnd ||
-      collectedAtMs < 1 ||
-      (hasMetricField(sample, "cpuPercent") &&
-        !Number.isFinite(sample.cpuPercent))
+      hasMetricField(sample, "cpuPercent") &&
+      !Number.isFinite(sample.cpuPercent)
     ) {
-      return null;
+      return reject({
+        predicate: "envelope.sample_cpu_non_finite",
+        sampleIndex,
+        sampleSequence: sequence,
+      });
     }
 
     if (sampleSequences.has(sequence)) {
-      return null;
+      return reject({
+        predicate: "envelope.sample_duplicate",
+        sampleIndex,
+        sampleSequence: sequence,
+      });
     }
 
     sampleSequences.add(sequence);
@@ -2618,7 +2809,12 @@ function validateReportEnvelope(request: ProtoMessage) {
     sequence += 1
   ) {
     if (!sampleSequences.has(sequence)) {
-      return null;
+      return reject({
+        missingSequence: sequence,
+        predicate: "envelope.sample_sequence_gap",
+        sequenceEnd,
+        sequenceStart,
+      });
     }
   }
 
@@ -2651,6 +2847,7 @@ function observationWindowFailureReasonFor(failure: unknown): number | null {
 
 function reportResponsibilityFor(input: {
   hostProfileSnapshot: ReturnType<typeof hostProfileSnapshotFromReport>;
+  observeRejection?: (rejection: HubProbeReportRejection) => void;
   report: { sequenceEnd: number; sequenceStart: number };
   request: ProtoMessage;
 }):
@@ -2661,6 +2858,10 @@ function reportResponsibilityFor(input: {
   | null {
   const snapshots = (input.request.snapshots ?? []) as ProtoMessage[];
   const snapshot = input.hostProfileSnapshot;
+  const reject = (rejection: HubProbeReportRejection) => {
+    input.observeRejection?.(rejection);
+    return null;
+  };
 
   // Older Probes predate compact snapshot references. Keep their ordinary
   // Observation Batches compatible, including a legacy sequence-one metrics
@@ -2678,33 +2879,77 @@ function reportResponsibilityFor(input: {
     !snapshot ||
     snapshots[0]?.collectorId !== hostProfileCollectorId
   ) {
-    return null;
+    return reject({
+      collectorId: String(snapshots[0]?.collectorId ?? ""),
+      predicate: "responsibility.invalid_snapshot_shape",
+      snapshotCount: snapshots.length,
+    });
   }
 
   if (snapshot.hostProfile === null && !snapshot.snapshotHash) {
-    return null;
+    return reject({
+      payloadPresent: false,
+      predicate: "responsibility.snapshot_hash_absent",
+      snapshotCount: snapshots.length,
+      snapshotHashPresent: false,
+    });
   }
 
   const isStartup =
     input.report.sequenceStart === 1 && input.report.sequenceEnd === 1;
   if (isStartup) {
-    return snapshot.hostProfile !== null &&
-      (input.request.metrics ?? []).length === 0 &&
+    const metricsCount = (input.request.metrics ?? []).length;
+    const hasConfigurationVersion =
       typeof input.request.probeConfigurationVersion === "string" &&
-      input.request.probeConfigurationVersion.length > 0 &&
-      !input.request.probeConfigurationError &&
-      !input.request.observationWindowFailure
-      ? "startup"
-      : null;
+      input.request.probeConfigurationVersion.length > 0;
+    const hasConfigurationError = Boolean(
+      input.request.probeConfigurationError,
+    );
+    const hasWindowFailure = Boolean(input.request.observationWindowFailure);
+    if (
+      snapshot.hostProfile === null ||
+      metricsCount !== 0 ||
+      !hasConfigurationVersion ||
+      hasConfigurationError ||
+      hasWindowFailure
+    ) {
+      return reject({
+        metricsCount,
+        observationWindowFailurePresent: hasWindowFailure,
+        predicate: "responsibility.invalid_startup_shape",
+        probeConfigurationErrorPresent: hasConfigurationError,
+        probeConfigurationVersionPresent: hasConfigurationVersion,
+        sequenceEnd: input.report.sequenceEnd,
+        sequenceStart: input.report.sequenceStart,
+        snapshotCount: snapshots.length,
+      });
+    }
+    return "startup";
   }
 
   if (snapshot.hostProfile !== null) {
     if (hasProducedHostProfile(input.request)) {
       return "observation";
     }
-    return hasSnapshotReplayOnlyContents(input.request)
-      ? "snapshot_replay"
-      : null;
+    if (hasSnapshotReplayOnlyContents(input.request)) return "snapshot_replay";
+    return reject({
+      metricsCount: (input.request.metrics ?? []).length,
+      observationWindowFailurePresent: Boolean(
+        input.request.observationWindowFailure,
+      ),
+      operationAcknowledgementCount: (
+        input.request.operationAcknowledgements ?? []
+      ).length,
+      operationStatusCount: (input.request.operationStatuses ?? []).length,
+      predicate: "responsibility.invalid_snapshot_replay_shape",
+      probeConfigurationErrorPresent: Boolean(
+        input.request.probeConfigurationError,
+      ),
+      sequenceEnd: input.report.sequenceEnd,
+      sequenceStart: input.report.sequenceStart,
+      snapshotCount: snapshots.length,
+      snapshotHashPresent: Boolean(snapshot.snapshotHash),
+    });
   }
 
   return "observation";
@@ -2793,7 +3038,18 @@ function validatedCollectorOutcomes(sample: ProtoMessage) {
             normalizedLegacyFailureCode !== failureCode)
         : failure !== null && failure !== undefined)
     ) {
-      throw new ReportBusinessRejection("malformed_probe_report", 400);
+      throw new ReportBusinessRejection("malformed_probe_report", 400, {
+        collectorFailureCode: failureCode ?? undefined,
+        collectorFailurePhase: failurePhase ?? undefined,
+        collectorId,
+        collectorLegacyFailureCode: legacyFailureCode,
+        collectorLegacyFailureCodeMatches:
+          legacyFailureCode === 0 ||
+          normalizedLegacyFailureCode === failureCode,
+        collectorOutcomeDuplicate: seen.has(collectorId),
+        collectorState: state,
+        predicate: "collector_outcome.invalid",
+      });
     }
     seen.add(collectorId);
     return {
@@ -2843,7 +3099,10 @@ function validCollectorFailureCode(code: string | null): code is string {
   );
 }
 
-function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
+function hostProfileOutcomeWindowIsCoherent(
+  request: ProtoMessage,
+  observeRejection: (rejection: HubProbeReportRejection) => void = () => {},
+) {
   const samples = (request.metrics ?? []) as ProtoMessage[];
   const snapshots = ((request.snapshots ?? []) as ProtoMessage[]).filter(
     (snapshot) => snapshot.collectorId === hostProfileCollectorId,
@@ -2853,22 +3112,90 @@ function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
     const matches = ((sample.collectorOutcomes ?? []) as ProtoMessage[]).filter(
       (candidate) => candidate.collectorId === hostProfileCollectorId,
     );
-    if (matches.length > 1 || (matches.length === 1 && index !== 0))
+    if (matches.length > 1) {
+      observeRejection({
+        hostProfileOutcomeCount: matches.length,
+        hostProfileOutcomeSampleIndex: index,
+        predicate: "host_profile.outcome_multiple_for_sample",
+      });
       return false;
+    }
+    if (matches.length === 1 && index !== 0) {
+      observeRejection({
+        hostProfileOutcomeCount: 1,
+        hostProfileOutcomeSampleIndex: index,
+        predicate: "host_profile.outcome_outside_first_sample",
+      });
+      return false;
+    }
     outcome ??= matches[0];
   }
   if (!outcome) return true;
-  if (Number(outcome.state) === 1 && !outcome.failure) {
-    return (
-      snapshots.length === 1 &&
-      Boolean(snapshots[0]?.snapshotHash) &&
-      (!snapshots[0]?.hostProfile ||
-        Boolean(
-          nonemptyString(snapshots[0]?.hostProfile?.probeAssetBundleVersion),
-        ))
-    );
+  const outcomeState = Number(outcome.state);
+  if (outcomeState === 1 && !outcome.failure) {
+    if (snapshots.length !== 1) {
+      observeRejection({
+        hostProfileOutcomeCount: 1,
+        hostProfileOutcomeState: outcomeState,
+        predicate: "host_profile.outcome_snapshot_count_invalid",
+        snapshotCount: snapshots.length,
+      });
+      return false;
+    }
+    if (!snapshots[0]?.snapshotHash) {
+      observeRejection({
+        hostProfileOutcomeCount: 1,
+        hostProfileOutcomeState: outcomeState,
+        predicate: "host_profile.outcome_snapshot_hash_absent",
+        snapshotCount: snapshots.length,
+        snapshotHashPresent: false,
+      });
+      return false;
+    }
+    if (
+      snapshots[0]?.hostProfile &&
+      !nonemptyString(snapshots[0]?.hostProfile?.probeAssetBundleVersion)
+    ) {
+      observeRejection({
+        hostProfileOutcomeCount: 1,
+        hostProfileOutcomeState: outcomeState,
+        predicate: "host_profile.outcome_bundle_version_absent",
+        probeAssetBundleVersionPresent: false,
+        snapshotCount: snapshots.length,
+      });
+      return false;
+    }
+    return true;
   }
-  return snapshots.length === 0 && [2, 3].includes(Number(outcome.state));
+  if (outcomeState === 1 && outcome.failure) {
+    observeRejection({
+      hostProfileOutcomeCount: 1,
+      hostProfileOutcomeSampleIndex: 0,
+      hostProfileOutcomeState: outcomeState,
+      outcomeFailurePresent: true,
+      predicate: "host_profile.outcome_success_with_failure",
+    });
+    return false;
+  }
+  if (![2, 3].includes(outcomeState)) {
+    observeRejection({
+      hostProfileOutcomeCount: 1,
+      hostProfileOutcomeState: outcomeState,
+      predicate: "host_profile.outcome_state_invalid",
+    });
+    return false;
+  }
+  if (snapshots.length !== 0) {
+    observeRejection({
+      hostProfileOutcomeCount: 1,
+      hostProfileOutcomeSampleIndex: 0,
+      hostProfileOutcomeState: outcomeState,
+      predicate: "host_profile.outcome_failed_with_snapshot",
+      snapshotCount: snapshots.length,
+    });
+    return false;
+  }
+  return true;
 }
 
 function reportConnectAddress(
