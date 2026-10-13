@@ -126,9 +126,18 @@ where
         ),
         LiveInstalledBundleRepairError,
     > {
-        let stage = self.context.stages.open(receipt, owner_uid)?;
-        let installed = inspect_installed_probe_for_upgrade(&self.context.paths)
-            .map_err(|_| LiveInstalledBundleRepairError::ManualReinstallRequired)?;
+        let stage = match self.context.stages.open(receipt, owner_uid) {
+            Ok(stage) => stage,
+            Err(LiveInstalledBundleRepairError::ManualReinstallRequired) => {
+                eprintln!("probe_repair_live_manual_failure=stage_open");
+                return Err(LiveInstalledBundleRepairError::ManualReinstallRequired);
+            }
+            Err(error) => return Err(error),
+        };
+        let installed = inspect_installed_probe_for_upgrade(&self.context.paths).map_err(|_| {
+            eprintln!("probe_repair_live_manual_failure=installed_inspect");
+            LiveInstalledBundleRepairError::ManualReinstallRequired
+        })?;
         if installed.hub_origin != authority.hub_origin
             || installed.probe_id != authority.probe_id
             || installed.source_bundle_version != authority.bundle_version
@@ -139,11 +148,18 @@ where
             || receipt.target_manifest_sha256 != authority.manifest_sha256
             || receipt.target_asset_set_digest != authority.target_asset_set_digest
         {
+            eprintln!("probe_repair_live_manual_failure=binding_compare");
             return Err(LiveInstalledBundleRepairError::ManualReinstallRequired);
         }
-        let binding =
-            InstalledBundleRepairBinding::from_verified_stage(authority, receipt, owner_uid)
-                .map_err(|_| LiveInstalledBundleRepairError::ManualReinstallRequired)?;
+        let binding = match InstalledBundleRepairBinding::from_verified_stage(
+            authority, receipt, owner_uid,
+        ) {
+            Ok(binding) => binding,
+            Err(_) => {
+                eprintln!("probe_repair_live_manual_failure=binding_construct");
+                return Err(LiveInstalledBundleRepairError::ManualReinstallRequired);
+            }
+        };
         Ok((stage, installed, binding))
     }
 }

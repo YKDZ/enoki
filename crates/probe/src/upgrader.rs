@@ -1363,8 +1363,17 @@ fn run_authorized_installed_bundle_repair() -> Result<ProbeRepairResult, ProbeRe
         &response.authority,
         &response.signature,
         now_ms,
-    )
-    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    );
+    let grant = match grant {
+        Ok(grant) => {
+            eprintln!("probe_repair_authority_validation=accepted");
+            grant
+        }
+        Err(_) => {
+            eprintln!("probe_repair_authority_validation=rejected");
+            return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+        }
+    };
     let session = crate::runtime_failure::begin_installed_bundle_repair(
         grant,
         response.stage_receipt,
@@ -1418,7 +1427,13 @@ fn compensate_preboundary_repair_failure(
 }
 
 fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError> {
-    (code == Some(3)).then(|| ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
+    if code == Some(3) {
+        // The helper uses exit 3 only for its strict 409 manual-reinstall disposition.
+        eprintln!("probe_repair_acquisition_manual");
+        Some(ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
+    } else {
+        None
+    }
 }
 
 fn fresh_repair_exchange_facts() -> Result<(String, u64), ProbeRepairRunError> {
