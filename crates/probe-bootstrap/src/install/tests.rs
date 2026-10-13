@@ -2965,8 +2965,8 @@ mod tests {
             "入口退出必须撤销验证 permit"
         );
         assert!(
-            service.contains("ReadWritePaths=/etc/enoki"),
-            "入口必须能写它自己的固定 gate 路径"
+            service.contains("ReadWritePaths=/etc "),
+            "入口必须能更新固定 gate 与账户数据库"
         );
         assert!(
             service.contains("RuntimeDirectory=enoki-probe"),
@@ -3299,7 +3299,7 @@ mod tests {
         assert!(lifecycle.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion"));
         assert!(lifecycle.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
         assert!(lifecycle.contains("SocketBindDeny=ipv4:any"));
-        assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
+        assert!(lifecycle.contains("ReadWritePaths=/etc /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe"));
         assert!(!lifecycle.contains("Environment="));
         assert!(!lifecycle.contains("PrivateNetwork=true"));
         assert!(lifecycle.contains("\nAmbientCapabilities=CAP_SETUID\n"));
@@ -3308,6 +3308,9 @@ mod tests {
             "\nBindPaths=-/var/lib/enoki-probe:/var/lib/private/enoki-probe\n"
         ));
         let lifecycle_upgrade = lifecycle_upgrade_unit();
+        assert!(lifecycle_upgrade.contains(
+            "ReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap"
+        ));
         assert!(!lifecycle_upgrade.contains("AmbientCapabilities=CAP_SETUID\n"));
         assert!(!lifecycle_upgrade.contains("TemporaryFileSystem=/var/lib/private"));
         assert!(!lifecycle_upgrade.contains("/var/lib/private/enoki-probe"));
