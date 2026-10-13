@@ -1383,7 +1383,8 @@ fn hub_uninstall_report_failure_keeps_exact_reentry_until_acknowledged_cleanup()
     }
 
     let mut retry_transport = RecordingValidationTransport::default();
-    systemd.failure_step = Some("remove-account");
+    let cleanup_call_start = systemd.calls.len();
+    systemd.failure_step = Some("remove-ipc-group");
     let completed = lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
         &request,
         &input,
@@ -1402,9 +1403,17 @@ fn hub_uninstall_report_failure_keeps_exact_reentry_until_acknowledged_cleanup()
             .status_body
             .contains("\"status\":\"succeeded\"")
     );
+    assert!(
+        systemd.calls[cleanup_call_start..]
+            .iter()
+            .any(|call| call.starts_with("remove-owned-ipc-group "))
+    );
     assert!(metadata_path.exists());
     assert!(identity_path.exists());
     assert!(companion_path.exists());
+    assert!(state_dir.exists());
+    assert!(companion_service.exists());
+    assert!(companion_socket.exists());
 
     assert!(
         companion_path.exists(),
