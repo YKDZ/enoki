@@ -1428,7 +1428,7 @@ fn compensate_preboundary_repair_failure(
 
 fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError> {
     if code == Some(3) {
-        // The helper uses exit 3 only for its strict 409 manual-reinstall disposition.
+        // helper 仅对严格的 409 手动重装 disposition 返回 exit 3。
         eprintln!("probe_repair_acquisition_manual");
         Some(ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
     } else {
