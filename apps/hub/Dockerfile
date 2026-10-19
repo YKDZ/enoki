@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS prepare
+FROM node:26-slim@sha256:0d1e33586362bb9e608c4e751e7a9e7edb55c9ac11461ed5666af696cc461dd4 AS prepare
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME/bin:$PNPM_HOME:$PATH
@@ -16,7 +16,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm config set store-dir /pnpm/store && \
   pnpm dlx turbo@2.10.2 prune @enoki/hub @enoki/web --docker
 
-FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS installer
+FROM node:26-slim@sha256:0d1e33586362bb9e608c4e751e7a9e7edb55c9ac11461ed5666af696cc461dd4 AS installer
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME/bin:$PNPM_HOME:$PATH
@@ -45,7 +45,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm --filter @enoki/hub --prod --no-optional deploy --legacy /app/deploy && \
   rm -f /app/deploy/node_modules/.modules.yaml
 
-FROM node:24-alpine@sha256:f70403e87646dc51b45295f4b8b70cdad0b63d2297c4c9899119b03f7af7a6b3 AS runtime
+FROM node:26-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS runtime
 
 ENV ENOKI_WEB_DIST=/app/web-dist
 ENV ENOKI_DATA_ROOT=/data
