@@ -34,7 +34,7 @@
     "valibot": "catalog:"
   },
   "devDependencies": {
-    "@tsconfig/node24": "^24.0.4",
+    "@tsconfig/node24": "^24.0.5",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
